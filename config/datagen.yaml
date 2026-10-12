@@ -29,3 +29,21 @@ mysql:
   user: graphio
   password: graphio
   database: graphio
+
+# ── 상용 스키마(pemdb1) 적재 — `pemfill` 전용 ────────────────────────────
+# 기존 backfill/run 은 위의 mysql: (자체 창고 스키마)를 그대로 쓴다. 상용은
+# 테이블·컬럼이 다른 별도 경로이므로 설정도 분리한다.
+pemdb1:
+  database: pemdb1              # 같은 서버의 다른 DB — host/port/user 는 mysql: 재사용
+  subscriber_pool: 20000        # 가입자 풀
+  # 생성 대상 eNB 수. 마스터 전량(eNB 32,121 · 셀 571,801)에 분당 수천 호를
+  # 흘리면 eNB 당 표본이 1건 미만이 되어 어떤 창에서도 판정이 서지 않는다
+  # (최소 표본 20 · 불변규칙 5). 0 이면 전량.
+  enb_limit: 60
+  success_only: true            # 평시 전부 녹색 — 실패는 fault 주입으로만 만든다
+  rates:
+    # 분당 호 수(주간 피크 기준 — 야간은 DIURNAL 곡선으로 0.14배까지 내려간다).
+    # eNB 60개 · 셀 2,161개에 20,000/분이면 eNB 당 ~330건 · 셀당 ~9건이다.
+    # eNB 축은 1분 창에서 최소 표본 20을 넘고, 셀 축은 5분 창에서 찬다
+    # (불변규칙 5). 적재 실측 11,000건/1초 — 더 올려도 병목은 아니다.
+    lte_call: 20000

@@ -257,6 +257,89 @@ def cmd_run(args) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------
+# pemfill — 상용 스키마(pemdb1) 적재
+# --------------------------------------------------------------------------
+
+
+def cmd_pemfill(args) -> int:
+    """상용 스키마로 생성·적재한다 — `XDR_LTE_CALL_KPI` + 1분 집계 PM_*.
+
+    기존 `backfill`·`run` 과 **완전히 별개 경로**다. 자체 창고 스키마(DuckDB
+    kpi_*_min)를 거치지 않고 상용 테이블에 직접 쓴다. 되돌릴 수 없는 변경을
+    기존 경로에 섞지 않기 위해 분리했다.
+    """
+    import pymysql
+
+    from . import pemdb1 as P
+
+    cfg = load_cfg(args.config)
+    data_dir = HERE / cfg["paths"]["data"]
+    my = cfg["mysql"]
+    pem = cfg.get("pemdb1") or {}
+    database = args.database or pem.get("database", "pemdb1")
+    rate = args.rate or int((pem.get("rates") or {}).get("lte_call", 2000))
+    minutes = args.minutes
+    seed = int(cfg["generate"].get("seed", 20260903))
+
+    # 파티션이 오늘 기준으로 깔려 있다(docker/mysql/gen_ddl.py). 기본 구간을
+    # "지금 직전 N분"으로 잡아야 MAXVALUE 한 칸에 몰리지 않는다.
+    now = _floor_minute(datetime.now())
+    start = (datetime.fromisoformat(args.start) if args.start
+             else now - timedelta(minutes=minutes))
+
+    conn = pymysql.connect(
+        host=my["host"], port=int(my["port"]), user=my["user"],
+        password=my["password"], database=database,
+        # 상용 collation 은 utf8mb3_general_ci 다. 커넥션을 utf8mb4 로 열면
+        # 리터럴 비교에서 Illegal mix of collations 가 날 수 있다.
+        charset="utf8mb3", autocommit=False,
+    )
+    try:
+        mapping = P.xdr_mapping(conn, database)
+        print(f"▶ 컬럼 매핑 확인 — {P.XDR_TABLE} {len(mapping.columns)}컬럼 "
+              f"(EVENT_TIME + 생성기 필드 {len(mapping.columns) - 1})")
+
+        gen = P.PemdbGen(
+            conn, data_dir, rates={"lte_call": rate}, seed=seed,
+            subscriber_pool=int(pem.get("subscriber_pool", 20_000)),
+            # 실측 실패·절단 비율을 그대로 재현하는 모드. 기본은 성공 전용
+            # (평시 전부 녹색)이고, Cause 집계 경로를 확인할 때 쓴다.
+            success_only=(False if args.with_failures
+                          else bool(pem.get("success_only", True))),
+            enb_limit=(args.enb_limit if args.enb_limit is not None
+                       else int(pem.get("enb_limit", 0))),
+        )
+        mapped = sum(1 for c in gen.cells if c.geo_status == "MAPPED")
+        print(f"▶ 셀 마스터 — {len(gen.cells):,}셀 / "
+              f"eNB {len({c.enb_id for c in gen.cells}):,}개 "
+              f"(좌표 보유 {mapped:,} · UNMAPPED {len(gen.cells) - mapped:,})")
+        gen.anchor = start
+
+        w = P.PemdbWriter(conn, mapping)
+        t0 = time.time()
+        total = 0
+        for m in range(minutes):
+            ts = start + timedelta(minutes=m)
+            rows = gen.records(m, ts)
+            total += w.write_xdr(ts, rows)
+            print(f"  [{ts:%m-%d %H:%M}] XDR {len(rows):,}건 · "
+                  f"{time.time() - t0:.0f}s", flush=True)
+
+        print(f"▶ XDR 적재 완료 — {total:,}건 / {minutes}분 · "
+              f"{time.time() - t0:.0f}s"
+              + (f" · 길이 초과 절단 {w.clamped}건" if w.clamped else ""))
+
+        if not args.no_agg:
+            hi = start + timedelta(minutes=minutes)
+            res = P.aggregate_all(conn, start, hi)
+            for t, n in res.items():
+                print(f"  {t:22} {n:,}행")
+    finally:
+        conn.close()
+    return 0
+
+
 def cmd_ui(args) -> int:
     """제어 UI 기동 — 실제 구현은 datagen.ui 에 있다 (import 는 지연시킨다)."""
     from .ui import main as ui_main
@@ -283,6 +366,20 @@ def main(argv=None) -> int:
     u.add_argument("--host", default="127.0.0.1")
     u.add_argument("--port", type=int, default=8009)
     u.set_defaults(fn=cmd_ui)
+
+    # 상용 스키마 경로 — 기존 backfill/run 과 섞지 않는다
+    p = sub.add_parser("pemfill", help="상용 스키마(pemdb1) 생성·적재 + 1분 집계")
+    p.add_argument("--config")
+    p.add_argument("--database", help="대상 DB (기본 설정 pemdb1.database)")
+    p.add_argument("--start", help="시작 분 (기본: 지금 - minutes)")
+    p.add_argument("--minutes", type=int, default=1)
+    p.add_argument("--rate", type=int, help="분당 호 수 (기본 설정 pemdb1.rates.lte_call)")
+    p.add_argument("--enb-limit", type=int,
+                   help="생성 대상 eNB 수 (기본 설정 pemdb1.enb_limit · 0 이면 전량)")
+    p.add_argument("--with-failures", action="store_true",
+                   help="실측 실패·절단 비율을 재현 (기본은 성공 전용)")
+    p.add_argument("--no-agg", action="store_true", help="XDR 적재만 하고 집계는 건너뛴다")
+    p.set_defaults(fn=cmd_pemfill)
 
     r = sub.add_parser("run", help="상주 데몬 — 백필 + 실시간 틱 + fault 주입")
     r.add_argument("--config")

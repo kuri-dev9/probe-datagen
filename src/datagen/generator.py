@@ -475,6 +475,15 @@ class Generator:
 
     # -- per-minute generation -------------------------------------------
 
+    def base_lte_call(self, ts: datetime, slot_start: float) -> tuple[Rec, Cell]:
+        """시나리오 변형 **전**의 LTE-CALL 레코드 하나.
+
+        상용 스키마 어댑터(`pemdb1.PemdbGen`)가 생성과 변형 사이에 끼어들어
+        실측 분포로 값을 덮어쓴다. 변형 뒤에 덮으면 주입한 장애가 지워지므로
+        그 중간 단계를 공개한다. `generate_minute` 경로는 그대로다.
+        """
+        return self._lte_call(ts, slot_start)
+
     def generate_minute(self, minute: int, ts: datetime) -> dict[str, list[str]]:
         slot_start = ts.timestamp()
         active = [sc for sc in self.scenarios if sc.covers(minute)]
