@@ -1,4 +1,9 @@
-# syntax=docker/dockerfile:1.7
+# 외부 프론트엔드(`# syntax=docker/dockerfile:1.7`)를 쓰지 않는다.
+# 그 지시자는 빌드할 때마다 Docker Hub 에서 프론트엔드 이미지를 받아 실행하는데,
+# 타겟 서버는 Hub 접근이 막혀 있고 실제로 `failed to solve: frontend grpc server
+# closed unexpectedly` 로 빌드가 죽었다. 여기서는 1.7 전용 문법을 쓰지 않으므로
+# 빌더 기본 문법으로 충분하다 — BuildKit 기능(ARG 로 고르는 스테이지 이름)은
+# 그대로 쓸 수 있다.
 #
 # probe-datagen 컨테이너 이미지
 # ════════════════════════════════════════════════════════════════════════
