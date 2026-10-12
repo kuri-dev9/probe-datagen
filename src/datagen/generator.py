@@ -407,6 +407,18 @@ class Generator:
         rec.set("ICMP_Delta_Uplink_IcmpPacketCount", smp.categorical("ICMP_Delta_Uplink_IcmpPacketCount", "0"))
         rec.set("ICMP_Delta_Dnlink_IcmpPacketCount", smp.categorical("ICMP_Delta_Dnlink_IcmpPacketCount", "0"))
 
+        if self.success_only:
+            # 성공 전용은 U-Plane 에도 걸린다. 실측 분포의 재전송 꼬리값이 저표본
+            # 셀에 몰리면 U-12(재전송률)가 임계를 넘어 **없는 장애가 뜬다** —
+            # 실제로 백필 30분에서 단일 셀 Critical 2건이 나왔다 (2026-10-12).
+            # 정상 수준(페이로드의 0.5%)으로 눌러 둔다. transport_loss 시나리오의
+            # 뮤테이터는 이 뒤에 돌므로 장애 주입은 그대로 성립한다.
+            for d in ("Uplink", "Dnlink"):
+                payload = int(rec.num(f"Traffic_Total_{d}_PayloadPacketCount"))
+                cap = max(0, int(payload * 0.005))
+                if int(rec.num(f"Traffic_Total_{d}_RetransPacketCount")) > cap:
+                    rec.set(f"Traffic_Total_{d}_RetransPacketCount", cap)
+
         if series == "transport":
             rec.set("SynCount", smp.categorical("SynCount", "1"))
             rec.set("SynAckCount", smp.categorical("SynAckCount", "1"))
@@ -427,7 +439,7 @@ class Generator:
             rec.set("QueryName", "." + smp.domain())
             rec.set("RequestFirstTime", f"{t - 0.02:.6f}")
             rec.set("RequestLastTime", f"{t - 0.02:.6f}")
-            reply = smp.categorical("ReplyCode", "0")
+            reply = "0" if self.success_only else smp.categorical("ReplyCode", "0")
             rec.set("ReplyCode", reply)
             # ReplyCode 와 AnswerCount 를 따로 뽑으면 "성공인데 답이 없는" 질의가
             # 생겨 U-29(DNS 성공률)의 베이스라인이 무너진다. 정상 응답은 답을 갖는다.
@@ -450,7 +462,10 @@ class Generator:
             rec.set("Host_Site", host.split(".")[-2] if host.count(".") >= 1 else host)
             rec.set("Host_Prefix", host.split(".")[0])
             rec.set("Method", smp.categorical("Method", "GET"))
-            rec.set("StatusCode", smp.categorical("StatusCode", "200"))
+            status = smp.categorical("StatusCode", "200")
+            if self.success_only and status.startswith("5"):
+                status = "200"   # 5xx 는 EXTERNAL_SERVER 시나리오가 만들 몫이다
+            rec.set("StatusCode", status)
             rec.set("RequestTime", f"{t - 0.18:.6f}")
             rec.set("ResponseTime", f"{t:.6f}")
             rec.set("HTTP_Total_Response_PayloadSize", int(smp.numeric("HTTP_Total_Response_PayloadSize")))

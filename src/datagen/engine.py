@@ -11,13 +11,15 @@
 from __future__ import annotations
 
 import json
+import random
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import aggregate, store
+from . import aggregate, faults, store
 from .cells import Cell, load_cells
 from .generator import Generator, SEP, SERIES_DIR
 from .profile import load as load_profiles
+from .scenarios import Scenario
 
 
 def _rows_for_series(lines: list[str], series: str) -> list[tuple]:
@@ -39,7 +41,8 @@ def _rows_for_series(lines: list[str], series: str) -> list[tuple]:
 
 
 class DataGen:
-    def __init__(self, data_dir: Path, rates: dict, seed: int = 20260903):
+    def __init__(self, data_dir: Path, rates: dict, seed: int = 20260903,
+                 anchor: datetime | None = None):
         self.cells: list[Cell] = load_cells(data_dir / "cells.json")
         self.profiles = load_profiles(data_dir / "profile.json")
         self.core_nodes = json.loads((data_dir / "core_nodes.json").read_text(encoding="utf-8"))
@@ -47,6 +50,13 @@ class DataGen:
             cells=self.cells, profiles=self.profiles, scenarios=[],
             rates=rates, seed=seed, diurnal=True,
         )
+        self.seed = seed
+        #: 분 인덱스 0 의 시각 — fault 시간창을 분 좌표로 옮기는 기준점.
+        #: None 이면 첫 generate 시각에서 역산해 채운다.
+        self.anchor = anchor
+        #: fault_id → (판별 키, Scenario). 같은 fault 가 틱마다 다시 와도 같은
+        #: Scenario 를 재사용해야 generator 의 도메인·기종 바인딩이 다시 구르지 않는다.
+        self._fault_cache: dict[int, tuple[tuple, Scenario]] = {}
         self.con = store.open_db()
         self._seed_masters()
 
@@ -76,6 +86,10 @@ class DataGen:
         여러 분을 생성한 뒤 aggregate_range 로 한 번에 돌린다 — 구간 멱등이라
         결과는 분마다 돌린 것과 같다.
         """
+        if self.anchor is None:
+            # 호출자가 anchor 를 안 정했으면 첫 generate 가 기준 — minute 인덱스가
+            # 0 이 아닐 수도 있으므로 역산해 "인덱스 0 의 시각"으로 맞춘다.
+            self.anchor = ts - timedelta(minutes=minute)
         payload = self.gen.generate_minute(minute, ts)
         counts = {}
         for series, lines in payload.items():
@@ -97,3 +111,47 @@ class DataGen:
         counts = self.generate_minute(minute, ts)
         self.aggregate_range(ts, ts + timedelta(minutes=1))
         return counts
+
+    # -- fault 주입 -------------------------------------------------------
+
+    def minute_of(self, ts: datetime) -> int:
+        """anchor 기준 분 인덱스 — generate_minute 의 minute 와 같은 좌표계."""
+        if self.anchor is None:
+            raise RuntimeError("anchor 미설정 — 백필 시작 전에 anchor 를 정해야 한다")
+        return int((ts - self.anchor).total_seconds() // 60)
+
+    def set_faults(self, active: list[dict], rng: random.Random) -> tuple[list[Scenario], list[int]]:
+        """활성 fault 목록을 Scenario 로 바꿔 생성기에 건다.
+
+        반환: (적용된 Scenario 목록, 해석 실패한 fault_id 목록).
+
+        같은 fault 는 틱마다 다시 와도 **같은 대상**이어야 한다 — 대상 셀이
+        틱마다 바뀌면 장애가 1분 조각으로 흩어져 탐지·채점이 성립하지 않는다.
+        그래서 호출자 rng(호출 순서에 따라 상태가 흔들린다) 대신 fault_id 로
+        시드한 전용 rng 로 해석한다. 데몬이 재시작해도 같은 대상이 나온다.
+        """
+        if self.anchor is None:
+            raise RuntimeError("anchor 미설정 — set_faults 전에 anchor 를 정해야 한다")
+        scs: list[Scenario] = []
+        bad: list[int] = []
+        for f in active:
+            fid = int(f["fault_id"])
+            # UI 가 fault 를 수정하면(시간·강도·대상) 키가 바뀌어 재해석된다
+            key = (f["kind"], str(f.get("target") or ""), f["start_ts"],
+                   int(f["duration_min"]), float(f["intensity"]), self.anchor)
+            cached = self._fault_cache.get(fid)
+            if cached and cached[0] == key:
+                scs.append(cached[1])
+                continue
+            frng = random.Random(self.seed * 1_000_003 + fid)
+            sc = faults.build(f, self.cells, self.anchor, frng)
+            if sc is None:
+                bad.append(fid)
+            else:
+                self._fault_cache[fid] = (key, sc)
+                scs.append(sc)
+        self.gen.scenarios = scs
+        # 프로파일 의존 대상(도메인·기종) 바인딩 — 캐시된 Scenario 는 이미 값이
+        # 차 있어 다시 구르지 않는다 (_bind_scenario_targets 가 빈 것만 채운다)
+        self.gen._bind_scenario_targets()
+        return scs, bad

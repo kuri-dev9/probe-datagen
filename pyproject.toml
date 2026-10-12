@@ -10,6 +10,9 @@ dependencies = [
     "pymysql>=1.1",
     "pandas>=2.0,<4",
     "pyyaml>=6.0",
+    # 제어 UI(datagen.ui, 포트 8009) — 운영자 장애 주입 화면
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
 ]
 
 [build-system]
