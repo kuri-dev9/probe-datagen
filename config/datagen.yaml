@@ -1,0 +1,28 @@
+# probe-datagen 설정 — 1단계(성공 케이스 백필)
+#
+# 장비 토폴로지·셀은 data/cells.json · core_nodes.json 에 박혀 있다(구 저장소에서
+# 생성한 350셀 세트). 바꾸려면 그 JSON 을 교체한다.
+
+paths:
+  data: data                    # cells.json · core_nodes.json · profile.json
+
+generate:
+  start: "2026-08-27 09:00:00"  # 백필 시작 (실시간 틱 단계에서는 now-N 으로)
+  minutes: 60                   # 생성할 분 수
+  aggregate_batch: 30           # N분 모아 한 번에 집계 (매 분 재스캔 회피)
+  seed: 20260903
+
+# 분당 생성 호수(계열별). 최소 표본 규칙(분모 20)을 넘기려면 셀 수 대비 넉넉해야
+# 한다. 350셀에 lte 2000/분이면 셀당 ~6건 — 상위 집계(SGG/노드)에서 표본이 찬다.
+rates:
+  lte_call: 2000
+  transport: 1500
+  dns: 800
+  http: 1200
+
+mysql:
+  host: 127.0.0.1               # 서버에서는 192.168.100.216
+  port: 3306                    # 서버에서는 3307
+  user: graphio
+  password: graphio
+  database: graphio

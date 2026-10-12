@@ -1,0 +1,20 @@
+[project]
+name = "probe-datagen"
+version = "0.1.0"
+description = "graphio PoC 데이터 생성기 — 성공 기본 · 요청 시 장애 주입 · MySQL 적재"
+requires-python = ">=3.11"
+dependencies = [
+    # DuckDB 는 **내부 계산 엔진**이다 — 생성 레코드의 1분 집계(aggregate.py,
+    # graphio 창고 규칙의 이식본)를 돌리는 데만 쓰고 밖으로는 MySQL 결과만 나간다.
+    "duckdb>=1.0",
+    "pymysql>=1.1",
+    "pandas>=2.0,<4",
+    "pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
