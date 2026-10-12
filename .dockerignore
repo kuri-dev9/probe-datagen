@@ -1,0 +1,14 @@
+# 빌드 컨텍스트에서 뺄 것.
+.git
+.gitignore
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+*.egg-info
+build
+dist
+.DS_Store
+run
+tests
+README.md

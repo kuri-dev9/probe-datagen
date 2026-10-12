@@ -228,6 +228,16 @@ def cmd_run(args) -> int:
     return 0
 
 
+def cmd_ui(args) -> int:
+    """제어 UI 기동 — 실제 구현은 datagen.ui 에 있다 (import 는 지연시킨다)."""
+    from .ui import main as ui_main
+
+    argv = ["--host", args.host, "--port", str(args.port)]
+    if args.config:
+        argv += ["--config", args.config]
+    return ui_main(argv)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="datagen")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -236,6 +246,15 @@ def main(argv=None) -> int:
     b.add_argument("--start")
     b.add_argument("--minutes", type=int)
     b.set_defaults(fn=cmd_backfill)
+    # 제어 UI 도 같은 진입점에 둔다. 컨테이너 ENTRYPOINT 가 `python -m datagen`
+    # 하나라, 서비스마다 명령만 바꿔 같은 이미지를 쓸 수 있어야 한다
+    # (compose 의 datagen / datagen-ui 가 그렇게 갈린다).
+    u = sub.add_parser("ui", help="장애 주입 제어 화면 (기본 8009)")
+    u.add_argument("--config")
+    u.add_argument("--host", default="127.0.0.1")
+    u.add_argument("--port", type=int, default=8009)
+    u.set_defaults(fn=cmd_ui)
+
     r = sub.add_parser("run", help="상주 데몬 — 백필 + 실시간 틱 + fault 주입")
     r.add_argument("--config")
     r.add_argument("--once", action="store_true", help="틱 1회만 수행하고 종료 (테스트용)")
