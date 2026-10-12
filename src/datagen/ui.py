@@ -104,8 +104,20 @@ def api_status():
     }
 
 
+def _window(date: str | None, span_sql: str, params: list):
+    """조회 범위를 만든다 — 날짜가 주어지면 그 하루, 아니면 지금 기준 상대 창.
+
+    과거 날짜는 더 변하지 않으므로 하루를 통째로 고정해 본다. 날짜 없이 쓰는
+    쪽(기본)은 지금까지와 같은 "흐르는 창"이다.
+    """
+    if date:
+        return ("slot_ts >= %s AND slot_ts < DATE_ADD(%s, INTERVAL 1 DAY)",
+                [date, date])
+    return (span_sql, params)
+
+
 @app.get("/api/ingest")
-def api_ingest(minutes: int = 60):
+def api_ingest(minutes: int = 60, date: str | None = None):
     """인입 현황 — 계열별 생성량. **장애 여부는 보지 않는다.**
 
     이 화면은 "생성이 고르게 돌고 있나"만 본다. 품질 판정은 관제 화면(8008)의
@@ -117,17 +129,17 @@ def api_ingest(minutes: int = 60):
     conn = _connect()
     try:
         with conn.cursor() as cur:
+            where, args = _window(
+                date, "slot_ts >= DATE_SUB(NOW(), INTERVAL %s MINUTE)", [minutes])
             cur.execute(
                 "SELECT series, COUNT(*) slots, SUM(records) recs, "
                 "       MIN(slot_ts) a, MAX(slot_ts) b "
-                "FROM file_ledger "
-                "WHERE slot_ts >= DATE_SUB(NOW(), INTERVAL %s MINUTE) "
-                "GROUP BY series ORDER BY recs DESC", [minutes])
+                f"FROM file_ledger WHERE {where} "
+                "GROUP BY series ORDER BY recs DESC", args)
             rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
             cur.execute(
                 "SELECT COUNT(*) slots, COALESCE(SUM(records),0) recs "
-                "FROM datagen_history "
-                "WHERE slot_ts >= DATE_SUB(NOW(), INTERVAL %s MINUTE)", [minutes])
+                f"FROM datagen_history WHERE {where}", args)
             tot_slots, tot_recs = cur.fetchone()
             # 날짜별 슬롯 수 — 상단에 "오늘 N분 / 누적 M분"
             cur.execute(
@@ -139,7 +151,7 @@ def api_ingest(minutes: int = 60):
     for r in rows:
         r["per_min"] = round(r["recs"] / r["slots"], 1) if r["slots"] else 0
     return {
-        "minutes": minutes, "series": rows,
+        "minutes": minutes, "date": date, "series": rows,
         "total": {"slots": tot_slots or 0, "records": int(tot_recs or 0),
                   "per_min": round((tot_recs or 0) / tot_slots, 1) if tot_slots else 0},
         "by_day": days,
@@ -147,7 +159,7 @@ def api_ingest(minutes: int = 60):
 
 
 @app.get("/api/series")
-def api_series(hours: int = 3):
+def api_series(hours: int = 3, date: str | None = None):
     """시계열 — 분당 생성량(계열별)과 그 분에 활성이던 fault.
 
     한 번의 조회로 그래프에 필요한 것을 다 내린다. 5초 폴링이 이 질의를 매번
@@ -156,15 +168,15 @@ def api_series(hours: int = 3):
     conn = _connect()
     try:
         with conn.cursor() as cur:
+            where, args = _window(
+                date, "slot_ts >= DATE_SUB(NOW(), INTERVAL %s HOUR)", [hours])
             cur.execute(
-                "SELECT slot_ts, series, records FROM file_ledger "
-                "WHERE slot_ts >= DATE_SUB(NOW(), INTERVAL %s HOUR) "
-                "ORDER BY slot_ts", [hours])
+                f"SELECT slot_ts, series, records FROM file_ledger WHERE {where} "
+                "ORDER BY slot_ts", args)
             raw = cur.fetchall()
             cur.execute(
-                "SELECT slot_ts, records, faults FROM datagen_history "
-                "WHERE slot_ts >= DATE_SUB(NOW(), INTERVAL %s HOUR) "
-                "ORDER BY slot_ts", [hours])
+                f"SELECT slot_ts, records, faults FROM datagen_history WHERE {where} "
+                "ORDER BY slot_ts", args)
             hist = cur.fetchall()
     finally:
         conn.close()
@@ -183,7 +195,7 @@ def api_series(hours: int = 3):
             "total": sum(by_slot[k].values()),
             "faults": (h[2].split(",") if h and h[2] else []),
         })
-    return {"hours": hours, "points": points,
+    return {"hours": hours, "date": date, "points": points,
             "series_names": sorted({s for v in by_slot.values() for s in v})}
 
 
@@ -280,10 +292,24 @@ def api_targets():
 
 
 @app.get("/api/faults")
-def api_faults(limit: int = 50):
+def api_faults(limit: int = 50, date: str | None = None):
+    """장애 목록. `date` 가 있으면 **그날 시작한 것**만 본다.
+
+    control.list_faults 는 제어 계약이라 건드리지 않고, 날짜 필터는 여기서 건다
+    (화면 사정으로 공유 모듈의 시그니처를 바꾸지 않는다).
+    """
     conn = _connect()
     try:
-        return list_faults(conn, limit=limit)
+        if not date:
+            return list_faults(conn, limit=limit)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT fault_id,kind,target,start_ts,duration_min,intensity,"
+                "mode,status,note,created_at,updated_at FROM datagen_fault "
+                "WHERE start_ts >= %s AND start_ts < DATE_ADD(%s, INTERVAL 1 DAY) "
+                "ORDER BY fault_id DESC LIMIT %s", [date, date, limit])
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
     finally:
         conn.close()
 
@@ -360,6 +386,14 @@ _HTML = """<!doctype html>
   .rates { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }
   .rates label { font-size:12px; color:var(--dim); }
   .rates input { width:100%; }
+  .nav { display:inline-flex; align-items:center; gap:6px; }
+  .nav button { background:var(--panel); color:var(--fg); border:1px solid var(--line);
+                border-radius:6px; padding:3px 9px; cursor:pointer; font-size:13px; }
+  .nav button:hover:not(:disabled) { border-color:var(--accent); }
+  .nav button:disabled { opacity:.35; cursor:default; }
+  .nav button.ghost { color:var(--dim); }
+  .nav b { min-width:132px; text-align:center; font-variant-numeric:tabular-nums; }
+  .past { color:var(--yellow); }
   .bar { display:flex; gap:24px; align-items:center; background:var(--panel);
          border:1px solid var(--line); border-radius:8px; padding:10px 16px;
          margin-bottom:14px; }
@@ -401,6 +435,12 @@ _HTML = """<!doctype html>
   <span>마지막 적재 슬롯 <b id="last-slot">—</b></span>
   <span class="active-cnt">활성 장애 <b id="active-cnt">0</b> 건</span>
   <span class="dim" id="poll-err"></span>
+  <span class="nav">
+    <button type="button" id="d-prev" title="이전 날짜">◀</button>
+    <b id="d-label">—</b>
+    <button type="button" id="d-next" title="다음 날짜">▶</button>
+    <button type="button" id="d-today" class="ghost">오늘</button>
+  </span>
   <span style="margin-left:auto">
     <label class="sw" title="끄면 화면이 멈춘다 — 생성은 계속된다">
       <input type="checkbox" id="live" checked> 실시간 갱신
@@ -500,7 +540,7 @@ async function poll() {
   try {
     const [st, faults] = await Promise.all([
       (await fetch("/api/status")).json(),
-      (await fetch("/api/faults?limit=50")).json(),
+      (await fetch("/api/faults" + q({limit:50}))).json(),
     ]);
     $("last-slot").textContent = ts(st.last_slot);
     $("active-cnt").textContent = st.active.length;
@@ -570,15 +610,60 @@ async function cancelFault(id) {
 }
 
 loadKinds(); loadTargets(); poll();
+// ── 날짜 이동 ───────────────────────────────────────────────────────────
+// null 이면 "오늘(흐르는 창)", 문자열이면 그 하루를 고정해서 본다.
+// 과거는 더 변하지 않으므로 그때는 실시간 갱신을 멈춘다 — 5초마다 다시 그려도
+// 같은 그림이고 DB 만 때린다.
+let DAY = null;          // "2026-10-12" | null
+let DAYS = [];           // 데이터가 있는 날짜 (최신순) — /api/ingest 의 by_day
+const q = extra => {
+  const u = new URLSearchParams(extra || {});
+  if (DAY) u.set("date", DAY);
+  const qs = u.toString();
+  return qs ? "?" + qs : "";
+};
+const isPast = () => DAY !== null;
+
+function renderNav() {
+  const label = DAY || (DAYS[0] ?? "—");
+  $("d-label").textContent = label === "—" ? "—" : `${label} (${dow(label)})`;
+  $("d-label").className = isPast() ? "past" : "";
+  // DAYS 는 최신순이다. 이전 = 인덱스 +1, 다음 = -1.
+  const cur = DAY ? DAYS.indexOf(DAY) : 0;
+  $("d-prev").disabled = cur < 0 || cur + 1 >= DAYS.length;
+  $("d-next").disabled = !DAY || cur <= 0;
+  $("d-today").disabled = !DAY;
+  $("live").disabled = isPast();
+  $("live").parentElement.title = isPast()
+    ? "과거 날짜를 보는 중 — 갱신할 것이 없다"
+    : "끄면 화면이 멈춘다 — 생성은 계속된다";
+}
+function goDay(d) {
+  DAY = d;                       // null 이면 오늘로 복귀
+  renderNav();
+  poll(); loadHeavy(true);
+}
+$("d-prev").addEventListener("click", () => {
+  const cur = DAY ? DAYS.indexOf(DAY) : 0;
+  if (cur + 1 < DAYS.length) goDay(DAYS[cur + 1]);
+});
+$("d-next").addEventListener("click", () => {
+  // 날짜로만 이동한다. 실시간(흐르는 창)으로 돌아가는 건 [오늘] 버튼의 몫 —
+  // 가장 최신 날짜가 반드시 오늘이라는 보장이 없다(생성이 멈춰 있었을 수 있다).
+  const cur = DAYS.indexOf(DAY);
+  if (cur > 0) goDay(DAYS[cur - 1]);
+});
+$("d-today").addEventListener("click", () => goDay(null));
+
 // ── 실시간 토글 ─────────────────────────────────────────────────────────
 // 끄면 화면만 멈춘다 — 생성 데몬은 계속 돈다. 시연 중 화면을 고정해 두고
 // 설명할 때 쓴다. 선택은 브라우저에 기억시킨다.
 const LIVE_KEY = "datagen.live";
-function isLive() { return $("live").checked; }
+function isLive() { return $("live").checked && !isPast(); }
 $("live").checked = localStorage.getItem(LIVE_KEY) !== "0";
 $("live").addEventListener("change", () => {
   localStorage.setItem(LIVE_KEY, isLive() ? "1" : "0");
-  if (isLive()) { poll(); loadHeavy(); }
+  if (isLive()) { poll(); loadHeavy(true); }
 });
 
 // ── 인입 현황 ───────────────────────────────────────────────────────────
@@ -597,7 +682,10 @@ function renderIngest(d) {
     `<div class="dim" style="margin-top:8px; font-size:12px">
        오늘 ${today ? today.slots : 0}분 · 누적 ${cum}분
        ${(d.by_day || []).length > 1 ? "(" + d.by_day.length + "일)" : ""}</div>`;
-  $("ing-range").textContent = `최근 ${d.minutes}분`;
+  $("ing-range").textContent = d.date ? `${d.date} 하루` : `최근 ${d.minutes}분`;
+  // 데이터가 있는 날짜는 여기서만 알 수 있다 — 별도 조회를 만들지 않는다.
+  const days = (d.by_day || []).map(x => String(x.d).slice(0, 10));
+  if (days.length && days.join() !== DAYS.join()) { DAYS = days; renderNav(); }
 }
 
 // ── 시계열 (인라인 SVG — 폐쇄망이라 외부 라이브러리를 쓰지 않는다) ─────
@@ -686,12 +774,14 @@ async function saveSettings() {
 // ── 무거운 조회는 느린 주기로 ───────────────────────────────────────────
 // 인입·시계열은 file_ledger 를 훑는다. 5초마다 돌리면 데이터가 쌓일수록
 // 부담이 커지므로 분리한다.
-async function loadHeavy() {
-  if (!isLive()) return;
+async function loadHeavy(force) {
+  // 과거 날짜나 토글 OFF 에서도 **한 번은** 그려야 화면이 빈 채로 남지 않는다.
+  // 주기 호출만 막는다(setInterval 쪽에서 isLive 로 거른다).
+  if (!force && !isLive()) return;
   try {
     const [ing, ser] = await Promise.all([
-      fetch("/api/ingest?minutes=60").then(r => r.json()),
-      fetch("/api/series?hours=3").then(r => r.json()),
+      fetch("/api/ingest" + q({minutes:60})).then(r => r.json()),
+      fetch("/api/series" + q({hours:3})).then(r => r.json()),
     ]);
     renderIngest(ing); renderChart(ser);
   } catch (e) { /* 다음 주기에 다시 */ }
@@ -699,11 +789,12 @@ async function loadHeavy() {
 
 (async () => {
   try { renderSettings(await (await fetch("/api/settings")).json()); } catch (e) {}
-  loadHeavy();
+  renderNav();
+  loadHeavy(true);
 })();
 
 setInterval(() => { if (isLive()) poll(); }, 5000);
-setInterval(loadHeavy, 15000);
+setInterval(() => { if (isLive()) loadHeavy(true); }, 15000);
 </script>
 </body>
 </html>
