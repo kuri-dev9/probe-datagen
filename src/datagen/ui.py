@@ -24,7 +24,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from .control import KINDS, add_fault, cancel_fault, ensure_tables, list_faults
+from .control import (KINDS, add_fault, cancel_fault, ensure_tables, get_config,
+                      list_faults, set_config)
 
 HERE = Path(__file__).resolve().parents[2]
 
@@ -101,6 +102,153 @@ def api_status():
         "recent_done": [f for f in faults if f["status"] == "done"][:10],
         "kinds": list(KINDS),
     }
+
+
+@app.get("/api/ingest")
+def api_ingest(minutes: int = 60):
+    """인입 현황 — 계열별 생성량. **장애 여부는 보지 않는다.**
+
+    이 화면은 "생성이 고르게 돌고 있나"만 본다. 품질 판정은 관제 화면(8008)의
+    일이고, 여기서 또 보여주면 두 화면이 같은 사실을 다르게 말할 위험이 있다.
+
+    출처는 `file_ledger` 다 — `datagen_history.records` 는 총합이라 계열별로
+    쪼갤 수 없다.
+    """
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT series, COUNT(*) slots, SUM(records) recs, "
+                "       MIN(slot_ts) a, MAX(slot_ts) b "
+                "FROM file_ledger "
+                "WHERE slot_ts >= DATE_SUB(NOW(), INTERVAL %s MINUTE) "
+                "GROUP BY series ORDER BY recs DESC", [minutes])
+            rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
+            cur.execute(
+                "SELECT COUNT(*) slots, COALESCE(SUM(records),0) recs "
+                "FROM datagen_history "
+                "WHERE slot_ts >= DATE_SUB(NOW(), INTERVAL %s MINUTE)", [minutes])
+            tot_slots, tot_recs = cur.fetchone()
+            # 날짜별 슬롯 수 — 상단에 "오늘 N분 / 누적 M분"
+            cur.execute(
+                "SELECT DATE(slot_ts) d, COUNT(*) slots, SUM(records) recs "
+                "FROM datagen_history GROUP BY 1 ORDER BY 1 DESC LIMIT 7")
+            days = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
+    finally:
+        conn.close()
+    for r in rows:
+        r["per_min"] = round(r["recs"] / r["slots"], 1) if r["slots"] else 0
+    return {
+        "minutes": minutes, "series": rows,
+        "total": {"slots": tot_slots or 0, "records": int(tot_recs or 0),
+                  "per_min": round((tot_recs or 0) / tot_slots, 1) if tot_slots else 0},
+        "by_day": days,
+    }
+
+
+@app.get("/api/series")
+def api_series(hours: int = 3):
+    """시계열 — 분당 생성량(계열별)과 그 분에 활성이던 fault.
+
+    한 번의 조회로 그래프에 필요한 것을 다 내린다. 5초 폴링이 이 질의를 매번
+    돌면 무거우므로 화면은 이쪽을 더 긴 주기로 부른다.
+    """
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT slot_ts, series, records FROM file_ledger "
+                "WHERE slot_ts >= DATE_SUB(NOW(), INTERVAL %s HOUR) "
+                "ORDER BY slot_ts", [hours])
+            raw = cur.fetchall()
+            cur.execute(
+                "SELECT slot_ts, records, faults FROM datagen_history "
+                "WHERE slot_ts >= DATE_SUB(NOW(), INTERVAL %s HOUR) "
+                "ORDER BY slot_ts", [hours])
+            hist = cur.fetchall()
+    finally:
+        conn.close()
+
+    by_slot: dict = {}
+    for slot_ts, series, records in raw:
+        k = slot_ts.isoformat()
+        by_slot.setdefault(k, {})[series] = int(records or 0)
+    points = []
+    hist_map = {h[0].isoformat(): h for h in hist}
+    for k in sorted(by_slot):
+        h = hist_map.get(k)
+        points.append({
+            "ts": k,
+            "series": by_slot[k],
+            "total": sum(by_slot[k].values()),
+            "faults": (h[2].split(",") if h and h[2] else []),
+        })
+    return {"hours": hours, "points": points,
+            "series_names": sorted({s for v in by_slot.values() for s in v})}
+
+
+@app.get("/api/settings")
+def api_settings():
+    """생성 설정 — datagen_config(DB) 가 우선, 없으면 datagen.yaml 기본값.
+
+    데몬이 틱마다 datagen_config 를 읽으므로 여기서 바꾸면 다음 분부터 반영된다
+    (재기동 불필요). 장비 추가·삭제는 이 화면의 범위가 아니다 — 셀 재배정이
+    필요해 설계가 따로 붙는다.
+    """
+    cfg = yaml.safe_load((HERE / "config" / "datagen.yaml").read_text(encoding="utf-8"))
+    rates = dict(cfg.get("rates") or {})
+    gen = dict(cfg.get("generate") or {})
+    conn = _connect()
+    try:
+        over = {}
+        for k in list(rates) + ["enabled", "retention_days"]:
+            v = get_config(conn, f"rate.{k}" if k in rates else k)
+            if v is not None:
+                over[k] = v
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 'SGW', COUNT(DISTINCT sgw_id) FROM cell_master UNION ALL "
+                "SELECT 'MME', COUNT(DISTINCT mme_id) FROM cell_master UNION ALL "
+                "SELECT 'PGW', COUNT(DISTINCT pgw_id) FROM cell_master")
+            nodes = {r[0]: r[1] for r in cur.fetchall()}
+            cur.execute("SELECT COUNT(*) FROM cell_master")
+            cells = cur.fetchone()[0]
+    finally:
+        conn.close()
+    for k in rates:
+        if k in over:
+            rates[k] = int(over[k])
+    return {
+        "rates": rates,
+        "enabled": str(over.get("enabled", "true")).lower() != "false",
+        "retention_days": int(over.get("retention_days", gen.get("retention_days", 7))),
+        "topology": {"cells": cells, **nodes},
+        "note": "장비 추가·삭제는 미지원 — 셀 재배정 설계가 선행되어야 한다",
+    }
+
+
+class SettingsReq(BaseModel):
+    rates: dict[str, int] | None = None
+    enabled: bool | None = None
+    retention_days: int | None = None
+
+
+@app.post("/api/settings")
+def api_set_settings(req: SettingsReq):
+    conn = _connect()
+    try:
+        if req.rates:
+            for k, v in req.rates.items():
+                if int(v) < 0:
+                    raise HTTPException(400, f"분당 호 수는 음수가 될 수 없다: {k}")
+                set_config(conn, f"rate.{k}", str(int(v)))
+        if req.enabled is not None:
+            set_config(conn, "enabled", "true" if req.enabled else "false")
+        if req.retention_days is not None:
+            set_config(conn, "retention_days", str(int(req.retention_days)))
+    finally:
+        conn.close()
+    return {"ok": True}
 
 
 @app.get("/api/targets")
@@ -193,6 +341,25 @@ _HTML = """<!doctype html>
          font:14px/1.5 "Pretendard","Apple SD Gothic Neo","Malgun Gothic",sans-serif; }
   h1 { font-size:17px; margin:0 0 14px; }
   h1 small { color:var(--dim); font-weight:normal; margin-left:8px; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  @media (max-width:980px) { .grid2 { grid-template-columns:1fr; } }
+  .kv { display:flex; justify-content:space-between; padding:5px 0;
+        border-bottom:1px solid var(--line); }
+  .kv:last-child { border-bottom:none; }
+  .kv b { font-variant-numeric:tabular-nums; }
+  .sw { display:inline-flex; align-items:center; gap:6px; cursor:pointer;
+        user-select:none; }
+  .sw input { accent-color:var(--accent); }
+  .daysep td { background:#222b36; color:var(--dim); font-size:12px;
+               letter-spacing:.3px; padding:4px 8px; }
+  .chart { width:100%; height:190px; display:block; }
+  .lg { display:flex; gap:12px; flex-wrap:wrap; font-size:12px; color:var(--dim);
+        margin-top:6px; }
+  .lg i { width:10px; height:10px; border-radius:2px; display:inline-block;
+          margin-right:4px; vertical-align:-1px; }
+  .rates { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; }
+  .rates label { font-size:12px; color:var(--dim); }
+  .rates input { width:100%; }
   .bar { display:flex; gap:24px; align-items:center; background:var(--panel);
          border:1px solid var(--line); border-radius:8px; padding:10px 16px;
          margin-bottom:14px; }
@@ -234,6 +401,11 @@ _HTML = """<!doctype html>
   <span>마지막 적재 슬롯 <b id="last-slot">—</b></span>
   <span class="active-cnt">활성 장애 <b id="active-cnt">0</b> 건</span>
   <span class="dim" id="poll-err"></span>
+  <span style="margin-left:auto">
+    <label class="sw" title="끄면 화면이 멈춘다 — 생성은 계속된다">
+      <input type="checkbox" id="live" checked> 실시간 갱신
+    </label>
+  </span>
 </div>
 
 <div class="panel">
@@ -260,6 +432,31 @@ _HTML = """<!doctype html>
   <div id="msg"></div>
 </div>
 
+<div class="grid2">
+  <div class="panel">
+    <h2>인입 현황 <small class="dim" id="ing-range">최근 60분</small></h2>
+    <div id="ingest" class="dim">불러오는 중…</div>
+  </div>
+  <div class="panel">
+    <h2>생성 설정 <small class="dim">다음 틱부터 반영된다</small></h2>
+    <div class="rates" id="rates"></div>
+    <div style="margin-top:12px; display:flex; gap:14px; align-items:center">
+      <label class="sw"><input type="checkbox" id="gen-on"> 생성 가동</label>
+      <label class="dim">보존일수 <input id="ret" type="number" min="1" max="90"
+             style="width:64px"></label>
+      <button type="button" onclick="saveSettings()">저장</button>
+      <span class="dim" id="set-msg"></span>
+    </div>
+    <div class="dim" id="topo" style="margin-top:10px; font-size:12px"></div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>생성 시계열 <small class="dim">분당 건수 · 최근 3시간</small></h2>
+  <svg class="chart" id="chart" viewBox="0 0 1000 190" preserveAspectRatio="none"></svg>
+  <div class="lg" id="legend"></div>
+</div>
+
 <div class="panel">
   <h2>장애 목록</h2>
   <table>
@@ -275,6 +472,10 @@ const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const ts = s => s ? String(s).replace("T"," ").slice(0,16) : "—";
+// 날짜 구분 행이 날짜를 들고 있으므로 각 행은 시각만 보인다
+const hm = s => s ? String(s).replace("T"," ").slice(11,16) : "—";
+const DOW = ["일","월","화","수","목","금","토"];
+const dow = d => DOW[new Date(d + "T00:00:00").getDay()] || "";
 
 async function loadKinds() {
   // kind 목록의 정본은 서버(control.KINDS) — 하드코딩하면 종류가 늘 때 UI 가 뒤처진다
@@ -304,18 +505,30 @@ async function poll() {
     $("last-slot").textContent = ts(st.last_slot);
     $("active-cnt").textContent = st.active.length;
     $("poll-err").textContent = "";
-    $("rows").innerHTML = faults.length ? faults.map(f => `
+    // 날짜가 바뀌는 자리에 구분 행을 넣는다. 목록이 하루를 넘기면 "16:01" 만
+    // 보고는 어제 것인지 오늘 것인지 알 수 없다.
+    let prevDay = null;
+    const html = faults.map(f => {
+      const day = String(f.start_ts || "").slice(0, 10);
+      let sep = "";
+      if (day && day !== prevDay) {
+        sep = `<tr class="daysep"><td colspan="7">${esc(day)} (${dow(day)})</td></tr>`;
+        prevDay = day;
+      }
+      return sep + `
       <tr class="${f.status}">
         <td>${f.fault_id}</td>
         <td>${esc(LABELS[f.kind] || f.kind)}</td>
         <td>${esc(f.target || "자동")}</td>
-        <td>${ts(f.start_ts)}</td>
+        <td>${hm(f.start_ts)}</td>
         <td>${f.duration_min}분</td>
         <td><span class="st st-${f.status}">${f.status}</span></td>
         <td>${["pending","active"].includes(f.status)
               ? `<button class="cancel" onclick="cancelFault(${f.fault_id})">취소</button>` : ""}</td>
-      </tr>`).join("")
-      : '<tr><td colspan="7" class="dim">장애 이력이 없다</td></tr>';
+      </tr>`;
+    }).join("");
+    $("rows").innerHTML = html ||
+      '<tr><td colspan="7" class="dim">장애 이력이 없다</td></tr>';
   } catch (e) {
     $("poll-err").textContent = "서버 응답 없음";
   }
@@ -357,7 +570,140 @@ async function cancelFault(id) {
 }
 
 loadKinds(); loadTargets(); poll();
-setInterval(poll, 5000);
+// ── 실시간 토글 ─────────────────────────────────────────────────────────
+// 끄면 화면만 멈춘다 — 생성 데몬은 계속 돈다. 시연 중 화면을 고정해 두고
+// 설명할 때 쓴다. 선택은 브라우저에 기억시킨다.
+const LIVE_KEY = "datagen.live";
+function isLive() { return $("live").checked; }
+$("live").checked = localStorage.getItem(LIVE_KEY) !== "0";
+$("live").addEventListener("change", () => {
+  localStorage.setItem(LIVE_KEY, isLive() ? "1" : "0");
+  if (isLive()) { poll(); loadHeavy(); }
+});
+
+// ── 인입 현황 ───────────────────────────────────────────────────────────
+function renderIngest(d) {
+  const tot = d.total || {};
+  const rows = (d.series || []).map(r =>
+    `<div class="kv"><span>${esc(r.series)}</span>
+       <b>${(r.recs ?? 0).toLocaleString()} <span class="dim">건 ·
+       ${r.per_min}/분</span></b></div>`).join("");
+  const today = (d.by_day || [])[0];
+  const cum = (d.by_day || []).reduce((a, x) => a + (x.slots || 0), 0);
+  $("ingest").innerHTML = rows +
+    `<div class="kv" style="margin-top:6px; border-top:1px solid var(--line)">
+       <span>합계</span><b>${(tot.records ?? 0).toLocaleString()} 건 ·
+       ${tot.per_min ?? 0}/분</b></div>` +
+    `<div class="dim" style="margin-top:8px; font-size:12px">
+       오늘 ${today ? today.slots : 0}분 · 누적 ${cum}분
+       ${(d.by_day || []).length > 1 ? "(" + d.by_day.length + "일)" : ""}</div>`;
+  $("ing-range").textContent = `최근 ${d.minutes}분`;
+}
+
+// ── 시계열 (인라인 SVG — 폐쇄망이라 외부 라이브러리를 쓰지 않는다) ─────
+const COLORS = { lte_call:"#4e9af1", transport:"#4caf7d",
+                 http:"#d8a22a", dns:"#a872e0" };
+function renderChart(d) {
+  const P = d.points || [], svg = $("chart");
+  if (!P.length) { svg.innerHTML =
+    '<text x="500" y="95" fill="#8a94a3" text-anchor="middle">데이터 없음</text>';
+    return; }
+  const names = d.series_names || [];
+  const W = 1000, H = 190, PAD_B = 22, PAD_T = 8;
+  const max = Math.max(1, ...P.map(p => p.total));
+  const bw = W / P.length;
+  const y = v => PAD_T + (H - PAD_B - PAD_T) * (1 - v / max);
+  let out = "";
+
+  // 장애가 있던 분은 배경을 깔아 둔다 — 생성량 변화와 겹쳐 보려는 것이지,
+  // 장애 판정을 보여주려는 게 아니다(판정은 관제 화면 몫).
+  P.forEach((p, i) => { if (p.faults && p.faults.length)
+    out += `<rect x="${(i*bw).toFixed(1)}" y="${PAD_T}" width="${Math.max(bw,1).toFixed(1)}"
+             height="${H-PAD_B-PAD_T}" fill="#e5534b" opacity=".10"/>`; });
+
+  // 계열별 적층 막대
+  P.forEach((p, i) => {
+    let acc = 0;
+    names.forEach(n => {
+      const v = (p.series || {})[n] || 0; if (!v) return;
+      const y0 = y(acc + v), y1 = y(acc);
+      out += `<rect x="${(i*bw).toFixed(1)}" y="${y0.toFixed(1)}"
+               width="${Math.max(bw-0.4,0.6).toFixed(1)}" height="${Math.max(y1-y0,0.5).toFixed(1)}"
+               fill="${COLORS[n] || "#6b7684"}"/>`;
+      acc += v;
+    });
+  });
+
+  // 날짜가 바뀌는 지점에 경계선 + 라벨, 그 외엔 정시마다 시각
+  let prevDay = null;
+  P.forEach((p, i) => {
+    const day = p.ts.slice(0, 10), hhmm = p.ts.slice(11, 16);
+    const x = (i * bw).toFixed(1);
+    if (prevDay && day !== prevDay) {
+      out += `<line x1="${x}" y1="${PAD_T}" x2="${x}" y2="${H-PAD_B}"
+               stroke="#4e9af1" stroke-width="1"/>
+              <text x="${+x+4}" y="${H-8}" fill="#4e9af1" font-size="11">${day}</text>`;
+    } else if (hhmm.endsWith(":00")) {
+      out += `<line x1="${x}" y1="${H-PAD_B}" x2="${x}" y2="${H-PAD_B+4}" stroke="#2c3542"/>
+              <text x="${+x+3}" y="${H-8}" fill="#8a94a3" font-size="11">${hhmm}</text>`;
+    }
+    prevDay = day;
+  });
+  out += `<text x="4" y="${PAD_T+10}" fill="#8a94a3" font-size="11">${max.toLocaleString()}</text>`;
+  svg.innerHTML = out;
+  $("legend").innerHTML = names.map(n =>
+    `<span><i style="background:${COLORS[n] || "#6b7684"}"></i>${esc(n)}</span>`).join("")
+    + '<span><i style="background:#e5534b;opacity:.35"></i>장애 주입 구간</span>';
+}
+
+// ── 생성 설정 ───────────────────────────────────────────────────────────
+let RATE_KEYS = [];
+function renderSettings(d) {
+  RATE_KEYS = Object.keys(d.rates || {});
+  $("rates").innerHTML = RATE_KEYS.map(k =>
+    `<div><label>${esc(k)} (분당)</label>
+       <input id="rate-${esc(k)}" type="number" min="0" step="100"
+              value="${d.rates[k]}"></div>`).join("");
+  $("gen-on").checked = !!d.enabled;
+  $("ret").value = d.retention_days;
+  const t = d.topology || {};
+  $("topo").textContent =
+    `토폴로지 — 셀 ${t.cells} · SGW ${t.SGW} · MME ${t.MME} · PGW ${t.PGW}` +
+    (d.note ? ` · ${d.note}` : "");
+}
+async function saveSettings() {
+  const rates = {};
+  RATE_KEYS.forEach(k => { rates[k] = Number($("rate-" + k).value || 0); });
+  const body = { rates, enabled: $("gen-on").checked,
+                 retention_days: Number($("ret").value || 7) };
+  const r = await fetch("/api/settings", { method:"POST",
+    headers:{"content-type":"application/json"}, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  $("set-msg").textContent = r.ok ? "저장됨 — 다음 틱부터" : (j.detail || "실패");
+  setTimeout(() => { $("set-msg").textContent = ""; }, 4000);
+}
+
+// ── 무거운 조회는 느린 주기로 ───────────────────────────────────────────
+// 인입·시계열은 file_ledger 를 훑는다. 5초마다 돌리면 데이터가 쌓일수록
+// 부담이 커지므로 분리한다.
+async function loadHeavy() {
+  if (!isLive()) return;
+  try {
+    const [ing, ser] = await Promise.all([
+      fetch("/api/ingest?minutes=60").then(r => r.json()),
+      fetch("/api/series?hours=3").then(r => r.json()),
+    ]);
+    renderIngest(ing); renderChart(ser);
+  } catch (e) { /* 다음 주기에 다시 */ }
+}
+
+(async () => {
+  try { renderSettings(await (await fetch("/api/settings")).json()); } catch (e) {}
+  loadHeavy();
+})();
+
+setInterval(() => { if (isLive()) poll(); }, 5000);
+setInterval(loadHeavy, 15000);
 </script>
 </body>
 </html>

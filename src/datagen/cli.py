@@ -142,6 +142,25 @@ def _purge_old(conn, retention_days: int) -> None:
     conn.commit()
 
 
+def _generation_enabled(conn) -> bool:
+    return str(control.get_config(conn, "enabled", "true")).lower() != "false"
+
+
+def _apply_live_config(conn, dg, base_rates: dict) -> None:
+    """datagen_config 의 rate.* 로 분당 호 수를 덮어쓴다 (없으면 yaml 기본값)."""
+    rates = dict(base_rates)
+    for k in base_rates:
+        v = control.get_config(conn, f"rate.{k}")
+        if v is not None:
+            try:
+                rates[k] = max(0, int(v))
+            except ValueError:
+                pass            # 잘못된 값은 무시하고 기본값을 쓴다
+    if rates != dg.gen.rates:
+        dg.gen.rates = rates
+        print(f"  설정 반영 — 분당 호 수 {rates}", flush=True)
+
+
 def cmd_run(args) -> int:
     cfg = load_cfg(args.config)
     data_dir = HERE / cfg["paths"]["data"]
@@ -192,6 +211,16 @@ def cmd_run(args) -> int:
                 time.sleep(max(0.5, (nxt - now).total_seconds()))
                 continue
             ts = pending
+            # 제어 화면이 바꾼 설정을 틱마다 읽는다 — 재기동 없이 다음 분부터
+            # 반영된다. Generator 는 self.rates 를 매 분 참조하므로 이 자리에서
+            # 덮어쓰면 충분하다(인스턴스를 다시 만들 필요가 없다).
+            _apply_live_config(w.conn, dg, cfg["rates"])
+            if not _generation_enabled(w.conn):
+                # 생성 정지 — 틱은 돌되 데이터를 만들지 않는다. 멈춘 동안의
+                # 구간은 비어 있고, 그것이 사실이다(0으로 채우지 않는다).
+                last_done = ts
+                print(f"[{ts:%H:%M}] 생성 정지 (설정)", flush=True)
+                continue
             active = control.poll_transitions(w.conn, datetime.now())
             scs, bad = dg.set_faults(active, rng)
             _cancel_faults(w.conn, bad, _CANCEL_NOTE)
