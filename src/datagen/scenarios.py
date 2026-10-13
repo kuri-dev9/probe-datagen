@@ -34,17 +34,14 @@ class Rec:
 
     def get(self, name: str, default: str = "") -> str:
         i = self.index.get(name)
-        if i is None:
-            i = self.index.get(name.replace(" ", "_"))
         return self.values[i] if i is not None else default
 
     def set(self, name: str, value) -> None:
-        # 통합 규격의 일부 필드명에는 공백이 있다(`Last_Cell ID`). 필드 인덱스는
-        # 정규화명(`Last_Cell_ID`)이라, 원본 헤더명으로 들어온 set 이 조용히
-        # 무시되지 않도록 공백을 흡수한다. 원본 .dat→read_csv 경로가 하던 일이다.
+        # **이름이 틀리면 조용히 무시된다.** 구 구현은 공백 든 원본 헤더명
+        # (`Last_Cell ID`)을 정규화명으로 흡수했는데, `fields.SERIES_FIELDS`
+        # 에는 공백 든 필드명이 하나도 없다(실측 0건) — 흡수가 가리는 것은
+        # 오타뿐이었다. 그래서 걷어내고 호출부를 실제 필드명으로 고쳤다.
         i = self.index.get(name)
-        if i is None:
-            i = self.index.get(name.replace(" ", "_"))
         if i is not None:
             self.values[i] = str(value)
 
@@ -65,10 +62,14 @@ class Target:
     cell_keys: set[str] = field(default_factory=set)
     sgg_codes: set[str] = field(default_factory=set)
     sido_codes: set[str] = field(default_factory=set)
-    sgw_id: int | None = None
-    pgw_id: int | None = None
-    mme_id: int | None = None
-    s6a_equip_id: int | None = None
+    # 상용은 0채움 varchar('0014'), 구 자체 스키마는 정수다. 양쪽을 담고
+    # 비교는 `_node_eq` 가 맞춘다. **표기를 바꾸지 않는다** — `as_truth()` 의
+    # `expect_node` 가 graphio `detail.axis_ids`("SGW-0014")와 글자까지 같아야
+    # 채점이 붙는다.
+    sgw_id: str | int | None = None
+    pgw_id: str | int | None = None
+    mme_id: str | int | None = None
+    s6a_equip_id: str | int | None = None
     vendor_model: tuple[str, str] | None = None
     domain: str | None = None
     apn: str | None = None
@@ -210,6 +211,25 @@ def mutator(kind: str) -> Callable[[Mutator], Mutator]:
     return deco
 
 
+def _node_eq(raw: str, want: str | int | None) -> bool:
+    """레코드의 노드 ID 가 시나리오 대상과 같은가.
+
+    표기가 두 벌이다. 상용 `XDR_LTE_CALL_KPI.SGW_ID`·`MME_ID`·`PGW_ID` 는
+    **0 채움 varchar** (`'0014'`)이고, 구 자체 스키마는 정수였다. 문자열로
+    비교하면 `'14'` 와 `'0014'` 가 어긋나 **변형이 한 건도 걸리지 않는다** —
+    에러 없이 장애가 주입되지 않고, 채점만 0% 로 나온다. graphio 쪽
+    `detector.resolve_axis_cells` 가 같은 이유로 `cast_int` 를 쓴다.
+
+    숫자로 접어 비교하고, 숫자가 아니면 문자열로 떨어뜨린다.
+    """
+    if want is None:
+        return True
+    try:
+        return int(raw or 0) == int(want)
+    except (TypeError, ValueError):
+        return str(raw) == str(want)
+
+
 def _fail_connect(rec: Rec, interface: int, cause: int, message: int) -> None:
     """소통 실패 호로 만든다 — 접속 단계에서 무너지는 형태 (R-21)."""
     rec.set("success_flag", 0)
@@ -230,7 +250,7 @@ def _fail_connect(rec: Rec, interface: int, cause: int, message: int) -> None:
 @mutator("gw_resource")
 def _gw_resource(rec, sc, intensity, rng, cell) -> bool:
     """SGW/PGW 세션 자원 소진 — S11 Cause 73 (No resources available)."""
-    if sc.target.sgw_id is not None and int(rec.get("SGW_ID", "0") or 0) != sc.target.sgw_id:
+    if not _node_eq(rec.get("SGW_ID"), sc.target.sgw_id):
         return False
     if rng.random() > intensity * 0.82:
         return False
@@ -247,7 +267,7 @@ def _gw_resource(rec, sc, intensity, rng, cell) -> bool:
 @mutator("gw_node_down")
 def _gw_node_down(rec, sc, intensity, rng, cell) -> bool:
     """노드 무응답 — First Error에 TIMEOUT(900)이 포함되므로 F-08로 바로 잡힌다."""
-    if sc.target.sgw_id is not None and int(rec.get("SGW_ID", "0") or 0) != sc.target.sgw_id:
+    if not _node_eq(rec.get("SGW_ID"), sc.target.sgw_id):
         return False
     if rng.random() > intensity * 0.9:
         return False
@@ -291,7 +311,7 @@ def _ran_radio(rec, sc, intensity, rng, cell) -> bool:
 @mutator("mme_overload")
 def _mme_overload(rec, sc, intensity, rng, cell) -> bool:
     """MME 과부하 — OverloadStart(34)와 Release Cause 500이 직접 증거."""
-    if sc.target.mme_id is not None and int(rec.get("MME_ID", "0") or 0) != sc.target.mme_id:
+    if not _node_eq(rec.get("MME_ID"), sc.target.mme_id):
         return False
     if cell.cell_key not in sc.active_cells_cache:
         return False
@@ -412,7 +432,7 @@ def _mobility(rec, sc, intensity, rng, cell) -> bool:
         src, dst = rng.choice(sc.target.cell_pairs)
         enb, _, cid = dst.rpartition("-")
         rec.set("Last_eNB_ID", enb)
-        rec.set("Last_Cell ID", cid)
+        rec.set("Last_Cell_ID", cid)
     if rng.random() < 0.45:
         rec.set("success_flag", 1)
         rec.set("drop_flag", 1)
@@ -449,7 +469,7 @@ def _ims_pdn(rec, sc, intensity, rng, cell) -> bool:
     """VoLTE 전용 이슈 — C-21만 악화하고 C-20(Data)은 정상이다 (R-30)."""
     if rec.get("ims_attempt_flag") != "1":
         return False
-    if sc.target.pgw_id is not None and int(rec.get("ims_PGW_ID", "0") or 0) != sc.target.pgw_id:
+    if not _node_eq(rec.get("ims_PGW_ID"), sc.target.pgw_id):
         return False
     if rng.random() > intensity * 0.8:
         return False

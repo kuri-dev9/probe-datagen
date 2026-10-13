@@ -49,6 +49,57 @@ PYTHONPATH=src .venv/bin/python -m datagen pemfill --minutes 2 --with-failures  
 PYTHONPATH=src .venv/bin/python -m datagen pemfill --minutes 2 --no-agg          # XDR 만
 ```
 
+### 장애 주입 — `--scenarios`
+
+기본은 평시 전용이다(전부 녹색). 장애를 넣으면 `ground_truth.json` 도 같은
+호출에서 쓴다 — 따로 돌리면 시나리오 배치 rng 가 달라져 정답이 데이터와 다른
+세대가 된다.
+
+```bash
+# 10종 전부 + 정답 기록 (graphio 채점이 그 파일을 읽는다)
+PYTHONPATH=src .venv/bin/python -m datagen pemfill \
+  --start "2026-10-13 10:02" --minutes 172 --rate 9000 \
+  --scenarios all --lead-minutes 6
+
+PYTHONPATH=src .venv/bin/python -m datagen pemfill --minutes 40 --scenarios SC-01,SC-02
+```
+
+주입은 **XDR 레코드 단위 변형**이다. 집계 결과를 직접 건드리지 않으므로
+적재→집계→탐지→RCA 전 경로가 실제와 같이 돈다.
+
+| | 시나리오 | 정답 코드 |
+| --- | --- | --- |
+| 돈다 (10종) | SC-01·02·03·04·08·09·10·11·12·13 | `pemdb1.SUPPORTED` |
+| **미연동 (3종)** | SC-05 DNS · SC-06 HTTP · SC-07 Transport | `pemdb1.UNSUPPORTED` |
+
+미연동 3종은 **pemdb1 에 그 XDR 자체가 없다** — `AnswerCount`·`StatusCode`·
+`Traffic_Total_Dnlink_RetransPacketCount` 같은 원천 컬럼이 없다. 지정해도 사유와
+함께 건너뛰고 정답 파일의 분모에도 넣지 않는다. 없는 원천을 지어내면 룰은
+발동하고 채점은 올라가지만 운영에서는 아무것도 재현되지 않는다.
+
+구간 길이가 짧으면 뒤쪽 시나리오가 배치되지 않는다(겹치면 Incident 압축이 두
+원인을 하나로 묶어 채점이 흐려진다). 10종을 모두 넣으려면 `--minutes 170` 이상이
+필요하고, 건너뛴 것은 로그에 사유가 나온다.
+
+### 가입자·단말 식별자 — 합성 평문
+
+`IMSI`·`mdn`·`IMEI` 는 **지어낸 평문**이다(`src/datagen/identity.py`). 실제
+암호문을 로컬에 두지 않기로 했고, 그렇다고 지우면 체계가 사라져 사업자·로밍·
+기종 축 분석이 성립하지 않는다.
+
+```
+IMSI  = imsi_mcc_mnc_info(앞 7자) + MSIN 8자리 = 15자리   규격: "first 7 characters of imsi"
+mdn   = 010 + 가입자번호 8자리 (첫 자리 2~9)   = 11자리
+IMEI  = TAC 8자리 + SNR 6자리 + Luhn 체크디지트 = 15자리   TAC 는 Vendor/Model 과 묶인다
+```
+
+이미 적재된 암호문은 `data/pemdb1/repairs/gen_subscriber_ids.py` 가 **결정론적
+1:1** 로 치환한다. 1:1 이 아니면 `UNIQ_IMSI_CNT` 가 줄어 집계·채점이 조용히
+흔들리므로, 치환 전후 그 합이 같은지를 검증 수단으로 쓴다.
+
+`SERVICECODE`(40종)는 **손대지 않았다** — 대응하는 코드 테이블이 없어 체계를
+알 수 없다.
+
 ```
 셀 마스터  CL_CELL_MAP + CM_CELL_REP_RU_LOC  (data/cells.json 대신)
 생성       Generator → base_lte_call → 실측 분포 덮기 → 시나리오 변형

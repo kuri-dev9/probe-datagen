@@ -41,8 +41,10 @@ from pathlib import Path
 from .cells import Cell
 from .fields import SERIES_FIELDS
 from .generator import Generator
+from .identity import synth_imei, synth_imsi
 from .profile import load as load_profiles
 from .scenarios import MUTATORS, Scenario
+from .scenarios import build_scenarios as build_sim_scenarios
 
 # --------------------------------------------------------------------------
 # 상수
@@ -123,6 +125,25 @@ class Distributions:
         self.vendor_models = [(e["vendor"], e["model"]) for e in d["vendor_model"]]
         self.vendor_model_w = [e["n"] for e in d["vendor_model"]]
 
+        #: 부가 절차 플래그(Data/IMS/Paging)의 CALL_TYPE 조건부 비율.
+        #: `d["call_type"]` 에는 주 상태 플래그(att/suc/drop/detach)만 있고
+        #: 부가 플래그는 `d["flags"]["by_call_type"]` 에 따로 실려 있다 —
+        #: 그걸 읽지 않아서 `IMS_ATTEMPT_FLAG`·`DATA_ATTEMPT_FLAG` 가
+        #: **320,044행 전부 '0'** 이 됐다(실측). 분모가 0 이면 `C-20`·`C-21`
+        #: 이 한 번도 판정되지 않고, SC-12(IMS PDN) 는 변형 조건
+        #: (`ims_attempt_flag == '1'`)에 걸릴 레코드가 없어 주입 자체가
+        #: 성립하지 않는다. 실측 비율(CALL_TYPE 3·4 에서 ims ~87%)을 쓴다.
+        self.proc_ratio: dict[str, dict[str, float]] = {}
+        for e in ((d.get("flags") or {}).get("by_call_type") or []):
+            n = e.get("n") or 0
+            if not n:
+                continue
+            self.proc_ratio[str(e["CALL_TYPE"])] = {
+                k: e.get(k, 0) / n for k in
+                ("data_attempt", "data_success", "ims_attempt",
+                 "ims_success", "paging_attempt", "paging_success")
+            }
+
         rel = d["release_cause"]
         if success_only:
             # 성공 전용 베이스라인에는 비정상 해제를 남기지 않는다. 실측 비율을
@@ -154,10 +175,18 @@ class Distributions:
         return self._pick(self.errors, self.error_w)
 
     def flags(self, call_type: str) -> dict[str, int]:
-        """CALL_TYPE 조건부 플래그. 성공 전용이면 성공=시도·절단=0."""
+        """CALL_TYPE 조건부 플래그. 성공 전용이면 성공=시도·절단=0.
+
+        부가 절차 플래그(Data/IMS/Paging)를 함께 낸다. 주변분포로 따로 뽑지
+        않는 이유는 주 상태 플래그와 같다 — `PAGING` 호에 IMS 시도가 서는
+        식의 없는 조합이 생기면 `C-20`·`C-21` 교차 KPI 가 무너진다
+        (불변규칙 3).
+        """
         r = self.flag_ratio.get(call_type)
         if not r:
-            return {"att": 0, "suc": 0, "drop": 0, "detach": 0}
+            return {"att": 0, "suc": 0, "drop": 0, "detach": 0,
+                    "data_att": 0, "data_suc": 0, "ims_att": 0, "ims_suc": 0,
+                    "pg_att": 0, "pg_suc": 0}
         rng = self.rng
         att = 1 if rng.random() < r["att"] else 0
         if self.success_only:
@@ -166,7 +195,25 @@ class Distributions:
             suc = 1 if att and rng.random() < (r["suc"] / r["att"] if r["att"] else 0) else 0
             drop = 1 if rng.random() < r["drop"] else 0
         detach = 1 if rng.random() < r["detach"] else 0
-        return {"att": att, "suc": suc, "drop": drop, "detach": detach}
+
+        p = self.proc_ratio.get(call_type) or {}
+        out = {"att": att, "suc": suc, "drop": drop, "detach": detach}
+        for key, a_name, s_name in (
+            ("data", "data_attempt", "data_success"),
+            ("ims", "ims_attempt", "ims_success"),
+            ("pg", "paging_attempt", "paging_success"),
+        ):
+            a = 1 if rng.random() < p.get(a_name, 0.0) else 0
+            if not a:
+                out[f"{key}_att"], out[f"{key}_suc"] = 0, 0
+                continue
+            if self.success_only:
+                sv = 1
+            else:
+                num, den = p.get(s_name, 0.0), p.get(a_name, 0.0)
+                sv = 1 if rng.random() < (num / den if den else 0.0) else 0
+            out[f"{key}_att"], out[f"{key}_suc"] = a, sv
+        return out
 
 
 # --------------------------------------------------------------------------
@@ -227,12 +274,24 @@ def _pick_enbs(uniq: dict, enb_limit: int | None) -> set[str] | None:
 def load_cells(conn, enb_limit: int | None = None) -> list[Cell]:
     """`CL_CELL_MAP` + `CM_CELL_REP_RU_LOC` → `Cell` 목록.
 
-    조인 키는 실측으로 확인된 것을 쓴다 (docker/mysql/load_master.py 주석):
-    `CM_CELL_REP_RU_LOC.ENB_ID` 는 적재 시 평문(DECODE)으로 치환돼 있고,
-    `SECTOR` 는 이름과 달리 `CELLNUM` 값이다.
+    조인 키는 실측으로 확인된 것을 쓴다. `CM_CELL_REP_RU_LOC.ENB_ID` 는
+    **반출 JSON 단계에서 이미 평문**이고 암호문은 `ENB_ID_ENC` 로 따로 남아
+    있다(2026-10-13 반출본 통일). `SECTOR` 는 이름과 달리 `CELLNUM` 값이다.
+
+    `XDR_LTE_CALL_KPI.FIRST_ENB_ID` 도 평문 숫자다 — 근거는 생성 데이터가
+    아니라 프로브 규격서다(`docs/xdr_spec/XDR_Specification_통합.xlsx`,
+    `LTE-Call-KPI` 22행: `First_eNB_ID · uint · NUMBER · 10`,
+    "First ECGI에서 eNB ID 파싱"). 그래서 셀 키를 평문으로 맞춘다.
 
     좌표가 없는 셀도 **버리지 않는다** — 미매핑 셀을 숨기면 그 셀의 이슈가
     영원히 안 보인다(불변규칙 12). `geo_status='UNMAPPED'` 로 남긴다.
+    `CL_CELL_MAP`(로컬 574,404행)에는 있지만 `CM_CELL_REP_RU_LOC`(442,689행)에
+    없는 셀이 있고, 그런 셀은 좌표가 없어 지리 롤업에서 빠진다. 노드 축
+    시나리오(SGW/MME 전체 셀)는 그 셀을 포함하므로 정답 셀의 약 15% 가
+    미매핑이다 — **의도된 것이다**(`_pick_enbs` 가 일부러 남긴다. H-07 감시와
+    UNMAPPED 패널이 한 번도 검증되지 않는 것을 막는다). 지리 패턴을 채점하는
+    CLUSTER·CORRIDOR 시나리오는 `_cells_in_one_sgg` 가 `MAPPED` 만 고르므로
+    영향을 받지 않는다(실측 미매핑 0%).
 
     `enb_limit` 은 생성 대상 eNB 수를 줄인다. 마스터 전량(eNB 32,121)에 분당
     수천 호를 흘리면 eNB 당 표본이 1건 미만이 되어 **어떤 창에서도 판정이
@@ -371,6 +430,11 @@ class PemdbGen:
             scenarios=[], rates={"lte_call": int(rates.get("lte_call", 2000))},
             seed=seed, diurnal=True, subscriber_pool=subscriber_pool,
             success_only=success_only,
+            # 상용 적재는 `ONGOINGFLAG='2'`(호 종료)만 담는다. 생성기가
+            # 프로파일에서 뽑으면 '2' 가 40% 뿐이라 **종료 레코드에만 채우는
+            # 필드가 60% 에서 빈다** — `_coerce` 가 플래그는 덮지만
+            # `initial_*_duration`·`initial_nr_conn_time` 은 못 덮는다.
+            end_only=True,
         )
         self._reseat_subscribers(random.Random(seed + 202))
         self.anchor: datetime | None = None
@@ -383,10 +447,17 @@ class PemdbGen:
         집계(R-10, 기종 쏠림)가 성립하지 않는다. 가입자에 고정해야 한다.
         """
         dist = self.dist
-        for sub in self.gen.subs:
+        for i, sub in enumerate(self.gen.subs):
             sub.vendor, sub.model = dist.vendor_model()
             # 인바운드 로머 — APN 분포에 mcc234 가 2.6% 있다 (sg1.super...)
             sub.mcc_mnc = "2340500" if rng.random() < 0.026 else "4500503"
+            # **식별자를 다시 만든다.** `mcc_mnc` 와 기종을 여기서 덮으므로,
+            # `_make_subscribers` 가 만든 IMSI·IMEI 는 이미 어긋났다. IMSI 는
+            # 규격상 `imsi_mcc_mnc_info` 로 시작해야 하고(앞 7자), IMEI 의 TAC 는
+            # 기종과 묶여야 한다(R-10). 다시 만들지 않으면 둘 다 조용히 깨진다.
+            # MDN 은 두 값에 의존하지 않으므로 그대로 둔다.
+            sub.imsi = synth_imsi(sub.mcc_mnc, i)
+            sub.imei = synth_imei(sub.vendor, sub.model, i)
 
     # -- 분 단위 ---------------------------------------------------------
 
@@ -433,6 +504,15 @@ class PemdbGen:
         rec.set("success_flag", f["suc"])
         rec.set("drop_flag", f["drop"])
         rec.set("detach_flag", f["detach"])
+        # 부가 절차 플래그 — 이걸 비워 두면 `C-20`(Data)·`C-21`(IMS) 의 분모가
+        # 0 이라 그 두 지표가 **한 번도 판정되지 않는다**. 빈 값은 "이상 없음"
+        # 으로 보이고 그것이 불변규칙 17 이 금지하는 형태다.
+        rec.set("data_attempt_flag", f["data_att"])
+        rec.set("data_success_flag", f["data_suc"])
+        rec.set("ims_attempt_flag", f["ims_att"])
+        rec.set("ims_success_flag", f["ims_suc"])
+        rec.set("paging_attempt_flag", f["pg_att"])
+        rec.set("paging_success_flag", f["pg_suc"])
         rec.set("APN", d.apn())
 
         # 해제 Cause — 절단 호에는 비정상만 붙인다
@@ -719,3 +799,89 @@ def aggregate_all(conn, lo: datetime, hi: datetime) -> dict[str, int]:
         PM_ENB_CAUSE: aggregate_enb_cause(conn, lo, hi),
         PM_EPC: aggregate_epc(conn, lo, hi),
     }
+
+
+# --------------------------------------------------------------------------
+# 장애 주입 — 시나리오 배치와 정답(ground truth)
+# --------------------------------------------------------------------------
+
+#: pemdb1 에서 돌릴 수 없는 시나리오와 그 이유.
+#: **억지로 만들지 않는다.** 원천 XDR 이 없는데 값을 지어내면 PoC 가 거짓말을
+#: 한다 — 룰은 발동하고 채점은 올라가지만 운영에서는 아무것도 재현되지 않는다.
+#: 미연동으로 남기고 보고하는 것이 불변규칙 17 의 취지다.
+UNSUPPORTED: dict[str, str] = {
+    "SC-05": "DNS_DEGRADATION — DNS XDR 미연동 "
+             "(AnswerCount·QueryRetryCount·ReplyCode·ResolvedIP 가 pemdb1 에 없다)",
+    "SC-06": "EXTERNAL_SERVER — HTTP XDR 미연동 "
+             "(StatusCode·HTTP_Total_Response_PayloadSize·ClientHelloDomain 이 없다)",
+    "SC-07": "TRANSPORT_LOSS — Transport XDR 미연동 "
+             "(Traffic_Total_Dnlink_RetransPacketCount·DnlinkRTTTime 이 없다)",
+}
+
+#: 돌아가는 10종. `XDR_LTE_CALL_KPI` 155컬럼만으로 변형이 성립하는 것들이다.
+SUPPORTED: tuple[str, ...] = (
+    "SC-01", "SC-02", "SC-03", "SC-04", "SC-08",
+    "SC-09", "SC-10", "SC-11", "SC-12", "SC-13",
+)
+
+
+def build_scenarios(gen: "PemdbGen", minutes: int, selected: str = "all",
+                    lead_minutes: int | None = None,
+                    seed: int | None = None) -> tuple[list[Scenario], list[str]]:
+    """시나리오를 구간에 배치한다. 반환은 (배치된 것, 건너뛴 사유).
+
+    `scenarios.build_scenarios` 를 **그대로** 쓴다. 변형은 필드명 기반이고
+    `fields.SERIES_FIELDS["lte_call"]` 과 상용 155컬럼은 위치가 1:1 이므로
+    (`xdr_mapping` 이 검증한다) 포팅할 것이 없다. 바꿔야 했던 것은 노드 ID
+    표기 비교 하나였다(`scenarios._node_eq`).
+
+    대상 선정은 **셀 마스터에 실린 실제 ID** 로 돈다. `load_cells` 가
+    `Cell.sgw_id`·`mme_id` 에 `CL_PGW`·`CL_MME` 의 0채움 varchar 를 넣으므로
+    `Target(sgw_id='0037')` 이 되고, `as_truth()` 의 `expect_node` 가
+    `"SGW-0037"` 로 나와 graphio `GP_INCIDENT.DETAIL.axis_ids` 와 글자까지
+    같아진다 (`detector._node_key` = `node_type || '-' || node_id`).
+    """
+    wanted = set(SUPPORTED) if selected in ("all", None, "") else {
+        t.strip().upper() for t in selected.split(",") if t.strip()}
+    skipped = [f"{sid}: {why}" for sid, why in sorted(UNSUPPORTED.items())
+               if sid in wanted]
+    wanted &= set(SUPPORTED)
+    if not wanted:
+        return [], skipped
+
+    rng = random.Random((seed if seed is not None else gen.seed) + 777)
+    scs = build_sim_scenarios(
+        gen.cells, minutes, rng,
+        selected=sorted(wanted), lead_minutes=lead_minutes,
+    )
+    placed = {sc.id for sc in scs}
+    skipped += [f"{sid}: 구간이 짧아 배치되지 않았다 (minutes={minutes})"
+                for sid in sorted(wanted - placed)]
+    gen.set_faults(scs)
+    return scs, skipped
+
+
+def write_truth(path: Path, start: datetime, minutes: int,
+                scenarios: list[Scenario]) -> dict:
+    """`ground_truth.json` — graphio `pipeline.score_against_truth` 가 읽는다.
+
+    포맷을 바꾸지 않는다. 바뀐 것은 **셀 키의 내용**이다 — 구 파일은 자체
+    난수 base64 암호문(`'SRmZzsHOGQXR6XVpRFPM2A==-1'`)이었고 지금은 상용
+    평문 `"{ENB_ID}-{CELLNUM}"`(`'157837-21'`)이다. graphio 쪽
+    `store/tables.py:cell_key()` 와 같은 모양이어야 `GP_INCIDENT_SCOPE` 와
+    교집합이 잡힌다. 모양이 어긋나면 **에러 없이 0%** 가 나온다.
+
+    생성과 같은 호출에서 쓴다. 따로 돌리면 시나리오 배치에 쓰인 rng 상태가
+    달라져 셀 집합이 바뀌고, 정답이 데이터와 다른 세대가 된다.
+    """
+    doc = {
+        "start": start.isoformat(),
+        "minutes": minutes,
+        "scenarios": [sc.as_truth() for sc in scenarios],
+        # 미연동을 정답에 넣지 않는다. 넣으면 분모가 13이 되어 탐지하지
+        # 못한 것이 아니라 **원천이 없는 것**까지 실패로 세게 된다.
+        "unsupported": UNSUPPORTED,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
+    return doc

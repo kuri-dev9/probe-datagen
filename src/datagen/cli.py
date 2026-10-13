@@ -316,6 +316,32 @@ def cmd_pemfill(args) -> int:
               f"(좌표 보유 {mapped:,} · UNMAPPED {len(gen.cells) - mapped:,})")
         gen.anchor = start
 
+        # ── 장애 주입 ────────────────────────────────────────────────────
+        # 기본은 꺼져 있다 — 기존 `pemfill` 호출(평시 전용)의 동작을 바꾸지
+        # 않는다. 주입은 **레코드 단위 변형**이고, 집계 결과를 직접 건드리지
+        # 않는다. 그래야 적재→집계→탐지→RCA 전 경로가 실제와 같이 돈다.
+        scs: list = []
+        if args.scenarios:
+            scs, skipped = P.build_scenarios(
+                gen, minutes, args.scenarios, lead_minutes=args.lead_minutes)
+            for line in skipped:
+                print(f"  건너뜀 — {line}")
+            for sc in scs:
+                t = start + timedelta(minutes=sc.start_minute)
+                print(f"  {sc.id} {sc.truth_code:24} "
+                      f"[{t:%H:%M}+{sc.duration}m] {sc.shape:4} "
+                      f"{sc.target.label()}")
+            print(f"▶ 시나리오 {len(scs)}종 배치")
+            # 상대 경로는 저장소 루트 기준으로 푼다 — cwd 에 따라 정답이
+            # 엉뚱한 자리에 떨어지면 graphio 는 "ground_truth.json 없음" 으로
+            # 조용히 채점을 건너뛴다.
+            truth_path = Path(args.truth_out or pem.get("truth_out")
+                              or (data_dir / "truth" / "ground_truth.json"))
+            if not truth_path.is_absolute():
+                truth_path = (HERE / truth_path).resolve()
+            P.write_truth(truth_path, start, minutes, scs)
+            print(f"▶ 정답 기록 — {truth_path}")
+
         w = P.PemdbWriter(conn, mapping)
         t0 = time.time()
         total = 0
@@ -379,6 +405,15 @@ def main(argv=None) -> int:
     p.add_argument("--with-failures", action="store_true",
                    help="실측 실패·절단 비율을 재현 (기본은 성공 전용)")
     p.add_argument("--no-agg", action="store_true", help="XDR 적재만 하고 집계는 건너뛴다")
+    # 장애 주입. 미지정이면 평시 전용 — 기존 호출의 동작이 그대로다.
+    # `all` 은 pemdb1 에서 돌아가는 10종(`pemdb1.SUPPORTED`)이다. SC-05·06·07 은
+    # DNS·HTTP·Transport XDR 이 pemdb1 에 없어 미연동이며, 지정해도 사유와 함께
+    # 건너뛴다 — 없는 원천을 지어내지 않는다.
+    p.add_argument("--scenarios", metavar="all|SC-01,SC-02,…",
+                   help="장애 시나리오 주입 + ground_truth.json 기록")
+    p.add_argument("--lead-minutes", type=int,
+                   help="첫 장애까지의 평시 구간 (기본: 구간 길이에서 자동)")
+    p.add_argument("--truth-out", help="정답 파일 경로 (기본 설정 pemdb1.truth_out)")
     p.set_defaults(fn=cmd_pemfill)
 
     r = sub.add_parser("run", help="상주 데몬 — 백필 + 실시간 틱 + fault 주입")

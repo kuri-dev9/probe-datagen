@@ -21,6 +21,7 @@ from pathlib import Path
 from .fields import SERIES_FIELDS
 from .cells import Cell, encrypt_id
 from .profile import Sampler, SeriesProfile
+from .identity import synth_imei, synth_imsi, synth_mdn
 from .scenarios import Rec, MUTATORS, Scenario
 
 SEP = "\x1e"
@@ -97,6 +98,7 @@ class Generator:
         diurnal: bool = True,
         subscriber_pool: int = 0,
         success_only: bool = True,
+        end_only: bool = False,
     ):
         self.cells = cells
         self.profiles = profiles
@@ -107,6 +109,14 @@ class Generator:
         # 소수 실패·절단·First Error 가 섞인다 — PoC 는 "평소 전부 녹색"이 기본이고
         # 실패는 시나리오 주입으로만 만든다. 끄면(False) 원본의 실측 재현 동작.
         self.success_only = success_only
+        # 호 종료 레코드만 만든다. `OngoingFlag` 를 프로파일에서 뽑으면 '2'(종료)가
+        # 40% 뿐이고, 종료 레코드에만 채우는 필드(initial_*_duration ·
+        # UEContextRelease_* · initial_nr_conn_time)가 나머지 60% 에서 빈다.
+        # 상용 적재는 추출 조건이 `ONGOINGFLAG='2'` 라서 전 레코드를 '2' 로
+        # 올려 쓰는데, 그러면 **"호 종료인데 지표가 비어 있는" 레코드**가 된다.
+        # 실측 결과 N-02(NR 레그 연결률)가 96.5% 대신 38% 로 나와 셀 184건이
+        # 허위 Critical 이 됐다 — 없는 장애를 만든 것이다(불변규칙 4·17).
+        self.end_only = end_only
         self.rng = random.Random(seed)
         self.samplers = {
             s: Sampler(p, random.Random(seed + i)) for i, (s, p) in enumerate(profiles.items())
@@ -149,18 +159,33 @@ class Generator:
         for i in range(n):
             vendor = smp.categorical("Vendor", "100SS") if smp else "100SS"
             model = smp.categorical("Model", "A1DE") if smp else "A1DE"
+            # `mcc_mnc` 를 먼저 정한다 — 규격이 `imsi_mcc_mnc_info` 를 "first 7
+            # characters of imsi" 로 못 박았으므로 IMSI 가 그것에서 파생돼야
+            # 한다. 거꾸로 하면 두 컬럼이 어긋나고 에러는 나지 않는다.
+            mcc_mnc = smp.categorical("imsi_mcc_mnc_info", "4500503") if smp else "4500503"
+            if not (len(mcc_mnc) == 7 and mcc_mnc.isdigit()):
+                # 프로파일에 `""`(1.2%)와 `"__other__"`(0.6%)가 있다. 그대로 두면
+                # IMSI 를 만들 수 없고, 빈 값을 쓰면 `imsi_mcc_mnc_info` 와
+                # IMSI 앞 7자가 어긋난다 — 규격이 선언한 관계가 깨진다.
+                # 대표값으로 채우고 **두 컬럼을 함께** 그 값으로 쓴다.
+                mcc_mnc = "4500503"
             subs.append(
                 Subscriber(
-                    imsi=encrypt_id(f"imsi:{i}", "sub"),
-                    mdn=encrypt_id(f"mdn:{i}", "sub"),
-                    imei=encrypt_id(f"imei:{i}", "sub"),
+                    # 합성 평문이다 — 암호문을 만들지 않는다(`identity` 머리말).
+                    # 인덱스 `i` 로 만들어 같은 seed 면 같은 식별자가 나온다.
+                    imsi=synth_imsi(mcc_mnc, i),
+                    mdn=synth_mdn(i),
+                    imei=synth_imei(vendor, model, i),
+                    # **ServiceCode 는 손대지 않는다.** 40종 암호문인데 대응하는
+                    # 코드 테이블이 없어 체계를 알 수 없다 — 모르는 것을
+                    # 지어내지 않는다.
                     service_code=encrypt_id(f"svc:{i % 40}", "sub"),
                     pay_code=smp.categorical("PayCode", "NA00006538") if smp else "NA00006538",
                     gender=smp.categorical("Gender", "1") if smp else "1",
                     age=f"{rng.randint(12, 88):03d}",
                     vendor=vendor,
                     model=model,
-                    mcc_mnc=smp.categorical("imsi_mcc_mnc_info", "4500503") if smp else "4500503",
+                    mcc_mnc=mcc_mnc,
                     exchange=f"{rng.randint(1000, 9999)}",
                     spid=smp.categorical("spid", "0") if smp else "0",
                     dcnr=smp.categorical("ue_dcnr", "-1") if smp else "-1",
@@ -227,7 +252,7 @@ class Generator:
         t = slot_start + rng.random() * 60
         rec.set("SummaryCreateTime", f"{t + 0.05:.6f}")
 
-        ongoing = smp.categorical("OngoingFlag", "2")
+        ongoing = "2" if self.end_only else smp.categorical("OngoingFlag", "2")
         rec.set("OngoingFlag", ongoing)
         self._common_user(rec, sub)
 
@@ -239,7 +264,7 @@ class Generator:
         rec.set("First_Cell_ID", cell.cell_id)
         rec.set("First_eNB_VLAN_ID", cell.vlan_id)
         rec.set("Last_eNB_ID", cell.enb_id)
-        rec.set("Last_Cell ID", cell.cell_id)
+        rec.set("Last_Cell_ID", cell.cell_id)
         rec.set("Last_eNB_VLAN_ID", cell.vlan_id)
         rec.set("First_eNB_PLMN", cell.plmn)
         rec.set("Last_eNB_PLMN", cell.plmn)

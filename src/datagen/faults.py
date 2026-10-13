@@ -20,7 +20,7 @@ from datetime import datetime
 
 from .cells import Cell
 from .geo_lite import haversine_km
-from .scenarios import Scenario, Target, _cells_in_one_sgg
+from .scenarios import Scenario, Target, _cells_in_one_sgg, _node_eq
 
 #: kind 고유 속성 — scenarios.build_scenarios 의 spec 에서 그대로 복사했다.
 #: peak 는 fault.intensity 가, 대상/시간창은 fault 행이 덮어쓴다.
@@ -177,11 +177,15 @@ def _resolve_target(raw: str | None, kind: str, cells: list[Cell], rng: random.R
     head, _, num = text.partition("-")
     field = _NODE_FIELD.get(head.upper())
     if field and num.strip().isdigit():
-        nid = int(num)
-        keys = {c.cell_key for c in cells if getattr(c, field) == nid}
+        # 표기를 보존한다. 상용 노드 ID 는 0채움('0014')이고 사용자는 'SGW-14'
+        # 로도 적는다 — 비교는 `_node_eq` 가 숫자로 맞추되, Target 에는 **셀
+        # 마스터에 실린 표기**를 넣어야 `as_truth()` 의 expect_node 가
+        # graphio 의 axis_ids 와 글자까지 같아진다.
+        keys = {c.cell_key for c in cells if _node_eq(getattr(c, field), num)}
         if not keys:
             return None
-        return Target(cell_keys=keys, **{field: nid})
+        actual = next(getattr(c, field) for c in cells if _node_eq(getattr(c, field), num))
+        return Target(cell_keys=keys, **{field: actual})
 
     return None  # 알 수 없는 형식 — 조용히 전국에 뿌리면 오히려 디버깅이 어려워진다
 
