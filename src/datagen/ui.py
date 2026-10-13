@@ -81,7 +81,7 @@ def _connect():
     return pymysql.connect(
         host=m["host"], port=int(m["port"]), user=m["user"],
         password=m["password"],
-        database=_pem_cfg().get("database", "pemdb1"),
+        database=_pem_cfg().get("database", "pemdb6"),
         # 상용 collation 이 utf8mb3_general_ci 다. utf8mb4 로 열면 리터럴
         # 비교에서 Illegal mix of collations 가 날 수 있다 (pemfill 과 동일).
         charset="utf8mb3",

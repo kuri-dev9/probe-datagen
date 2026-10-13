@@ -42,7 +42,7 @@ CFG = dict(host=os.environ.get("DB_HOST", "127.0.0.1"),
            port=int(os.environ.get("DB_PORT", "3306")),
            user=os.environ.get("DB_USER", "graphio"),
            password=os.environ.get("DB_PASSWORD", "graphio"),
-           database=os.environ.get("DB_NAME", "pemdb1"),
+           database=os.environ.get("DB_NAME", "pemdb6"),
            # **charset 을 명시한다.** 어긋나면 한글이 '?' 로 바뀌어 들어가고,
            # 그것은 에러가 아니라 성공한 INSERT 로 돌아온다.
            charset="utf8mb4", autocommit=False)

@@ -28,15 +28,21 @@ rates:
 mysql:
   host: 127.0.0.1               # 서버에서는 192.168.100.216
   port: 3306                    # 서버에서는 3307
-  user: graphio
-  password: graphio
+  user: pem
+  password: "tnsfPans2013^_"
   database: graphio
 
 # ── 상용 스키마(pemdb1) 적재 — `pemfill` 전용 ────────────────────────────
 # 기존 backfill/run 은 위의 mysql: (자체 창고 스키마)를 그대로 쓴다. 상용은
 # 테이블·컬럼이 다른 별도 경로이므로 설정도 분리한다.
+# 섹션 이름 `pemdb1` 은 **설정 키**다(코드가 `cfg.get("pemdb1")` 로 찾는다).
+# 스키마 이름이 아니다 — 그건 아래 `database:` 다. 둘이 달라도 맞다.
 pemdb1:
-  database: pemdb1              # 같은 서버의 다른 DB — host/port/user 는 mysql: 재사용
+  # **`pemdb6` 다. `pemdb1` 이 아니다(2026-10-13 결정).** PoC 서버의 기존
+  # `pemdb1` 은 손대지 않고 그대로 두고, 우리가 쓰는 스키마를 따로 만든다.
+  # 생성기가 쓰는 쪽이라 **여기가 틀리면 남의 스키마에 XDR 을 쏟아붓는다.**
+  # graphio 쪽 `config/*.yaml` 의 `store.mysql.database` 와 같아야 한다.
+  database: pemdb6              # 같은 서버의 다른 DB — host/port/user 는 mysql: 재사용
   subscriber_pool: 20000        # 가입자 풀
   # 생성 대상 eNB 수. 마스터 전량(eNB 32,121 · 셀 571,801)에 분당 수천 호를
   # 흘리면 eNB 당 표본이 1건 미만이 되어 어떤 창에서도 판정이 서지 않는다

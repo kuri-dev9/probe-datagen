@@ -65,11 +65,14 @@ IF_PROTO_NAME = {
     "5": "EMM", "6": "ESM", "7": "GTPv1C", "8": "DIAM",
 }
 
-#: 상용 추출 조건 (XDR_LTE_CALL_KPI 테이블 코멘트: ONGOING_FLAG='2').
+#: 상용 추출 조건 (상용 `XDR_LTE_CALL_KPI` 테이블 코멘트: ONGOING_FLAG='2').
 #: 2 = 호 종료 레코드 — 플래그가 실려 있는 유일한 레코드다.
 ONGOING_END = "2"
 
-XDR_TABLE = "XDR_LTE_CALL_KPI"
+#: C-Plane 원시 xDR. **`GP_RAW_LTE_CALL_KPI` 다**(2026-10-14) — `pemdb6` 가
+#: 정본이 되면서 원시 네 종을 `GP_RAW_*` 한 묶음으로 묶었다. 구조는 상용
+#: 테이블을 그대로 옮겼고(154컬럼·타입 동일) 파티션만 **시간 단위**다.
+XDR_TABLE = "GP_RAW_LTE_CALL_KPI"
 PM_ENB = "PM_ENB_KPI_1M"
 PM_ENB_CAUSE = "PM_ENB_CAUSE_1M"
 PM_EPC = "PM_EPC_KPI_1M_ORG"
@@ -79,10 +82,13 @@ PM_EPC = "PM_EPC_KPI_1M_ORG"
 #: 때 "있는 줄 알고" 그 이름을 찾는다. 정본 DDL 은
 #: `../graphio-probe-rca/docker/mysql/gp_tables.sql`, 요구 명세는 같은 저장소의
 #: `docs/UPLANE-TABLE-SPEC.md` 다.
+#: 이름이 `GP_RAW_*` 에서 바뀌었다(2026-10-14). 규격 문서의 `_SD`(Summary
+#: Detail) 접미를 달고 있었는데, C-Plane 까지 네 종이 한 묶음이 되면서 "원시"
+#: 라는 역할을 이름이 말하는 쪽을 골랐다 — 집계는 `GP_KPI_*_1M` 이다.
 GP_XDR = {
-    "transport": "GP_XDR_TRANSPORT_SD",
-    "dns": "GP_XDR_DNS_SD",
-    "http": "GP_XDR_HTTP_SD",
+    "transport": "GP_RAW_TRANSPORT",
+    "dns": "GP_RAW_DNS",
+    "http": "GP_RAW_HTTP",
 }
 
 #: 계열별 `(GP_ 컬럼, 규격 필드명)` — **이름으로 맞춘다.**
@@ -97,9 +103,9 @@ GP_XDR = {
 #: `TRAFFIC_TOTAL_UPLINK_RETRANS_PACKET_COUNT`(42자)로 식별자 30자 상한을
 #: 넘는다(상용이 Oracle 포팅이라 그 제약을 받는다).
 #:
-#: `SUMMARY_CREATE_TIME` 은 여기 없다 — 규격은 epoch 실수지만 DB 컬럼은
-#: 파티션 키용 `datetime` 이라 writer 가 분 시각을 직접 넣는다. `write_xdr` 이
-#: `EVENT_TIME` 에 하는 것과 같다.
+#: `EVENT_TIME` 은 여기 없다 — 규격 필드(`SummaryCreateTime`)는 epoch 실수지만
+#: DB 컬럼은 파티션 키용 `datetime` 이라 writer 가 분 시각을 직접 넣는다.
+#: `write_xdr` 이 C-Plane 에 하는 것과 같다.
 UPLANE_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
     "transport": (
         ("ENB_ID", "eNB_ID"),
@@ -161,8 +167,19 @@ UPLANE_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
     ),
 }
 
-#: 분 귀속 컬럼 — 세 계열이 공통이다.
-UPLANE_SLOT = "SUMMARY_CREATE_TIME"
+#: `information_schema.DATA_TYPE` 중 숫자로 보는 것. 빈 문자열을 NULL 로
+#: 번역할 대상을 가리는 데 쓴다(`UplaneMapping.numeric`).
+_NUMERIC_TYPES: frozenset[str] = frozenset({
+    "tinyint", "smallint", "mediumint", "int", "integer", "bigint",
+    "decimal", "numeric", "float", "double", "real", "bit",
+})
+
+#: 분 귀속 컬럼 — **원시 네 종이 모두 이 이름을 쓴다**(2026-10-14).
+#: 예전에는 U-Plane 만 `SUMMARY_CREATE_TIME`(규격 `SummaryCreateTime`)이고
+#: C-Plane 은 `EVENT_TIME` 이었다. 한 묶음으로 묶으면서 통일했다 — 상용
+#: `PM_*` 와 집계 `GP_KPI_*`(`SLOT_TIME`)에 대응이 분명한 쪽이다.
+#: graphio 쪽 정본은 `store/tables.py:UPLANE_TIME` 이고 **같은 값이어야 한다.**
+UPLANE_SLOT = "EVENT_TIME"
 
 #: U-Plane 계열 순서. 로그·집계 보고에서 자리를 고정한다.
 UPLANE_SERIES: tuple[str, ...] = ("transport", "dns", "http")
@@ -568,10 +585,19 @@ class UplaneMapping:
     columns: list[str]              # UPLANE_SLOT 을 포함한 INSERT 컬럼 순서
     picks: list[int]                # 생성기 값 리스트에서 뽑을 위치 (SLOT 제외)
     widths: list[int | None]        # picks 와 같은 길이
+    #: 숫자 타입 컬럼인가 — `picks` 와 같은 길이.
+    #:
+    #: **빈 문자열을 NULL 로 번역해야 하는 자리를 가린다.** 측정값이
+    #: `varchar(20)` 에서 숫자로 바뀐 뒤(2026-10-14) 빈 문자열을 그대로 넘기면
+    #: `STRICT_TRANS_TABLES` 가 `ERROR 1366 Incorrect integer value` 로 거부해
+    #: 적재가 통째로 멈춘다. 실측 분포에 그런 값이 있다 — `data/profile.json`
+    #: 의 `dns.categorical` 에서 `ReplyCode`·`AnswerCount`·`QueryRetryCount`
+    #: 가 각각 0.385% 확률로 빈 문자열을 낸다(원본 .dat 에 그렇게 들어 있었다).
+    numeric: list[bool]
 
 
 def uplane_mapping(conn, database: str) -> dict[str, UplaneMapping]:
-    """`GP_XDR_*_SD` 세 테이블의 적재 명세를 만든다.
+    """`GP_RAW_*` 세 테이블의 적재 명세를 만든다.
 
     **이름으로 맞추고, 어긋나면 멈춘다.** DDL 쪽 컬럼이 `UPLANE_FIELDS` 에
     없거나 반대로 없는 컬럼을 적재하려 하면 둘 다 에러다. 조용히 빠지면 그
@@ -587,7 +613,8 @@ def uplane_mapping(conn, database: str) -> dict[str, UplaneMapping]:
         table = GP_XDR[series]
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS "
+                "SELECT COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH, DATA_TYPE "
+                "FROM information_schema.COLUMNS "
                 "WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s ORDER BY ORDINAL_POSITION",
                 [database, table],
             )
@@ -595,6 +622,9 @@ def uplane_mapping(conn, database: str) -> dict[str, UplaneMapping]:
         if not rows:
             continue
         db_cols = {r[0].upper(): (int(r[1]) if r[1] is not None else None) for r in rows}
+        # **타입을 DB 에서 읽는다.** 코드에 목록을 적으면 DDL 을 바꿀 때
+        # 한쪽만 고쳐지고, 그러면 빈 문자열이 다시 적재를 멈춘다.
+        db_numeric = {r[0].upper(): str(r[2]).lower() in _NUMERIC_TYPES for r in rows}
         spec = UPLANE_FIELDS[series]
         want = {c for c, _ in spec} | {UPLANE_SLOT}
         if missing := want - set(db_cols):
@@ -612,6 +642,7 @@ def uplane_mapping(conn, database: str) -> dict[str, UplaneMapping]:
             columns=[UPLANE_SLOT] + [c for c, _ in spec],
             picks=[idx[f] for _, f in spec],
             widths=[db_cols[c] for c, _ in spec],
+            numeric=[db_numeric[c] for c, _ in spec],
         )
     return out
 
@@ -851,6 +882,10 @@ class PemdbWriter:
         self.conn = conn
         self.map = mapping
         self.clamped = 0
+        #: 숫자 컬럼에 온 빈 문자열을 NULL 로 바꾼 횟수. **조용히 바꾸지
+        #: 않는다** — 실측 분포가 내는 "모름"이라 정상이지만, 갑자기 늘면
+        #: 생성 쪽이 바뀐 것이다.
+        self.nulled = 0
 
     def _row(self, ts: datetime, values: list[str]) -> tuple:
         """생성기 값 리스트 → 상용 컬럼 순서 튜플 (EVENT_TIME 선두)."""
@@ -884,13 +919,13 @@ class PemdbWriter:
 
     def write_uplane(self, ts: datetime, series: str, rows: list[list[str]],
                      mapping: UplaneMapping) -> int:
-        """`GP_XDR_*_SD` 한 계열 적재 — `write_xdr` 과 같은 구간 멱등이다.
+        """`GP_RAW_*` 한 계열 적재 — `write_xdr` 과 같은 구간 멱등이다.
 
-        `SUMMARY_CREATE_TIME` 에는 **분 시각을 넣는다.** 규격 필드는 epoch
+        `EVENT_TIME` 에는 **분 시각을 넣는다.** 규격 필드(`SummaryCreateTime`)는 epoch
         실수지만 DB 컬럼은 파티션 키라 `datetime` 이어야 하고, 1분 집계에
         분 안의 초는 쓰이지 않는다. `write_xdr` 이 `EVENT_TIME` 에 하는 것과
-        같은 처리다 — 두 테이블의 분 귀속이 같아야 같은 분의 C-Plane·U-Plane
-        이 한 Incident 로 상관된다.
+        같은 처리다 — 네 테이블의 분 귀속이 같아야 같은 분의 C-Plane·U-Plane
+        이 한 Incident 로 상관된다. **이제 컬럼 이름까지 같다.**
 
         응답시간 계열(`RESPONSE_TIME`·`REQUEST_TIME`·`REQUEST_FIRST_TIME`)은
         **원래의 epoch 값을 그대로 둔다.** 집계가 둘의 차이를 쓰므로 분 시각으로
@@ -901,8 +936,21 @@ class PemdbWriter:
         data = []
         for values in rows:
             out: list = [ts]
-            for pos, width in zip(mapping.picks, mapping.widths):
+            for pos, width, is_num in zip(mapping.picks, mapping.widths,
+                                          mapping.numeric):
                 v = values[pos]
+                if is_num and isinstance(v, str) and not v.strip():
+                    # **빈 문자열은 "모름"이고, 숫자 컬럼에서 그 표현은 NULL
+                    # 이다**(불변규칙 17). 0 으로 채우면 `REPLY_CODE` 에서는
+                    # NOERROR(성공)가 되고 `ANSWER_COUNT` 에서는 "응답 0건"이
+                    # 되어, 모르는 것이 사실처럼 집계된다.
+                    #
+                    # 그대로 넘기면 `STRICT_TRANS_TABLES` 가 `ERROR 1366` 으로
+                    # **적재를 통째로 멈춘다** — 실측 분포가 0.385% 확률로
+                    # 그런 값을 내므로 1분이면 반드시 걸린다.
+                    out.append(None)
+                    self.nulled += 1
+                    continue
                 if width is not None and len(v) > width:
                     # STRICT_TRANS_TABLES 에서는 길이 초과가 에러다. 잘라서
                     # 넘기되 횟수를 센다 — 조용히 자르면 값이 틀린 것을 모른다.
@@ -1139,7 +1187,7 @@ def aggregate_all(conn, lo: datetime, hi: datetime) -> dict[str, int]:
 
 #: 생성기가 **쓰는** 테이블과 그 시각 컬럼 — 보존 정리의 대상이다.
 #:
-#: **기준은 접두가 아니라 쓰기 주체다.** `GP_XDR_*_SD` 는 이름이 `GP_` 지만
+#: **기준은 접두가 아니라 쓰기 주체다.** `GP_RAW_*` 는 이름이 `GP_` 지만
 #: **생성기가 쓰는 원시 XDR** 이므로 여기 들어간다. 빼면 두 가지가 같이 깨진다 —
 #: 디스크가 무한히 자라고, `ensure_partitions` 가 앞을 늘려 주지 않아 범위를
 #: 벗어난 분이 전부 `pmax` 한 칸에 몰려 프루닝이 죽는다(에러 없이 느려진다).
@@ -1158,8 +1206,37 @@ WRITTEN_TABLES: tuple[tuple[str, str], ...] = (
 ) + tuple((GP_XDR[s], UPLANE_SLOT) for s in UPLANE_SERIES)
 
 
-def _day_partitions(conn, database: str, table: str) -> list[tuple[str, datetime]]:
-    """`pYYYYMMDD` 파티션의 (이름, 상한 시각). `pmax`(MAXVALUE)는 제외한다.
+#: 원시 xDR 의 보관 시간. **시간 파티션이라 이 입도로 자를 수 있다** —
+#: 일 파티션으로는 "보존 1일"이 실제로 1~2일분이 남았다(상한이 cutoff 이하인
+#: 날만 떨어뜨릴 수 있기 때문이다). graphio 쪽 DDL 생성기
+#: (`docker/mysql/gen_gp_xdr_ddl.py`)의 `RETAIN_HOURS` 와 같은 값이어야 한다.
+RETAIN_HOURS = 24
+
+#: 파티션 이름 → 입도. **이름 길이로 판정한다.**
+#:
+#: `pYYYYMMDD`(9자)는 일, `pYYYYMMDDHH`(11자)는 시간이다. 입도를 코드에
+#: 적어 두지 않는 이유: 테이블마다 다르고(원시 4종은 시간, `PM_*` 는 일),
+#: DDL 을 바꿀 때 한쪽만 고쳐지면 **조용히 안 지워진다.** DB 가 정본이다.
+_GRAIN_BY_LEN: dict[int, str] = {9: "day", 11: "hour"}
+
+#: 입도별 파티션 이름 포맷. 이름은 그 구간의 **시작** 시각이고 상한은 +1단위다.
+_GRAIN_FMT: dict[str, str] = {"day": "%Y%m%d", "hour": "%Y%m%d%H"}
+
+#: 입도별 한 칸의 길이.
+_GRAIN_STEP: dict[str, timedelta] = {
+    "day": timedelta(days=1),
+    "hour": timedelta(hours=1),
+}
+
+
+def _table_partitions(conn, database: str, table: str
+                      ) -> tuple[str | None, list[tuple[str, datetime]]]:
+    """`(입도, [(이름, 상한)])`. `pmax`(MAXVALUE)는 제외한다.
+
+    입도는 파티션 **이름 길이**로 읽는다(`_GRAIN_BY_LEN`). 테이블이 섞여
+    있기 때문이다 — 원시 4종은 시간 파티션이고 `PM_*` 는 일 파티션이다.
+    이름이 규칙을 벗어나면 입도를 `None` 으로 돌려주고, 호출부는 그 테이블을
+    건드리지 않는다(상용 원본이 다른 표기를 쓸 수 있다).
 
     `PARTITION_DESCRIPTION` 은 `'2026-10-14 00:00:00'`(따옴표 포함) 꼴이다 —
     RANGE COLUMNS 의 상한이고, 그 값 **미만**이 그 파티션에 들어간다.
@@ -1172,89 +1249,148 @@ def _day_partitions(conn, database: str, table: str) -> list[tuple[str, datetime
             [database, table],
         )
         rows = cur.fetchall()
-    out = []
+    out: list[tuple[str, datetime]] = []
+    grains: set[str] = set()
     for name, desc in rows:
         text = (desc or "").strip().strip("'")
         if text.upper() == "MAXVALUE":
             continue
+        g = _GRAIN_BY_LEN.get(len(name))
+        if g is None or not name[1:].isdigit():
+            continue        # 상용 원본의 다른 표기 — 손대지 않는다
         try:
             out.append((name, datetime.fromisoformat(text)))
         except ValueError:
-            continue        # 상용 원본의 다른 표기 — 손대지 않는다
-    return out
+            continue
+        grains.add(g)
+    # 한 테이블에 두 입도가 섞이면 판정할 수 없다. 건드리지 않는 쪽이 안전하다.
+    grain = grains.pop() if len(grains) == 1 else None
+    return grain, out
 
 
-def ensure_partitions(conn, database: str, ahead_days: int = 2) -> dict[str, list[str]]:
-    """앞으로 쓸 일 파티션을 `pmax` 에서 떼어 미리 만든다.
+def ensure_partitions(conn, database: str, ahead_hours: int = 48,
+                      ahead_days: int = 3) -> dict[str, list[str]]:
+    """앞으로 쓸 파티션을 `pmax` 에서 떼어 미리 만든다. **입도별로 다르게.**
 
     **드롭만 하고 추가하지 않으면 파티션 체계가 조용히 죽는다.** 범위를 벗어난
-    분은 전부 `pmax` 한 칸에 들어가고, 그러면 `EVENT_TIME` 범위 조건으로 프루닝이
+    분은 전부 `pmax` 한 칸에 들어가고, 그러면 시각 범위 조건으로 프루닝이
     안 돼 질의마다 전체 스캔이 된다 — 에러는 나지 않고 느려질 뿐이라 알아채기
-    어렵다. 설치 시점(`docker/mysql/gen_ddl.py`)에 오늘+3일까지만 깔려 있으므로
-    상주 데몬은 스스로 앞을 늘려야 한다.
+    어렵다.
+
+    **생성기가 꺼져 있는 동안은 아무것도 하지 않아도 된다** — 쓰지 않으면
+    담을 그릇도 필요 없다. 대신 **다시 켤 때 적재보다 먼저 돌아야 한다.**
+    오래 쉬었으면 마지막 상한이 과거일 수 있고, 그 상태로 적재하면 그 분이
+    `pmax` 로 흘러간다. 그래서 `want` 는 "오늘+N"이 아니라 **현재 시각 기준**
+    이다 — 구 구현은 전자여서, 상한이 이미 더 뒤면 `new` 가 빈 리스트가 되고
+    조용히 아무것도 하지 않았다.
+
+    공백 구간은 따로 메우지 않는다. RANGE 파티션은 앞 칸의 상한 이상을 다음
+    칸이 받으므로, 쉬는 동안의 빈 구간은 현재 칸이 흡수한다. 그 구간에 데이터가
+    없으니 프루닝 효율만 미미하게 떨어진다.
 
     `pmax` 가 비어 있으면 REORGANIZE 는 메타데이터 변경에 가깝다(실측 수십 ms).
     """
     out: dict[str, list[str]] = {}
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    now = datetime.now().replace(minute=0, second=0, microsecond=0)
     for table, _col in WRITTEN_TABLES:
-        parts = _day_partitions(conn, database, table)
-        if not parts:
-            continue            # 파티션 없는 테이블 — 추가할 것이 없다
+        grain, parts = _table_partitions(conn, database, table)
+        if grain is None or not parts:
+            continue            # 파티션이 없거나 이름 규칙이 다르다
+        step = _GRAIN_STEP[grain]
+        fmt = _GRAIN_FMT[grain]
+        if grain == "hour":
+            base = now
+            span = ahead_hours
+        else:
+            base = now.replace(hour=0)
+            span = ahead_days
         have = {u for _n, u in parts}
-        want = [today + timedelta(days=i + 1) for i in range(ahead_days + 1)]
-        new = [d for d in want if d not in have and d > max(have)]
+        last = max(have)
+        # **현재 칸부터** 센다. 쉬다 켠 경우 여기가 과거보다 뒤라 공백을 넘는다.
+        want = [base + step * (i + 1) for i in range(span + 1)]
+        new = [u for u in want if u not in have and u > last]
         if not new:
             continue
         spec = ", ".join(
-            f"PARTITION p{(d - timedelta(days=1)):%Y%m%d} "
-            f"VALUES LESS THAN ('{d:%Y-%m-%d} 00:00:00') ENGINE = InnoDB"
-            for d in new)
+            f"PARTITION p{(u - step):{fmt}} "
+            f"VALUES LESS THAN ('{u:%Y-%m-%d %H:%M:%S}') ENGINE = InnoDB"
+            for u in new)
         with conn.cursor() as cur:
             cur.execute(
                 f"ALTER TABLE `{table}` REORGANIZE PARTITION pmax INTO "
                 f"({spec}, PARTITION pmax VALUES LESS THAN (MAXVALUE) ENGINE = InnoDB)")
-        out[table] = [f"p{(d - timedelta(days=1)):%Y%m%d}" for d in new]
+        out[table] = [f"p{(u - step):{fmt}}" for u in new]
     return out
 
 
-def purge_before(conn, database: str, cutoff: datetime) -> dict[str, int]:
-    """`cutoff` 보다 오래된 데이터를 버린다 — **일 파티션 드롭으로.**
+def pmax_rows(conn, database: str) -> dict[str, int]:
+    """`pmax` 에 쌓인 행 수. **0 이 아니면 파티션 관리가 멈춘 것이다.**
 
-    `DELETE` 를 쓰지 않는 이유는 비용이다. 분당 2만 호면 하루가 1,000만 행이
-    넘고, 그만큼을 `DELETE` 로 지우면 모든 행이 undo log·바이너리 로그를 타며
-    인덱스를 갱신한다(실측 대조는 작업 보고에 있다). `DROP PARTITION` 은
-    테이블스페이스 파일을 지우는 일이라 행 수와 거의 무관하다.
-
-    대가는 **입도**다. 파티션이 하루 단위이므로 "상한이 cutoff 이하"인 날만
-    떨어뜨릴 수 있고, 보존 1일이면 실제로는 1~2일분이 남는다. 반나절을 더
-    들고 있는 것과 매시간 수백만 행을 지우는 것 중 전자를 고른 것이다 —
-    로컬 PoC 디스크가 무한히 자라지 않게 막는 것이 목적이었다.
-
-    반환은 테이블 → 떨어뜨린 파티션에 들어 있던 행 수다. **`TABLE_ROWS` 가
-    아니라 실제 `COUNT(*)` 로 센다** — 추정치를 보고하면 0인지 아닌지를
-    구분할 수 없다.
+    범위를 벗어난 분이 거기 모이고, 그 상태는 에러를 내지 않는다 — 질의가
+    느려질 뿐이다. 그래서 호출부가 이것을 보고 경고한다.
     """
     out: dict[str, int] = {}
     with conn.cursor() as cur:
-        # DDL 은 배타적 메타데이터 잠금을 잡는다. graphio 가 같은 테이블을 읽는
-        # 중이면 기다리므로, 틱 루프를 무한정 세우지 않도록 한도를 둔다 —
-        # 못 지우면 다음 정리 주기에 다시 시도하면 된다.
-        cur.execute("SET SESSION lock_wait_timeout = 10")
-    for table, col in WRITTEN_TABLES:
-        parts = _day_partitions(conn, database, table)
-        dead = [name for name, upper in parts if upper <= cutoff]
-        if not dead:
+        for table, _col in WRITTEN_TABLES:
+            cur.execute(
+                "SELECT TABLE_ROWS FROM information_schema.PARTITIONS "
+                "WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s AND PARTITION_NAME='pmax'",
+                [database, table],
+            )
+            row = cur.fetchone()
+            if not row or not row[0]:
+                continue
+            # 추정치라 정확한 수를 세려면 COUNT(*) 가 필요하다. 여기서는
+            # "0 인가 아닌가"만 쓰므로 추정으로 충분하다 — 매 틱 전수 집계를
+            # 하면 그게 더 비싸다.
+            cur.execute(f"SELECT COUNT(*) FROM `{table}` PARTITION (pmax)")
+            n = int(cur.fetchone()[0])
+            if n:
+                out[table] = n
+    return out
+
+
+def purge_partitions(conn, database: str, retain_hours: int = 24,
+                     retain_days: int = 1) -> dict[str, int]:
+    """보관 기간을 지난 파티션을 떨어뜨린다. **입도별로 다른 기간을 쓴다.**
+
+    원시 xDR 4종은 시간 파티션이라 24시간 입도로 자른다. 일 파티션(`PM_*`)은
+    `retain_days` 다.
+
+    **이름을 문자열로 비교하지 않는다.** 구 구현은
+    `name[1:] < cutoff.strftime('%Y%m%d')` 였고, 시간 파티션 이름은 10자라
+    자릿수가 어긋나 비교가 틀렸다 — `'2026101400' < '20261013'` 이 거짓이
+    되어 **에러 없이 아무것도 지우지 않았다.** 지금은 상한을 `datetime` 으로
+    파싱해 비교한다.
+
+    `DELETE` 를 쓰지 않는 이유는 비용이다. 분당 2만 호면 하루가 1,000만 행이
+    넘고, 그만큼을 `DELETE` 로 지우면 모든 행이 undo log·바이너리 로그를 타며
+    인덱스를 갱신한다. `DROP PARTITION` 은 테이블스페이스 파일을 지우는 일이라
+    행 수와 거의 무관하다.
+
+    **상한이 cutoff 이하인 칸만** 떨어뜨린다. 상한은 "그 값 미만"이 들어 있다는
+    뜻이므로, 상한 ≤ cutoff 면 그 칸의 모든 행이 보관 기간 밖이다.
+    """
+    now = datetime.now()
+    cut = {"hour": now - timedelta(hours=retain_hours),
+           "day": now - timedelta(days=retain_days)}
+    out: dict[str, int] = {}
+    for table, _col in WRITTEN_TABLES:
+        grain, parts = _table_partitions(conn, database, table)
+        if grain is None or not parts:
+            continue
+        cutoff = cut[grain]
+        drop = [n for n, upper in parts if upper <= cutoff]
+        # **전부 떨어뜨리지 않는다.** 파티션이 하나도 없는 테이블은 RANGE
+        # 정의가 `pmax` 만 남아, 그 뒤 모든 적재가 거기로 몰린다.
+        if len(drop) >= len(parts):
+            drop = drop[:-1]
+        if not drop:
             continue
         with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT COUNT(*) FROM `{table}` "
-                f"PARTITION ({','.join(dead)})")
-            n = int(cur.fetchone()[0])
-            # 한 문장에 몰아 넣는다 — 파티션마다 ALTER 를 걸면 메타데이터
-            # 잠금을 그만큼 여러 번 잡는다
-            cur.execute(f"ALTER TABLE `{table}` DROP PARTITION {','.join(dead)}")
-        out[table] = n
+            for name in drop:
+                cur.execute(f"ALTER TABLE `{table}` DROP PARTITION `{name}`")
+        out[table] = len(drop)
     return out
 
 
@@ -1267,7 +1403,7 @@ def purge_before(conn, database: str, cutoff: datetime) -> dict[str, int]:
 #: 한다 — 룰은 발동하고 채점은 올라가지만 운영에서는 아무것도 재현되지 않는다.
 #: 미연동으로 남기고 보고하는 것이 불변규칙 17 의 취지다.
 #: 지금은 비어 있다. **U-Plane 세 종(SC-05·06·07)이 2026-10-13 에 풀렸다** —
-#: `GP_XDR_TRANSPORT_SD`·`GP_XDR_DNS_SD`·`GP_XDR_HTTP_SD` 를 만들고 적재 경로를
+#: `GP_RAW_TRANSPORT`·`GP_RAW_DNS`·`GP_RAW_HTTP` 를 만들고 적재 경로를
 #: 붙였다(`UPLANE_FIELDS` · `PemdbWriter.write_uplane`).
 #:
 #: 풀기 전에 **변조기가 건드리는 필드가 실제로 적재되는지** 대조했다. 규격

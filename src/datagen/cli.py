@@ -146,51 +146,25 @@ def _purge_old(conn, retention_days: int) -> None:
 #: (`CL_*`·`CM_*` 는 시각 컬럼이 없거나 보존 대상이 아니다).
 #: `GP_*` 는 graphio 산출물이라 **datagen 이 지우지 않는다** — 남의 산출물을
 #: 지우면 그쪽 재실행 전제가 깨진다. graphio 가 자기 `reset()` 으로 비운다.
-PEM_SLOT_TABLES = (
-    ("XDR_LTE_CALL_KPI", "EVENT_TIME"),
-    ("PM_ENB_KPI_1M", "EVENT_TIME"),
-    ("PM_ENB_CAUSE_1M", "EVENT_TIME"),
-    ("PM_EPC_KPI_1M_ORG", "EVENT_TIME"),
-)
-
-
 def _purge_pemdb1(conn, retention_days: int) -> dict[str, int]:
-    """보존 기간을 지난 분을 비운다 — 로컬 PoC DB 가 무한히 자라지 않게.
+    """보존 기간을 지난 파티션을 떨어뜨린다 — `pemdb1.purge_partitions` 위임.
 
-    **`XDR_LTE_CALL_KPI` 는 파티션을 떨어뜨린다.** 일 단위 RANGE 파티션이라
-    `DROP PARTITION` 이 메타데이터 조작 한 번이고, 같은 일을 `DELETE` 로 하면
-    수백만 행을 지우면서 undo 로그와 복제 지연을 만든다. 비교할 필요가 없을
-    만큼 차이가 크다.
+    **구현을 여기 두지 않는다.** 예전에는 이 함수가 테이블 이름(`XDR_LTE_CALL_KPI`)
+    과 파티션 이름 규칙(`len(name) == 9`)을 직접 들고 있었다. 원시 테이블이
+    `GP_RAW_*` 로 바뀌고 파티션이 시간 단위(`pYYYYMMDDHH`, 11자)가 되자 **두
+    조건이 모두 어긋나 에러 없이 아무것도 지우지 않았다** — 이름을 두 곳에
+    적어 둔 대가다(2026-10-14).
 
-    파티션이 없거나 이름 규칙이 다르면 `DELETE` 로 떨어진다 — 조용히 아무것도
-    안 하면 DB 가 계속 자라고 아무도 모른다.
+    지금은 대상·입도·보관 기간을 `pemdb1` 쪽 한 곳에서 판정한다. 시간 파티션은
+    24시간, 일 파티션은 `retention_days` 다.
     """
-    cutoff = _floor_minute(datetime.now()) - timedelta(days=retention_days)
-    out: dict[str, int] = {}
+    from . import pemdb1 as P
     with conn.cursor() as cur:
-        # 파티션 경로 — `pXXXXXXXX`(일자) 중 cutoff 이전 것만.
-        cur.execute(
-            "SELECT PARTITION_NAME, TABLE_ROWS FROM information_schema.partitions "
-            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s "
-            "AND PARTITION_NAME IS NOT NULL", ["XDR_LTE_CALL_KPI"])
-        parts = [(r[0], r[1] or 0) for r in cur.fetchall()]
-        dropped = 0
-        for name, rows in parts:
-            if not (name.startswith("p") and name[1:].isdigit() and len(name) == 9):
-                continue        # `pmax` 는 건드리지 않는다
-            if name[1:] >= cutoff.strftime("%Y%m%d"):
-                continue
-            if rows == 0:
-                continue        # 빈 파티션은 떨어뜨리지 않는다 — 다시 못 만든다
-            cur.execute(f"ALTER TABLE XDR_LTE_CALL_KPI DROP PARTITION `{name}`")
-            dropped += rows
-        out["XDR_LTE_CALL_KPI(partition)"] = dropped
-
-        for t, col in PEM_SLOT_TABLES:
-            if t == "XDR_LTE_CALL_KPI":
-                continue        # 위에서 파티션으로 처리했다
-            cur.execute(f"DELETE FROM `{t}` WHERE `{col}` < %s", [cutoff])
-            out[t] = cur.rowcount
+        cur.execute("SELECT DATABASE()")
+        database = cur.fetchone()[0]
+    out = {t: n for t, n in P.purge_partitions(
+        conn, database, retain_hours=P.RETAIN_HOURS,
+        retain_days=retention_days).items()}
     conn.commit()
     return out
 
@@ -215,51 +189,14 @@ def _apply_live_config(conn, dg, base_rates: dict) -> None:
 
 
 def _retention_sweep(conn, days: int) -> dict[str, int]:
-    """보존 기간을 지난 데이터를 지운다. **로컬 PoC 는 1일이다**(사람 지시).
+    """보존 기간을 지난 파티션을 떨어뜨린다 — `_purge_pemdb1` 과 같은 일이다.
 
-    `XDR_LTE_CALL_KPI` 는 일 단위 RANGE 파티션이라 `DROP PARTITION` 이 훨씬
-    싸다 — 184만 행 `DELETE` 는 행마다 언두 로그를 쌓지만 파티션 드롭은 파일
-    단위다. 다만 파티션을 지우면 **다시 만들어야** 한다(안 그러면 그 날짜가
-    `pmax` 한 칸에 몰려 프루닝이 죽는다). 그래서 드롭 후 즉시 재생성한다.
-
-    `GP_*` 는 **건드리지 않는다.** graphio 의 산출물이고 그쪽 `reset()` 이
-    소유한다(`store/tables.RESETTABLE_TABLES`). 남의 결과를 생성기가 지우면
-    파이프라인이 도는 중에 사라져 원인을 찾을 수 없는 빈 화면이 된다.
-
-    마스터(`CL_*`·`CM_*`)도 대상이 아니다 — 시각 컬럼이 없거나 있어도 보존
-    개념이 아니다.
+    **두 함수가 따로 있었고 구현도 각자 갖고 있었다.** 하나는 상주 데몬(`run`)
+    이, 하나는 백필(`pemfill`)이 불렀다. 테이블 이름과 파티션 이름 규칙을 양쪽에
+    적어 둔 탓에 `GP_RAW_*` 전환 때 **둘 다 조용히 멈췄다**(2026-10-14).
+    지금은 한 자리(`pemdb1.purge_partitions`)만 고치면 둘이 함께 따라온다.
     """
-    cutoff = _floor_minute(datetime.now()) - timedelta(days=days)
-    out: dict[str, int] = {}
-    with conn.cursor() as cur:
-        # ① XDR — 파티션으로 자른다
-        cur.execute(
-            "SELECT PARTITION_NAME FROM information_schema.partitions "
-            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s "
-            "  AND PARTITION_NAME IS NOT NULL AND PARTITION_NAME <> 'pmax' "
-            "ORDER BY PARTITION_ORDINAL_POSITION", [P_XDR_TABLE])
-        parts = [r[0] for r in cur.fetchall()]
-        drop = [n for n in parts
-                if n.startswith("p") and n[1:].isdigit() and n[1:] < cutoff.strftime("%Y%m%d")]
-        for n in drop:
-            cur.execute(f"ALTER TABLE `{P_XDR_TABLE}` DROP PARTITION `{n}`")
-        out["partitions_dropped"] = len(drop)
-
-        # ② PM_* — 파티션이 없으므로 DELETE
-        for t, col in _RETENTION_TABLES:
-            cur.execute(f"DELETE FROM `{t}` WHERE `{col}` < %s", [cutoff])
-            out[t] = cur.rowcount
-    conn.commit()
-    return out
-
-
-#: 보존 정리 대상 — datagen 이 **쓴 것만** 지운다. `GP_*` 는 graphio 소유다.
-_RETENTION_TABLES = (
-    ("PM_ENB_KPI_1M", "EVENT_TIME"),
-    ("PM_ENB_CAUSE_1M", "EVENT_TIME"),
-    ("PM_EPC_KPI_1M_ORG", "EVENT_TIME"),
-)
-P_XDR_TABLE = "XDR_LTE_CALL_KPI"
+    return _purge_pemdb1(conn, days)
 
 
 def _pem_rates(cfg: dict, pem: dict, lte_rate: int) -> dict:
@@ -312,7 +249,7 @@ def cmd_run(args) -> int:
     my = cfg["mysql"]
     pem = cfg.get("pemdb1") or {}
     gen_cfg = cfg["generate"]
-    database = pem.get("database", "pemdb1")
+    database = pem.get("database", "pemdb6")
     rate = int((pem.get("rates") or {}).get("lte_call",
                                             cfg["rates"].get("lte_call", 2000)))
     seed = int(gen_cfg.get("seed", 20260903))
@@ -359,7 +296,7 @@ def cmd_run(args) -> int:
               f" · 셀 {len(gen.cells):,} · 분당 {rate:,}호 · 보존 {retention_days}일")
         print("  U-Plane — "
               + (" · ".join(f"{s} {rates[s]:,}" for s in up_on) if up_on
-                 else "꺼짐 (rates 0 이거나 GP_XDR_* 테이블 없음)"))
+                 else "꺼짐 (rates 0 이거나 GP_RAW_* 테이블 없음)"))
         print(f"  anchor {anchor:%Y-%m-%d %H:%M} · 백필 없음"
               + (" (--once)" if args.once else " (Ctrl-C 종료)"))
 
@@ -390,6 +327,17 @@ def cmd_run(args) -> int:
                 _cancel_faults(conn, bad, _CANCEL_NOTE)
 
             t0 = time.time()
+            # **적재보다 먼저 파티션을 보장한다.** 생성기가 꺼져 있는 동안은
+            # 파티션이 늘지 않아도 해가 없다 — 쓸 데이터가 없으니 담을 그릇도
+            # 필요 없다. 문제는 **다시 켤 때**다: 오래 쉬었으면 마지막 상한이
+            # 과거라, 그 상태로 적재하면 그 분이 `pmax` 한 칸으로 흘러간다.
+            # 그러면 범위 조건으로 프루닝이 안 돼 질의마다 전체 스캔이 되고,
+            # **에러는 나지 않고 느려질 뿐이라 알아채기 어렵다.**
+            #
+            # 평소에는 조회 한 번으로 끝난다(필요 없으면 DDL 을 실행하지 않는다).
+            added = P.ensure_partitions(conn, database)
+            if added:
+                print(f"  파티션 추가 — {added}", flush=True)
             minute_idx = gen.minute_of(ts)
             rows = gen.records(minute_idx, ts)
             n = writer.write_xdr(ts, rows)
@@ -414,7 +362,15 @@ def cmd_run(args) -> int:
             if datetime.now() - last_retention >= timedelta(hours=1):
                 swept = _retention_sweep(conn, retention_days)
                 if any(swept.values()):
-                    print(f"  보존 정리 {retention_days}일 — {swept}", flush=True)
+                    print(f"  보존 정리 — 파티션 {swept} 드롭 "
+                          f"(원시 {P.RETAIN_HOURS}시간 · 집계 {retention_days}일)",
+                          flush=True)
+                # **`pmax` 에 행이 쌓이면 파티션 관리가 멈춘 것이다.** 그 상태는
+                # 에러를 내지 않고 질의만 느려지므로, 여기서 말하지 않으면
+                # 아무도 모른다.
+                if stuck := P.pmax_rows(conn, database):
+                    print(f"  ★ pmax 적적 — {stuck} · 파티션 범위를 확인하라",
+                          flush=True)
                 last_retention = datetime.now()
             if args.once:
                 break
@@ -445,7 +401,7 @@ def cmd_pemfill(args) -> int:
     data_dir = HERE / cfg["paths"]["data"]
     my = cfg["mysql"]
     pem = cfg.get("pemdb1") or {}
-    database = args.database or pem.get("database", "pemdb1")
+    database = args.database or pem.get("database", "pemdb6")
     rate = args.rate or int((pem.get("rates") or {}).get("lte_call", 2000))
     minutes = args.minutes
     seed = int(cfg["generate"].get("seed", 20260903))
@@ -472,7 +428,7 @@ def cmd_pemfill(args) -> int:
             print("  U-Plane — " + " · ".join(
                 f"{m.table} {len(m.columns)}컬럼" for m in umaps.values()))
         else:
-            print(f"  U-Plane — GP_XDR_* 가 {database} 에 없다. 그 계열은 건너뛴다")
+            print(f"  U-Plane — GP_RAW_* 가 {database} 에 없다. 그 계열은 건너뛴다")
 
         # ── 그릴 수 있는 동으로 셀을 한정한다 ─────────────────────────────
         # 번들 경계 geojson 은 행정동, pemdb1 은 법정동이다. 매핑으로는 못 넘는
@@ -551,6 +507,14 @@ def cmd_pemfill(args) -> int:
         # 분 단위로 안전하다. `write_xdr` 이 DELETE→INSERT 를 한 트랜잭션에
         # 넣고 커밋하므로 어떤 분도 반쯤 쓰인 상태로 남지 않는다 — 행이 있으면
         # 그 분은 완성된 것이다.
+        # **적재보다 먼저 파티션을 보장한다.** 백필은 과거 구간을 쓰므로
+        # 특히 중요하다 — 범위 밖이면 그 분이 전부 `pmax` 로 몰리고, 그러면
+        # 프루닝이 죽는다(에러 없이 느려진다). `ensure_partitions` 는 필요
+        # 없으면 조회 한 번으로 끝난다.
+        added = P.ensure_partitions(conn, database)
+        if added:
+            print(f"▶ 파티션 추가 — {added}")
+
         done: set = set()
         if args.resume:
             with conn.cursor() as cur:
@@ -578,7 +542,8 @@ def cmd_pemfill(args) -> int:
 
         print(f"▶ XDR 적재 완료 — {total:,}건 / {minutes}분 · "
               f"{time.time() - t0:.0f}s"
-              + (f" · 길이 초과 절단 {w.clamped}건" if w.clamped else ""))
+              + (f" · 길이 초과 절단 {w.clamped}건" if w.clamped else "")
+              + (f" · 빈 값 → NULL {w.nulled}건" if w.nulled else ""))
         if up_total:
             print("  U-Plane — " + " · ".join(
                 f"{s} {v:,}건" for s, v in up_total.items()))

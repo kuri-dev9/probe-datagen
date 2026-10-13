@@ -61,7 +61,7 @@ CONN = dict(
     port=int(os.environ.get("GP_MYSQL_PORT", "3306")),
     user=os.environ.get("GP_MYSQL_USER", "graphio"),
     password=os.environ.get("GP_MYSQL_PASSWORD", "graphio"),
-    database=os.environ.get("GP_MYSQL_DB", "pemdb1"),
+    database=os.environ.get("GP_MYSQL_DB", "pemdb6"),
     charset="utf8mb4",
 )
 BATCH = 2000
