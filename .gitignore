@@ -6,3 +6,10 @@ __pycache__/
 
 # 데몬·UI 로그 (상주 실행 시 생긴다)
 run/
+
+# 상용 마스터 반출본 — **git 에 두지 않는다.**
+# `CL_CELL_MAP.json` 167MB · `CM_CELL_REP_RU_LOC.json` 167MB 로 GitHub 의 100MB
+# 한도를 넘는다. 코드가 아니라 데이터이고, 타겟 서버로는 이미지와 같은 경로
+# (tar 반출)로 옮긴다. 로컬 적재는 `docker/mysql/load_master*.py` 가 한다.
+data/pemdb1/CL_CELL_MAP.json
+data/pemdb1/CM_CELL_REP_RU_LOC.json
