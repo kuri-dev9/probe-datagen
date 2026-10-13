@@ -142,6 +142,59 @@ def _purge_old(conn, retention_days: int) -> None:
     conn.commit()
 
 
+#: 보존 정리 대상 — (테이블, 시각 컬럼). **마스터는 넣지 않는다**
+#: (`CL_*`·`CM_*` 는 시각 컬럼이 없거나 보존 대상이 아니다).
+#: `GP_*` 는 graphio 산출물이라 **datagen 이 지우지 않는다** — 남의 산출물을
+#: 지우면 그쪽 재실행 전제가 깨진다. graphio 가 자기 `reset()` 으로 비운다.
+PEM_SLOT_TABLES = (
+    ("XDR_LTE_CALL_KPI", "EVENT_TIME"),
+    ("PM_ENB_KPI_1M", "EVENT_TIME"),
+    ("PM_ENB_CAUSE_1M", "EVENT_TIME"),
+    ("PM_EPC_KPI_1M_ORG", "EVENT_TIME"),
+)
+
+
+def _purge_pemdb1(conn, retention_days: int) -> dict[str, int]:
+    """보존 기간을 지난 분을 비운다 — 로컬 PoC DB 가 무한히 자라지 않게.
+
+    **`XDR_LTE_CALL_KPI` 는 파티션을 떨어뜨린다.** 일 단위 RANGE 파티션이라
+    `DROP PARTITION` 이 메타데이터 조작 한 번이고, 같은 일을 `DELETE` 로 하면
+    수백만 행을 지우면서 undo 로그와 복제 지연을 만든다. 비교할 필요가 없을
+    만큼 차이가 크다.
+
+    파티션이 없거나 이름 규칙이 다르면 `DELETE` 로 떨어진다 — 조용히 아무것도
+    안 하면 DB 가 계속 자라고 아무도 모른다.
+    """
+    cutoff = _floor_minute(datetime.now()) - timedelta(days=retention_days)
+    out: dict[str, int] = {}
+    with conn.cursor() as cur:
+        # 파티션 경로 — `pXXXXXXXX`(일자) 중 cutoff 이전 것만.
+        cur.execute(
+            "SELECT PARTITION_NAME, TABLE_ROWS FROM information_schema.partitions "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s "
+            "AND PARTITION_NAME IS NOT NULL", ["XDR_LTE_CALL_KPI"])
+        parts = [(r[0], r[1] or 0) for r in cur.fetchall()]
+        dropped = 0
+        for name, rows in parts:
+            if not (name.startswith("p") and name[1:].isdigit() and len(name) == 9):
+                continue        # `pmax` 는 건드리지 않는다
+            if name[1:] >= cutoff.strftime("%Y%m%d"):
+                continue
+            if rows == 0:
+                continue        # 빈 파티션은 떨어뜨리지 않는다 — 다시 못 만든다
+            cur.execute(f"ALTER TABLE XDR_LTE_CALL_KPI DROP PARTITION `{name}`")
+            dropped += rows
+        out["XDR_LTE_CALL_KPI(partition)"] = dropped
+
+        for t, col in PEM_SLOT_TABLES:
+            if t == "XDR_LTE_CALL_KPI":
+                continue        # 위에서 파티션으로 처리했다
+            cur.execute(f"DELETE FROM `{t}` WHERE `{col}` < %s", [cutoff])
+            out[t] = cur.rowcount
+    conn.commit()
+    return out
+
+
 def _generation_enabled(conn) -> bool:
     return str(control.get_config(conn, "enabled", "true")).lower() != "false"
 
@@ -161,99 +214,177 @@ def _apply_live_config(conn, dg, base_rates: dict) -> None:
         print(f"  설정 반영 — 분당 호 수 {rates}", flush=True)
 
 
+def _retention_sweep(conn, days: int) -> dict[str, int]:
+    """보존 기간을 지난 데이터를 지운다. **로컬 PoC 는 1일이다**(사람 지시).
+
+    `XDR_LTE_CALL_KPI` 는 일 단위 RANGE 파티션이라 `DROP PARTITION` 이 훨씬
+    싸다 — 184만 행 `DELETE` 는 행마다 언두 로그를 쌓지만 파티션 드롭은 파일
+    단위다. 다만 파티션을 지우면 **다시 만들어야** 한다(안 그러면 그 날짜가
+    `pmax` 한 칸에 몰려 프루닝이 죽는다). 그래서 드롭 후 즉시 재생성한다.
+
+    `GP_*` 는 **건드리지 않는다.** graphio 의 산출물이고 그쪽 `reset()` 이
+    소유한다(`store/tables.RESETTABLE_TABLES`). 남의 결과를 생성기가 지우면
+    파이프라인이 도는 중에 사라져 원인을 찾을 수 없는 빈 화면이 된다.
+
+    마스터(`CL_*`·`CM_*`)도 대상이 아니다 — 시각 컬럼이 없거나 있어도 보존
+    개념이 아니다.
+    """
+    cutoff = _floor_minute(datetime.now()) - timedelta(days=days)
+    out: dict[str, int] = {}
+    with conn.cursor() as cur:
+        # ① XDR — 파티션으로 자른다
+        cur.execute(
+            "SELECT PARTITION_NAME FROM information_schema.partitions "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s "
+            "  AND PARTITION_NAME IS NOT NULL AND PARTITION_NAME <> 'pmax' "
+            "ORDER BY PARTITION_ORDINAL_POSITION", [P_XDR_TABLE])
+        parts = [r[0] for r in cur.fetchall()]
+        drop = [n for n in parts
+                if n.startswith("p") and n[1:].isdigit() and n[1:] < cutoff.strftime("%Y%m%d")]
+        for n in drop:
+            cur.execute(f"ALTER TABLE `{P_XDR_TABLE}` DROP PARTITION `{n}`")
+        out["partitions_dropped"] = len(drop)
+
+        # ② PM_* — 파티션이 없으므로 DELETE
+        for t, col in _RETENTION_TABLES:
+            cur.execute(f"DELETE FROM `{t}` WHERE `{col}` < %s", [cutoff])
+            out[t] = cur.rowcount
+    conn.commit()
+    return out
+
+
+#: 보존 정리 대상 — datagen 이 **쓴 것만** 지운다. `GP_*` 는 graphio 소유다.
+_RETENTION_TABLES = (
+    ("PM_ENB_KPI_1M", "EVENT_TIME"),
+    ("PM_ENB_CAUSE_1M", "EVENT_TIME"),
+    ("PM_EPC_KPI_1M_ORG", "EVENT_TIME"),
+)
+P_XDR_TABLE = "XDR_LTE_CALL_KPI"
+
+
 def cmd_run(args) -> int:
+    """상주 데몬 — **실시간 틱만.** 백필하지 않는다.
+
+    ## 왜 백필을 없앴나
+
+    구 구현은 기동할 때 과거 N분(기본 180)을 먼저 메웠다. 그런데 백필은
+    `pemfill` 이 따로 하고, 데몬이 기동마다 과거를 다시 만들면 **이미 있는
+    구간을 덮어쓴다** — 장애를 주입해 둔 구간이 평시 데이터로 밀린다.
+    사람이 "백필 하지 마라, 실시간으로만 써라"고 명시했다(2026-10-13).
+
+    ## 왜 경로를 바꿨나
+
+    구 구현은 `graphio` DB 의 자체 창고(`kpi_cell_min`·`cause_min`…)에 썼다.
+    graphio 가 상용 스키마 `pemdb1` 으로 전환된 뒤로 **그 DB 를 아무도 읽지
+    않는다.** 틱은 멀쩡히 돌고 화면만 멈춰 있어 원인을 찾기 어려웠다 —
+    에러가 없는 쪽이 더 나쁘다.
+
+    지금은 `pemfill` 과 **같은 쓰기 경로**(`datagen.pemdb1`)를 쓴다. 두 벌로
+    만들면 백필과 실시간이 서로 다른 데이터를 만들고, 그 차이는 조용하다.
+    """
+    import pymysql
+
+    from . import pemdb1 as P
+
     cfg = load_cfg(args.config)
     data_dir = HERE / cfg["paths"]["data"]
     my = cfg["mysql"]
+    pem = cfg.get("pemdb1") or {}
     gen_cfg = cfg["generate"]
+    database = pem.get("database", "pemdb1")
+    rate = int((pem.get("rates") or {}).get("lte_call",
+                                            cfg["rates"].get("lte_call", 2000)))
     seed = int(gen_cfg.get("seed", 20260903))
-    batch = int(gen_cfg.get("aggregate_batch", 30))
-    backfill_minutes = args.backfill_minutes or int(gen_cfg.get("backfill_minutes", 180))
-    retention_days = int(gen_cfg.get("retention_days", 7))
+    retention_days = int(gen_cfg.get("retention_days", 1))
 
-    dg = DataGen(data_dir, cfg["rates"], seed=seed)
-    w = MysqlWriter(host=my["host"], port=my["port"], user=my["user"],
-                    password=my["password"], database=my["database"])
-    control.ensure_tables(w.conn)
-    print(f"▶ 마스터 적재: {w.write_masters(dg.con)}")
-
-    rng = random.Random(seed)
-    now = _floor_minute(datetime.now())
-    last = w.last_slot()
-    floor_start = now - timedelta(minutes=backfill_minutes)
-    # 시작점: 마지막 슬롯 +1분. 다만 갭이 backfill_minutes 보다 크면 최근 구간만
-    # 메운다 — 며칠치 갭을 전부 메우면 재기동이 몇 시간이 되고, 어차피 보존
-    # 기간이 지난 과거는 곧 지워진다.
-    if last is None or last + timedelta(minutes=1) < floor_start:
-        start = floor_start
-    else:
-        start = last + timedelta(minutes=1)
-    dg.anchor = start  # 분 인덱스 0 = 백필 시작 분 — fault 시간창 계산의 기준점
-
-    total = max(0, int((now - start).total_seconds() // 60))  # 지금-1분까지
-    if total:
-        print(f"▶ 백필: {start:%Y-%m-%d %H:%M} ~ {now - timedelta(minutes=1):%H:%M} ({total}분)")
-        _backfill(dg, w, rng, start, total, batch)
-    # 마지막으로 생성한 분 — 틱이 같은 분을 다시 생성하면 raw 가 중복돼
-    # 집계가 부풀므로(멱등이 깨진다) 반드시 그 다음 분부터 잇는다
-    last_done = start + timedelta(minutes=total - 1) if total else start - timedelta(minutes=1)
-
-    # 첫 보존 정리는 1시간 뒤 — 기동 직후 대량 DELETE 로 첫 틱을 막지 않는다
-    last_retention = datetime.now()
-    print("▶ 틱 루프 시작" + (" (--once)" if args.once else " (Ctrl-C 종료)"))
+    conn = pymysql.connect(
+        host=my["host"], port=int(my["port"]), user=my["user"],
+        password=my["password"], database=database,
+        # 상용 collation 이 utf8mb3_general_ci 다. utf8mb4 로 열면 리터럴
+        # 비교에서 Illegal mix of collations 가 날 수 있다.
+        charset="utf8mb3", autocommit=False,
+    )
     try:
+        control.ensure_tables(conn)
+        mapping = P.xdr_mapping(conn, database)
+
+        drawable = None
+        xw_path = pem.get("geo_crosswalk")
+        if xw_path:
+            q = Path(xw_path)
+            if not q.is_absolute():
+                q = (HERE / q).resolve()
+            drawable = P.load_drawable_dongs(q)
+
+        gen = P.PemdbGen(
+            conn, data_dir, rates={"lte_call": rate}, seed=seed,
+            subscriber_pool=int(pem.get("subscriber_pool", 20_000)),
+            success_only=bool(pem.get("success_only", True)),
+            enb_limit=int(pem.get("enb_limit", 0)),
+            drawable=drawable,
+        )
+        writer = P.PemdbWriter(conn, mapping)
+
+        # **anchor 는 기동 시각이다.** fault 의 시간창이 여기서부터 센다.
+        # 과거로 잡으면 이미 지난 장애가 되살아난다.
+        anchor = _floor_minute(datetime.now())
+        gen.anchor = anchor
+        print(f"▶ 실시간 틱 — {database} · eNB {len({c.enb_id for c in gen.cells}):,}"
+              f" · 셀 {len(gen.cells):,} · 분당 {rate:,}호 · 보존 {retention_days}일")
+        print(f"  anchor {anchor:%Y-%m-%d %H:%M} · 백필 없음"
+              + (" (--once)" if args.once else " (Ctrl-C 종료)"))
+
+        last_done: datetime | None = None
+        last_retention = datetime.now()
         while True:
             now = datetime.now()
-            pending = _floor_minute(now) - timedelta(minutes=1)  # 직전 분 = 방금 닫힌 분
-            if pending <= last_done:
-                # 다음 분 경계 +3초 — 분이 닫힌 직후의 늦은 레코드 여유
+            pending = _floor_minute(now) - timedelta(minutes=1)   # 방금 닫힌 분
+            if last_done is not None and pending <= last_done:
                 nxt = _floor_minute(now) + timedelta(minutes=1, seconds=3)
                 time.sleep(max(0.5, (nxt - now).total_seconds()))
                 continue
-            ts = pending
-            # 제어 화면이 바꾼 설정을 틱마다 읽는다 — 재기동 없이 다음 분부터
-            # 반영된다. Generator 는 self.rates 를 매 분 참조하므로 이 자리에서
-            # 덮어쓰면 충분하다(인스턴스를 다시 만들 필요가 없다).
-            _apply_live_config(w.conn, dg, cfg["rates"])
-            if not _generation_enabled(w.conn):
-                # 생성 정지 — 틱은 돌되 데이터를 만들지 않는다. 멈춘 동안의
-                # 구간은 비어 있고, 그것이 사실이다(0으로 채우지 않는다).
+            # 기동 직후 첫 틱은 **그 분부터** 시작한다 — 과거로 거슬러 가지 않는다
+            ts = max(pending, anchor)
+
+            if str(control.get_config(conn, "enabled", "true")).lower() == "false":
+                # 생성 정지. 그 구간은 **비어 있고 그것이 사실이다** — 0 으로
+                # 채우면 없는 트래픽 급감이 된다(불변규칙 4).
                 last_done = ts
                 print(f"[{ts:%H:%M}] 생성 정지 (설정)", flush=True)
+                if args.once:
+                    break
                 continue
-            active = control.poll_transitions(w.conn, datetime.now())
-            scs, bad = dg.set_faults(active, rng)
-            _cancel_faults(w.conn, bad, _CANCEL_NOTE)
-            counts = dg.generate_minute(dg.minute_of(ts), ts)
-            # 지각 귀속 재집계 — 완료 시각이 뒤 분에 떨어진 호를 15분 창에서 재귀속.
-            # anchor 이전은 duck 에 raw 가 없어 재집계하면 기존 슬롯만 지워진다 — 자른다.
-            lo = max(dg.anchor, ts - timedelta(minutes=15))
-            hi = ts + timedelta(minutes=1)
-            dg.aggregate_range(lo, hi)
-            w.write_slot(dg.con, lo, hi)
-            rec_total = sum(counts.values())
-            tags = ",".join(str(f["fault_id"]) for f in active)
-            with w.conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO datagen_history (slot_ts, records, faults, created_at) "
-                    "VALUES (%s,%s,%s,%s)",
-                    [ts, rec_total, tags or None, datetime.now()],
-                )
-            w.conn.commit()
-            # 시도·완료 귀속이 둘 다 끝난 분만 버린다 (재집계 창 15분의 2배 여유)
-            store.trim_raw(dg.con, ts - timedelta(minutes=30))
+
+            active = control.poll_transitions(conn, datetime.now())
+            scs, bad = gen.set_fault_rows(active)
+            if bad:
+                _cancel_faults(conn, bad, _CANCEL_NOTE)
+
+            t0 = time.time()
+            rows = gen.records(gen.minute_of(ts), ts)
+            n = writer.write_xdr(ts, rows)
+            # 그 1분만 집계한다. 구간 멱등이라 다시 돌려도 같은 값이다.
+            P.aggregate_all(conn, ts, ts + timedelta(minutes=1))
+            # 분 단위 멱등이다 — 그냥 INSERT 하면 같은 분을 두 번 돌릴 때
+            # 이력이 쌓여 제어 화면이 생성량을 2배·3배로 보고한다.
+            control.record_tick(
+                conn, ts, n, ",".join(str(f["fault_id"]) for f in active))
             last_done = ts
-            fault_label = ",".join(sc.id for sc in scs) or "-"
-            print(f"[{ts:%H:%M}] {rec_total}건 · fault {fault_label}", flush=True)
+            print(f"[{ts:%H:%M}] XDR {n:,}건 · fault "
+                  f"{','.join(sc.id for sc in scs) or '-'} · {time.time() - t0:.1f}s",
+                  flush=True)
+
             if datetime.now() - last_retention >= timedelta(hours=1):
-                _purge_old(w.conn, retention_days)
+                swept = _retention_sweep(conn, retention_days)
+                if any(swept.values()):
+                    print(f"  보존 정리 {retention_days}일 — {swept}", flush=True)
                 last_retention = datetime.now()
             if args.once:
                 break
     except KeyboardInterrupt:
         print("\n■ 중단 요청 — 연결 정리 후 종료")
     finally:
-        w.close()
+        conn.close()
     return 0
 
 
@@ -382,9 +513,118 @@ def cmd_pemfill(args) -> int:
             res = P.aggregate_all(conn, start, hi)
             for t, n in res.items():
                 print(f"  {t:22} {n:,}행")
+
+        if args.follow:
+            _pem_follow(conn, P, gen, w, start + timedelta(minutes=minutes),
+                        retention_days=int(cfg["generate"].get("retention_days", 1)),
+                        no_agg=args.no_agg, once=args.once)
     finally:
         conn.close()
     return 0
+
+
+def _pem_follow(conn, P, gen, w, last_done, *, retention_days: int,
+                no_agg: bool, once: bool) -> None:
+    """상용 스키마 실시간 틱 — 분이 닫히면 그 분을 생성·적재한다.
+
+    **`pemfill` 의 준비 코드를 그대로 쓴다.** 셀 선택·가입자 풀·컬럼 매핑이
+    백필과 같아야 같은 DB 안에서 데이터가 갈라지지 않는다. 구 `cmd_run` 은
+    자체 창고(`graphio.kpi_cell_min` · `slot_ts`)에 쓰는 별개 경로이고, 전환 후
+    **아무도 읽지 않는 DB 에 쓰고 있었다** — 에러가 안 나서 더 나빴다.
+
+    ``last_done`` 은 **다음에 생성할 분**이다. 이미 적재한 분을 다시 만들면
+    `PemdbWriter` 가 구간 멱등(DELETE→INSERT)이라 행 수는 안 늘지만, 레코드가
+    통째로 바뀌어 그 분의 집계·탐지 결과가 흔들린다. 그래서 전진만 한다.
+
+    장애는 `datagen_fault` 에서 틱마다 읽는다(`control.poll_transitions`).
+    데몬이 죽었다 떠도 진행 중이던 장애가 이어진다 — 전이가 DB 에서 일어난다.
+    """
+    from . import control
+
+    control.ensure_tables(conn)
+    # 첫 보존 정리는 1시간 뒤 — 기동 직후 대량 삭제로 첫 틱을 막지 않는다.
+    next_purge = datetime.now() + timedelta(hours=1)
+    print(f"▶ 틱 루프 시작 — 다음 분 {last_done:%H:%M}"
+          + (" (--once)" if once else " (Ctrl-C 종료)"), flush=True)
+    try:
+        while True:
+            now = datetime.now()
+            pending = _floor_minute(now) - timedelta(minutes=1)   # 방금 닫힌 분
+            if pending < last_done:
+                nxt = _floor_minute(now) + timedelta(minutes=1, seconds=3)
+                time.sleep(max(0.5, (nxt - now).total_seconds()))
+                continue
+
+            # 장애 전이 + 활성 목록. 해석은 `faults.resolve_active` 가 하고
+            # 같은 fault 는 틱마다 같은 대상에 걸린다(fault_id 로 시드).
+            active = control.poll_transitions(conn, pending)
+            if gen.anchor is None:
+                gen.anchor = pending
+            scs, bad = gen.set_fault_rows(active)
+            for fid in bad:
+                print(f"  ! fault {fid} 해석 실패 — 건너뛴다", flush=True)
+
+            t0 = time.time()
+            minute_idx = int((pending - gen.anchor).total_seconds() // 60)
+            rows = gen.records(minute_idx, pending)
+
+            # **한 분이 실패해도 데몬은 살아 있어야 한다.** 틱이 예외로 죽으면
+            # 그 뒤로 데이터가 멈추는데, 화면은 "최신 관측 시각"을 그대로
+            # 보여주므로 **멈춘 것이 보이지 않는다.** 실제로 그렇게 죽었다 —
+            # 다른 `pemfill` 이 같은 구간을 건드려 `1213 Deadlock` 이 났다.
+            #
+            # 데드락·락 타임아웃은 재시도하면 대개 통과한다(MySQL 이 한쪽을
+            # 희생시키는 정상 동작이다). 그 외 예외는 재시도해도 같을 테니
+            # 한 번만 기록하고 다음 분으로 넘어간다.
+            n = None
+            for attempt in range(1, 4):
+                try:
+                    n = w.write_xdr(pending, rows)
+                    if not no_agg:
+                        P.aggregate_all(conn, pending,
+                                        pending + timedelta(minutes=1))
+                    break
+                except Exception as exc:          # noqa: BLE001 — 데몬이 멈추면 안 된다
+                    code = getattr(exc, "args", [None])[0]
+                    conn.rollback()
+                    if code in (1213, 1205) and attempt < 3:   # 데드락 · 락 대기 초과
+                        time.sleep(attempt * 2)
+                        print(f"  [{pending:%H:%M}] 재시도 {attempt}/2 — {code}",
+                              flush=True)
+                        continue
+                    print(f"  ! [{pending:%m-%d %H:%M}] 실패 — {type(exc).__name__}: "
+                          f"{exc}", flush=True)
+                    break
+            tags = ",".join(sc.id for sc in scs) or "-"
+            if n is not None:
+                print(f"  [{pending:%m-%d %H:%M}] XDR {n:,}건 · fault {tags} · "
+                      f"{time.time() - t0:.1f}s", flush=True)
+            # 실패해도 전진한다 — 같은 분을 무한히 재시도하면 그 뒤가 영영
+            # 생성되지 않는다. 빠진 분은 행이 없을 뿐이고, 0 으로 채우지
+            # 않으므로 비율이 NULL 이 되어 "없는 장애"를 만들지 않는다(불변규칙 4).
+            last_done = pending + timedelta(minutes=1)
+
+            if datetime.now() >= next_purge:
+                try:
+                    res = _purge_pemdb1(conn, retention_days)
+                except Exception as exc:          # noqa: BLE001
+                    conn.rollback()
+                    print(f"  ! 보존 정리 실패 — {exc}", flush=True)
+                    next_purge = datetime.now() + timedelta(hours=1)
+                    if once:
+                        return
+                    continue
+                total = sum(res.values())
+                if total:
+                    print(f"  보존 정리({retention_days}일) — "
+                          + " · ".join(f"{k} {v:,}" for k, v in res.items() if v),
+                          flush=True)
+                next_purge = datetime.now() + timedelta(hours=1)
+
+            if once:
+                return
+    except KeyboardInterrupt:
+        print("\n틱 루프 종료", flush=True)
 
 
 def cmd_ui(args) -> int:
@@ -400,7 +640,7 @@ def cmd_ui(args) -> int:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="datagen")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    b = sub.add_parser("backfill", help="성공 케이스 N분 생성·적재")
+    b = sub.add_parser("backfill", help="[구 창고 전용] 성공 케이스 N분 생성·적재 — graphio 는 안 읽는다")
     b.add_argument("--config")
     b.add_argument("--start")
     b.add_argument("--minutes", type=int)
@@ -442,13 +682,17 @@ def main(argv=None) -> int:
     p.add_argument("--lead-minutes", type=int,
                    help="첫 장애까지의 평시 구간 (기본: 구간 길이에서 자동)")
     p.add_argument("--truth-out", help="정답 파일 경로 (기본 설정 pemdb1.truth_out)")
+    # 백필이 끝난 뒤 상주하며 분마다 생성한다. **이것이 실시간 경로다** —
+    # 구 `run` 은 자체 창고(graphio DB)에 쓰므로 graphio 화면에 안 나온다.
+    p.add_argument("--follow", action="store_true",
+                   help="백필 후 상주하며 분마다 생성 (실시간 — 이걸 데몬으로 쓴다)")
+    p.add_argument("--once", action="store_true",
+                   help="--follow 와 함께: 한 틱만 돌고 끝낸다 (점검용)")
     p.set_defaults(fn=cmd_pemfill)
 
-    r = sub.add_parser("run", help="상주 데몬 — 백필 + 실시간 틱 + fault 주입")
+    r = sub.add_parser("run", help="[구 창고 전용] 상주 데몬 — graphio 는 안 읽는다. 실시간은 pemfill --follow")
     r.add_argument("--config")
     r.add_argument("--once", action="store_true", help="틱 1회만 수행하고 종료 (테스트용)")
-    r.add_argument("--backfill-minutes", type=int,
-                   help="재기동 시 메울 과거 분 수 (설정 generate.backfill_minutes 덮어쓰기)")
     r.set_defaults(fn=cmd_run)
     args = ap.parse_args(argv)
     return args.fn(args)

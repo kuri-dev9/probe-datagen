@@ -215,3 +215,40 @@ def build(fault: dict, cells: list[Cell], anchor: datetime, rng: random.Random) 
     sc.cell_order = sorted(target.cell_keys)
     rng.shuffle(sc.cell_order)
     return sc
+
+
+def resolve_active(cells: list[Cell], anchor: datetime, seed: int,
+                   active: list[dict],
+                   cache: dict[int, tuple[tuple, Scenario]],
+                   ) -> tuple[list[Scenario], list[int]]:
+    """활성 fault 행 목록 → (Scenario 목록, 해석 실패한 fault_id 목록).
+
+    **구 창고 경로(`engine.DataGen`)와 상용 경로(`pemdb1.PemdbGen`)가 이 함수를
+    공유한다.** 두 경로가 각자 해석하면 같은 fault 가 서로 다른 셀 집합에
+    걸리고, 그것은 에러 없이 다른 데이터를 만든다.
+
+    같은 fault 는 틱마다 다시 와도 **같은 대상**이어야 한다 — 대상 셀이 틱마다
+    바뀌면 장애가 1분 조각으로 흩어져 탐지·채점이 성립하지 않는다. 그래서
+    호출자 rng(호출 순서에 따라 상태가 흔들린다) 대신 fault_id 로 시드한 전용
+    rng 로 해석하고, 결과를 `cache` 에 들고 있는다. 데몬이 재시작해도 같은
+    대상이 나온다.
+    """
+    scs: list[Scenario] = []
+    bad: list[int] = []
+    for f in active:
+        fid = int(f["fault_id"])
+        # UI 가 fault 를 수정하면(시간·강도·대상) 키가 바뀌어 재해석된다
+        key = (f["kind"], str(f.get("target") or ""), f["start_ts"],
+               int(f["duration_min"]), float(f["intensity"]), anchor)
+        cached = cache.get(fid)
+        if cached and cached[0] == key:
+            scs.append(cached[1])
+            continue
+        frng = random.Random(seed * 1_000_003 + fid)
+        sc = build(f, cells, anchor, frng)
+        if sc is None:
+            bad.append(fid)
+        else:
+            cache[fid] = (key, sc)
+            scs.append(sc)
+    return scs, bad

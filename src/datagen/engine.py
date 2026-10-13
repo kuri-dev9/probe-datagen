@@ -125,31 +125,15 @@ class DataGen:
 
         반환: (적용된 Scenario 목록, 해석 실패한 fault_id 목록).
 
-        같은 fault 는 틱마다 다시 와도 **같은 대상**이어야 한다 — 대상 셀이
-        틱마다 바뀌면 장애가 1분 조각으로 흩어져 탐지·채점이 성립하지 않는다.
-        그래서 호출자 rng(호출 순서에 따라 상태가 흔들린다) 대신 fault_id 로
-        시드한 전용 rng 로 해석한다. 데몬이 재시작해도 같은 대상이 나온다.
+        해석은 `faults.resolve_active` 가 한다 — 상용 경로(`pemdb1.PemdbGen`)와
+        **같은 함수**여야 같은 fault 가 같은 셀 집합에 걸린다. `rng` 인자는
+        호환을 위해 남겨 두지만 쓰지 않는다(대상 해석은 fault_id 로 시드한
+        전용 rng 로 돈다 — 호출 순서에 흔들리면 장애가 조각난다).
         """
         if self.anchor is None:
             raise RuntimeError("anchor 미설정 — set_faults 전에 anchor 를 정해야 한다")
-        scs: list[Scenario] = []
-        bad: list[int] = []
-        for f in active:
-            fid = int(f["fault_id"])
-            # UI 가 fault 를 수정하면(시간·강도·대상) 키가 바뀌어 재해석된다
-            key = (f["kind"], str(f.get("target") or ""), f["start_ts"],
-                   int(f["duration_min"]), float(f["intensity"]), self.anchor)
-            cached = self._fault_cache.get(fid)
-            if cached and cached[0] == key:
-                scs.append(cached[1])
-                continue
-            frng = random.Random(self.seed * 1_000_003 + fid)
-            sc = faults.build(f, self.cells, self.anchor, frng)
-            if sc is None:
-                bad.append(fid)
-            else:
-                self._fault_cache[fid] = (key, sc)
-                scs.append(sc)
+        scs, bad = faults.resolve_active(
+            self.cells, self.anchor, self.seed, active, self._fault_cache)
         self.gen.scenarios = scs
         # 프로파일 의존 대상(도메인·기종) 바인딩 — 캐시된 Scenario 는 이미 값이
         # 차 있어 다시 구르지 않는다 (_bind_scenario_targets 가 빈 것만 채운다)

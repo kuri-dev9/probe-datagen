@@ -15,8 +15,12 @@
   `CM_CELL_REP_RU_LOC.SECTOR`  = 실제로는 CELLNUM 값이다 (이름과 내용이 다르다)
   `XDR.FIRST_CELL_ID`          = CL_CELL_MAP.CELLNUM
 
-가입자 식별자(`IMSI`·`IMEI`·`mdn`·`SPID`·`SERVICECODE`)는 **암호문 그대로 둔다.**
+가입자 식별자(`IMSI`·`IMEI`·`mdn`·`SERVICECODE`)는 **암호문 그대로 둔다.**
 복호화하지 않고 집계·조인한다 (graphio 불변규칙 14).
+
+`SPID` 는 이 목록에 **없다.** 애초에 암호문이 아니라 평문 숫자였고, 요금제·가입
+등급의 대리 지표라 2026-10-13 에 **컬럼째 지웠다** — 지운 값의 분포는
+`data/pemdb1/_charset_repair.md` 에 있다. 상용에는 있다.
 """
 from __future__ import annotations
 

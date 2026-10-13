@@ -48,27 +48,72 @@ KIND_LABELS = {
 }
 
 # ── MySQL 접속 ──────────────────────────────────────────────────────────────
+#
+# **상용 스키마(`pemdb1`)를 본다.** 전환 전에는 생성기 자체 창고(`graphio` DB 의
+# `kpi_cell_min`·`file_ledger`·`cell_master`)를 읽었는데, graphio 가 `pemdb1` 으로
+# 옮겨간 뒤 그 DB 는 **아무도 쓰지도 읽지도 않는다.** 화면은 멀쩡히 떠서 멈춘
+# 숫자를 보여 줬고 에러는 없었다 — 그 조용함이 문제였다.
+#
+# 제어 테이블(`datagen_*`)도 같은 DB 에 둔다. UI 가 `graphio` 에 쓰고 데몬이
+# `pemdb1` 에서 읽으면 **주입한 장애가 영원히 적용되지 않는다** — 양쪽 다
+# 정상으로 보이고 그 사이에 아무 신호가 없다.
 
-_MYSQL: dict | None = None  # main() 이 --config 로 채운다. 미설정이면 기본 yaml.
+_CFG: dict | None = None  # main() 이 --config 로 채운다. 미설정이면 기본 yaml.
 
 
-def _mysql_cfg() -> dict:
-    global _MYSQL
-    if _MYSQL is None:
+def _cfg() -> dict:
+    global _CFG
+    if _CFG is None:
         p = HERE / "config" / "datagen.yaml"
-        _MYSQL = yaml.safe_load(p.read_text(encoding="utf-8"))["mysql"]
-    return _MYSQL
+        _CFG = yaml.safe_load(p.read_text(encoding="utf-8"))
+    return _CFG
+
+
+def _pem_cfg() -> dict:
+    return _cfg().get("pemdb1") or {}
 
 
 def _connect():
     """요청마다 새 커넥션 — pymysql 커넥션은 스레드 전용이라 공유하면
     커서 상태가 섞여 엉뚱한 자리에서 깨진다(FastAPI 는 동기 엔드포인트를
     스레드풀에서 돌린다). 요청당 연결 비용은 로컬/폐쇄망에서 무시할 수준."""
-    m = _mysql_cfg()
+    m = _cfg()["mysql"]
     return pymysql.connect(
         host=m["host"], port=int(m["port"]), user=m["user"],
-        password=m["password"], database=m["database"], charset="utf8mb4",
+        password=m["password"],
+        database=_pem_cfg().get("database", "pemdb1"),
+        # 상용 collation 이 utf8mb3_general_ci 다. utf8mb4 로 열면 리터럴
+        # 비교에서 Illegal mix of collations 가 날 수 있다 (pemfill 과 동일).
+        charset="utf8mb3",
     )
+
+
+#: 셀 목록 캐시. `pemdb1.load_cells` 는 결정론적이고 `enb_limit`·`drawable` 이
+#: 같으면 **생성기와 글자까지 같은 집합**을 준다 — 그래서 별도 테이블 없이
+#: 여기서 다시 계산한다. 셀→노드(MME/SGW/PGW) 배정은 DB 컬럼이 아니라
+#: `load_cells` 의 eNB 해시로 정해지므로, 테이블을 조회해서는 알 수 없다.
+_CELLS: list | None = None
+
+
+def _cells(conn) -> list:
+    """생성기와 **같은 셀 집합**. 캐시한다 — 요청마다 마스터를 다시 읽을 이유가 없다."""
+    global _CELLS
+    if _CELLS is None:
+        from . import pemdb1 as P
+
+        pem = _pem_cfg()
+        drawable = None
+        xw = pem.get("geo_crosswalk")
+        if xw:
+            q = Path(xw)
+            if not q.is_absolute():
+                q = (HERE / q).resolve()
+            if q.exists():
+                drawable = P.load_drawable_dongs(q)
+        # 생성기(`cli.cmd_run`)와 **같은 인자**여야 같은 집합이 나온다
+        _CELLS = P.load_cells(
+            conn, enb_limit=int(pem.get("enb_limit", 0)), drawable=drawable)
+    return _CELLS
 
 
 # ── API ─────────────────────────────────────────────────────────────────────
@@ -90,7 +135,9 @@ def api_status():
     conn = _connect()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT MAX(slot_ts) FROM kpi_cell_min")
+            # 생성이 전진하는지는 **상용 원시 테이블**로 본다. 구 `kpi_cell_min`
+            # 은 아무도 쓰지 않아 영원히 같은 값을 돌려줬다.
+            cur.execute("SELECT MAX(EVENT_TIME) FROM XDR_LTE_CALL_KPI")
             last_slot = cur.fetchone()[0]
         faults = list_faults(conn, limit=100)
     finally:
@@ -123,8 +170,12 @@ def api_ingest(minutes: int = 60, date: str | None = None):
     이 화면은 "생성이 고르게 돌고 있나"만 본다. 품질 판정은 관제 화면(8008)의
     일이고, 여기서 또 보여주면 두 화면이 같은 사실을 다르게 말할 위험이 있다.
 
-    출처는 `file_ledger` 다 — `datagen_history.records` 는 총합이라 계열별로
-    쪼갤 수 없다.
+    출처는 `datagen_history` 다. 구 구현은 `file_ledger` 로 계열을 쪼갰지만
+    그 테이블은 자체 창고 소유였고 상용 스키마에 대응이 없다
+    (`graphio/store/tables.py` 의 `LEGACY_TABLE_MAP["file_ledger"] = None`).
+    **계열은 `lte_call` 하나다** — Transport·DNS·HTTP XDR 은 운영 DB 가 적재하지
+    않는다(영구 미연동, `pemdb1.UNSUPPORTED`). 없는 계열을 0건으로 그려 넣으면
+    "그 계열은 돌고 있는데 양이 없다"로 읽히므로 아예 내리지 않는다.
     """
     conn = _connect()
     try:
@@ -132,11 +183,12 @@ def api_ingest(minutes: int = 60, date: str | None = None):
             where, args = _window(
                 date, "slot_ts >= DATE_SUB(NOW(), INTERVAL %s MINUTE)", [minutes])
             cur.execute(
-                "SELECT series, COUNT(*) slots, SUM(records) recs, "
+                "SELECT 'lte_call' series, COUNT(*) slots, "
+                "       COALESCE(SUM(records),0) recs, "
                 "       MIN(slot_ts) a, MAX(slot_ts) b "
-                f"FROM file_ledger WHERE {where} "
-                "GROUP BY series ORDER BY recs DESC", args)
+                f"FROM datagen_history WHERE {where}", args)
             rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
+            rows = [r for r in rows if r["slots"]]      # 빈 창에는 계열을 만들지 않는다
             cur.execute(
                 "SELECT COUNT(*) slots, COALESCE(SUM(records),0) recs "
                 f"FROM datagen_history WHERE {where}", args)
@@ -170,10 +222,8 @@ def api_series(hours: int = 3, date: str | None = None):
         with conn.cursor() as cur:
             where, args = _window(
                 date, "slot_ts >= DATE_SUB(NOW(), INTERVAL %s HOUR)", [hours])
-            cur.execute(
-                f"SELECT slot_ts, series, records FROM file_ledger WHERE {where} "
-                "ORDER BY slot_ts", args)
-            raw = cur.fetchall()
+            # `file_ledger` 를 쓰지 않는다 — 상용 스키마에 대응이 없다.
+            # 계열은 `lte_call` 하나이므로 `datagen_history` 로 충분하다.
             cur.execute(
                 f"SELECT slot_ts, records, faults FROM datagen_history WHERE {where} "
                 "ORDER BY slot_ts", args)
@@ -182,18 +232,15 @@ def api_series(hours: int = 3, date: str | None = None):
         conn.close()
 
     by_slot: dict = {}
-    for slot_ts, series, records in raw:
-        k = slot_ts.isoformat()
-        by_slot.setdefault(k, {})[series] = int(records or 0)
     points = []
-    hist_map = {h[0].isoformat(): h for h in hist}
-    for k in sorted(by_slot):
-        h = hist_map.get(k)
+    for slot_ts, records, tags in hist:
+        k = slot_ts.isoformat()
+        by_slot[k] = {"lte_call": int(records or 0)}
         points.append({
             "ts": k,
             "series": by_slot[k],
-            "total": sum(by_slot[k].values()),
-            "faults": (h[2].split(",") if h and h[2] else []),
+            "total": int(records or 0),
+            "faults": (tags.split(",") if tags else []),
         })
     return {"hours": hours, "date": date, "points": points,
             "series_names": sorted({s for v in by_slot.values() for s in v})}
@@ -207,9 +254,13 @@ def api_settings():
     (재기동 불필요). 장비 추가·삭제는 이 화면의 범위가 아니다 — 셀 재배정이
     필요해 설계가 따로 붙는다.
     """
-    cfg = yaml.safe_load((HERE / "config" / "datagen.yaml").read_text(encoding="utf-8"))
-    rates = dict(cfg.get("rates") or {})
+    cfg = _cfg()
     gen = dict(cfg.get("generate") or {})
+    # **분당 호 수는 `pemdb1.rates` 가 정본이다.** 구 `rates:`(lte 2000 ·
+    # transport/dns/http)는 자체 창고용이고, 상용 경로는 `lte_call` 하나를
+    # 20,000/분으로 돌린다. 여기서 구 절을 보여 주면 운영자가 2000 을 저장해
+    # 생성량이 10분의 1로 떨어진다 — 에러 없이 표본이 말라 탐지가 멈춘다.
+    rates = {"lte_call": int((_pem_cfg().get("rates") or {}).get("lte_call", 2000))}
     conn = _connect()
     try:
         over = {}
@@ -217,24 +268,23 @@ def api_settings():
             v = get_config(conn, f"rate.{k}" if k in rates else k)
             if v is not None:
                 over[k] = v
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT 'SGW', COUNT(DISTINCT sgw_id) FROM cell_master UNION ALL "
-                "SELECT 'MME', COUNT(DISTINCT mme_id) FROM cell_master UNION ALL "
-                "SELECT 'PGW', COUNT(DISTINCT pgw_id) FROM cell_master")
-            nodes = {r[0]: r[1] for r in cur.fetchall()}
-            cur.execute("SELECT COUNT(*) FROM cell_master")
-            cells = cur.fetchone()[0]
+        cells_list = _cells(conn)
     finally:
         conn.close()
+    nodes = {
+        "SGW": len({c.sgw_id for c in cells_list}),
+        "MME": len({c.mme_id for c in cells_list}),
+        "PGW": len({c.pgw_id for c in cells_list}),
+    }
     for k in rates:
         if k in over:
             rates[k] = int(over[k])
     return {
         "rates": rates,
         "enabled": str(over.get("enabled", "true")).lower() != "false",
-        "retention_days": int(over.get("retention_days", gen.get("retention_days", 7))),
-        "topology": {"cells": cells, **nodes},
+        # 로컬 PoC 는 1일이다(사람 지시). yaml 기본값과 어긋나지 않게 1 로 둔다.
+        "retention_days": int(over.get("retention_days", gen.get("retention_days", 1))),
+        "topology": {"cells": len(cells_list), **nodes},
         "note": "장비 추가·삭제는 미지원 — 셀 재배정 설계가 선행되어야 한다",
     }
 
@@ -265,30 +315,44 @@ def api_set_settings(req: SettingsReq):
 
 @app.get("/api/targets")
 def api_targets():
-    """대상 후보를 cell_master 에서 집계한다. core_node 가 아니라 cell_master 를
-    보는 이유: 셀이 하나도 안 걸린 노드에 장애를 넣어 봐야 지표에 아무것도
-    안 나타난다 — 영향 셀 수가 있는 것만 고르게 한다. 셀 수 내림차순이라
-    "효과가 잘 보이는" 대상이 위에 온다."""
+    """대상 후보 — 셀이 **실제로 걸린** 노드·시군구만.
+
+    셀이 하나도 안 걸린 노드에 장애를 넣어 봐야 지표에 아무것도 안 나타난다.
+    셀 수 내림차순이라 "효과가 잘 보이는" 대상이 위에 온다.
+
+    구 구현은 `cell_master` 를 조회했지만 그 테이블은 자체 창고 소유이고 상용에
+    없다. 더 중요한 것은 **셀→노드 배정이 DB 컬럼이 아니라는 점**이다 —
+    `pemdb1.load_cells` 가 eNB 해시로 정한다(`CL_CELL_MAP` 에 셀→노드 컬럼이
+    없다). 그래서 어떤 테이블을 조회해도 알 수 없고, 생성기와 **같은 함수**를
+    불러야 같은 답이 나온다. 다른 값을 쓰면 주입 대상이 생성 대상과 어긋나
+    장애가 아무 셀에도 걸리지 않는다.
+    """
     conn = _connect()
     try:
-        with conn.cursor() as cur:
-            out: dict = {}
-            for key, col in (("sgw", "sgw_id"), ("mme", "mme_id"), ("pgw", "pgw_id")):
-                cur.execute(
-                    f"SELECT {col}, COUNT(*) FROM cell_master "
-                    f"WHERE {col} IS NOT NULL GROUP BY {col} ORDER BY COUNT(*) DESC"
-                )
-                out[key] = [{"id": r[0], "cells": r[1]} for r in cur.fetchall()]
-            cur.execute(
-                "SELECT adm_sgg_cd, adm_sgg_nm, COUNT(*) FROM cell_master "
-                "WHERE adm_sgg_cd IS NOT NULL GROUP BY adm_sgg_cd, adm_sgg_nm "
-                "ORDER BY COUNT(*) DESC"
-            )
-            out["sgg"] = [{"code": r[0], "name": r[1], "cells": r[2]}
-                          for r in cur.fetchall()]
+        cells_list = _cells(conn)
     finally:
         conn.close()
-    return out
+
+    def tally(attr: str) -> list[dict]:
+        cnt: dict[str, int] = {}
+        for c in cells_list:
+            v = getattr(c, attr)
+            if v:
+                cnt[v] = cnt.get(v, 0) + 1
+        return [{"id": k, "cells": n}
+                for k, n in sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+    sgg: dict[str, int] = {}
+    for c in cells_list:
+        if c.adm_sgg_cd:
+            sgg[c.adm_sgg_cd] = sgg.get(c.adm_sgg_cd, 0) + 1
+    return {
+        "sgw": tally("sgw_id"), "mme": tally("mme_id"), "pgw": tally("pgw_id"),
+        # 시군구 이름은 추출 단계에서 한글이 깨져 비어 있다 — 지어내지 않고
+        # 코드를 그대로 보여 준다(불변규칙 17).
+        "sgg": [{"code": k, "name": "", "cells": n}
+                for k, n in sorted(sgg.items(), key=lambda kv: (-kv[1], kv[0]))],
+    }
 
 
 @app.get("/api/faults")
@@ -817,9 +881,11 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     if args.config:
-        global _MYSQL
-        _MYSQL = yaml.safe_load(
-            Path(args.config).read_text(encoding="utf-8"))["mysql"]
+        # **설정 전체를 들고 있는다.** `mysql:` 절만 떼어 두면 `pemdb1:`(대상 DB ·
+        # enb_limit · 분당 호 수)를 못 보고, 그러면 UI 가 생성기와 다른 셀 집합을
+        # 보여 준다 — 주입 대상이 생성 대상과 어긋나도 에러가 나지 않는다.
+        global _CFG
+        _CFG = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
 
     import uvicorn
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")

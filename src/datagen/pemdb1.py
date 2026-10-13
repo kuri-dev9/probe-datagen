@@ -39,6 +39,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from .cells import Cell
+from .faults import resolve_active as resolve_active_faults
 from .fields import SERIES_FIELDS
 from .generator import Generator
 from .identity import synth_imei, synth_imsi
@@ -502,6 +503,10 @@ class PemdbGen:
         self._reseat_subscribers(random.Random(seed + 202))
         self.anchor: datetime | None = None
         self.seed = seed
+        #: fault_id → (판별 키, Scenario). 같은 fault 가 틱마다 다시 와도 같은
+        #: Scenario 를 재사용해야 generator 의 도메인·기종 바인딩이 다시 구르지
+        #: 않는다 (`faults.resolve_active` 가 읽고 쓴다).
+        self._fault_cache: dict[int, tuple[tuple, Scenario]] = {}
 
     def _reseat_subscribers(self, rng: random.Random) -> None:
         """가입자 풀의 Vendor/Model·PLMN 을 상용 실측 분포로 바꾼다.
@@ -623,6 +628,20 @@ class PemdbGen:
     def set_faults(self, scenarios: list[Scenario]) -> None:
         self.gen.scenarios = scenarios
         self.gen._bind_scenario_targets()
+
+    def set_fault_rows(self, active: list[dict]) -> tuple[list[Scenario], list[int]]:
+        """`datagen_fault` 활성 행 목록을 걸어 둔다 — 실시간 틱(`cli.cmd_run`)용.
+
+        해석은 `faults.resolve_active` 가 한다. 구 창고 경로(`engine.DataGen`)와
+        **같은 함수**를 쓴다 — 두 경로가 각자 해석하면 같은 fault 가 서로 다른
+        셀 집합에 걸리고, 그 차이는 에러 없이 다른 데이터로 나타난다.
+        """
+        if self.anchor is None:
+            raise RuntimeError("anchor 미설정 — set_fault_rows 전에 anchor 를 정해야 한다")
+        scs, bad = resolve_active_faults(
+            self.cells, self.anchor, self.seed, active, self._fault_cache)
+        self.set_faults(scs)
+        return scs, bad
 
 
 # --------------------------------------------------------------------------
@@ -862,6 +881,126 @@ def aggregate_all(conn, lo: datetime, hi: datetime) -> dict[str, int]:
         PM_ENB_CAUSE: aggregate_enb_cause(conn, lo, hi),
         PM_EPC: aggregate_epc(conn, lo, hi),
     }
+
+
+# --------------------------------------------------------------------------
+# 보존 정리 — 파티션 단위로 버린다
+# --------------------------------------------------------------------------
+
+#: 생성기가 **쓰는** 테이블과 그 시각 컬럼 — 보존 정리의 대상이다.
+#:
+#: **`GP_*` 는 넣지 않는다.** 그것은 graphio 의 산출물이고
+#: (`graphio/store/tables.py:RESETTABLE_TABLES`), 남의 산출물을 생성기가 지우면
+#: 두 주체가 같은 행을 다투게 된다. graphio 가 Incident 를 쓰는 중에 생성기가
+#: 그 파티션을 떨어뜨리면 분석 결과만 사라지고 에러는 나지 않는다 — 운영자
+#: 화면에서는 "장애 없음"으로 보인다(불변규칙 17 이 금지하는 형태).
+#: `CL_*`·`CM_*` 마스터도 대상이 아니다 — 다른 주체가 관리하고 시각 컬럼이 없다.
+WRITTEN_TABLES: tuple[tuple[str, str], ...] = (
+    (XDR_TABLE, "EVENT_TIME"),
+    (PM_ENB, "EVENT_TIME"),
+    (PM_ENB_CAUSE, "EVENT_TIME"),
+    (PM_EPC, "EVENT_TIME"),
+)
+
+
+def _day_partitions(conn, database: str, table: str) -> list[tuple[str, datetime]]:
+    """`pYYYYMMDD` 파티션의 (이름, 상한 시각). `pmax`(MAXVALUE)는 제외한다.
+
+    `PARTITION_DESCRIPTION` 은 `'2026-10-14 00:00:00'`(따옴표 포함) 꼴이다 —
+    RANGE COLUMNS 의 상한이고, 그 값 **미만**이 그 파티션에 들어간다.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT PARTITION_NAME, PARTITION_DESCRIPTION FROM information_schema.PARTITIONS "
+            "WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s AND PARTITION_NAME IS NOT NULL "
+            "ORDER BY PARTITION_ORDINAL_POSITION",
+            [database, table],
+        )
+        rows = cur.fetchall()
+    out = []
+    for name, desc in rows:
+        text = (desc or "").strip().strip("'")
+        if text.upper() == "MAXVALUE":
+            continue
+        try:
+            out.append((name, datetime.fromisoformat(text)))
+        except ValueError:
+            continue        # 상용 원본의 다른 표기 — 손대지 않는다
+    return out
+
+
+def ensure_partitions(conn, database: str, ahead_days: int = 2) -> dict[str, list[str]]:
+    """앞으로 쓸 일 파티션을 `pmax` 에서 떼어 미리 만든다.
+
+    **드롭만 하고 추가하지 않으면 파티션 체계가 조용히 죽는다.** 범위를 벗어난
+    분은 전부 `pmax` 한 칸에 들어가고, 그러면 `EVENT_TIME` 범위 조건으로 프루닝이
+    안 돼 질의마다 전체 스캔이 된다 — 에러는 나지 않고 느려질 뿐이라 알아채기
+    어렵다. 설치 시점(`docker/mysql/gen_ddl.py`)에 오늘+3일까지만 깔려 있으므로
+    상주 데몬은 스스로 앞을 늘려야 한다.
+
+    `pmax` 가 비어 있으면 REORGANIZE 는 메타데이터 변경에 가깝다(실측 수십 ms).
+    """
+    out: dict[str, list[str]] = {}
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    for table, _col in WRITTEN_TABLES:
+        parts = _day_partitions(conn, database, table)
+        if not parts:
+            continue            # 파티션 없는 테이블 — 추가할 것이 없다
+        have = {u for _n, u in parts}
+        want = [today + timedelta(days=i + 1) for i in range(ahead_days + 1)]
+        new = [d for d in want if d not in have and d > max(have)]
+        if not new:
+            continue
+        spec = ", ".join(
+            f"PARTITION p{(d - timedelta(days=1)):%Y%m%d} "
+            f"VALUES LESS THAN ('{d:%Y-%m-%d} 00:00:00') ENGINE = InnoDB"
+            for d in new)
+        with conn.cursor() as cur:
+            cur.execute(
+                f"ALTER TABLE `{table}` REORGANIZE PARTITION pmax INTO "
+                f"({spec}, PARTITION pmax VALUES LESS THAN (MAXVALUE) ENGINE = InnoDB)")
+        out[table] = [f"p{(d - timedelta(days=1)):%Y%m%d}" for d in new]
+    return out
+
+
+def purge_before(conn, database: str, cutoff: datetime) -> dict[str, int]:
+    """`cutoff` 보다 오래된 데이터를 버린다 — **일 파티션 드롭으로.**
+
+    `DELETE` 를 쓰지 않는 이유는 비용이다. 분당 2만 호면 하루가 1,000만 행이
+    넘고, 그만큼을 `DELETE` 로 지우면 모든 행이 undo log·바이너리 로그를 타며
+    인덱스를 갱신한다(실측 대조는 작업 보고에 있다). `DROP PARTITION` 은
+    테이블스페이스 파일을 지우는 일이라 행 수와 거의 무관하다.
+
+    대가는 **입도**다. 파티션이 하루 단위이므로 "상한이 cutoff 이하"인 날만
+    떨어뜨릴 수 있고, 보존 1일이면 실제로는 1~2일분이 남는다. 반나절을 더
+    들고 있는 것과 매시간 수백만 행을 지우는 것 중 전자를 고른 것이다 —
+    로컬 PoC 디스크가 무한히 자라지 않게 막는 것이 목적이었다.
+
+    반환은 테이블 → 떨어뜨린 파티션에 들어 있던 행 수다. **`TABLE_ROWS` 가
+    아니라 실제 `COUNT(*)` 로 센다** — 추정치를 보고하면 0인지 아닌지를
+    구분할 수 없다.
+    """
+    out: dict[str, int] = {}
+    with conn.cursor() as cur:
+        # DDL 은 배타적 메타데이터 잠금을 잡는다. graphio 가 같은 테이블을 읽는
+        # 중이면 기다리므로, 틱 루프를 무한정 세우지 않도록 한도를 둔다 —
+        # 못 지우면 다음 정리 주기에 다시 시도하면 된다.
+        cur.execute("SET SESSION lock_wait_timeout = 10")
+    for table, col in WRITTEN_TABLES:
+        parts = _day_partitions(conn, database, table)
+        dead = [name for name, upper in parts if upper <= cutoff]
+        if not dead:
+            continue
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT COUNT(*) FROM `{table}` "
+                f"PARTITION ({','.join(dead)})")
+            n = int(cur.fetchone()[0])
+            # 한 문장에 몰아 넣는다 — 파티션마다 ALTER 를 걸면 메타데이터
+            # 잠금을 그만큼 여러 번 잡는다
+            cur.execute(f"ALTER TABLE `{table}` DROP PARTITION {','.join(dead)}")
+        out[table] = n
+    return out
 
 
 # --------------------------------------------------------------------------

@@ -122,6 +122,30 @@ def poll_transitions(conn, now: datetime) -> list[dict]:
     return active
 
 
+def record_tick(conn, slot_ts: datetime, records: int,
+                faults: str | None = None) -> None:
+    """틱 이력을 **분 단위로 멱등하게** 남긴다.
+
+    생성 자체는 멱등이다(`PemdbWriter.write_xdr` 이 DELETE→INSERT). 그런데
+    이력을 그냥 INSERT 하면 같은 분을 두 번 돌릴 때 행이 쌓이고, 제어 화면의
+    인입 현황이 `SUM(records)` 를 쓰므로 **실제 생성량의 2배·3배를 보고한다** —
+    실측으로 15:00 한 분이 3행 쌓여 19,059건이 57,177건으로 보였다. 에러는
+    없고 숫자만 틀리는 형태다.
+
+    UNIQUE 키를 걸지 않고 DELETE→INSERT 로 맞춘다. 키를 추가하면 이미 만들어진
+    테이블에는 `CREATE TABLE IF NOT EXISTS` 가 손대지 못해 한쪽만 적용되고,
+    그 상태에서 평범한 INSERT 가 남아 있으면 `1062 Duplicate entry` 로 데몬이
+    죽는다.
+    """
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM datagen_history WHERE slot_ts=%s", [slot_ts])
+        cur.execute(
+            "INSERT INTO datagen_history (slot_ts, records, faults, created_at) "
+            "VALUES (%s,%s,%s,%s)",
+            [slot_ts, records, faults or None, datetime.now()])
+    conn.commit()
+
+
 def get_config(conn, k: str, default: str | None = None) -> str | None:
     with conn.cursor() as cur:
         cur.execute("SELECT v FROM datagen_config WHERE k=%s", [k])
