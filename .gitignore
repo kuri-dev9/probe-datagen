@@ -13,3 +13,23 @@ run/
 # (tar 반출)로 옮긴다. 로컬 적재는 `docker/mysql/load_master*.py` 가 한다.
 data/pemdb1/CL_CELL_MAP.json
 data/pemdb1/CM_CELL_REP_RU_LOC.json
+
+# ── 운영 자산·DB 데이터·스키마 — **git 에 올리지 않는다** ──────────────────
+#
+# `probe-datagen` 은 PUBLIC 저장소다. 아래는 통신사의 실제 기지국 자산 대장과
+# 운영 DB 구조다 — 공개 데이터가 아니다.
+#
+#   data/pemdb1/CL_*.json         eNB·셀·장비 등록부 (PCI·주파수·EMS ID)
+#   data/pemdb1/CM_*.json         셀 좌표·행정구역·조직 계층·RU 이름
+#   data/pemdb1/CD_*.json         코드 테이블
+#   data/pemdb1/_*.json           추출 메타·실측 표본·분포
+#   data/pemdb1/repairs/          운영 교정 원장 (실제 지역명·조직명)
+#   docker/mysql/pemdb1_*.sql     운영 DB 스키마 (SHOW CREATE TABLE 산출물)
+#   data/cells.json 등            구 시뮬레이터 프로파일
+#
+# **DB 에만 있으면 된다.** 타겟 서버로는 컨테이너 이미지와 같은 경로(tar 반출)로
+# 옮기고, 적재는 `docker/mysql/load_master*.py` 가 한다. 반출 묶음은
+# `../_transfer/` 에 만든다.
+data/
+docker/mysql/pemdb1_local.sql
+docker/mysql/pemdb1_masters.sql
