@@ -262,6 +262,27 @@ _RETENTION_TABLES = (
 P_XDR_TABLE = "XDR_LTE_CALL_KPI"
 
 
+def _pem_rates(cfg: dict, pem: dict, lte_rate: int) -> dict:
+    """상용 경로의 계열별 분당 생성량.
+
+    `lte_call` 은 호출부가 정한 값(`--rate` 우선)을 그대로 쓰고, U-Plane 세
+    계열은 `pemdb1.rates` → 전역 `rates` 순으로 찾는다. **없으면 0 이고, 0 은
+    "그 계열을 만들지 않는다"는 뜻이다** — 설정에 없는 계열을 기본값으로 켜면
+    기존 호출의 동작이 조용히 바뀐다.
+
+    전역 `rates:` 의 값(transport 1500 등)은 구 창고 세대의 350셀 기준이다.
+    상용 경로는 셀이 2천 개 규모라 그대로 쓰면 셀당 1건 미만이 되어 어떤
+    창에서도 판정이 서지 않는다(불변규칙 5). 그래서 `pemdb1.rates` 쪽에
+    따로 적어 둔다.
+    """
+    pem_rates = pem.get("rates") or {}
+    base = cfg.get("rates") or {}
+    out = {"lte_call": int(lte_rate)}
+    for s in ("transport", "dns", "http"):
+        out[s] = int(pem_rates.get(s, base.get(s, 0)) or 0)
+    return out
+
+
 def cmd_run(args) -> int:
     """상주 데몬 — **실시간 틱만.** 백필하지 않는다.
 
@@ -307,6 +328,9 @@ def cmd_run(args) -> int:
     try:
         control.ensure_tables(conn)
         mapping = P.xdr_mapping(conn, database)
+        # U-Plane 테이블이 아직 없으면 빈 dict 가 오고 그 계열은 적재되지
+        # 않는다. C-Plane 틱이 그것 때문에 막혀서는 안 된다.
+        umaps = P.uplane_mapping(conn, database)
 
         drawable = None
         xw_path = pem.get("geo_crosswalk")
@@ -316,8 +340,9 @@ def cmd_run(args) -> int:
                 q = (HERE / q).resolve()
             drawable = P.load_drawable_dongs(q)
 
+        rates = _pem_rates(cfg, pem, rate)
         gen = P.PemdbGen(
-            conn, data_dir, rates={"lte_call": rate}, seed=seed,
+            conn, data_dir, rates=rates, seed=seed,
             subscriber_pool=int(pem.get("subscriber_pool", 20_000)),
             success_only=bool(pem.get("success_only", True)),
             enb_limit=int(pem.get("enb_limit", 0)),
@@ -329,8 +354,12 @@ def cmd_run(args) -> int:
         # 과거로 잡으면 이미 지난 장애가 되살아난다.
         anchor = _floor_minute(datetime.now())
         gen.anchor = anchor
+        up_on = [s for s in P.UPLANE_SERIES if s in gen.series and s in umaps]
         print(f"▶ 실시간 틱 — {database} · eNB {len({c.enb_id for c in gen.cells}):,}"
               f" · 셀 {len(gen.cells):,} · 분당 {rate:,}호 · 보존 {retention_days}일")
+        print("  U-Plane — "
+              + (" · ".join(f"{s} {rates[s]:,}" for s in up_on) if up_on
+                 else "꺼짐 (rates 0 이거나 GP_XDR_* 테이블 없음)"))
         print(f"  anchor {anchor:%Y-%m-%d %H:%M} · 백필 없음"
               + (" (--once)" if args.once else " (Ctrl-C 종료)"))
 
@@ -361,8 +390,14 @@ def cmd_run(args) -> int:
                 _cancel_faults(conn, bad, _CANCEL_NOTE)
 
             t0 = time.time()
-            rows = gen.records(gen.minute_of(ts), ts)
+            minute_idx = gen.minute_of(ts)
+            rows = gen.records(minute_idx, ts)
             n = writer.write_xdr(ts, rows)
+            # U-Plane 은 **같은 분 좌표**로 만든다. 다른 좌표를 쓰면 같은 분의
+            # C-Plane 과 시나리오 강도가 어긋나 한 장애가 두 축에서 다른 시각에
+            # 나타난다.
+            un = writer.write_uplane_all(
+                ts, gen.uplane_records(minute_idx, ts), umaps)
             # 그 1분만 집계한다. 구간 멱등이라 다시 돌려도 같은 값이다.
             P.aggregate_all(conn, ts, ts + timedelta(minutes=1))
             # 분 단위 멱등이다 — 그냥 INSERT 하면 같은 분을 두 번 돌릴 때
@@ -370,9 +405,11 @@ def cmd_run(args) -> int:
             control.record_tick(
                 conn, ts, n, ",".join(str(f["fault_id"]) for f in active))
             last_done = ts
-            print(f"[{ts:%H:%M}] XDR {n:,}건 · fault "
-                  f"{','.join(sc.id for sc in scs) or '-'} · {time.time() - t0:.1f}s",
-                  flush=True)
+            up = " · ".join(f"{s[:4]} {v:,}" for s, v in un.items())
+            print(f"[{ts:%H:%M}] XDR {n:,}건"
+                  + (f" · U {up}" if up else "")
+                  + f" · fault {','.join(sc.id for sc in scs) or '-'}"
+                  f" · {time.time() - t0:.1f}s", flush=True)
 
             if datetime.now() - last_retention >= timedelta(hours=1):
                 swept = _retention_sweep(conn, retention_days)
@@ -430,6 +467,12 @@ def cmd_pemfill(args) -> int:
         mapping = P.xdr_mapping(conn, database)
         print(f"▶ 컬럼 매핑 확인 — {P.XDR_TABLE} {len(mapping.columns)}컬럼 "
               f"(EVENT_TIME + 생성기 필드 {len(mapping.columns) - 1})")
+        umaps = P.uplane_mapping(conn, database)
+        if umaps:
+            print("  U-Plane — " + " · ".join(
+                f"{m.table} {len(m.columns)}컬럼" for m in umaps.values()))
+        else:
+            print(f"  U-Plane — GP_XDR_* 가 {database} 에 없다. 그 계열은 건너뛴다")
 
         # ── 그릴 수 있는 동으로 셀을 한정한다 ─────────────────────────────
         # 번들 경계 geojson 은 행정동, pemdb1 은 법정동이다. 매핑으로는 못 넘는
@@ -446,7 +489,7 @@ def cmd_pemfill(args) -> int:
             print(f"▶ 폴리곤 있는 동 {len(drawable):,}개 — {p}")
 
         gen = P.PemdbGen(
-            conn, data_dir, rates={"lte_call": rate}, seed=seed,
+            conn, data_dir, rates=_pem_rates(cfg, pem, rate), seed=seed,
             subscriber_pool=int(pem.get("subscriber_pool", 20_000)),
             # 실측 실패·절단 비율을 그대로 재현하는 모드. 기본은 성공 전용
             # (평시 전부 녹색)이고, Cause 집계 경로를 확인할 때 쓴다.
@@ -497,16 +540,48 @@ def cmd_pemfill(args) -> int:
         w = P.PemdbWriter(conn, mapping)
         t0 = time.time()
         total = 0
+        up_total: dict[str, int] = {}
+        # ── 재개 ────────────────────────────────────────────────────────────
+        # **시나리오 배치가 `(start, minutes)` 에 묶여 있어 구간을 쪼갤 수 없다.**
+        # `scenarios.build_scenarios` 가 `lead`·`span`·`dur` 를 그 두 값에서
+        # 계산하므로, 뒷부분만 따로 돌리면 13종이 다른 자리에 깔리고 정답 파일도
+        # 다시 쓰인다. 그래서 같은 명령을 그대로 다시 호출하되 **이미 만든 분만
+        # 건너뛴다.**
+        #
+        # 분 단위로 안전하다. `write_xdr` 이 DELETE→INSERT 를 한 트랜잭션에
+        # 넣고 커밋하므로 어떤 분도 반쯤 쓰인 상태로 남지 않는다 — 행이 있으면
+        # 그 분은 완성된 것이다.
+        done: set = set()
+        if args.resume:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT DISTINCT EVENT_TIME FROM `{P.XDR_TABLE}` "
+                    "WHERE EVENT_TIME >= %s AND EVENT_TIME < %s",
+                    [start, start + timedelta(minutes=minutes)],
+                )
+                done = {r[0] for r in cur.fetchall()}
+            print(f"▶ 재개 — 이미 만든 {len(done):,}분을 건너뛴다 "
+                  f"(남은 {minutes - len(done):,}분)")
         for m in range(minutes):
             ts = start + timedelta(minutes=m)
+            if ts in done:
+                continue
             rows = gen.records(m, ts)
             total += w.write_xdr(ts, rows)
-            print(f"  [{ts:%m-%d %H:%M}] XDR {len(rows):,}건 · "
-                  f"{time.time() - t0:.0f}s", flush=True)
+            un = w.write_uplane_all(ts, gen.uplane_records(m, ts), umaps)
+            for s, v in un.items():
+                up_total[s] = up_total.get(s, 0) + v
+            up = " · ".join(f"{s[:4]} {v:,}" for s, v in un.items())
+            print(f"  [{ts:%m-%d %H:%M}] XDR {len(rows):,}건"
+                  + (f" · U {up}" if up else "")
+                  + f" · {time.time() - t0:.0f}s", flush=True)
 
         print(f"▶ XDR 적재 완료 — {total:,}건 / {minutes}분 · "
               f"{time.time() - t0:.0f}s"
               + (f" · 길이 초과 절단 {w.clamped}건" if w.clamped else ""))
+        if up_total:
+            print("  U-Plane — " + " · ".join(
+                f"{s} {v:,}건" for s, v in up_total.items()))
 
         if not args.no_agg:
             hi = start + timedelta(minutes=minutes)
@@ -516,6 +591,7 @@ def cmd_pemfill(args) -> int:
 
         if args.follow:
             _pem_follow(conn, P, gen, w, start + timedelta(minutes=minutes),
+                        umaps=umaps,
                         retention_days=int(cfg["generate"].get("retention_days", 1)),
                         no_agg=args.no_agg, once=args.once)
     finally:
@@ -523,8 +599,8 @@ def cmd_pemfill(args) -> int:
     return 0
 
 
-def _pem_follow(conn, P, gen, w, last_done, *, retention_days: int,
-                no_agg: bool, once: bool) -> None:
+def _pem_follow(conn, P, gen, w, last_done, *, umaps: dict,
+                retention_days: int, no_agg: bool, once: bool) -> None:
     """상용 스키마 실시간 틱 — 분이 닫히면 그 분을 생성·적재한다.
 
     **`pemfill` 의 준비 코드를 그대로 쓴다.** 셀 선택·가입자 풀·컬럼 매핑이
@@ -577,9 +653,12 @@ def _pem_follow(conn, P, gen, w, last_done, *, retention_days: int,
             # 희생시키는 정상 동작이다). 그 외 예외는 재시도해도 같을 테니
             # 한 번만 기록하고 다음 분으로 넘어간다.
             n = None
+            un: dict[str, int] = {}
             for attempt in range(1, 4):
                 try:
                     n = w.write_xdr(pending, rows)
+                    un = w.write_uplane_all(
+                        pending, gen.uplane_records(minute_idx, pending), umaps)
                     if not no_agg:
                         P.aggregate_all(conn, pending,
                                         pending + timedelta(minutes=1))
@@ -597,8 +676,10 @@ def _pem_follow(conn, P, gen, w, last_done, *, retention_days: int,
                     break
             tags = ",".join(sc.id for sc in scs) or "-"
             if n is not None:
-                print(f"  [{pending:%m-%d %H:%M}] XDR {n:,}건 · fault {tags} · "
-                      f"{time.time() - t0:.1f}s", flush=True)
+                up = " · ".join(f"{s[:4]} {v:,}" for s, v in un.items())
+                print(f"  [{pending:%m-%d %H:%M}] XDR {n:,}건"
+                      + (f" · U {up}" if up else "")
+                      + f" · fault {tags} · {time.time() - t0:.1f}s", flush=True)
             # 실패해도 전진한다 — 같은 분을 무한히 재시도하면 그 뒤가 영영
             # 생성되지 않는다. 빠진 분은 행이 없을 뿐이고, 0 으로 채우지
             # 않으므로 비율이 NULL 이 되어 "없는 장애"를 만들지 않는다(불변규칙 4).
@@ -673,6 +754,10 @@ def main(argv=None) -> int:
     p.add_argument("--with-failures", action="store_true",
                    help="실측 실패·절단 비율을 재현 (기본은 성공 전용)")
     p.add_argument("--no-agg", action="store_true", help="XDR 적재만 하고 집계는 건너뛴다")
+    # 같은 명령을 다시 호출해 중단된 지점부터 이어 만든다. 시나리오 배치가
+    # (start, minutes) 에 묶여 있어 구간을 쪼갤 수 없기 때문이다.
+    p.add_argument("--resume", action="store_true",
+                   help="이미 XDR 이 있는 분은 건너뛴다 (중단 후 이어 만들기)")
     # 장애 주입. 미지정이면 평시 전용 — 기존 호출의 동작이 그대로다.
     # `all` 은 pemdb1 에서 돌아가는 10종(`pemdb1.SUPPORTED`)이다. SC-05·06·07 은
     # DNS·HTTP·Transport XDR 이 pemdb1 에 없어 미연동이며, 지정해도 사유와 함께

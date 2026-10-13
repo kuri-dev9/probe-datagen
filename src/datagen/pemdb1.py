@@ -74,6 +74,99 @@ PM_ENB = "PM_ENB_KPI_1M"
 PM_ENB_CAUSE = "PM_ENB_CAUSE_1M"
 PM_EPC = "PM_EPC_KPI_1M_ORG"
 
+#: U-Plane 원시 XDR — **상용에 없다. PoC 가 만든 테이블이다.**
+#: 접두를 `GP_` 로 둔 이유: 상용 이름(`PM_APP_*`·`PM_DNS_*`)을 쓰면 운영 전환
+#: 때 "있는 줄 알고" 그 이름을 찾는다. 정본 DDL 은
+#: `../graphio-probe-rca/docker/mysql/gp_tables.sql`, 요구 명세는 같은 저장소의
+#: `docs/UPLANE-TABLE-SPEC.md` 다.
+GP_XDR = {
+    "transport": "GP_XDR_TRANSPORT_SD",
+    "dns": "GP_XDR_DNS_SD",
+    "http": "GP_XDR_HTTP_SD",
+}
+
+#: 계열별 `(GP_ 컬럼, 규격 필드명)` — **이름으로 맞춘다.**
+#:
+#: `XDR_LTE_CALL_KPI` 는 154필드가 1:1 이라 위치로 맞췄지만(`xdr_mapping`),
+#: 여기는 규격 415필드 중 55개만 뽑으므로 위치 대응이 아예 없다. 이름으로
+#: 맞추고 **컬럼이 하나라도 빠지면 멈춘다**(`uplane_mapping`) — 조용히 빠지면
+#: 그 카운터가 영원히 NULL 이고, NULL 은 "모름"으로 읽혀 KPI 가 산출 불가로
+#: 내려간다. 에러가 나는 쪽이 낫다.
+#:
+#: `Traffic_Total_*` 만 이름을 줄였다. 그대로 펴면
+#: `TRAFFIC_TOTAL_UPLINK_RETRANS_PACKET_COUNT`(42자)로 식별자 30자 상한을
+#: 넘는다(상용이 Oracle 포팅이라 그 제약을 받는다).
+#:
+#: `SUMMARY_CREATE_TIME` 은 여기 없다 — 규격은 epoch 실수지만 DB 컬럼은
+#: 파티션 키용 `datetime` 이라 writer 가 분 시각을 직접 넣는다. `write_xdr` 이
+#: `EVENT_TIME` 에 하는 것과 같다.
+UPLANE_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
+    "transport": (
+        ("ENB_ID", "eNB_ID"),
+        ("CELL_ID", "Cell_ID"),
+        ("IMSI", "IMSI"),
+        ("SYN_COUNT", "SynCount"),
+        ("ACK_TIME", "AckTime"),
+        ("RST_COUNT", "RstCount"),
+        ("UPLINK_WINDOW_CLOSE_COUNT", "UplinkWindowCloseCount"),
+        ("DNLINK_WINDOW_CLOSE_COUNT", "DnlinkWindowCloseCount"),
+        ("SYN_MSS_SIZE", "SynMssSize"),
+        ("SYN_ACK_MSS_SIZE", "SynAckMssSize"),
+        ("UPLINK_RTT_TIME", "UplinkRTTTime"),
+        ("UPLINK_RTT_COUNT", "UplinkRTTCount"),
+        ("DNLINK_RTT_TIME", "DnlinkRTTTime"),
+        ("DNLINK_RTT_COUNT", "DnlinkRTTCount"),
+        ("RETRANS_PKT_UP", "Traffic_Total_Uplink_RetransPacketCount"),
+        ("PAYLOAD_PKT_UP", "Traffic_Total_Uplink_PayloadPacketCount"),
+        ("RETRANS_PKT_DN", "Traffic_Total_Dnlink_RetransPacketCount"),
+        ("PAYLOAD_PKT_DN", "Traffic_Total_Dnlink_PayloadPacketCount"),
+        ("PAYLOAD_SIZE_UP", "Traffic_Total_Uplink_PayloadSize"),
+        ("PAYLOAD_SIZE_DN", "Traffic_Total_Dnlink_PayloadSize"),
+        ("THROUGHPUT_TIME_UP", "Traffic_Total_Uplink_ThroughputTime"),
+        ("THROUGHPUT_TIME_DN", "Traffic_Total_Dnlink_ThroughputTime"),
+        ("TETHERING", "Tethering"),
+    ),
+    "dns": (
+        ("ENB_ID", "eNB_ID"),
+        ("CELL_ID", "Cell_ID"),
+        ("IMSI", "IMSI"),
+        ("QUERY_NAME", "QueryName"),
+        ("REPLY_CODE", "ReplyCode"),
+        ("ANSWER_COUNT", "AnswerCount"),
+        ("QUERY_RETRY_COUNT", "QueryRetryCount"),
+        ("DNS_RETRY_SEQUENCE", "dns_retry_sequence"),
+        ("DNS_RETRY_INTERVAL", "dns_retry_interval"),
+        ("RESPONSE_TIME", "ResponseTime"),
+        ("REQUEST_FIRST_TIME", "RequestFirstTime"),
+        ("PAYLOAD_SIZE_UP", "Traffic_Total_Uplink_PayloadSize"),
+        ("PAYLOAD_SIZE_DN", "Traffic_Total_Dnlink_PayloadSize"),
+    ),
+    "http": (
+        ("ENB_ID", "eNB_ID"),
+        ("CELL_ID", "Cell_ID"),
+        ("IMSI", "IMSI"),
+        ("HOST", "Host"),
+        ("HOST_SITE", "Host_Site"),
+        ("STATUS_CODE", "StatusCode"),
+        ("REQUEST_TIME", "RequestTime"),
+        ("RESPONSE_TIME", "ResponseTime"),
+        ("UPLINK_RTT_TIME", "UplinkRTTTime"),
+        ("UPLINK_RTT_COUNT", "UplinkRTTCount"),
+        ("DNLINK_RTT_TIME", "DnlinkRTTTime"),
+        ("DNLINK_RTT_COUNT", "DnlinkRTTCount"),
+        ("RETRANS_PKT_DN", "Traffic_Total_Dnlink_RetransPacketCount"),
+        ("PAYLOAD_PKT_DN", "Traffic_Total_Dnlink_PayloadPacketCount"),
+        ("PAYLOAD_SIZE_DN", "Traffic_Total_Dnlink_PayloadSize"),
+        ("THROUGHPUT_TIME_DN", "Traffic_Total_Dnlink_ThroughputTime"),
+    ),
+}
+
+#: 분 귀속 컬럼 — 세 계열이 공통이다.
+UPLANE_SLOT = "SUMMARY_CREATE_TIME"
+
+#: U-Plane 계열 순서. 로그·집계 보고에서 자리를 고정한다.
+UPLANE_SERIES: tuple[str, ...] = ("transport", "dns", "http")
+
 
 # --------------------------------------------------------------------------
 # 실측 분포
@@ -467,6 +560,62 @@ def xdr_mapping(conn, database: str) -> XdrMapping:
     return XdrMapping(cols, widths)
 
 
+@dataclass
+class UplaneMapping:
+    """계열 하나의 적재 명세 — `(GP_ 컬럼, 생성기 필드 인덱스, varchar 폭)`."""
+
+    table: str
+    columns: list[str]              # UPLANE_SLOT 을 포함한 INSERT 컬럼 순서
+    picks: list[int]                # 생성기 값 리스트에서 뽑을 위치 (SLOT 제외)
+    widths: list[int | None]        # picks 와 같은 길이
+
+
+def uplane_mapping(conn, database: str) -> dict[str, UplaneMapping]:
+    """`GP_XDR_*_SD` 세 테이블의 적재 명세를 만든다.
+
+    **이름으로 맞추고, 어긋나면 멈춘다.** DDL 쪽 컬럼이 `UPLANE_FIELDS` 에
+    없거나 반대로 없는 컬럼을 적재하려 하면 둘 다 에러다. 조용히 빠지면 그
+    카운터가 영원히 NULL 이고, NULL 은 "모름"으로 읽혀 해당 KPI 가 산출 불가로
+    내려간다 — 데이터는 들어오는데 지표만 안 서는 형태라 추적이 어렵다.
+
+    테이블이 아직 없으면(DDL 미적용) 그 계열을 **생략한다**. 멈추지 않는
+    이유는 C-Plane 적재가 U-Plane 때문에 막혀서는 안 되기 때문이다 —
+    호출부가 돌려받은 dict 의 키로 "무엇이 살아 있는가"를 판정한다.
+    """
+    out: dict[str, UplaneMapping] = {}
+    for series in UPLANE_SERIES:
+        table = GP_XDR[series]
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s ORDER BY ORDINAL_POSITION",
+                [database, table],
+            )
+            rows = cur.fetchall()
+        if not rows:
+            continue
+        db_cols = {r[0].upper(): (int(r[1]) if r[1] is not None else None) for r in rows}
+        spec = UPLANE_FIELDS[series]
+        want = {c for c, _ in spec} | {UPLANE_SLOT}
+        if missing := want - set(db_cols):
+            raise RuntimeError(f"{table} 에 없는 컬럼: {sorted(missing)}")
+        if extra := set(db_cols) - want:
+            raise RuntimeError(
+                f"{table} 에 적재 명세가 없는 컬럼: {sorted(extra)} — "
+                "UPLANE_FIELDS 를 채우지 않으면 그 컬럼은 영원히 NULL 이다"
+            )
+        idx = {name: i for i, name in enumerate(SERIES_FIELDS[series])}
+        if absent := [f for _, f in spec if f not in idx]:
+            raise RuntimeError(f"{series} 생성기에 없는 규격 필드: {absent}")
+        out[series] = UplaneMapping(
+            table=table,
+            columns=[UPLANE_SLOT] + [c for c, _ in spec],
+            picks=[idx[f] for _, f in spec],
+            widths=[db_cols[c] for c, _ in spec],
+        )
+    return out
+
+
 # --------------------------------------------------------------------------
 # 생성 — 기존 Generator 를 상용 분포로 덮어쓴다
 # --------------------------------------------------------------------------
@@ -487,11 +636,21 @@ class PemdbGen:
             random.Random(seed + 101), success_only=success_only,
         )
         profiles = load_profiles(data_dir / "profile.json")
-        # lte_call 만 쓴다 — 상용 XDR_LTE_CALL_KPI 가 목표고, transport/http/dns 는
-        # PM_APP_*/PM_DNS_* 로 가야 해서 아직 매핑하지 않았다.
+        # **`lte_call` 이 반드시 첫 자리여야 한다.** `Generator.__init__` 이
+        # `enumerate(profiles.items())` 로 계열별 샘플러 시드를 `seed + i` 로
+        # 준다. 순서가 바뀌면 lte_call 의 시드가 달라져 **같은 seed 로 돌려도
+        # C-Plane 데이터가 재현되지 않는다** — 에러 없이 과거 결과와 어긋난다.
+        series_rates = {"lte_call": int(rates.get("lte_call", 2000))}
+        for s in UPLANE_SERIES:
+            # 비율 0 이면 그 계열을 아예 만들지 않는다. 빈 계열을 넣어 두면
+            # 집계가 0행을 "값이 0" 으로 쓸 자리가 생긴다(불변규칙 17).
+            if int(rates.get(s, 0)) > 0:
+                series_rates[s] = int(rates[s])
+        self.series: tuple[str, ...] = tuple(series_rates)
         self.gen = Generator(
-            cells=self.cells, profiles={"lte_call": profiles["lte_call"]},
-            scenarios=[], rates={"lte_call": int(rates.get("lte_call", 2000))},
+            cells=self.cells,
+            profiles={s: profiles[s] for s in series_rates},
+            scenarios=[], rates=series_rates,
             seed=seed, diurnal=True, subscriber_pool=subscriber_pool,
             success_only=success_only,
             # 상용 적재는 `ONGOINGFLAG='2'`(호 종료)만 담는다. 생성기가
@@ -557,6 +716,42 @@ class PemdbGen:
                     continue
                 MUTATORS[sc.kind](rec, sc, sc.intensity(minute), gen.rng, cell)
             out.append(rec.values)
+        return out
+
+    def uplane_records(self, minute: int, ts: datetime) -> dict[str, list[list[str]]]:
+        """한 분의 U-Plane 레코드 — 계열별 값 리스트.
+
+        `records`(lte_call)와 구조가 같지만 **`_coerce` 가 없다.** 덮어쓸 상용
+        실측 분포가 없기 때문이다 — 상용에 원시 Transport·DNS·HTTP XDR 자체가
+        없어서 `_distributions.json` 에 그 계열의 값 분포가 들어 있지 않다.
+        여기서 억지로 C-Plane 분포를 가져다 쓰면 근거 없는 수치가 된다.
+
+        **시나리오 변형은 계열을 가린다.** `sc.series` 에 그 계열이 없으면
+        건너뛴다 — `SC-05`(DNS)·`SC-06`(HTTP)·`SC-07`(Transport)이 각각 자기
+        계열만 건드리도록 이미 선언돼 있고, 전 계열에 걸면 한 장애가 세 축을
+        동시에 흔들어 원인 판정이 섞인다.
+        """
+        gen = self.gen
+        slot_start = ts.timestamp()
+        active = [sc for sc in gen.scenarios if sc.covers(minute)]
+        for sc in active:
+            sc.active_cells_cache = sc.active_cells(minute)  # type: ignore[attr-defined]
+
+        out: dict[str, list[list[str]]] = {}
+        for series in UPLANE_SERIES:
+            if series not in self.series:
+                continue
+            rows: list[list[str]] = []
+            for _ in range(gen._volume(series, ts)):
+                rec, cell = gen.base_user_traffic(series, ts, slot_start)
+                for sc in active:
+                    if series not in sc.series:
+                        continue
+                    if sc.target.cell_keys and cell.cell_key not in sc.active_cells_cache:
+                        continue
+                    MUTATORS[sc.kind](rec, sc, sc.intensity(minute), gen.rng, cell)
+                rows.append(rec.values)
+            out[series] = rows
         return out
 
     def _coerce(self, rec) -> None:
@@ -686,6 +881,61 @@ class PemdbWriter:
                 )
         self.conn.commit()
         return len(data)
+
+    def write_uplane(self, ts: datetime, series: str, rows: list[list[str]],
+                     mapping: UplaneMapping) -> int:
+        """`GP_XDR_*_SD` 한 계열 적재 — `write_xdr` 과 같은 구간 멱등이다.
+
+        `SUMMARY_CREATE_TIME` 에는 **분 시각을 넣는다.** 규격 필드는 epoch
+        실수지만 DB 컬럼은 파티션 키라 `datetime` 이어야 하고, 1분 집계에
+        분 안의 초는 쓰이지 않는다. `write_xdr` 이 `EVENT_TIME` 에 하는 것과
+        같은 처리다 — 두 테이블의 분 귀속이 같아야 같은 분의 C-Plane·U-Plane
+        이 한 Incident 로 상관된다.
+
+        응답시간 계열(`RESPONSE_TIME`·`REQUEST_TIME`·`REQUEST_FIRST_TIME`)은
+        **원래의 epoch 값을 그대로 둔다.** 집계가 둘의 차이를 쓰므로 분 시각으로
+        덮으면 모든 응답시간이 0 이 된다.
+        """
+        cols = ",".join(f"`{c}`" for c in mapping.columns)
+        marks = ",".join(["%s"] * len(mapping.columns))
+        data = []
+        for values in rows:
+            out: list = [ts]
+            for pos, width in zip(mapping.picks, mapping.widths):
+                v = values[pos]
+                if width is not None and len(v) > width:
+                    # STRICT_TRANS_TABLES 에서는 길이 초과가 에러다. 잘라서
+                    # 넘기되 횟수를 센다 — 조용히 자르면 값이 틀린 것을 모른다.
+                    v = v[:width]
+                    self.clamped += 1
+                out.append(v)
+            data.append(tuple(out))
+        with self.conn.cursor() as cur:
+            cur.execute(
+                f"DELETE FROM `{mapping.table}` "
+                f"WHERE `{UPLANE_SLOT}` >= %s AND `{UPLANE_SLOT}` < %s",
+                [ts, ts + timedelta(minutes=1)],
+            )
+            for i in range(0, len(data), 2000):
+                cur.executemany(
+                    f"INSERT INTO `{mapping.table}` ({cols}) VALUES ({marks})",
+                    data[i:i + 2000],
+                )
+        self.conn.commit()
+        return len(data)
+
+    def write_uplane_all(self, ts: datetime, batches: dict[str, list[list[str]]],
+                         mappings: dict[str, UplaneMapping]) -> dict[str, int]:
+        """계열별 적재를 한 번에. 테이블이 없는 계열은 **건너뛴다.**
+
+        `uplane_mapping` 이 DDL 미적용 계열을 명세에서 빼므로, 여기서 그
+        계열의 레코드는 버려진다. 생성은 했는데 적재되지 않는 상태를 조용히
+        두면 "왜 비어 있나"를 추적할 수 없으니 호출부가 반환값으로 센다.
+        """
+        return {
+            s: self.write_uplane(ts, s, rows, mappings[s])
+            for s, rows in batches.items() if s in mappings
+        }
 
     def last_event_time(self, table: str = XDR_TABLE) -> datetime | None:
         with self.conn.cursor() as cur:
@@ -889,9 +1139,14 @@ def aggregate_all(conn, lo: datetime, hi: datetime) -> dict[str, int]:
 
 #: 생성기가 **쓰는** 테이블과 그 시각 컬럼 — 보존 정리의 대상이다.
 #:
-#: **`GP_*` 는 넣지 않는다.** 그것은 graphio 의 산출물이고
-#: (`graphio/store/tables.py:RESETTABLE_TABLES`), 남의 산출물을 생성기가 지우면
-#: 두 주체가 같은 행을 다투게 된다. graphio 가 Incident 를 쓰는 중에 생성기가
+#: **기준은 접두가 아니라 쓰기 주체다.** `GP_XDR_*_SD` 는 이름이 `GP_` 지만
+#: **생성기가 쓰는 원시 XDR** 이므로 여기 들어간다. 빼면 두 가지가 같이 깨진다 —
+#: 디스크가 무한히 자라고, `ensure_partitions` 가 앞을 늘려 주지 않아 범위를
+#: 벗어난 분이 전부 `pmax` 한 칸에 몰려 프루닝이 죽는다(에러 없이 느려진다).
+#:
+#: **`GP_KPI_*`·`GP_INCIDENT` 류 분석 산출물은 넣지 않는다.** 그것은 graphio 가
+#: 쓰고 (`graphio/store/tables.py:RESETTABLE_TABLES`), 남의 산출물을 생성기가
+#: 지우면 두 주체가 같은 행을 다툰다. graphio 가 Incident 를 쓰는 중에 생성기가
 #: 그 파티션을 떨어뜨리면 분석 결과만 사라지고 에러는 나지 않는다 — 운영자
 #: 화면에서는 "장애 없음"으로 보인다(불변규칙 17 이 금지하는 형태).
 #: `CL_*`·`CM_*` 마스터도 대상이 아니다 — 다른 주체가 관리하고 시각 컬럼이 없다.
@@ -900,7 +1155,7 @@ WRITTEN_TABLES: tuple[tuple[str, str], ...] = (
     (PM_ENB, "EVENT_TIME"),
     (PM_ENB_CAUSE, "EVENT_TIME"),
     (PM_EPC, "EVENT_TIME"),
-)
+) + tuple((GP_XDR[s], UPLANE_SLOT) for s in UPLANE_SERIES)
 
 
 def _day_partitions(conn, database: str, table: str) -> list[tuple[str, datetime]]:
@@ -1011,19 +1266,30 @@ def purge_before(conn, database: str, cutoff: datetime) -> dict[str, int]:
 #: **억지로 만들지 않는다.** 원천 XDR 이 없는데 값을 지어내면 PoC 가 거짓말을
 #: 한다 — 룰은 발동하고 채점은 올라가지만 운영에서는 아무것도 재현되지 않는다.
 #: 미연동으로 남기고 보고하는 것이 불변규칙 17 의 취지다.
-UNSUPPORTED: dict[str, str] = {
-    "SC-05": "DNS_DEGRADATION — DNS XDR 미연동 "
-             "(AnswerCount·QueryRetryCount·ReplyCode·ResolvedIP 가 pemdb1 에 없다)",
-    "SC-06": "EXTERNAL_SERVER — HTTP XDR 미연동 "
-             "(StatusCode·HTTP_Total_Response_PayloadSize·ClientHelloDomain 이 없다)",
-    "SC-07": "TRANSPORT_LOSS — Transport XDR 미연동 "
-             "(Traffic_Total_Dnlink_RetransPacketCount·DnlinkRTTTime 이 없다)",
-}
+#: 지금은 비어 있다. **U-Plane 세 종(SC-05·06·07)이 2026-10-13 에 풀렸다** —
+#: `GP_XDR_TRANSPORT_SD`·`GP_XDR_DNS_SD`·`GP_XDR_HTTP_SD` 를 만들고 적재 경로를
+#: 붙였다(`UPLANE_FIELDS` · `PemdbWriter.write_uplane`).
+#:
+#: 풀기 전에 **변조기가 건드리는 필드가 실제로 적재되는지** 대조했다. 규격
+#: 415필드 중 55개만 적재하므로, 변조는 됐는데 그 컬럼이 안 실리면 **장애가
+#: 주입되지 않고 채점만 0% 로 나온다** — 에러가 없는 종류다.
+#:
+#:   SC-05 `_dns_degradation`   6/7 적재 (`ResolvedIP` 만 빠짐)
+#:   SC-06 `_external_server`   3/4 적재 (`HTTP_Total_Response_PayloadSize` 빠짐)
+#:   SC-07 `_transport_loss`    4/4 적재
+#:
+#: 빠진 둘은 **1분 집계가 읽지 않는다**(`graphio/metrics/cell_agg.py` 의
+#: `_u_cell_specs`). 판정 신호는 각각 `ReplyCode=2`/`ResponseTime=0` →
+#: `DNS_FAIL`·`DNS_NORESP`, `StatusCode` 5xx → `HTTP_5XX`,
+#: down 재전송·`DnlinkRTTTime` → `RETRANS_DN`·`RTT_DN_TIME` 이라 전부 살아 있다.
+UNSUPPORTED: dict[str, str] = {}
 
-#: 돌아가는 10종. `XDR_LTE_CALL_KPI` 155컬럼만으로 변형이 성립하는 것들이다.
+#: 돌아가는 13종 전부. **채점 상한이 10/13(76.9%)에서 13/13 으로 올라간다** —
+#: 구 벤치마크에서 SC-05·SC-06 은 C-Plane 이벤트가 0건이어서 탐지 자체가
+#: 불가능했고, 그것이 탐지율 저하가 아니라 **채점 상한**이었다.
 SUPPORTED: tuple[str, ...] = (
-    "SC-01", "SC-02", "SC-03", "SC-04", "SC-08",
-    "SC-09", "SC-10", "SC-11", "SC-12", "SC-13",
+    "SC-01", "SC-02", "SC-03", "SC-04", "SC-05", "SC-06", "SC-07",
+    "SC-08", "SC-09", "SC-10", "SC-11", "SC-12", "SC-13",
 )
 
 

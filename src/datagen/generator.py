@@ -506,6 +506,18 @@ class Generator:
         """
         return self._lte_call(ts, slot_start)
 
+    def base_user_traffic(self, series: str, ts: datetime,
+                          slot_start: float) -> tuple[Rec, Cell]:
+        """시나리오 변형 **전**의 U-Plane 레코드 하나 (transport·dns·http).
+
+        `base_lte_call` 과 같은 이유로 공개한다 — 상용 스키마 어댑터
+        (`pemdb1.PemdbGen.uplane_records`)가 생성과 변형 사이에 끼어든다.
+        다만 U-Plane 은 **덮어쓸 상용 실측 분포가 없다** (상용에 원시
+        Transport·DNS·HTTP XDR 자체가 없다). 그래서 어댑터는 값을 고치지 않고
+        셀 선택·시나리오 변형만 관장한다.
+        """
+        return self._user_traffic(series, ts, slot_start)
+
     def generate_minute(self, minute: int, ts: datetime) -> dict[str, list[str]]:
         slot_start = ts.timestamp()
         active = [sc for sc in self.scenarios if sc.covers(minute)]
