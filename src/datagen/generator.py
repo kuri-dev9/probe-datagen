@@ -80,7 +80,6 @@ class Subscriber:
     model: str
     mcc_mnc: str
     exchange: str
-    spid: str
     dcnr: str
     home_cell: int
 
@@ -187,7 +186,6 @@ class Generator:
                     model=model,
                     mcc_mnc=mcc_mnc,
                     exchange=f"{rng.randint(1000, 9999)}",
-                    spid=smp.categorical("spid", "0") if smp else "0",
                     dcnr=smp.categorical("ue_dcnr", "-1") if smp else "-1",
                     home_cell=rng.randrange(len(self.cells)),
                 )
@@ -287,7 +285,6 @@ class Generator:
         )
         rec.set("ue_dcnr", sub.dcnr)
         rec.set("equip_nw", smp.categorical("equip_nw", ""))
-        rec.set("spid", sub.spid)
         rec.set("nas_key_validity", smp.categorical("nas_key_validity", "1"))
 
         dur = min(smp.numeric("call_duration_time", 0.0), 6e8)

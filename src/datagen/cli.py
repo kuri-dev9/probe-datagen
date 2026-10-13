@@ -300,6 +300,20 @@ def cmd_pemfill(args) -> int:
         print(f"▶ 컬럼 매핑 확인 — {P.XDR_TABLE} {len(mapping.columns)}컬럼 "
               f"(EVENT_TIME + 생성기 필드 {len(mapping.columns) - 1})")
 
+        # ── 그릴 수 있는 동으로 셀을 한정한다 ─────────────────────────────
+        # 번들 경계 geojson 은 행정동, pemdb1 은 법정동이다. 매핑으로는 못 넘는
+        # 차이라(`pemdb1.load_drawable_dongs` 참조) 셀 쪽을 좁힌다. 경로가
+        # 설정돼 있는데 파일이 없으면 **멈춘다** — 조용히 전량으로 돌면 읍면동
+        # 지도의 절반이 다시 회색이 되고, 그것을 알아챌 방법이 없다.
+        drawable = None
+        xw_path = args.geo_crosswalk or pem.get("geo_crosswalk")
+        if xw_path and not args.no_geo_filter:
+            p = Path(xw_path)
+            if not p.is_absolute():
+                p = (HERE / p).resolve()
+            drawable = P.load_drawable_dongs(p)
+            print(f"▶ 폴리곤 있는 동 {len(drawable):,}개 — {p}")
+
         gen = P.PemdbGen(
             conn, data_dir, rates={"lte_call": rate}, seed=seed,
             subscriber_pool=int(pem.get("subscriber_pool", 20_000)),
@@ -309,11 +323,18 @@ def cmd_pemfill(args) -> int:
                           else bool(pem.get("success_only", True))),
             enb_limit=(args.enb_limit if args.enb_limit is not None
                        else int(pem.get("enb_limit", 0))),
+            drawable=drawable,
         )
-        mapped = sum(1 for c in gen.cells if c.geo_status == "MAPPED")
+        mapped = [c for c in gen.cells if c.geo_status == "MAPPED"]
         print(f"▶ 셀 마스터 — {len(gen.cells):,}셀 / "
               f"eNB {len({c.enb_id for c in gen.cells}):,}개 "
-              f"(좌표 보유 {mapped:,} · UNMAPPED {len(gen.cells) - mapped:,})")
+              f"(좌표 보유 {len(mapped):,} · UNMAPPED {len(gen.cells) - len(mapped):,})")
+        # 지리 축이 실제로 몇 칸을 칠하는지 — 패턴(CLUSTER/CORRIDOR)이 성립할
+        # 만큼 한 시군구에 셀이 모여 있는지를 여기서 보고 판단한다.
+        if mapped:
+            print(f"  시도 {len({c.adm_sido_cd for c in mapped})} · "
+                  f"시군구 {len({(c.adm_sido_cd, c.adm_sgg_cd) for c in mapped})} · "
+                  f"읍면동 {len({(c.adm_sido_cd, c.adm_sgg_cd, c.adm_emd_cd) for c in mapped})}")
         gen.anchor = start
 
         # ── 장애 주입 ────────────────────────────────────────────────────
@@ -402,6 +423,13 @@ def main(argv=None) -> int:
     p.add_argument("--rate", type=int, help="분당 호 수 (기본 설정 pemdb1.rates.lte_call)")
     p.add_argument("--enb-limit", type=int,
                    help="생성 대상 eNB 수 (기본 설정 pemdb1.enb_limit · 0 이면 전량)")
+    # 셀 선택을 폴리곤 있는 동으로 한정한다. 기본은 설정의 경로를 쓴다 —
+    # `--no-geo-filter` 로 끄면 종전대로 전량이 후보이고 읍면동 지도가 다시
+    # 절반 회색이 된다(비교용으로만 쓴다).
+    p.add_argument("--geo-crosswalk",
+                   help="행정코드 crosswalk 경로 (기본 설정 pemdb1.geo_crosswalk)")
+    p.add_argument("--no-geo-filter", action="store_true",
+                   help="폴리곤 없는 동의 셀도 후보에 넣는다 (읍면동 지도가 비어 보인다)")
     p.add_argument("--with-failures", action="store_true",
                    help="실측 실패·절단 비율을 재현 (기본은 성공 전용)")
     p.add_argument("--no-agg", action="store_true", help="XDR 적재만 하고 집계는 건너뛴다")

@@ -34,7 +34,7 @@ SEP = "\x1e"
 CATEGORICAL: dict[str, tuple[str, ...]] = {
     "lte_call": (
         "OngoingFlag", "call_type", "old_call_type", "APN", "ims_APN",
-        "imsi_mcc_mnc_info", "Vendor", "Model", "PayCode", "spid",
+        "imsi_mcc_mnc_info", "Vendor", "Model", "PayCode",
         "First_eNB_PLMN", "PDN_Type", "ims_PDN_Type", "CNDomain",
         "InitialUEMessage_RRC_Establishment_Cause", "ue_dcnr", "equip_nw",
         "ue_usage_type", "mme_restrict_dcnr", "nas_key_validity",

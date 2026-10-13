@@ -165,7 +165,8 @@ def synth_service_code(index: int) -> str:
     달리 **맞출 표준이 없으므로 흉내낼 대상도 없다** — 그래서 한눈에 합성값임을
     알 수 있는 `SVC` 접두를 붙인다.
 
-    `spid`(141행, `uint`/`NUMBER(3)`, "Subscriber Profile ID for RFP")는 별도
-    컬럼이고 평문이다. 둘을 섞지 않는다.
+    `spid`(141행, `uint`/`NUMBER(3)`, "Subscriber Profile ID for RFP")는
+    **로컬에서 컬럼째 지웠다**(2026-10-13) — 요금제·가입 등급의 대리 지표라
+    개인 속성에 가깝다. 상용에는 있다.
     """
     return "SVC" + _scatter(index, 7)

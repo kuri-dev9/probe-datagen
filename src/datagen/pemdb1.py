@@ -249,6 +249,60 @@ def _weight(enb_id: str, cellnum: int) -> float:
     return 0.25 * (16.0 ** ((h % 10_000) / 10_000))
 
 
+def load_drawable_dongs(path: Path) -> set[str]:
+    """graphio 의 행정코드 crosswalk 에서 **폴리곤이 있는 동 코드** 집합을 읽는다.
+
+    반환 원소는 `CM_CELL_REP_RU_LOC` 의 `CITY_ID-GU_ID-DONG_ID` 를 이은 꼴
+    (`"11-11110-11110003"`)이다 — graphio `metrics/kpi.py:cell_geo_exprs()` 의
+    `adm_emd_cd` 와 같은 형식이라 그대로 비교된다.
+
+    **왜 필요한가.** 번들 경계 geojson 은 **행정동**(3,504) 이고 pemdb1 은
+    **법정동**(8,079) 이다. `종로1·2·3·4가동` 같은 통합 행정동은 법정동 목록에
+    대응 행이 **원리상 없다** — 이름이 우연히 같은 2,868개만 crosswalk 가
+    맞췄다. 그래서 셀을 아무렇게나 고르면 읍면동 지도의 절반이 회색으로 남고,
+    운영자는 그것을 "그 지역 문제 없음"으로 읽는다(불변규칙 12).
+
+    해법은 경계 데이터를 새로 구하는 것이 아니라 **그릴 수 있는 동에서 셀을
+    고르는 것**이다 — 마스터에 44만 셀이 있고 그중 22만이 폴리곤 있는 동에
+    속한다(실측). PoC 에서 셀 선택은 우리 재량이다.
+
+    **파일이 없으면 멈춘다.** 없는 집합을 추측으로 만들면 지도가 또 어긋나고,
+    그때는 어디서 어긋났는지 알 방법이 없다.
+    """
+    if not path.exists():
+        raise RuntimeError(
+            f"행정코드 crosswalk 가 없다: {path}\n"
+            "  graphio 쪽에서 먼저 만들어라 — python -m graphio geo-xw"
+        )
+    with path.open(encoding="utf-8") as fh:
+        xw = json.load(fh)
+    emd = ((xw.get("map") or {}).get("emd") or {})
+    if not emd:
+        raise RuntimeError(f"crosswalk 에 map.emd 가 비어 있다: {path}")
+    # 키는 geojson 코드, **값이 pemdb1 코드**다. 뒤집어 쓰면 전량 무매칭이 된다.
+    return set(emd.values())
+
+
+def _filter_drawable(uniq: dict, drawable: set[str] | None) -> dict:
+    """폴리곤 있는 동의 셀만 남긴다. 좌표 없는 셀은 **그대로 둔다**.
+
+    `CITY_ID IS NULL` 인 셀은 애초에 동에 닿지 않으므로 읍면동 커버리지의
+    분모가 아니고, 빼면 `H-07`(미매핑 감시)과 UNMAPPED 패널이 한 번도
+    검증되지 않는다(불변규칙 12). "시뮬레이션이 그 셀을 안 쓴다"와 "미매핑
+    셀이 없다"는 다른 사실이다.
+    """
+    if not drawable:
+        return uniq
+    out = {}
+    for key, r in uniq.items():
+        city, gu, dong = r[5], r[6], r[7]
+        if city is None:                       # UNMAPPED — 판정 대상이 아니다
+            out[key] = r
+        elif f"{city}-{gu}-{dong}" in drawable:
+            out[key] = r
+    return out
+
+
 def _pick_enbs(uniq: dict, enb_limit: int | None) -> set[str] | None:
     """생성 대상 eNB 를 결정론적으로 고른다.
 
@@ -271,7 +325,8 @@ def _pick_enbs(uniq: dict, enb_limit: int | None) -> set[str] | None:
     return out
 
 
-def load_cells(conn, enb_limit: int | None = None) -> list[Cell]:
+def load_cells(conn, enb_limit: int | None = None,
+               drawable: set[str] | None = None) -> list[Cell]:
     """`CL_CELL_MAP` + `CM_CELL_REP_RU_LOC` → `Cell` 목록.
 
     조인 키는 실측으로 확인된 것을 쓴다. `CM_CELL_REP_RU_LOC.ENB_ID` 는
@@ -297,6 +352,10 @@ def load_cells(conn, enb_limit: int | None = None) -> list[Cell]:
     수천 호를 흘리면 eNB 당 표본이 1건 미만이 되어 **어떤 창에서도 판정이
     서지 않는다**(최소 표본 20, 불변규칙 5). 선택은 결정론적이다 — 틱마다
     대상 eNB 가 바뀌면 시계열이 조각난다.
+
+    `drawable` 은 `load_drawable_dongs()` 가 준 **폴리곤 있는 동 코드** 집합이다.
+    주면 그 동의 셀(+좌표 없는 셀)만 후보가 되어 읍면동 지도가 전부 칠해진다.
+    `None` 이면 종전대로 전량이 후보다.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -327,6 +386,9 @@ def load_cells(conn, enb_limit: int | None = None) -> list[Cell]:
             continue
         uniq.setdefault((str(r[0]), int(r[1])), r)
 
+    # 폴리곤 있는 동으로 좁힌 **뒤에** eNB 를 고른다. 순서를 바꾸면 고른 eNB 의
+    # 셀이 대부분 탈락해 생성 규모가 무너진다.
+    uniq = _filter_drawable(uniq, drawable)
     keep = _pick_enbs(uniq, enb_limit)
     cells: list[Cell] = []
     for (enb, cellnum), (_e, _c, c_uid, grp, ems,
@@ -414,8 +476,9 @@ class PemdbGen:
 
     def __init__(self, conn, data_dir: Path, rates: dict, seed: int = 20260903,
                  subscriber_pool: int = 20_000, success_only: bool = True,
-                 enb_limit: int | None = None):
-        self.cells = load_cells(conn, enb_limit=enb_limit)
+                 enb_limit: int | None = None,
+                 drawable: set[str] | None = None):
+        self.cells = load_cells(conn, enb_limit=enb_limit, drawable=drawable)
         if not self.cells:
             raise RuntimeError("CL_CELL_MAP 이 비어 있다 — 마스터를 먼저 적재하라")
         self.dist = Distributions(

@@ -57,7 +57,7 @@ KEEP: dict[str, tuple[str, ...]] = {
         "initial_paging_duration", "initial_paging_msg_count",
         "initial_paging_attempt_count",
         "imsi_mcc_mnc_info", "ue_dcnr", "initial_nr_conn_time",
-        "mme_restrict_dcnr", "equip_nw", "spid",
+        "mme_restrict_dcnr", "equip_nw",
     ),
     "transport": (
         "SummaryCreateTime", "OngoingFlag", "IMSI", "Vendor", "Model",
@@ -114,7 +114,7 @@ _VARCHAR = {
     "Host_Prefix", "Method", "ResolvedIP", "ClientHelloDomain",
     "LastDnsQueryName", "App_Group_Code", "App_ID", "imsi_mcc_mnc_info",
     "First_eNB_ID", "Last_eNB_ID", "eNB_ID", "old_call_Last_eNB_ID",
-    "First_eNB_PLMN", "Last_eNB_PLMN", "spid", "equip_nw",
+    "First_eNB_PLMN", "Last_eNB_PLMN", "equip_nw",
 }
 
 
