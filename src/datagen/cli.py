@@ -334,6 +334,8 @@ def cmd_run(args) -> int:
             # 희소 Call Type 바닥. `None` 이면 `Distributions.CALL_TYPE_FLOOR`
             # 기본값(0.3%)을 쓴다. 0 을 주면 실측 분포 그대로 돈다.
             call_type_floor=pem.get("call_type_floor"),
+            # U-Plane 세션 분포 모수. 없으면 `session.Shape` 기본값이다.
+            uplane_session=pem.get("uplane_session"),
         )
         # U-Plane 은 MySQL 이 아니라 로컬 Parquet 로 간다(2026-10-14).
         # 계열 유무의 정본은 **생성 설정**이다 — 전에는 테이블 존재 여부였다.
@@ -510,6 +512,7 @@ def cmd_pemfill(args) -> int:
                        else int(pem.get("enb_limit", 0))),
             drawable=drawable,
             call_type_floor=pem.get("call_type_floor"),
+            uplane_session=pem.get("uplane_session"),
         )
         mapped = [c for c in gen.cells if c.geo_status == "MAPPED"]
         print(f"▶ 셀 마스터 — {len(gen.cells):,}셀 / "
@@ -671,6 +674,11 @@ def _pem_follow(conn, P, gen, w, last_done, *, umaps: dict,
             t0 = time.time()
             minute_idx = int((pending - gen.anchor).total_seconds() // 60)
             rows = gen.records(minute_idx, pending)
+            # **생성은 재시도 루프 밖에서 한 번만 한다.** U-Plane 세션 엔진이
+            # 활성 세션을 분 사이에 들고 있어(`session.SessionEngine`) 같은
+            # 분을 두 번 생성하면 세션이 두 칸 전진하고 **같은 세션의 레코드가
+            # 두 줄 나온다.** 적재는 구간 멱등이지만 생성은 아니다.
+            up_rows = gen.uplane_records(minute_idx, pending)
 
             # **한 분이 실패해도 데몬은 살아 있어야 한다.** 틱이 예외로 죽으면
             # 그 뒤로 데이터가 멈추는데, 화면은 "최신 관측 시각"을 그대로
@@ -685,8 +693,7 @@ def _pem_follow(conn, P, gen, w, last_done, *, umaps: dict,
             for attempt in range(1, 4):
                 try:
                     n = w.write_xdr(pending, rows)
-                    un = w.write_uplane_all(
-                        pending, gen.uplane_records(minute_idx, pending), umaps)
+                    un = w.write_uplane_all(pending, up_rows, umaps)
                     if not no_agg:
                         P.aggregate_all(conn, pending,
                                         pending + timedelta(minutes=1))

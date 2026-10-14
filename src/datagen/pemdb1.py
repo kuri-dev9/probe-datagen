@@ -45,11 +45,12 @@ from . import uplane_parquet
 from .cells import Cell
 from .faults import resolve_active as resolve_active_faults
 from .fields import SERIES_FIELDS
-from .generator import Generator
+from .generator import Generator, USER_FIELDS
 from .identity import synth_imei, synth_imsi
 from .profile import load as load_profiles
 from .scenarios import MUTATORS, Scenario
 from .scenarios import build_scenarios as build_sim_scenarios
+from .session import Call, SessionEngine, Shape
 
 # --------------------------------------------------------------------------
 # 상수
@@ -117,11 +118,33 @@ PM_EPC = "PM_EPC_KPI_1M_ORG"
 #: `EVENT_TIME` 은 여기 없다 — 규격 필드(`SummaryCreateTime`)는 epoch 실수지만
 #: 분 귀속 컬럼은 `datetime` 이라 writer 가 분 시각을 직접 넣는다.
 #: `write_xdr` 이 C-Plane 에 하는 것과 같다.
+#: **`ONGOING_FLAG`·`SESSION_ID` 는 세션 모델이 추가했다**(2026-10-14). 구 DDL
+#: 에는 없었다 — 그때는 U-Plane 레코드 하나가 세션 하나였고 전부 `20`
+#: (Start/End) 이라 담을 뜻이 없었다. 세션이 분을 넘기면서
+#:
+#:   · `ONGOING_FLAG` 가 **집계 대상을 가른다.** `{2, 20}` 만 세고(graphio
+#:     `codes.COUNTED_ONGOING_FLAGS`) Interim 을 세면 같은 바이트를 여러 번
+#:     센다. 이 컬럼이 없으면 그 구분을 할 수 없다.
+#:   · `SESSION_ID` 가 **한 세션의 레코드를 잇는다.** 핸드오버로 셀이 바뀐
+#:     세션이 끊기지 않았음을 확인할 유일한 키다(설계 §7.6). 그리고 그 세션을
+#:     열어 준 **호와 잇는다** — SCR-07 가입자 추적의 연결 고리다.
+#:   · `MME_ID`·`SGW_ID`·`PGW_ID` 가 **장비 축 집계의 원천이다**(2026-10-14).
+#:     셀 축(`GP_KPI_U_CELL_1M`)·도메인 축(`GP_KPI_DOMAIN_1M`)은 있었는데 장비
+#:     축이 비어 있어서 "이 SGW 를 경유하는 트래픽의 품질"을 화면이 물을 수
+#:     없었다. 생성기는 전부터 이 세 값을 레코드에 쓰고 있었고(`uplane_rec` 이
+#:     셀에서 받는다) **Parquet 컬럼 목록에만 없었다.** 셀→노드를 나중에
+#:     조인해 얻는 방법도 있지만, 한 레코드가 자기 경로를 이미 들고 있으므로
+#:     조인은 틀릴 여지만 늘린다(0 채움 표기가 어긋나면 조용히 빈다).
 UPLANE_FIELDS: dict[str, tuple[tuple[str, str, str, int | None], ...]] = {
     "transport": (
         ("ENB_ID", "eNB_ID", "str", 30),
         ("CELL_ID", "Cell_ID", "str", 3),
         ("IMSI", "IMSI", "str", 30),
+        ("ONGOING_FLAG", "OngoingFlag", "i8", None),
+        ("SESSION_ID", "SessionID", "str", 32),
+        ("MME_ID", "MME_ID", "str", 30),
+        ("SGW_ID", "SGW_ID", "str", 30),
+        ("PGW_ID", "PGW_ID", "str", 30),
         ("SYN_COUNT", "SynCount", "i64", None),
         ("ACK_TIME", "AckTime", "f64", None),
         ("RST_COUNT", "RstCount", "i64", None),
@@ -147,6 +170,11 @@ UPLANE_FIELDS: dict[str, tuple[tuple[str, str, str, int | None], ...]] = {
         ("ENB_ID", "eNB_ID", "str", 30),
         ("CELL_ID", "Cell_ID", "str", 3),
         ("IMSI", "IMSI", "str", 30),
+        ("ONGOING_FLAG", "OngoingFlag", "i8", None),
+        ("SESSION_ID", "SessionID", "str", 32),
+        ("MME_ID", "MME_ID", "str", 30),
+        ("SGW_ID", "SGW_ID", "str", 30),
+        ("PGW_ID", "PGW_ID", "str", 30),
         ("QUERY_NAME", "QueryName", "str", 255),
         ("REPLY_CODE", "ReplyCode", "i32", None),
         ("ANSWER_COUNT", "AnswerCount", "i32", None),
@@ -162,6 +190,11 @@ UPLANE_FIELDS: dict[str, tuple[tuple[str, str, str, int | None], ...]] = {
         ("ENB_ID", "eNB_ID", "str", 30),
         ("CELL_ID", "Cell_ID", "str", 3),
         ("IMSI", "IMSI", "str", 30),
+        ("ONGOING_FLAG", "OngoingFlag", "i8", None),
+        ("SESSION_ID", "SessionID", "str", 32),
+        ("MME_ID", "MME_ID", "str", 30),
+        ("SGW_ID", "SGW_ID", "str", 30),
+        ("PGW_ID", "PGW_ID", "str", 30),
         ("HOST", "Host", "str", 255),
         ("HOST_SITE", "Host_Site", "str", 255),
         ("STATUS_CODE", "StatusCode", "i32", None),
@@ -720,8 +753,13 @@ def uplane_specs(series_on: Iterable[str] | None = None) -> dict[str, UplaneSpec
 #: `PayloadSize` 만 센다 — `DataSize` 는 헤더를 포함하고 `RetransDataSize` 는
 #: 재전송이라 **같은 바이트를 두 번 세게 된다.** 사용자가 보는 "사용량"은
 #: 실제로 흘러간 페이로드다.
-_BYTE_FIELDS = ("Traffic_Total_Uplink_PayloadSize",
-                "Traffic_Total_Dnlink_PayloadSize")
+#:
+#: **`Delta` 다. `Total` 이 아니다**(2026-10-14, 세션 모델). 세션이 분을 넘기면
+#: `Total` 은 누적이라 Start·Interim·End 를 모두 더하면 같은 바이트를 여러 번
+#: 센다 — 5분 세션 하나가 3배로 보고된다. 화면이 묻는 것은 "그 분에 얼마나
+#: 흘렸나"이고 그게 정확히 `Delta` 다.
+_BYTE_FIELDS = ("Traffic_Delta_Uplink_PayloadSize",
+                "Traffic_Delta_Dnlink_PayloadSize")
 
 #: 필드 인덱스 캐시. 분당 5만 행을 도는 자리라 매번 `.index()` 를 부르면
 #: 그것만으로 틱이 눈에 띄게 느려진다.
@@ -762,7 +800,8 @@ class PemdbGen:
                  subscriber_pool: int = 20_000, success_only: bool = True,
                  enb_limit: int | None = None,
                  drawable: set[str] | None = None,
-                 call_type_floor: float | None = None):
+                 call_type_floor: float | None = None,
+                 uplane_session: dict | None = None):
         self.cells = load_cells(conn, enb_limit=enb_limit, drawable=drawable)
         if not self.cells:
             raise RuntimeError("CL_CELL_MAP 이 비어 있다 — 마스터를 먼저 적재하라")
@@ -796,6 +835,18 @@ class PemdbGen:
             end_only=True,
         )
         self._reseat_subscribers(random.Random(seed + 202))
+        #: U-Plane 세션 엔진 — **C-Plane 과 U-Plane 을 잇는 자리**(2026-10-14).
+        #: `rates` 의 U-Plane 세 값이 여기서 파생 계수로 환산된다
+        #: (`session` 머리말 §1.4). 활성 세션을 분 사이에 들고 있으므로
+        #: **생성기 인스턴스 하나가 계속 살아 있어야 한다** — 틱마다 새로
+        #: 만들면 세션이 매번 끊기고 종료 레코드가 나오지 않는다.
+        self.sessions = SessionEngine(
+            self.gen, series_rates, Shape.from_cfg(uplane_session), seed=seed)
+        #: `records()` 가 담고 `uplane_records()` 가 꺼내는 그 분의 성공 호.
+        #: 두 호출 사이에 끼어 있는 이유는 **U-Plane 이 C-Plane 레코드에서
+        #: 나와야** 하기 때문이다 — 분이 어긋나면 멈춘다(`uplane_records`).
+        self._calls: list[Call] = []
+        self._calls_at: datetime | None = None
         self.anchor: datetime | None = None
         self.seed = seed
         #: fault_id → (판별 키, Scenario). 같은 fault 가 틱마다 다시 와도 같은
@@ -829,66 +880,105 @@ class PemdbGen:
             raise RuntimeError("anchor 미설정")
         return int((ts - self.anchor).total_seconds() // 60)
 
-    def records(self, minute: int, ts: datetime) -> list[list[str]]:
-        """한 분의 레코드(생성기 필드 순서의 값 리스트)를 만든다.
-
-        순서가 중요하다: 기반 생성 → **상용 분포 덮기** → 시나리오 변형.
-        덮기를 변형 뒤에 두면 장애가 지워진다.
-        """
-        gen = self.gen
-        slot_start = ts.timestamp()
-        active = [sc for sc in gen.scenarios if sc.covers(minute)]
+    def _active(self, minute: int) -> list[Scenario]:
+        """이 분에 걸리는 시나리오 + 대상 셀 캐시."""
+        active = [sc for sc in self.gen.scenarios if sc.covers(minute)]
         for sc in active:
             sc.active_cells_cache = sc.active_cells(minute)  # type: ignore[attr-defined]
+        return active
 
-        out: list[list[str]] = []
-        for _ in range(gen._volume("lte_call", ts)):
-            rec, cell = gen.base_lte_call(ts, slot_start)
-            self._coerce(rec)
-            for sc in active:
-                if "lte_call" not in sc.series:
-                    continue
-                if sc.target.cell_keys and cell.cell_key not in sc.active_cells_cache:
-                    continue
-                MUTATORS[sc.kind](rec, sc, sc.intensity(minute), gen.rng, cell)
-            out.append(rec.values)
-        return out
-
-    def uplane_records(self, minute: int, ts: datetime) -> dict[str, list[list[str]]]:
-        """한 분의 U-Plane 레코드 — 계열별 값 리스트.
-
-        `records`(lte_call)와 구조가 같지만 **`_coerce` 가 없다.** 덮어쓸 상용
-        실측 분포가 없기 때문이다 — 상용에 원시 Transport·DNS·HTTP XDR 자체가
-        없어서 `_distributions.json` 에 그 계열의 값 분포가 들어 있지 않다.
-        여기서 억지로 C-Plane 분포를 가져다 쓰면 근거 없는 수치가 된다.
+    def _mutator(self, minute: int, active: list[Scenario]):
+        """계열·셀 자격을 판정해 뮤테이터를 거는 콜백.
 
         **시나리오 변형은 계열을 가린다.** `sc.series` 에 그 계열이 없으면
         건너뛴다 — `SC-05`(DNS)·`SC-06`(HTTP)·`SC-07`(Transport)이 각각 자기
         계열만 건드리도록 이미 선언돼 있고, 전 계열에 걸면 한 장애가 세 축을
         동시에 흔들어 원인 판정이 섞인다.
         """
+        if not active:
+            return None
+        rng = self.gen.rng
+
+        def mutate(series: str, rec, cell) -> None:
+            for sc in active:
+                if series not in sc.series:
+                    continue
+                if sc.target.cell_keys and cell.cell_key not in sc.active_cells_cache:
+                    continue
+                MUTATORS[sc.kind](rec, sc, sc.intensity(minute), rng, cell)
+
+        return mutate
+
+    def records(self, minute: int, ts: datetime) -> list[list[str]]:
+        """한 분의 레코드(생성기 필드 순서의 값 리스트)를 만든다.
+
+        순서가 중요하다: 기반 생성 → **상용 분포 덮기** → 시나리오 변형.
+        덮기를 변형 뒤에 두면 장애가 지워진다.
+
+        **성공 호를 모아 둔다**(2026-10-14). U-Plane 이 그 호에서 파생되므로
+        (`session` 머리말) 어떤 호가 베어러를 세웠는지를 여기서만 알 수 있다.
+        변형 **뒤에** 분류하는 이유는 장애가 호의 결말을 바꾸기 때문이다 —
+        `ran_radio` 가 심은 `drop_flag=1`·Cause 121 이 U-Plane 의 "즉시 끊김"
+        으로 이어져야 한다(설계 §3.2).
+        """
         gen = self.gen
         slot_start = ts.timestamp()
-        active = [sc for sc in gen.scenarios if sc.covers(minute)]
-        for sc in active:
-            sc.active_cells_cache = sc.active_cells(minute)  # type: ignore[attr-defined]
+        active = self._active(minute)
+        mutate = self._mutator(minute, active)
+        idx = gen.index["lte_call"]
+        i_user = tuple(idx[f] for f in USER_FIELDS)      # 필드 인덱스 캐시
+        i_apn, i_end = idx["APN"], idx["call_end_time"]
+        i_rel = idx["UEContextRelease_Cause"]
 
-        out: dict[str, list[list[str]]] = {}
-        for series in UPLANE_SERIES:
-            if series not in self.series:
-                continue
-            rows: list[list[str]] = []
-            for _ in range(gen._volume(series, ts)):
-                rec, cell = gen.base_user_traffic(series, ts, slot_start)
-                for sc in active:
-                    if series not in sc.series:
-                        continue
-                    if sc.target.cell_keys and cell.cell_key not in sc.active_cells_cache:
-                        continue
-                    MUTATORS[sc.kind](rec, sc, sc.intensity(minute), gen.rng, cell)
-                rows.append(rec.values)
-            out[series] = rows
+        out: list[list[str]] = []
+        calls: list[Call] = []
+        for _ in range(gen._volume("lte_call", ts)):
+            rec, cell = gen.base_lte_call(ts, slot_start)
+            self._coerce(rec)
+            if mutate is not None:
+                mutate("lte_call", rec, cell)
+            vals = rec.values
+            out.append(vals)
+            outcome = self.sessions.classify(rec)
+            if outcome is not None:
+                # **레코드에 적힌 값을 그대로 가져간다.** 생성기의 가입자
+                # 객체를 다시 읽으면 뮤테이터가 바꾼 값(기종 등)과 어긋나고,
+                # 그러면 U-Plane 의 IMSI 가 C-Plane 에 없는 값이 될 수 있다
+                # (§7.2 고아 레코드 0).
+                try:
+                    t = float(vals[i_end] or slot_start)
+                except ValueError:
+                    t = slot_start
+                calls.append(Call(
+                    cell=cell, user=tuple(vals[i] for i in i_user),
+                    apn=vals[i_apn], t=t, outcome=outcome, rel=vals[i_rel]))
+        self._calls, self._calls_at = calls, ts
         return out
+
+    def uplane_records(self, minute: int, ts: datetime) -> dict[str, list[list[str]]]:
+        """한 분의 U-Plane 레코드 — 계열별 값 리스트.
+
+        **`records()` 를 먼저 불러야 한다.** U-Plane 은 그 분의 성공 호에서
+        파생되므로(설계 §1.1) 호 목록 없이는 만들 것이 없다. 분이 어긋나면
+        **멈춘다** — 조용히 다른 분의 호에 트래픽을 붙이면 같은 분의 C-Plane·
+        U-Plane 이 다른 장애를 보게 되고, 에러가 나지 않는다.
+
+        `records`(lte_call)와 달리 **`_coerce` 가 없다.** 덮어쓸 상용 실측
+        분포가 없기 때문이다 — 상용에 원시 Transport·DNS·HTTP XDR 자체가
+        없어서 `_distributions.json` 에 그 계열의 값 분포가 들어 있지 않다.
+        여기서 억지로 C-Plane 분포를 가져다 쓰면 근거 없는 수치가 된다.
+
+        켜 두지 않은 계열(`pemdb1.rates` 0)은 **목록에서 뺀다.** 빈 리스트를
+        넣어 두면 적재가 0행을 "값이 0" 으로 쓸 자리가 생긴다(불변규칙 17).
+        """
+        if self._calls_at != ts:
+            raise RuntimeError(
+                f"uplane_records({ts:%Y-%m-%d %H:%M}) 앞에 records() 가 없다 "
+                f"(호 목록은 {self._calls_at} 것이다). U-Plane 은 그 분의 성공 "
+                "호에서 파생된다 — 순서를 바꾸면 인과가 끊어진다")
+        mutate = self._mutator(minute, self._active(minute))
+        got = self.sessions.minute(ts, self._calls, mutate)
+        return {s: rows for s, rows in got.items() if s in self.series}
 
     def _coerce(self, rec) -> None:
         """자체 프로파일에서 나온 값을 상용 실측값으로 바꾼다."""

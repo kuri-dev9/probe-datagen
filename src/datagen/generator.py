@@ -66,9 +66,24 @@ DIURNAL = [
 #: 더 비현실적이기 때문이고, 크게 두지 않는 것은 **셀 축 최소 표본**이 야간에
 #: 무너지면 탐지가 통째로 서지 않기 때문이다(불변규칙 5).
 #:
-#: U-Plane 세 계열은 1.0 — 개수와 크기 양쪽에 곡선이 온전히 걸린다.
+#: **U-Plane 세 항목의 뜻이 바뀌었다** (2026-10-14, 세션 모델). 더는 계열별
+#: 레코드 **개수**에 걸리지 않는다 — U-Plane 레코드 수는 이제 성공 호에서
+#: 파생되므로(`session.SessionEngine`) 개수 쪽 곡선은 `lte_call` 과
+#: `uplane_sessions` 가 함께 만든다. 이 셋이 남아서 하는 일은 **세션당 바이트**
+#: 뿐이다(`_traffic_scale`). 지우지 않은 것은 "U-Plane 트래픽 크기 곡선"이라는
+#: 역할이 그대로 있고, 계열별로 다르게 두고 싶을 자리이기 때문이다.
+#:
+#: `uplane_sessions` 가 **호당 세션 수**에 걸리는 새 항목이다. 0.857 이면
+#: 04시 배율이 `1 - 0.857×0.5 = 0.571` = 1/1.75 이고, 총 트래픽이
+#:
+#:     호 1/1.14  ×  호당 세션 1/1.75  ×  세션 바이트 1/2  =  총 1/4
+#:
+#: 가 되어 사용자가 지정한 4배를 유지한다(설계 §4). 곡선을 세 자리에 나눠
+#: 거는 이유는 하나에 몰면 그 축만 비현실적으로 출렁이기 때문이다 — 실제로는
+#: 피크에 "쓰는 사람이 늘고, 더 자주 쓰고, 한 번에 더 많이 쓴다".
 DIURNAL_WEIGHT: dict[str, float] = {
     "lte_call": 0.25,
+    "uplane_sessions": 0.857,
     "transport": 1.0,
     "dns": 1.0,
     "http": 1.0,
@@ -110,6 +125,17 @@ def _index(series: str) -> dict[str, int]:
     return {f: i for i, f in enumerate(SERIES_FIELDS[series])}
 
 
+#: 가입자 식별 필드 — C-Plane·U-Plane 이 **같은 목록·같은 순서**로 쓴다.
+#:
+#: U-Plane 세션 모델이 호에서 이 값들을 상속하므로(`session.Call.user`) 한쪽만
+#: 늘어나면 U-Plane 레코드의 그 필드가 조용히 빈다. 그래서 목록을 한 자리에
+#: 두고 `_common_user` 와 `session.USER_FIELDS` 가 함께 읽는다.
+USER_FIELDS = (
+    "IMSI", "MDN", "IMEI", "ServiceCode", "PayCode", "Gender", "Age",
+    "Vendor", "Model", "imsi_mcc_mnc_info", "ExchangeNumber",
+)
+
+
 @dataclass
 class Subscriber:
     imsi: str
@@ -125,6 +151,13 @@ class Subscriber:
     exchange: str
     dcnr: str
     home_cell: int
+
+
+def user_values(sub: Subscriber) -> tuple[str, ...]:
+    """`USER_FIELDS` 순서의 값. 순서를 바꾸면 U-Plane 상속이 어긋난다."""
+    return (sub.imsi, sub.mdn, sub.imei, sub.service_code, sub.pay_code,
+            sub.gender, sub.age, sub.vendor, sub.model, sub.mcc_mnc,
+            sub.exchange)
 
 
 class Generator:
@@ -262,14 +295,15 @@ class Generator:
         return max(0, int(base * factor))
 
     def _traffic_scale(self, series: str, ts: datetime) -> float:
-        """레코드당 트래픽 **크기** 배율.
+        """**세션당** 트래픽 크기 배율.
 
-        개수(`_volume`)와 **같은 곡선**을 곱하므로 총 트래픽은 그 제곱이 된다
-        (DIURNAL 주석 참조). 사용량이 많은 시간대에는 "쓰는 사람이 늘고, 각자
-        더 많이 쓴다" — 둘 중 하나만 반영하면 피크의 총량이 모자란다.
+        세션 모델(2026-10-14) 이후 이 곡선은 곱해지는 자리가 셋 중 하나다 —
+        호 수(`lte_call`) × 호당 세션 수(`uplane_sessions`) × 여기. 셋의 곱이
+        총 트래픽 4배를 만든다(`DIURNAL_WEIGHT` 주석). 전에는 개수(`_volume`)와
+        여기 둘뿐이라 제곱이었다.
 
-        **C-Plane 에는 적용하지 않는다.** 호출부(`_user_traffic`)가 U-Plane
-        전용이고, `lte_call` 의 측정값은 지속시간·메시지 수라 바이트가 아니다.
+        **C-Plane 에는 적용하지 않는다.** U-Plane 전용이고, `lte_call` 의
+        측정값은 지속시간·메시지 수라 바이트가 아니다.
         """
         if not self.diurnal:
             return 1.0
@@ -286,17 +320,8 @@ class Generator:
         return self.subs[self.rng.randrange(len(self.subs))]
 
     def _common_user(self, rec: Rec, sub: Subscriber) -> None:
-        rec.set("IMSI", sub.imsi)
-        rec.set("MDN", sub.mdn)
-        rec.set("IMEI", sub.imei)
-        rec.set("ServiceCode", sub.service_code)
-        rec.set("PayCode", sub.pay_code)
-        rec.set("Gender", sub.gender)
-        rec.set("Age", sub.age)
-        rec.set("Vendor", sub.vendor)
-        rec.set("Model", sub.model)
-        rec.set("imsi_mcc_mnc_info", sub.mcc_mnc)
-        rec.set("ExchangeNumber", sub.exchange)
+        for name, value in zip(USER_FIELDS, user_values(sub)):
+            rec.set(name, value)
 
     def _lte_call(self, ts: datetime, slot_start: float) -> tuple[Rec, Cell]:
         smp = self.samplers["lte_call"]
@@ -447,27 +472,44 @@ class Generator:
         if self.rng.random() < 0.55:
             rec.set("success_flag", 0)
 
-    def _user_traffic(self, series: str, ts: datetime, slot_start: float) -> tuple[Rec, Cell]:
+    def uplane_rec(self, series: str, ts: datetime, tf: float,
+                   cell: Cell, t: float, user: tuple[str, ...],
+                   apn: str | None, ongoing: str, sid: str,
+                   domain: str | None = None) -> Rec:
+        """U-Plane 레코드 하나 — **식별자·셀·시각을 호출부가 준다.**
+
+        구 `_user_traffic` 의 본문이고, 달라진 것은 셀·가입자·시각을 스스로
+        고르지 않는다는 점뿐이다. 세션 모델에서 그 셋은 **성공 호에서
+        상속**되어야 하고(`session.Call`), 여기서 다시 뽑으면 인과가 끊어진다.
+
+        * ``tf`` — 트래픽 **크기** 배율(시간대 곡선). 한 번 구해 이 레코드의
+          모든 양(量) 필드에 같은 값을 쓴다 — 필드마다 다시 구하면 패킷 수와
+          바이트가 서로 다른 배율을 받아 **평균 패킷 크기가 시간대마다
+          달라진다.**
+        * ``apn`` — ``None`` 이면 프로파일에서 뽑는다. 세션 모델은 호의 APN 을
+          그대로 넘긴다(한 베어러의 APN 이 계열마다 다를 수 없다).
+        * ``domain`` — ``None`` 이면 계열 프로파일에서 뽑는다. 세션 모델은
+          HTTP 에만 넘긴다. **계열마다 도메인 풀이 다르다**(실측 교집합
+          dns∩http 18/400) — 한 풀로 통일하면 다른 계열의 도메인 축 구성비가
+          바뀐다. DNS→HTTP 인과는 이름이 아니라 **세션 단위 게이트**로
+          성립한다(`SessionEngine._open`).
+        """
         smp = self.samplers[series]
         rng = self.rng
-        # 시간대 트래픽 크기 배율. 한 번 구해 이 레코드의 모든 양(量) 필드에
-        # 같은 값을 쓴다 — 필드마다 다시 구하면 패킷 수와 바이트가 서로 다른
-        # 배율을 받아 **평균 패킷 크기가 시간대마다 달라진다.**
-        tf = self._traffic_scale(series, ts)
-        cell = self._pick_cell()
-        sub = self.subs[rng.randrange(len(self.subs))]
         values = self.templates[series].copy()
         rec = Rec(values, self.index[series])
-        t = slot_start + rng.random() * 60
         rec.set("SummaryCreateTime", f"{t:.6f}")
-        rec.set("OngoingFlag", smp.categorical("OngoingFlag", "20"))
-        self._common_user(rec, sub)
+        rec.set("OngoingFlag", ongoing)
+        rec.set("SessionID", sid)
+        rec.set("SessionCreatedTime", f"{t:.6f}")
+        for name, value in zip(USER_FIELDS, user):
+            rec.set(name, value)
         rec.set("SGW_ID", cell.sgw_id)
         rec.set("PGW_ID", cell.pgw_id)
         rec.set("MME_ID", cell.mme_id)
         rec.set("eNB_ID", cell.enb_id)
         rec.set("Cell_ID", cell.cell_id)
-        rec.set("APN", smp.categorical("APN", ""))
+        rec.set("APN", smp.categorical("APN", "") if apn is None else apn)
         rec.set("SessionQCI", smp.categorical("SessionQCI", "6"))
         rec.set("App_Group_Code", smp.categorical("App_Group_Code", "Other"))
         rec.set("App_ID", smp.categorical("App_ID", ""))
@@ -492,9 +534,18 @@ class Generator:
                 # 망이 가장 빠른 것으로 보이고, 실제와 반대다. 둘을 함께 늘리면
                 # 비율은 그대로고 **총량만** 시간대를 따른다 — 그것이 "사용량이
                 # 늘어난다"의 뜻이다. 혼잡에 따른 품질 저하는 장애 주입이 한다.
-                rec.set(key, int(smp.numeric(key) * tf))
+                v = int(smp.numeric(key) * tf)
+                rec.set(key, v)
+                # **`Delta` 도 같은 값으로 둔다.** 이 레코드는 그 자체로 한
+                # 세션(`ONGOINGFLAG=20`)이므로 "세션 누적"과 "이 분의 증분"이
+                # 같다. 분을 넘기는 세션은 `session.SessionEngine._emit` 이
+                # 둘을 갈라 다시 쓴다. 비워 두면 생성량 통계
+                # (`pemdb1.series_stat`)가 dns·http 바이트를 0 으로 센다.
+                rec.set(f"Traffic_Delta_{direction}_{f}", v)
             rec.set(f"Traffic_Total_{direction}_FirstTime", f"{t - 3.0:.6f}")
             rec.set(f"Traffic_Total_{direction}_LastTime", f"{t:.6f}")
+            rec.set(f"Traffic_Delta_{direction}_FirstTime", f"{t - 3.0:.6f}")
+            rec.set(f"Traffic_Delta_{direction}_LastTime", f"{t:.6f}")
         rec.set("ICMP_Delta_Uplink_IcmpPacketCount", smp.categorical("ICMP_Delta_Uplink_IcmpPacketCount", "0"))
         rec.set("ICMP_Delta_Dnlink_IcmpPacketCount", smp.categorical("ICMP_Delta_Dnlink_IcmpPacketCount", "0"))
 
@@ -509,6 +560,7 @@ class Generator:
                 cap = max(0, int(payload * 0.005))
                 if int(rec.num(f"Traffic_Total_{d}_RetransPacketCount")) > cap:
                     rec.set(f"Traffic_Total_{d}_RetransPacketCount", cap)
+                    rec.set(f"Traffic_Delta_{d}_RetransPacketCount", cap)
 
         if series == "transport":
             rec.set("SynCount", smp.categorical("SynCount", "1"))
@@ -548,7 +600,7 @@ class Generator:
             rec.set("ResolvedIP", f"{rng.randrange(1, 224)}.{rng.randrange(256)}."
                                   f"{rng.randrange(256)}.{rng.randrange(1, 255)}")
         else:  # http
-            host = smp.domain()
+            host = smp.domain() if domain is None else domain
             rec.set("Host", host)
             rec.set("Host_Site", host.split(".")[-2] if host.count(".") >= 1 else host)
             rec.set("Host_Prefix", host.split(".")[0])
@@ -563,6 +615,25 @@ class Generator:
             rec.set("HTTP_Total_Response_PayloadSize", int(smp.numeric("HTTP_Total_Response_PayloadSize") * tf))
             rec.set("HTTP_Total_Request_ContentLength", int(smp.numeric("HTTP_Total_Request_ContentLength") * tf))
             rec.set("HTTP_Total_Response_ContentLength", int(smp.numeric("HTTP_Total_Response_ContentLength") * tf))
+        return rec
+
+    def _user_traffic(self, series: str, ts: datetime,
+                      slot_start: float) -> tuple[Rec, Cell]:
+        """**구 경로** — 호와 무관하게 셀·가입자·시각을 스스로 뽑는 U-Plane
+        레코드 하나.
+
+        세션 모델(2026-10-14) 이후 상용 경로(`pemdb1.PemdbGen`)는 이 함수를
+        쓰지 않는다. 남겨 둔 것은 `generate_minute`(.dat 파일 생성, 구 창고
+        경로)이 아직 부르기 때문이고, 그 경로는 `cli.cmd_backfill` 이 막혀
+        있어 실제로는 돌지 않는다. **여기로 만든 U-Plane 에는 C-Plane 과
+        인과가 없다** — 새 코드가 이 함수를 부르면 그 인과가 다시 끊어진다.
+        """
+        cell = self._pick_cell()
+        sub = self.subs[self.rng.randrange(len(self.subs))]
+        rec = self.uplane_rec(
+            series, ts, self._traffic_scale(series, ts), cell,
+            slot_start + self.rng.random() * 60, user_values(sub), None,
+            self.samplers[series].categorical("OngoingFlag", "20"), "")
         return rec, cell
 
     # -- per-minute generation -------------------------------------------
@@ -576,19 +647,14 @@ class Generator:
         """
         return self._lte_call(ts, slot_start)
 
-    def base_user_traffic(self, series: str, ts: datetime,
-                          slot_start: float) -> tuple[Rec, Cell]:
-        """시나리오 변형 **전**의 U-Plane 레코드 하나 (transport·dns·http).
-
-        `base_lte_call` 과 같은 이유로 공개한다 — 상용 스키마 어댑터
-        (`pemdb1.PemdbGen.uplane_records`)가 생성과 변형 사이에 끼어든다.
-        다만 U-Plane 은 **덮어쓸 상용 실측 분포가 없다** (상용에 원시
-        Transport·DNS·HTTP XDR 자체가 없다). 그래서 어댑터는 값을 고치지 않고
-        셀 선택·시나리오 변형만 관장한다.
-        """
-        return self._user_traffic(series, ts, slot_start)
-
     def generate_minute(self, minute: int, ts: datetime) -> dict[str, list[str]]:
+        """**구 경로** — 계열별 1분 .dat 파일용 레코드.
+
+        U-Plane 을 `_user_traffic` 으로 만들므로 **C-Plane 과 인과가 없다**
+        (세션 모델 이전 동작). 상용 경로는 `pemdb1.PemdbGen` 이고 그쪽이
+        `session.SessionEngine` 을 쓴다. 이 함수를 부르는 것은
+        `engine.DataGen` 하나이고 그 경로는 `cli.cmd_backfill` 이 막아 두었다.
+        """
         slot_start = ts.timestamp()
         active = [sc for sc in self.scenarios if sc.covers(minute)]
         for sc in active:
