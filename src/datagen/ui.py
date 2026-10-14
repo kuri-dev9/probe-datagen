@@ -24,7 +24,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from .control import (KINDS, add_fault, cancel_fault, ensure_tables, get_config,
+from .pemdb1 import XDR_TABLE
+from .control import (FAULT_SELECT, KINDS, T_CONFIG, T_FAULT, T_HISTORY,
+                      add_fault, cancel_fault, ensure_tables, get_config,
                       list_faults, set_config)
 
 HERE = Path(__file__).resolve().parents[2]
@@ -137,7 +139,11 @@ def api_status():
         with conn.cursor() as cur:
             # 생성이 전진하는지는 **상용 원시 테이블**로 본다. 구 `kpi_cell_min`
             # 은 아무도 쓰지 않아 영원히 같은 값을 돌려줬다.
-            cur.execute("SELECT MAX(EVENT_TIME) FROM XDR_LTE_CALL_KPI")
+            # **테이블명을 박지 않는다.** 개명(`XDR_LTE_CALL_KPI` →
+            # `GP_RAW_LTE_CALL_KPI`, 2026-10-14) 때 이 한 줄이 남아서 상태 바가
+            # "마지막 적재 슬롯 —"·"서버 응답 없음"으로 떴다 — 화면에는 에러가
+            # 아니라 **빈 값**으로 보여서 원인을 짚기 어려웠다.
+            cur.execute(f"SELECT MAX(EVENT_TIME) FROM {XDR_TABLE}")
             last_slot = cur.fetchone()[0]
         faults = list_faults(conn, limit=100)
     finally:
@@ -170,7 +176,7 @@ def api_ingest(minutes: int = 60, date: str | None = None):
     이 화면은 "생성이 고르게 돌고 있나"만 본다. 품질 판정은 관제 화면(8008)의
     일이고, 여기서 또 보여주면 두 화면이 같은 사실을 다르게 말할 위험이 있다.
 
-    출처는 `datagen_history` 다. 구 구현은 `file_ledger` 로 계열을 쪼갰지만
+    출처는 `CM_DATAGEN_HISTORY` 다. 구 구현은 `file_ledger` 로 계열을 쪼갰지만
     그 테이블은 자체 창고 소유였고 상용 스키마에 대응이 없다
     (`graphio/store/tables.py` 의 `LEGACY_TABLE_MAP["file_ledger"] = None`).
     **계열은 `lte_call` 하나다** — Transport·DNS·HTTP XDR 은 운영 DB 가 적재하지
@@ -181,22 +187,22 @@ def api_ingest(minutes: int = 60, date: str | None = None):
     try:
         with conn.cursor() as cur:
             where, args = _window(
-                date, "slot_ts >= DATE_SUB(NOW(), INTERVAL %s MINUTE)", [minutes])
+                date, "SLOT_TIME >= DATE_SUB(NOW(), INTERVAL %s MINUTE)", [minutes])
             cur.execute(
                 "SELECT 'lte_call' series, COUNT(*) slots, "
-                "       COALESCE(SUM(records),0) recs, "
-                "       MIN(slot_ts) a, MAX(slot_ts) b "
-                f"FROM datagen_history WHERE {where}", args)
+                "       COALESCE(SUM(RECORD_CNT),0) recs, "
+                "       MIN(SLOT_TIME) a, MAX(SLOT_TIME) b "
+                f"FROM {T_HISTORY} WHERE {where}", args)
             rows = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
             rows = [r for r in rows if r["slots"]]      # 빈 창에는 계열을 만들지 않는다
             cur.execute(
-                "SELECT COUNT(*) slots, COALESCE(SUM(records),0) recs "
-                f"FROM datagen_history WHERE {where}", args)
+                "SELECT COUNT(*) slots, COALESCE(SUM(RECORD_CNT),0) recs "
+                f"FROM {T_HISTORY} WHERE {where}", args)
             tot_slots, tot_recs = cur.fetchone()
             # 날짜별 슬롯 수 — 상단에 "오늘 N분 / 누적 M분"
             cur.execute(
-                "SELECT DATE(slot_ts) d, COUNT(*) slots, SUM(records) recs "
-                "FROM datagen_history GROUP BY 1 ORDER BY 1 DESC LIMIT 7")
+                f"SELECT DATE(SLOT_TIME) d, COUNT(*) slots, SUM(RECORD_CNT) recs "
+                f"FROM {T_HISTORY} GROUP BY 1 ORDER BY 1 DESC LIMIT 7")
             days = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
     finally:
         conn.close()
@@ -221,36 +227,63 @@ def api_series(hours: int = 3, date: str | None = None):
     try:
         with conn.cursor() as cur:
             where, args = _window(
-                date, "slot_ts >= DATE_SUB(NOW(), INTERVAL %s HOUR)", [hours])
+                date, "SLOT_TIME >= DATE_SUB(NOW(), INTERVAL %s HOUR)", [hours])
             # `file_ledger` 를 쓰지 않는다 — 상용 스키마에 대응이 없다.
-            # 계열은 `lte_call` 하나이므로 `datagen_history` 로 충분하다.
+            # 계열은 `lte_call` 하나이므로 `CM_DATAGEN_HISTORY` 로 충분하다.
             cur.execute(
-                f"SELECT slot_ts, records, faults FROM datagen_history WHERE {where} "
-                "ORDER BY slot_ts", args)
+                f"SELECT SLOT_TIME, RECORD_CNT, FAULT_IDS, SERIES_STAT "
+                f"FROM {T_HISTORY} WHERE {where} ORDER BY SLOT_TIME", args)
             hist = cur.fetchall()
     finally:
         conn.close()
 
     by_slot: dict = {}
     points = []
-    for slot_ts, records, tags in hist:
+    for slot_ts, records, tags, stat in hist:
         k = slot_ts.isoformat()
-        by_slot[k] = {"lte_call": int(records or 0)}
-        points.append({
+        # `SERIES_STAT` 는 json 컬럼이다. 커넥터 설정에 따라 `str`·`bytes`·
+        # 이미 파싱된 `dict` 중 하나로 온다 — 바로 `json.loads` 를 부르면
+        # 마지막 경우에 `TypeError` 가 난다(graphio `rca/evidence.json_col`
+        # 과 같은 함정).
+        if isinstance(stat, (bytes, bytearray)):
+            stat = stat.decode("utf-8", "replace")
+        if isinstance(stat, str):
+            try:
+                stat = json.loads(stat)
+            except ValueError:
+                stat = None
+        if not isinstance(stat, dict):
+            stat = None
+
+        # **계열별 건수의 정본은 `SERIES_STAT` 다.** 없으면(구 행) `RECORD_CNT`
+        # 로 `lte_call` 하나만 세운다 — 0 으로 채우지 않는다(불변규칙 17).
+        series = ({k2: int((v or {}).get("n") or 0) for k2, v in stat.items()}
+                  if stat else {"lte_call": int(records or 0)})
+        by_slot[k] = series
+        point = {
             "ts": k,
-            "series": by_slot[k],
-            "total": int(records or 0),
+            "series": series,
+            "total": sum(series.values()),
             "faults": (tags.split(",") if tags else []),
-        })
+        }
+        if stat:
+            # 바이트가 있는 계열만 싣는다. C-Plane 은 페이로드가 없어 키가
+            # 아예 없고, 화면은 그 계열에 크기를 표시하지 않는다.
+            b = {k2: int(v["bytes"]) for k2, v in stat.items()
+                 if isinstance(v, dict) and v.get("bytes") is not None}
+            if b:
+                point["bytes"] = b
+                point["total_bytes"] = sum(b.values())
+        points.append(point)
     return {"hours": hours, "date": date, "points": points,
             "series_names": sorted({s for v in by_slot.values() for s in v})}
 
 
 @app.get("/api/settings")
 def api_settings():
-    """생성 설정 — datagen_config(DB) 가 우선, 없으면 datagen.yaml 기본값.
+    """생성 설정 — CM_DATAGEN_CONFIG(DB) 가 우선, 없으면 datagen.yaml 기본값.
 
-    데몬이 틱마다 datagen_config 를 읽으므로 여기서 바꾸면 다음 분부터 반영된다
+    데몬이 틱마다 그 테이블을 읽으므로 여기서 바꾸면 다음 분부터 반영된다
     (재기동 불필요). 장비 추가·삭제는 이 화면의 범위가 아니다 — 셀 재배정이
     필요해 설계가 따로 붙는다.
     """
@@ -368,10 +401,10 @@ def api_faults(limit: int = 50, date: str | None = None):
             return list_faults(conn, limit=limit)
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT fault_id,kind,target,start_ts,duration_min,intensity,"
-                "mode,status,note,created_at,updated_at FROM datagen_fault "
-                "WHERE start_ts >= %s AND start_ts < DATE_ADD(%s, INTERVAL 1 DAY) "
-                "ORDER BY fault_id DESC LIMIT %s", [date, date, limit])
+                FAULT_SELECT + f" FROM {T_FAULT} "
+                "WHERE START_TIME >= %s "
+                "AND START_TIME < DATE_ADD(%s, INTERVAL 1 DAY) "
+                "ORDER BY FAULT_ID DESC LIMIT %s", [date, date, limit])
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, r)) for r in cur.fetchall()]
     finally:
@@ -443,6 +476,20 @@ _HTML = """<!doctype html>
   .daysep td { background:#222b36; color:var(--dim); font-size:12px;
                letter-spacing:.3px; padding:4px 8px; }
   .chart { width:100%; height:190px; display:block; }
+  /* 툴팁은 SVG 밖 div 다 — SVG 안에 그리면 viewBox 가
+     preserveAspectRatio="none" 로 늘어나 글자가 가로로 찌그러진다. */
+  .chartwrap { position:relative; }
+  .tip { position:absolute; pointer-events:none; opacity:0; transition:opacity .08s;
+         background:#0f141b; border:1px solid #2c3542; border-radius:6px;
+         padding:8px 10px; font-size:12px; line-height:1.55; color:var(--fg);
+         box-shadow:0 6px 20px rgba(0,0,0,.5); white-space:nowrap; z-index:5; }
+  .tip b { font-weight:600; }
+  .tip .t-ts { color:var(--dim); font-size:11px; margin-bottom:4px; }
+  .tip .t-row { display:flex; gap:10px; justify-content:space-between; }
+  .tip .t-row span:first-child { display:flex; align-items:center; gap:6px; }
+  .tip i { width:8px; height:8px; border-radius:2px; display:inline-block; }
+  .tip .t-sum { border-top:1px solid #2c3542; margin-top:4px; padding-top:4px; }
+  .tip .t-f { color:#e5534b; margin-top:4px; }
   .lg { display:flex; gap:12px; flex-wrap:wrap; font-size:12px; color:var(--dim);
         margin-top:6px; }
   .lg i { width:10px; height:10px; border-radius:2px; display:inline-block;
@@ -556,8 +603,11 @@ _HTML = """<!doctype html>
 </div>
 
 <div class="panel">
-  <h2>생성 시계열 <small class="dim">분당 건수 · 최근 3시간</small></h2>
-  <svg class="chart" id="chart" viewBox="0 0 1000 190" preserveAspectRatio="none"></svg>
+  <h2>생성 시계열 <small class="dim">분당 건수 · 최근 3시간 · 오른쪽 끝이 현재</small></h2>
+  <div class="chartwrap" id="chartwrap">
+    <svg class="chart" id="chart" viewBox="0 0 1000 190" preserveAspectRatio="none"></svg>
+    <div class="tip" id="tip"></div>
+  </div>
   <div class="lg" id="legend"></div>
 </div>
 
@@ -753,59 +803,149 @@ function renderIngest(d) {
 }
 
 // ── 시계열 (인라인 SVG — 폐쇄망이라 외부 라이브러리를 쓰지 않는다) ─────
+//
+// **고정 격자다.** 예전에는 `bw = W / points.length` 로 봉 폭을 데이터 수에
+// 맞췄다. 그래서 막 띄웠을 때 2분치가 화면을 반씩 채우는 거대한 봉이 되고,
+// 분이 쌓일수록 봉이 좁아져 **같은 화면이 매 분 다르게 보였다.**
+//
+// 지금은 창(3시간=180분)을 분 단위 슬롯으로 고정하고 **오른쪽 끝을 현재
+// 시각**으로 둔다. 분이 지나면 한 칸씩 왼쪽으로 밀린다(Grafana 형태).
+// 데이터가 없는 슬롯은 비워 둔다 — 0 으로 그리면 "생성했는데 0건"과
+// "아직 안 돌았다"가 같아 보인다(불변규칙 17).
 const COLORS = { lte_call:"#4e9af1", transport:"#4caf7d",
                  http:"#d8a22a", dns:"#a872e0" };
+const CHART = { W:1000, H:190, PAD_B:22, PAD_T:8 };
+let CHART_SLOTS = [];          // 마우스 추적이 쓰는 슬롯 메타
+
+function fmtBytes(n) {
+  if (n === null || n === undefined) return null;
+  const u = ["B","KB","MB","GB","TB"]; let i = 0, v = Number(n);
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return (v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)) + " " + u[i];
+}
+
+let LAST_SERIES = null;
 function renderChart(d) {
-  const P = d.points || [], svg = $("chart");
-  if (!P.length) { svg.innerHTML =
-    '<text x="500" y="95" fill="#8a94a3" text-anchor="middle">데이터 없음</text>';
-    return; }
+  LAST_SERIES = d;
+  const svg = $("chart"), P = d.points || [];
+  const { W, H, PAD_B, PAD_T } = CHART;
   const names = d.series_names || [];
-  const W = 1000, H = 190, PAD_B = 22, PAD_T = 8;
-  const max = Math.max(1, ...P.map(p => p.total));
-  const bw = W / P.length;
+
+  // 슬롯 축을 **현재 분**에서 역산한다. 서버 응답이 비어 있어도 축은 선다 —
+  // 축이 데이터에 의존하면 빈 화면에서 눈금이 사라져 "고장"처럼 보인다.
+  const hours = d.hours || 3, slots = hours * 60;
+  const now = new Date(); now.setSeconds(0, 0);
+  const t0 = now.getTime() - (slots - 1) * 60000;
+  const bw = W / slots;
+
+  // 분 → 슬롯 인덱스. `ts` 는 서버가 로컬 시각으로 내려준 ISO 문자열이다.
+  const byIdx = new Map();
+  P.forEach(p => {
+    const t = new Date(p.ts).getTime();
+    const i = Math.round((t - t0) / 60000);
+    if (i >= 0 && i < slots) byIdx.set(i, p);
+  });
+
+  const max = Math.max(1, ...P.map(p => p.total || 0));
   const y = v => PAD_T + (H - PAD_B - PAD_T) * (1 - v / max);
   let out = "";
 
-  // 장애가 있던 분은 배경을 깔아 둔다 — 생성량 변화와 겹쳐 보려는 것이지,
-  // 장애 판정을 보여주려는 게 아니다(판정은 관제 화면 몫).
-  P.forEach((p, i) => { if (p.faults && p.faults.length)
-    out += `<rect x="${(i*bw).toFixed(1)}" y="${PAD_T}" width="${Math.max(bw,1).toFixed(1)}"
+  // 장애 구간 배경 — 생성량 변화와 겹쳐 보려는 것이지 장애 판정이 아니다.
+  byIdx.forEach((p, i) => { if (p.faults && p.faults.length)
+    out += `<rect x="${(i*bw).toFixed(2)}" y="${PAD_T}" width="${bw.toFixed(2)}"
              height="${H-PAD_B-PAD_T}" fill="#e5534b" opacity=".10"/>`; });
 
-  // 계열별 적층 막대
-  P.forEach((p, i) => {
+  // 계열별 적층 막대. 폭이 1px 미만이면 틈이 생기지 않게 간격을 두지 않는다.
+  const gap = bw > 3 ? 0.5 : 0;
+  byIdx.forEach((p, i) => {
     let acc = 0;
     names.forEach(n => {
       const v = (p.series || {})[n] || 0; if (!v) return;
       const y0 = y(acc + v), y1 = y(acc);
-      out += `<rect x="${(i*bw).toFixed(1)}" y="${y0.toFixed(1)}"
-               width="${Math.max(bw-0.4,0.6).toFixed(1)}" height="${Math.max(y1-y0,0.5).toFixed(1)}"
+      out += `<rect x="${(i*bw).toFixed(2)}" y="${y0.toFixed(1)}"
+               width="${Math.max(bw-gap, 0.6).toFixed(2)}"
+               height="${Math.max(y1-y0, 0.5).toFixed(1)}"
                fill="${COLORS[n] || "#6b7684"}"/>`;
       acc += v;
     });
   });
 
-  // 날짜가 바뀌는 지점에 경계선 + 라벨, 그 외엔 정시마다 시각
-  let prevDay = null;
-  P.forEach((p, i) => {
-    const day = p.ts.slice(0, 10), hhmm = p.ts.slice(11, 16);
-    const x = (i * bw).toFixed(1);
-    if (prevDay && day !== prevDay) {
-      out += `<line x1="${x}" y1="${PAD_T}" x2="${x}" y2="${H-PAD_B}"
-               stroke="#4e9af1" stroke-width="1"/>
-              <text x="${+x+4}" y="${H-8}" fill="#4e9af1" font-size="11">${day}</text>`;
-    } else if (hhmm.endsWith(":00")) {
-      out += `<line x1="${x}" y1="${H-PAD_B}" x2="${x}" y2="${H-PAD_B+4}" stroke="#2c3542"/>
-              <text x="${+x+3}" y="${H-8}" fill="#8a94a3" font-size="11">${hhmm}</text>`;
-    }
-    prevDay = day;
-  });
+  // 눈금 — 정시마다. 슬롯이 촘촘하면 30분 간격으로 줄인다.
+  const everyMin = bw < 4 ? 30 : 60;
+  for (let i = 0; i < slots; i++) {
+    const t = new Date(t0 + i * 60000);
+    if (t.getMinutes() % everyMin !== 0) continue;
+    const x = (i * bw).toFixed(2);
+    const hh = String(t.getHours()).padStart(2,"0"),
+          mm = String(t.getMinutes()).padStart(2,"0");
+    const midnight = t.getHours() === 0 && t.getMinutes() === 0;
+    out += midnight
+      ? `<line x1="${x}" y1="${PAD_T}" x2="${x}" y2="${H-PAD_B}" stroke="#4e9af1"/>
+         <text x="${+x+4}" y="${H-8}" fill="#4e9af1" font-size="11">${t.getMonth()+1}/${t.getDate()}</text>`
+      : `<line x1="${x}" y1="${H-PAD_B}" x2="${x}" y2="${H-PAD_B+4}" stroke="#2c3542"/>
+         <text x="${+x+3}" y="${H-8}" fill="#8a94a3" font-size="11">${hh}:${mm}</text>`;
+  }
+  // 오른쪽 끝 = 현재. 눈금 라벨은 왼쪽으로 붙인다(잘리지 않게).
+  out += `<line x1="${W-0.5}" y1="${PAD_T}" x2="${W-0.5}" y2="${H-PAD_B}"
+           stroke="#4e9af1" stroke-width="1" opacity=".55"/>`;
+  out += `<text x="${W-4}" y="${H-8}" fill="#4e9af1" font-size="11"
+           text-anchor="end">now</text>`;
   out += `<text x="4" y="${PAD_T+10}" fill="#8a94a3" font-size="11">${max.toLocaleString()}</text>`;
+  if (!P.length) out += `<text x="500" y="95" fill="#8a94a3" text-anchor="middle"
+                          font-size="12">데이터 없음</text>`;
   svg.innerHTML = out;
+
+  CHART_SLOTS = { slots, t0, bw, byIdx, names };
   $("legend").innerHTML = names.map(n =>
     `<span><i style="background:${COLORS[n] || "#6b7684"}"></i>${esc(n)}</span>`).join("")
     + '<span><i style="background:#e5534b;opacity:.35"></i>장애 주입 구간</span>';
+}
+
+// ── 툴팁 ────────────────────────────────────────────────────────────────
+// SVG 는 `preserveAspectRatio="none"` 로 가로가 늘어나므로 **픽셀 좌표를
+// viewBox 좌표로 환산**해야 한다. 안 그러면 마우스 위치와 집히는 슬롯이
+// 오른쪽으로 갈수록 어긋난다.
+function chartHover(ev) {
+  const tip = $("tip"), svg = $("chart");
+  if (!CHART_SLOTS || !CHART_SLOTS.slots) { tip.style.opacity = 0; return; }
+  const { slots, t0, byIdx, names } = CHART_SLOTS;
+  const box = svg.getBoundingClientRect();
+  const px = ev.clientX - box.left;
+  const i = Math.floor(px / box.width * slots);
+  if (i < 0 || i >= slots) { tip.style.opacity = 0; return; }
+
+  const t = new Date(t0 + i * 60000);
+  const hh = String(t.getHours()).padStart(2,"0"),
+        mm = String(t.getMinutes()).padStart(2,"0");
+  const p = byIdx.get(i);
+  let html = `<div class="t-ts">${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}`
+           + `-${String(t.getDate()).padStart(2,"0")} ${hh}:${mm}</div>`;
+  if (!p) {
+    html += '<div class="dim">생성 기록 없음</div>';
+  } else {
+    const bytes = p.bytes || {};
+    names.forEach(n => {
+      const v = (p.series || {})[n]; if (v === undefined) return;
+      // 바이트가 없는 계열(C-Plane)은 크기를 적지 않는다 — 0 으로 적으면
+      // "안 흘렀다"로 읽힌다(불변규칙 17).
+      const b = fmtBytes(bytes[n]);
+      html += `<div class="t-row"><span><i style="background:${COLORS[n]||"#6b7684"}"></i>`
+            + `${esc(n)}</span><span><b>${v.toLocaleString()}</b> 건`
+            + (b ? ` · ${b}` : "") + `</span></div>`;
+    });
+    html += `<div class="t-row t-sum"><span>합계</span><span><b>`
+          + `${(p.total||0).toLocaleString()}</b> 건`
+          + (p.total_bytes ? ` · ${fmtBytes(p.total_bytes)}` : "") + `</span></div>`;
+    if (p.faults && p.faults.length)
+      html += `<div class="t-f">장애 주입 #${p.faults.join(", #")}</div>`;
+  }
+  tip.innerHTML = html;
+  tip.style.opacity = 1;
+  // 오른쪽 끝에서 툴팁이 패널 밖으로 나가지 않게 뒤집는다.
+  const wrap = $("chartwrap").getBoundingClientRect();
+  const tw = tip.offsetWidth, left = ev.clientX - wrap.left;
+  tip.style.left = (left + tw + 16 > wrap.width ? left - tw - 12 : left + 12) + "px";
+  tip.style.top = Math.max(0, ev.clientY - wrap.top - tip.offsetHeight - 10) + "px";
 }
 
 // ── 생성 설정 ───────────────────────────────────────────────────────────
@@ -856,6 +996,15 @@ async function loadHeavy(force) {
   renderNav();
   loadHeavy(true);
 })();
+
+// 툴팁은 래퍼에 건다 — SVG 에 걸면 막대 사이 빈 공간에서 이벤트가 끊겨
+// 커서를 가로로 움직일 때 툴팁이 깜빡인다.
+$("chartwrap").addEventListener("mousemove", chartHover);
+$("chartwrap").addEventListener("mouseleave", () => { $("tip").style.opacity = 0; });
+
+// **1분마다 다시 그린다.** 축이 현재 시각 기준이라 데이터가 안 바뀌어도
+// 분이 지나면 한 칸 밀려야 한다 — 안 그러면 "now" 선이 과거에 머문다.
+setInterval(() => { if (isLive() && LAST_SERIES) renderChart(LAST_SERIES); }, 60000);
 
 setInterval(() => { if (isLive()) poll(); }, 5000);
 setInterval(() => { if (isLive()) loadHeavy(true); }, 15000);

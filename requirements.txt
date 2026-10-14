@@ -9,6 +9,9 @@ idna==3.20
 numpy==2.5.4
 opentelemetry-api==1.45.1
 pandas==3.0.6
+# U-Plane 원시 xDR 을 Parquet(zstd)로 쓴다 — MySQL 을 거치지 않는다
+# (src/datagen/uplane_parquet.py). 읽는 쪽 graphio 도 같은 polars 를 쓴다.
+polars==2.0.0
 pydantic==2.14.1
 pydantic_core==2.50.1
 PyMySQL==1.2.3

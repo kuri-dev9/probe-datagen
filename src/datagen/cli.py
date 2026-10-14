@@ -1,11 +1,19 @@
 """probe-datagen CLI.
 
-  python -m datagen backfill --minutes 60 --start "2026-08-27 09:00"
-  python -m datagen run [--once]
+  python -m datagen pemfill --follow          # 실시간 적재 — 이것을 데몬으로 쓴다
+  python -m datagen pemfill --follow --once   # 한 틱만 (점검용)
+  python -m datagen run                       # pemfill --follow 와 같은 경로
+  python -m datagen ui                        # 장애 주입 제어 화면 (:8009)
 
-backfill: 지정 구간 생성(성공만) → 내부 DuckDB 집계 → MySQL 적재 (1단계).
-run:      상주 데몬 — 재기동 백필 + 분 단위 실시간 틱 + fault 주입(2단계).
+`pemfill`·`run` 이 **같은 쓰기 경로**(`datagen.pemdb1` → `pemdb6`)를 쓴다.
 파일은 남기지 않는다.
+
+**`backfill` 은 막아 두었다** (2026-10-14). 구 창고(`graphio` DB) + 내부 DuckDB
+경로이고 graphio 가 그 DB 를 읽지 않는다. 더 중요한 이유는 **백필 자체가 지금
+위험**하다는 것이다 — `pemdb6` 가 그대로 운영이 되므로(별도 상용 DB 는 없다)
+과거 구간을 평시 데이터로 덮으면 주입해 둔 장애 구간이 밀려나고 되돌릴 원본이
+없다. 코드는 남겨 두었다(`cmd_backfill`·`_backfill`) — 되살릴 때 `pemfill`
+쪽으로 경로를 옮기는 것이 순서다.
 """
 
 from __future__ import annotations
@@ -30,7 +38,29 @@ def load_cfg(path: str | None) -> dict:
     return yaml.safe_load(p.read_text(encoding="utf-8"))
 
 
-def cmd_backfill(args) -> int:
+#: `backfill` 을 막는 이유. 조용히 아무것도 안 하는 것보다 **왜 막혔는지
+#: 말하며 실패하는 쪽**이 낫다 — 다음 사람이 이 문장을 보고 판단한다.
+_BACKFILL_BLOCKED = """backfill 은 막아 두었다 (2026-10-14).
+
+  ① 구 창고 경로다 — `graphio` DB + 내부 DuckDB 에 쓰고, graphio 는 그 DB 를
+     읽지 않는다. 지금 창고는 `pemdb6` 다.
+  ② **과거 구간 덮어쓰기가 위험하다.** `pemdb6` 가 그대로 운영이 되므로
+     평시 데이터로 과거를 메우면 주입해 둔 장애 구간이 밀려나고 되돌릴
+     원본이 없다.
+
+실시간 적재는 이쪽이다:
+  python -m datagen pemfill --follow          # 데몬
+  python -m datagen pemfill --follow --once   # 한 틱만 (점검용)
+
+되살리려면 `cmd_backfill` 본문을 `pemfill` 경로(`datagen.pemdb1`)로 옮기고
+이 가드를 지운다. 본문은 그대로 남겨 두었다."""
+
+
+def cmd_backfill(args) -> int:  # noqa: ARG001
+    raise SystemExit(_BACKFILL_BLOCKED)
+
+
+def _cmd_backfill_retired(args) -> int:
     cfg = load_cfg(args.config)
     data_dir = HERE / cfg["paths"]["data"]
     my = cfg["mysql"]
@@ -80,11 +110,10 @@ def _faults_overlapping(conn, lo: datetime, hi: datetime) -> list[dict]:
     """
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT fault_id,kind,target,start_ts,duration_min,intensity "
-            "FROM datagen_fault WHERE status<>'cancelled' "
-            "AND start_ts < %s "
-            "AND DATE_ADD(start_ts, INTERVAL duration_min MINUTE) > %s "
-            "ORDER BY fault_id",
+            control.FAULT_SELECT_ACTIVE + f" FROM {control.T_FAULT} "
+            "WHERE STATUS<>'cancelled' AND START_TIME < %s "
+            "AND DATE_ADD(START_TIME, INTERVAL DURATION_MIN MINUTE) > %s "
+            "ORDER BY FAULT_ID",
             [hi, lo],
         )
         cols = [d[0] for d in cur.description]
@@ -99,8 +128,8 @@ def _cancel_faults(conn, fault_ids: list[int], note: str) -> None:
     with conn.cursor() as cur:
         for fid in fault_ids:
             cur.execute(
-                "UPDATE datagen_fault SET status='cancelled', note=%s, updated_at=%s "
-                "WHERE fault_id=%s",
+                f"UPDATE {control.T_FAULT} SET STATUS='cancelled', NOTE=%s, "
+                "UPDATED_TIME=%s WHERE FAULT_ID=%s",
                 [note, now, fid],
             )
     conn.commit()
@@ -174,7 +203,7 @@ def _generation_enabled(conn) -> bool:
 
 
 def _apply_live_config(conn, dg, base_rates: dict) -> None:
-    """datagen_config 의 rate.* 로 분당 호 수를 덮어쓴다 (없으면 yaml 기본값)."""
+    """CM_DATAGEN_CONFIG 의 rate.* 로 분당 호 수를 덮어쓴다 (없으면 yaml 기본값)."""
     rates = dict(base_rates)
     for k in base_rates:
         v = control.get_config(conn, f"rate.{k}")
@@ -197,6 +226,27 @@ def _retention_sweep(conn, days: int) -> dict[str, int]:
     지금은 한 자리(`pemdb1.purge_partitions`)만 고치면 둘이 함께 따라온다.
     """
     return _purge_pemdb1(conn, days)
+
+
+def _uplane_store(cfg: dict, pem: dict) -> tuple[Path, int]:
+    """U-Plane Parquet 루트와 보존 분 수 — `(root, retain_minutes)`.
+
+    **경로를 코드에 박지 않는다.** 지금은 `gen`·`corr` 가 같은 머신의 로컬
+    프로세스라 디렉터리 하나를 공유하면 되지만, 컨테이너로 가면 그 자리가
+    volume mount 지점이 된다. 설정으로 노출해 두면 그때 고칠 자리가 한 곳이다.
+
+    읽는 쪽은 graphio 의 `paths.uplane_raw` 다. **두 값이 같은 디렉터리를
+    가리켜야 하고, 어긋나면 집계가 조용히 0행이 된다** — 에러가 나지 않는
+    종류라 기본값을 서로 맞춰 두었다(`pemdb1.UPLANE_ROOT_DEFAULT`).
+    """
+    from . import pemdb1 as P
+
+    sec = (pem.get("uplane_parquet") or {})
+    raw = Path(str(sec.get("root") or P.UPLANE_ROOT_DEFAULT))
+    if not raw.is_absolute():
+        raw = (HERE / raw).resolve()
+    keep = int(sec.get("retain_minutes", P.UPLANE_RETAIN_MINUTES))
+    return raw, keep
 
 
 def _pem_rates(cfg: dict, pem: dict, lte_rate: int) -> dict:
@@ -265,9 +315,6 @@ def cmd_run(args) -> int:
     try:
         control.ensure_tables(conn)
         mapping = P.xdr_mapping(conn, database)
-        # U-Plane 테이블이 아직 없으면 빈 dict 가 오고 그 계열은 적재되지
-        # 않는다. C-Plane 틱이 그것 때문에 막혀서는 안 된다.
-        umaps = P.uplane_mapping(conn, database)
 
         drawable = None
         xw_path = pem.get("geo_crosswalk")
@@ -284,19 +331,28 @@ def cmd_run(args) -> int:
             success_only=bool(pem.get("success_only", True)),
             enb_limit=int(pem.get("enb_limit", 0)),
             drawable=drawable,
+            # 희소 Call Type 바닥. `None` 이면 `Distributions.CALL_TYPE_FLOOR`
+            # 기본값(0.3%)을 쓴다. 0 을 주면 실측 분포 그대로 돈다.
+            call_type_floor=pem.get("call_type_floor"),
         )
-        writer = P.PemdbWriter(conn, mapping)
+        # U-Plane 은 MySQL 이 아니라 로컬 Parquet 로 간다(2026-10-14).
+        # 계열 유무의 정본은 **생성 설정**이다 — 전에는 테이블 존재 여부였다.
+        up_root, up_keep = _uplane_store(cfg, pem)
+        umaps = P.uplane_specs(gen.series)
+        writer = P.PemdbWriter(conn, mapping, uplane_root=up_root,
+                               uplane_retain_minutes=up_keep)
 
         # **anchor 는 기동 시각이다.** fault 의 시간창이 여기서부터 센다.
         # 과거로 잡으면 이미 지난 장애가 되살아난다.
         anchor = _floor_minute(datetime.now())
         gen.anchor = anchor
-        up_on = [s for s in P.UPLANE_SERIES if s in gen.series and s in umaps]
+        up_on = [s for s in P.UPLANE_SERIES if s in umaps]
         print(f"▶ 실시간 틱 — {database} · eNB {len({c.enb_id for c in gen.cells}):,}"
               f" · 셀 {len(gen.cells):,} · 분당 {rate:,}호 · 보존 {retention_days}일")
         print("  U-Plane — "
               + (" · ".join(f"{s} {rates[s]:,}" for s in up_on) if up_on
-                 else "꺼짐 (rates 0 이거나 GP_RAW_* 테이블 없음)"))
+                 else "꺼짐 (rates 0)")
+              + (f" → {up_root} (Parquet · {up_keep}분 보관)" if up_on else ""))
         print(f"  anchor {anchor:%Y-%m-%d %H:%M} · 백필 없음"
               + (" (--once)" if args.once else " (Ctrl-C 종료)"))
 
@@ -344,14 +400,18 @@ def cmd_run(args) -> int:
             # U-Plane 은 **같은 분 좌표**로 만든다. 다른 좌표를 쓰면 같은 분의
             # C-Plane 과 시나리오 강도가 어긋나 한 장애가 두 축에서 다른 시각에
             # 나타난다.
-            un = writer.write_uplane_all(
-                ts, gen.uplane_records(minute_idx, ts), umaps)
+            # **행을 변수에 담는다.** 바이트 통계를 내려면 같은 행을 한 번 더
+            # 봐야 하는데, `uplane_records` 를 두 번 부르면 rng 상태가 달라져
+            # **적재한 것과 다른 데이터를 세게 된다.**
+            up_rows = gen.uplane_records(minute_idx, ts)
+            un = writer.write_uplane_all(ts, up_rows, umaps)
             # 그 1분만 집계한다. 구간 멱등이라 다시 돌려도 같은 값이다.
             P.aggregate_all(conn, ts, ts + timedelta(minutes=1))
             # 분 단위 멱등이다 — 그냥 INSERT 하면 같은 분을 두 번 돌릴 때
             # 이력이 쌓여 제어 화면이 생성량을 2배·3배로 보고한다.
             control.record_tick(
-                conn, ts, n, ",".join(str(f["fault_id"]) for f in active))
+                conn, ts, n, ",".join(str(f["fault_id"]) for f in active),
+                series_stat=P.series_stat(rows, up_rows))
             last_done = ts
             up = " · ".join(f"{s[:4]} {v:,}" for s, v in un.items())
             print(f"[{ts:%H:%M}] XDR {n:,}건"
@@ -423,12 +483,7 @@ def cmd_pemfill(args) -> int:
         mapping = P.xdr_mapping(conn, database)
         print(f"▶ 컬럼 매핑 확인 — {P.XDR_TABLE} {len(mapping.columns)}컬럼 "
               f"(EVENT_TIME + 생성기 필드 {len(mapping.columns) - 1})")
-        umaps = P.uplane_mapping(conn, database)
-        if umaps:
-            print("  U-Plane — " + " · ".join(
-                f"{m.table} {len(m.columns)}컬럼" for m in umaps.values()))
-        else:
-            print(f"  U-Plane — GP_RAW_* 가 {database} 에 없다. 그 계열은 건너뛴다")
+        up_root, up_keep = _uplane_store(cfg, pem)
 
         # ── 그릴 수 있는 동으로 셀을 한정한다 ─────────────────────────────
         # 번들 경계 geojson 은 행정동, pemdb1 은 법정동이다. 매핑으로는 못 넘는
@@ -454,6 +509,7 @@ def cmd_pemfill(args) -> int:
             enb_limit=(args.enb_limit if args.enb_limit is not None
                        else int(pem.get("enb_limit", 0))),
             drawable=drawable,
+            call_type_floor=pem.get("call_type_floor"),
         )
         mapped = [c for c in gen.cells if c.geo_status == "MAPPED"]
         print(f"▶ 셀 마스터 — {len(gen.cells):,}셀 / "
@@ -493,7 +549,14 @@ def cmd_pemfill(args) -> int:
             P.write_truth(truth_path, start, minutes, scs)
             print(f"▶ 정답 기록 — {truth_path}")
 
-        w = P.PemdbWriter(conn, mapping)
+        umaps = P.uplane_specs(gen.series)
+        if umaps:
+            print(f"  U-Plane — {' · '.join(umaps)} → {up_root} "
+                  f"(Parquet · {up_keep}분 보관)")
+        else:
+            print("  U-Plane — 꺼짐 (pemdb1.rates 0). 그 계열은 건너뛴다")
+        w = P.PemdbWriter(conn, mapping, uplane_root=up_root,
+                          uplane_retain_minutes=up_keep)
         t0 = time.time()
         total = 0
         up_total: dict[str, int] = {}
@@ -577,7 +640,7 @@ def _pem_follow(conn, P, gen, w, last_done, *, umaps: dict,
     `PemdbWriter` 가 구간 멱등(DELETE→INSERT)이라 행 수는 안 늘지만, 레코드가
     통째로 바뀌어 그 분의 집계·탐지 결과가 흔들린다. 그래서 전진만 한다.
 
-    장애는 `datagen_fault` 에서 틱마다 읽는다(`control.poll_transitions`).
+    장애는 `CM_DATAGEN_FAULT` 에서 틱마다 읽는다(`control.poll_transitions`).
     데몬이 죽었다 떠도 진행 중이던 장애가 이어진다 — 전이가 DB 에서 일어난다.
     """
     from . import control
@@ -686,7 +749,7 @@ def cmd_ui(args) -> int:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="datagen")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    b = sub.add_parser("backfill", help="[구 창고 전용] 성공 케이스 N분 생성·적재 — graphio 는 안 읽는다")
+    b = sub.add_parser("backfill", help="※ 막혀 있다 — 치면 이유를 말한다 (구 창고 경로 · 과거 덮어쓰기 위험)")
     b.add_argument("--config")
     b.add_argument("--start")
     b.add_argument("--minutes", type=int)
@@ -700,8 +763,8 @@ def main(argv=None) -> int:
     u.add_argument("--port", type=int, default=8009)
     u.set_defaults(fn=cmd_ui)
 
-    # 상용 스키마 경로 — 기존 backfill/run 과 섞지 않는다
-    p = sub.add_parser("pemfill", help="상용 스키마(pemdb1) 생성·적재 + 1분 집계")
+    # 상용 스키마 경로 — `run` 과 같은 쓰기 경로다 (`cmd_run` docstring 참조)
+    p = sub.add_parser("pemfill", help="생성·적재 + 1분 집계 (pemdb6) — --follow 가 실시간 데몬")
     p.add_argument("--config")
     p.add_argument("--database", help="대상 DB (기본 설정 pemdb1.database)")
     p.add_argument("--start", help="시작 분 (기본: 지금 - minutes)")
@@ -740,7 +803,11 @@ def main(argv=None) -> int:
                    help="--follow 와 함께: 한 틱만 돌고 끝낸다 (점검용)")
     p.set_defaults(fn=cmd_pemfill)
 
-    r = sub.add_parser("run", help="[구 창고 전용] 상주 데몬 — graphio 는 안 읽는다. 실시간은 pemfill --follow")
+    # **이 문구가 한동안 틀려 있었다.** 구 구현이 `graphio` DB 에 쓰던 시절의
+    # 설명("구 창고 전용 · graphio 는 안 읽는다")이 남아 있었고, 그 뒤 쓰기
+    # 경로를 `pemfill` 과 같게 고쳤는데 help 만 그대로였다 — 읽은 사람이
+    # `gp.sh start gen` 이 엉뚱한 DB 에 쓴다고 오판했다(실제로 그랬다).
+    r = sub.add_parser("run", help="상주 데몬 — pemfill --follow 와 같은 쓰기 경로 (백필 없음)")
     r.add_argument("--config")
     r.add_argument("--once", action="store_true", help="틱 1회만 수행하고 종료 (테스트용)")
     r.set_defaults(fn=cmd_run)

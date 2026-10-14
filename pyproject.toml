@@ -9,6 +9,9 @@ dependencies = [
     "duckdb>=1.0",
     "pymysql>=1.1",
     "pandas>=2.0,<4",
+    # U-Plane 원시 xDR 의 Parquet(zstd) 쓰기 — MySQL 을 거치지 않는다
+    # (`datagen/uplane_parquet.py`). 읽는 쪽 graphio 도 polars 로 집계한다.
+    "polars>=1.0",
     "pyyaml>=6.0",
     # 제어 UI(datagen.ui, 포트 8009) — 운영자 장애 주입 화면
     "fastapi>=0.110",

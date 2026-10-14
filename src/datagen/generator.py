@@ -34,12 +34,55 @@ SERIES_FILE_PREFIX = {
 }
 SERIES_DIR = {"lte_call": "lte-call", "transport": "transport", "http": "http", "dns": "dns"}
 
-#: 시간대별 트래픽 곡선 (0~23시 상대 배율) — 야간 저트래픽 셀에서 최소 표본
-#: 규칙(§4.8.4)이 실제로 필요한지 확인할 수 있어야 한다.
+#: 시간대별 트래픽 곡선 (0~23시 상대 배율).
+#:
+#: **04시가 최저, 19시가 최고다** (2026-10-14 사용자 지정). 07~24 가 높고
+#: 01~06 이 낮으며, 사이를 계단 없이 오르내린다 — 시간이 바뀌는 자리에서 값이
+#: 점프하면 1분 집계 그래프에 수직선이 생기고, 그것이 장애처럼 보인다.
+#:
+#: **진폭이 2배(0.50~1.00)인 이유.** 이 곡선을 두 곳에 쓴다 —
+#: 레코드 **개수**(`_volume`)와 레코드당 **트래픽 크기**(`_traffic_scale`).
+#: 총 트래픽은 둘의 곱이므로 `0.50² = 0.25` ~ `1.00² = 1.00`, 즉 **4배**가
+#: 된다. 사용자가 지정한 "많고 적은 차이 약 4배"가 총 트래픽 기준이다.
+#:
+#: 야간 저트래픽 셀에서 최소 표본 규칙(§4.8.4)이 실제로 필요한지 확인할 수
+#: 있어야 한다는 원래 목적도 그대로다 — 04시 셀당 표본이 1분 창에서 모자라
+#: `ESCALATION_WINDOWS` 확대를 밟는다.
 DIURNAL = [
-    0.28, 0.20, 0.16, 0.14, 0.15, 0.22, 0.40, 0.68, 0.88, 0.95, 0.98, 1.00,
-    0.97, 0.95, 0.96, 0.98, 1.00, 1.05, 1.12, 1.15, 1.10, 0.95, 0.72, 0.45,
+    # 0     1     2     3     4     5     6     7     8     9    10    11
+    0.62, 0.56, 0.52, 0.51, 0.50, 0.54, 0.62, 0.73, 0.83, 0.88, 0.91, 0.92,
+    #12    13    14    15    16    17    18    19    20    21    22    23
+    0.91, 0.90, 0.90, 0.92, 0.95, 0.97, 0.99, 1.00, 0.98, 0.92, 0.82, 0.71,
 ]
+
+#: 계열별 **진폭 축소**. `1.0` 이면 곡선 그대로, `0.0` 이면 평탄하다.
+#: 적용식은 `1 - w·(1 - DIURNAL[h])` — 기준점이 1.0 이므로 피크는 그대로
+#: 두고 저점만 끌어올린다.
+#:
+#: **`lte_call` 은 0.25 다.** C-Plane xDR 은 호 하나하나의 시그널링 기록이고
+#: 사용량(바이트)과 직접 묶이지 않는다 — 데이터를 많이 쓰는 시간대라고 호
+#: 수가 그만큼 늘지는 않는다(사용자 판단: "시그널 데이터는 호 자체만 판단").
+#: 04시↔19시 **1.14배**가 된다. 0 으로 두지 않는 것은 완전히 평탄한 호 수가
+#: 더 비현실적이기 때문이고, 크게 두지 않는 것은 **셀 축 최소 표본**이 야간에
+#: 무너지면 탐지가 통째로 서지 않기 때문이다(불변규칙 5).
+#:
+#: U-Plane 세 계열은 1.0 — 개수와 크기 양쪽에 곡선이 온전히 걸린다.
+DIURNAL_WEIGHT: dict[str, float] = {
+    "lte_call": 0.25,
+    "transport": 1.0,
+    "dns": 1.0,
+    "http": 1.0,
+}
+
+
+def diurnal_factor(hour: int, series: str = "", weight: float | None = None) -> float:
+    """시간대 배율. ``series`` 의 진폭 축소를 반영한다.
+
+    `_volume`(개수)과 `_traffic_scale`(크기)이 **같은 함수**를 쓴다 — 두 자리가
+    따로 계산하면 한쪽만 고쳐질 때 총 트래픽 배수가 조용히 달라진다.
+    """
+    w = DIURNAL_WEIGHT.get(series, 1.0) if weight is None else weight
+    return 1.0 - w * (1.0 - DIURNAL[hour % 24])
 
 _STRINGY = (
     "IMSI", "MDN", "IMEI", "ServiceCode", "PayCode", "Gender", "Age", "Vendor",
@@ -214,9 +257,25 @@ class Generator:
         base = self.rates.get(series, 0)
         if not base:
             return 0
-        factor = DIURNAL[ts.hour] if self.diurnal else 1.0
+        factor = diurnal_factor(ts.hour, series) if self.diurnal else 1.0
         factor *= 1.0 + self.rng.uniform(-0.06, 0.06)
         return max(0, int(base * factor))
+
+    def _traffic_scale(self, series: str, ts: datetime) -> float:
+        """레코드당 트래픽 **크기** 배율.
+
+        개수(`_volume`)와 **같은 곡선**을 곱하므로 총 트래픽은 그 제곱이 된다
+        (DIURNAL 주석 참조). 사용량이 많은 시간대에는 "쓰는 사람이 늘고, 각자
+        더 많이 쓴다" — 둘 중 하나만 반영하면 피크의 총량이 모자란다.
+
+        **C-Plane 에는 적용하지 않는다.** 호출부(`_user_traffic`)가 U-Plane
+        전용이고, `lte_call` 의 측정값은 지속시간·메시지 수라 바이트가 아니다.
+        """
+        if not self.diurnal:
+            return 1.0
+        # 분 단위 흔들림은 개수 쪽에만 준다. 크기까지 흔들면 같은 분의 처리율이
+        # 이유 없이 출렁여 변화점 탐지(D2)가 그것을 집는다.
+        return diurnal_factor(ts.hour, series)
 
     # -- record builders -------------------------------------------------
 
@@ -391,6 +450,10 @@ class Generator:
     def _user_traffic(self, series: str, ts: datetime, slot_start: float) -> tuple[Rec, Cell]:
         smp = self.samplers[series]
         rng = self.rng
+        # 시간대 트래픽 크기 배율. 한 번 구해 이 레코드의 모든 양(量) 필드에
+        # 같은 값을 쓴다 — 필드마다 다시 구하면 패킷 수와 바이트가 서로 다른
+        # 배율을 받아 **평균 패킷 크기가 시간대마다 달라진다.**
+        tf = self._traffic_scale(series, ts)
         cell = self._pick_cell()
         sub = self.subs[rng.randrange(len(self.subs))]
         values = self.templates[series].copy()
@@ -423,7 +486,13 @@ class Generator:
                 "ThroughputTime", "RetransPacketCount",
             ):
                 key = f"Traffic_Total_{direction}_{f}"
-                rec.set(key, int(smp.numeric(key)))
+                # **`ThroughputTime` 도 같이 곱한다.** 처리율은
+                # `PayloadSize / ThroughputTime` 이라(U-15) 크기만 키우면
+                # **피크 시간대의 처리율이 배율만큼 올라간다** — 혼잡한 19시에
+                # 망이 가장 빠른 것으로 보이고, 실제와 반대다. 둘을 함께 늘리면
+                # 비율은 그대로고 **총량만** 시간대를 따른다 — 그것이 "사용량이
+                # 늘어난다"의 뜻이다. 혼잡에 따른 품질 저하는 장애 주입이 한다.
+                rec.set(key, int(smp.numeric(key) * tf))
             rec.set(f"Traffic_Total_{direction}_FirstTime", f"{t - 3.0:.6f}")
             rec.set(f"Traffic_Total_{direction}_LastTime", f"{t:.6f}")
         rec.set("ICMP_Delta_Uplink_IcmpPacketCount", smp.categorical("ICMP_Delta_Uplink_IcmpPacketCount", "0"))
@@ -490,9 +559,10 @@ class Generator:
             rec.set("StatusCode", status)
             rec.set("RequestTime", f"{t - 0.18:.6f}")
             rec.set("ResponseTime", f"{t:.6f}")
-            rec.set("HTTP_Total_Response_PayloadSize", int(smp.numeric("HTTP_Total_Response_PayloadSize")))
-            rec.set("HTTP_Total_Request_ContentLength", int(smp.numeric("HTTP_Total_Request_ContentLength")))
-            rec.set("HTTP_Total_Response_ContentLength", int(smp.numeric("HTTP_Total_Response_ContentLength")))
+            # 본문 크기도 시간대를 따른다 — 같은 `tf` 를 쓴다(위 주석 참조).
+            rec.set("HTTP_Total_Response_PayloadSize", int(smp.numeric("HTTP_Total_Response_PayloadSize") * tf))
+            rec.set("HTTP_Total_Request_ContentLength", int(smp.numeric("HTTP_Total_Request_ContentLength") * tf))
+            rec.set("HTTP_Total_Response_ContentLength", int(smp.numeric("HTTP_Total_Response_ContentLength") * tf))
         return rec, cell
 
     # -- per-minute generation -------------------------------------------

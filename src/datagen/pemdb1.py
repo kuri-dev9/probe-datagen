@@ -34,10 +34,14 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import polars as pl
+
+from . import uplane_parquet
 from .cells import Cell
 from .faults import resolve_active as resolve_active_faults
 from .fields import SERIES_FIELDS
@@ -77,112 +81,126 @@ PM_ENB = "PM_ENB_KPI_1M"
 PM_ENB_CAUSE = "PM_ENB_CAUSE_1M"
 PM_EPC = "PM_EPC_KPI_1M_ORG"
 
-#: U-Plane 원시 XDR — **상용에 없다. PoC 가 만든 테이블이다.**
-#: 접두를 `GP_` 로 둔 이유: 상용 이름(`PM_APP_*`·`PM_DNS_*`)을 쓰면 운영 전환
-#: 때 "있는 줄 알고" 그 이름을 찾는다. 정본 DDL 은
-#: `../graphio-probe-rca/docker/mysql/gp_tables.sql`, 요구 명세는 같은 저장소의
-#: `docs/UPLANE-TABLE-SPEC.md` 다.
-#: 이름이 `GP_RAW_*` 에서 바뀌었다(2026-10-14). 규격 문서의 `_SD`(Summary
-#: Detail) 접미를 달고 있었는데, C-Plane 까지 네 종이 한 묶음이 되면서 "원시"
-#: 라는 역할을 이름이 말하는 쪽을 골랐다 — 집계는 `GP_KPI_*_1M` 이다.
-GP_XDR = {
-    "transport": "GP_RAW_TRANSPORT",
-    "dns": "GP_RAW_DNS",
-    "http": "GP_RAW_HTTP",
-}
+#: **U-Plane 원시 XDR 은 MySQL 에 없다 — 로컬 Parquet 다**(2026-10-14).
+#:
+#: 전에는 `GP_RAW_TRANSPORT`·`GP_RAW_DNS`·`GP_RAW_HTTP` 세 테이블에 분당 6.3만
+#: 행을 INSERT 했고, 그 쓰기가 전체 I/O 의 68% 였다(실측). 세 테이블은 1분
+#: 집계의 **입력 전용**이라 집계 후 아무도 읽지 않는다 — 읽는 쪽이 없는
+#: 데이터를 트랜잭션·undo log·인덱스를 태워 가며 DB 에 넣을 이유가 없다.
+#: 설계와 레이아웃은 `uplane_parquet` 머리말에 있다.
+#:
+#: **C-Plane(`XDR_TABLE`)은 그대로 MySQL 이다.** 그쪽은 SCR-06·SCR-07 과 RCA
+#: 증거팩이 원시 레코드를 직접 조회한다.
 
-#: 계열별 `(GP_ 컬럼, 규격 필드명)` — **이름으로 맞춘다.**
+#: 계열별 `(컬럼, 규격 필드명, 타입, 문자 폭)` — **이름으로 맞춘다.**
+#:
+#: **타입과 폭이 여기 적혀 있는 이유**(2026-10-14): 전에는 `uplane_mapping` 이
+#: `information_schema` 에서 읽었다. 테이블을 지우면 그 원천이 없어지므로
+#: 정본이 코드로 옮겨 온다. 값은 구 DDL 과 **같다** — 집계 결과가 전후 동일해야
+#: 하고, 타입이 바뀌면 캐스팅 결과가 조용히 달라진다.
+#:
+#: 폭은 `str` 컬럼에만 있다(구 `varchar(n)`). 넘치면 잘라서 넘기고 횟수를
+#: 센다 — Parquet 자체에는 길이 제한이 없지만, **자르지 않으면 DB 시절과
+#: 다른 값이 집계에 들어간다.**
 #:
 #: `XDR_LTE_CALL_KPI` 는 154필드가 1:1 이라 위치로 맞췄지만(`xdr_mapping`),
 #: 여기는 규격 415필드 중 55개만 뽑으므로 위치 대응이 아예 없다. 이름으로
-#: 맞추고 **컬럼이 하나라도 빠지면 멈춘다**(`uplane_mapping`) — 조용히 빠지면
-#: 그 카운터가 영원히 NULL 이고, NULL 은 "모름"으로 읽혀 KPI 가 산출 불가로
-#: 내려간다. 에러가 나는 쪽이 낫다.
+#: 맞추고 **생성기에 없는 필드를 쓰라고 하면 멈춘다**(`uplane_specs`) —
+#: 조용히 빠지면 그 카운터가 영원히 NULL 이고, NULL 은 "모름"으로 읽혀 KPI 가
+#: 산출 불가로 내려간다. 에러가 나는 쪽이 낫다.
 #:
 #: `Traffic_Total_*` 만 이름을 줄였다. 그대로 펴면
 #: `TRAFFIC_TOTAL_UPLINK_RETRANS_PACKET_COUNT`(42자)로 식별자 30자 상한을
-#: 넘는다(상용이 Oracle 포팅이라 그 제약을 받는다).
+#: 넘는다(상용이 Oracle 포팅이라 그 제약을 받는다). **컬럼 이름은 그대로
+#: 둔다** — 집계(graphio `metrics/uplane_agg.py`)가 이 이름으로 읽는다.
 #:
 #: `EVENT_TIME` 은 여기 없다 — 규격 필드(`SummaryCreateTime`)는 epoch 실수지만
-#: DB 컬럼은 파티션 키용 `datetime` 이라 writer 가 분 시각을 직접 넣는다.
+#: 분 귀속 컬럼은 `datetime` 이라 writer 가 분 시각을 직접 넣는다.
 #: `write_xdr` 이 C-Plane 에 하는 것과 같다.
-UPLANE_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
+UPLANE_FIELDS: dict[str, tuple[tuple[str, str, str, int | None], ...]] = {
     "transport": (
-        ("ENB_ID", "eNB_ID"),
-        ("CELL_ID", "Cell_ID"),
-        ("IMSI", "IMSI"),
-        ("SYN_COUNT", "SynCount"),
-        ("ACK_TIME", "AckTime"),
-        ("RST_COUNT", "RstCount"),
-        ("UPLINK_WINDOW_CLOSE_COUNT", "UplinkWindowCloseCount"),
-        ("DNLINK_WINDOW_CLOSE_COUNT", "DnlinkWindowCloseCount"),
-        ("SYN_MSS_SIZE", "SynMssSize"),
-        ("SYN_ACK_MSS_SIZE", "SynAckMssSize"),
-        ("UPLINK_RTT_TIME", "UplinkRTTTime"),
-        ("UPLINK_RTT_COUNT", "UplinkRTTCount"),
-        ("DNLINK_RTT_TIME", "DnlinkRTTTime"),
-        ("DNLINK_RTT_COUNT", "DnlinkRTTCount"),
-        ("RETRANS_PKT_UP", "Traffic_Total_Uplink_RetransPacketCount"),
-        ("PAYLOAD_PKT_UP", "Traffic_Total_Uplink_PayloadPacketCount"),
-        ("RETRANS_PKT_DN", "Traffic_Total_Dnlink_RetransPacketCount"),
-        ("PAYLOAD_PKT_DN", "Traffic_Total_Dnlink_PayloadPacketCount"),
-        ("PAYLOAD_SIZE_UP", "Traffic_Total_Uplink_PayloadSize"),
-        ("PAYLOAD_SIZE_DN", "Traffic_Total_Dnlink_PayloadSize"),
-        ("THROUGHPUT_TIME_UP", "Traffic_Total_Uplink_ThroughputTime"),
-        ("THROUGHPUT_TIME_DN", "Traffic_Total_Dnlink_ThroughputTime"),
-        ("TETHERING", "Tethering"),
+        ("ENB_ID", "eNB_ID", "str", 30),
+        ("CELL_ID", "Cell_ID", "str", 3),
+        ("IMSI", "IMSI", "str", 30),
+        ("SYN_COUNT", "SynCount", "i64", None),
+        ("ACK_TIME", "AckTime", "f64", None),
+        ("RST_COUNT", "RstCount", "i64", None),
+        ("UPLINK_WINDOW_CLOSE_COUNT", "UplinkWindowCloseCount", "i64", None),
+        ("DNLINK_WINDOW_CLOSE_COUNT", "DnlinkWindowCloseCount", "i64", None),
+        ("SYN_MSS_SIZE", "SynMssSize", "i32", None),
+        ("SYN_ACK_MSS_SIZE", "SynAckMssSize", "i32", None),
+        ("UPLINK_RTT_TIME", "UplinkRTTTime", "i64", None),
+        ("UPLINK_RTT_COUNT", "UplinkRTTCount", "i64", None),
+        ("DNLINK_RTT_TIME", "DnlinkRTTTime", "i64", None),
+        ("DNLINK_RTT_COUNT", "DnlinkRTTCount", "i64", None),
+        ("RETRANS_PKT_UP", "Traffic_Total_Uplink_RetransPacketCount", "i64", None),
+        ("PAYLOAD_PKT_UP", "Traffic_Total_Uplink_PayloadPacketCount", "i64", None),
+        ("RETRANS_PKT_DN", "Traffic_Total_Dnlink_RetransPacketCount", "i64", None),
+        ("PAYLOAD_PKT_DN", "Traffic_Total_Dnlink_PayloadPacketCount", "i64", None),
+        ("PAYLOAD_SIZE_UP", "Traffic_Total_Uplink_PayloadSize", "i64", None),
+        ("PAYLOAD_SIZE_DN", "Traffic_Total_Dnlink_PayloadSize", "i64", None),
+        ("THROUGHPUT_TIME_UP", "Traffic_Total_Uplink_ThroughputTime", "f64", None),
+        ("THROUGHPUT_TIME_DN", "Traffic_Total_Dnlink_ThroughputTime", "f64", None),
+        ("TETHERING", "Tethering", "i8", None),
     ),
     "dns": (
-        ("ENB_ID", "eNB_ID"),
-        ("CELL_ID", "Cell_ID"),
-        ("IMSI", "IMSI"),
-        ("QUERY_NAME", "QueryName"),
-        ("REPLY_CODE", "ReplyCode"),
-        ("ANSWER_COUNT", "AnswerCount"),
-        ("QUERY_RETRY_COUNT", "QueryRetryCount"),
-        ("DNS_RETRY_SEQUENCE", "dns_retry_sequence"),
-        ("DNS_RETRY_INTERVAL", "dns_retry_interval"),
-        ("RESPONSE_TIME", "ResponseTime"),
-        ("REQUEST_FIRST_TIME", "RequestFirstTime"),
-        ("PAYLOAD_SIZE_UP", "Traffic_Total_Uplink_PayloadSize"),
-        ("PAYLOAD_SIZE_DN", "Traffic_Total_Dnlink_PayloadSize"),
+        ("ENB_ID", "eNB_ID", "str", 30),
+        ("CELL_ID", "Cell_ID", "str", 3),
+        ("IMSI", "IMSI", "str", 30),
+        ("QUERY_NAME", "QueryName", "str", 255),
+        ("REPLY_CODE", "ReplyCode", "i32", None),
+        ("ANSWER_COUNT", "AnswerCount", "i32", None),
+        ("QUERY_RETRY_COUNT", "QueryRetryCount", "i32", None),
+        ("DNS_RETRY_SEQUENCE", "dns_retry_sequence", "i32", None),
+        ("DNS_RETRY_INTERVAL", "dns_retry_interval", "f64", None),
+        ("RESPONSE_TIME", "ResponseTime", "f64", None),
+        ("REQUEST_FIRST_TIME", "RequestFirstTime", "f64", None),
+        ("PAYLOAD_SIZE_UP", "Traffic_Total_Uplink_PayloadSize", "i64", None),
+        ("PAYLOAD_SIZE_DN", "Traffic_Total_Dnlink_PayloadSize", "i64", None),
     ),
     "http": (
-        ("ENB_ID", "eNB_ID"),
-        ("CELL_ID", "Cell_ID"),
-        ("IMSI", "IMSI"),
-        ("HOST", "Host"),
-        ("HOST_SITE", "Host_Site"),
-        ("STATUS_CODE", "StatusCode"),
-        ("REQUEST_TIME", "RequestTime"),
-        ("RESPONSE_TIME", "ResponseTime"),
-        ("UPLINK_RTT_TIME", "UplinkRTTTime"),
-        ("UPLINK_RTT_COUNT", "UplinkRTTCount"),
-        ("DNLINK_RTT_TIME", "DnlinkRTTTime"),
-        ("DNLINK_RTT_COUNT", "DnlinkRTTCount"),
-        ("RETRANS_PKT_DN", "Traffic_Total_Dnlink_RetransPacketCount"),
-        ("PAYLOAD_PKT_DN", "Traffic_Total_Dnlink_PayloadPacketCount"),
-        ("PAYLOAD_SIZE_DN", "Traffic_Total_Dnlink_PayloadSize"),
-        ("THROUGHPUT_TIME_DN", "Traffic_Total_Dnlink_ThroughputTime"),
+        ("ENB_ID", "eNB_ID", "str", 30),
+        ("CELL_ID", "Cell_ID", "str", 3),
+        ("IMSI", "IMSI", "str", 30),
+        ("HOST", "Host", "str", 255),
+        ("HOST_SITE", "Host_Site", "str", 255),
+        ("STATUS_CODE", "StatusCode", "i32", None),
+        ("REQUEST_TIME", "RequestTime", "f64", None),
+        ("RESPONSE_TIME", "ResponseTime", "f64", None),
+        ("UPLINK_RTT_TIME", "UplinkRTTTime", "i64", None),
+        ("UPLINK_RTT_COUNT", "UplinkRTTCount", "i64", None),
+        ("DNLINK_RTT_TIME", "DnlinkRTTTime", "i64", None),
+        ("DNLINK_RTT_COUNT", "DnlinkRTTCount", "i64", None),
+        ("RETRANS_PKT_DN", "Traffic_Total_Dnlink_RetransPacketCount", "i64", None),
+        ("PAYLOAD_PKT_DN", "Traffic_Total_Dnlink_PayloadPacketCount", "i64", None),
+        ("PAYLOAD_SIZE_DN", "Traffic_Total_Dnlink_PayloadSize", "i64", None),
+        ("THROUGHPUT_TIME_DN", "Traffic_Total_Dnlink_ThroughputTime", "f64", None),
     ),
 }
 
-#: `information_schema.DATA_TYPE` 중 숫자로 보는 것. 빈 문자열을 NULL 로
-#: 번역할 대상을 가리는 데 쓴다(`UplaneMapping.numeric`).
-_NUMERIC_TYPES: frozenset[str] = frozenset({
-    "tinyint", "smallint", "mediumint", "int", "integer", "bigint",
-    "decimal", "numeric", "float", "double", "real", "bit",
-})
-
-#: 분 귀속 컬럼 — **원시 네 종이 모두 이 이름을 쓴다**(2026-10-14).
+#: 분 귀속 컬럼 — **C-Plane 과 U-Plane 이 같은 이름을 쓴다**(2026-10-14).
 #: 예전에는 U-Plane 만 `SUMMARY_CREATE_TIME`(규격 `SummaryCreateTime`)이고
 #: C-Plane 은 `EVENT_TIME` 이었다. 한 묶음으로 묶으면서 통일했다 — 상용
 #: `PM_*` 와 집계 `GP_KPI_*`(`SLOT_TIME`)에 대응이 분명한 쪽이다.
-#: graphio 쪽 정본은 `store/tables.py:UPLANE_TIME` 이고 **같은 값이어야 한다.**
+#: U-Plane 이 Parquet 로 나간 뒤에도 **컬럼 이름은 그대로다** — graphio 쪽
+#: 정본은 `store/tables.py:UPLANE_TIME` 이고 **같은 값이어야 한다.**
 UPLANE_SLOT = "EVENT_TIME"
 
 #: U-Plane 계열 순서. 로그·집계 보고에서 자리를 고정한다.
+#: **graphio 쪽 정본은 `store/tables.py:UPLANE_SERIES` 이고 같은 값이어야
+#: 한다** — 그 문자열이 `GP_KPI_U_CELL_1M.SERIES` 에 그대로 들어간다.
 UPLANE_SERIES: tuple[str, ...] = ("transport", "dns", "http")
+
+#: U-Plane Parquet 를 몇 분치 남길지. **사람이 10분으로 정했다**(2026-10-14).
+#: 집계 여부를 보지 않는다 — 근거는 `uplane_parquet.purge` 머리말.
+#: 설정으로 덮어쓴다(`pemdb1.uplane_parquet.retain_minutes`).
+UPLANE_RETAIN_MINUTES = 10
+
+#: U-Plane Parquet 루트의 기본값. **설정이 정본이다**
+#: (`pemdb1.uplane_parquet.root`) — 이 값은 설정을 빠뜨렸을 때의 폴백이고,
+#: 읽는 쪽 기본값(graphio `paths.uplane_raw` = `data/uplane_raw`)과 **같은
+#: 디렉터리를 가리켜야 한다.** 어긋나면 집계가 조용히 0행이 된다.
+UPLANE_ROOT_DEFAULT = "../graphio-probe-rca/data/uplane_raw"
 
 
 # --------------------------------------------------------------------------
@@ -198,13 +216,39 @@ class Distributions:
     그대로여도 전체 합산 소통률이 움직인다(불변규칙 3).
     """
 
-    def __init__(self, path: Path, rng: random.Random, success_only: bool = True):
+    #: 희소 Call Type 의 **최소 비율**. 실측 그대로 뽑으면 분당 20,000호에서
+    #: 어떤 절차는 1건도 안 나온다 —
+    #:
+    #:     2 Attach MT   0.0024% → 0.5건/분
+    #:     9 Detach MO   0.0140% → 2.8건/분
+    #:     7 Ext Svc MO  0.0214% → 4.3건/분
+    #:
+    #: 최소 표본은 분모 20건이고(불변규칙 5) 그 위에 이항검정이 한 겹 더 있다.
+    #: 분당 몇 건짜리 절차는 30분 창에서도 판정이 서지 않아 **화면·탐지·RCA 가
+    #: 그 절차를 한 번도 다루지 않는다** — 에러 없이 기능이 비어 있는 상태다.
+    #:
+    #: 0.3% 면 분당 60건이라 1분 창에서 분모 20을 넘는다. **실측 분포를 일부러
+    #: 왜곡하는 것**이므로 근거를 남긴다: 사용자 지시(2026-10-14) — "에러 case
+    #: 말고도 조금씩 데이터가 만들어져야 한다". 구성비 자체는 그대로다 —
+    #: Service(3·4)가 여전히 95% 이상이고 Attach 는 적다(불변규칙 3 의 취지).
+    CALL_TYPE_FLOOR = 0.003
+
+    #: 바닥을 **적용하지 않는** Call Type. `codes.CALL_TYPE` 에 정의가 없는 값은
+    #: 늘리면 안 된다 — 화면이 `UNKNOWN` 으로 표기하고 H-17(미정의 코드
+    #: 출현률)이 오른다. 실측의 `0` 이 그렇다(6건, 규격서에 없음).
+    CALL_TYPE_FLOOR_EXCLUDE = frozenset({"0"})
+
+    def __init__(self, path: Path, rng: random.Random, success_only: bool = True,
+                 call_type_floor: float | None = None):
         d = json.loads(path.read_text(encoding="utf-8"))
         self.rng = rng
         self.success_only = success_only
 
         self.call_types = [e["v"] for e in d["call_type"]]
-        self.call_type_w = [e["n"] for e in d["call_type"]]
+        self.call_type_w = self._floored_call_type_w(
+            self.call_types, [e["n"] for e in d["call_type"]],
+            self.CALL_TYPE_FLOOR if call_type_floor is None else call_type_floor,
+        )
         #: CALL_TYPE 별 플래그 비율 — "Detach인데 소통 성공" 같은 조합을 막으려면
         #: 플래그를 주변분포로 따로 뽑지 않고 Call Type 조건부로 뽑아야 한다.
         self.flag_ratio = {
@@ -263,6 +307,45 @@ class Distributions:
             rel = [e for e in rel if e["v"] in NORMAL_RELEASE or e["v"] == "0"]
         self.releases = [e["v"] for e in rel]
         self.release_w = [e["n"] for e in rel]
+
+    @classmethod
+    def _floored_call_type_w(cls, types: list[str], weights: list[int],
+                             floor: float) -> list[float]:
+        """희소 Call Type 가중치를 ``floor`` 까지 끌어올린다.
+
+        올린 몫은 **바닥 위에 있는 타입에서 비례 차감**한다. 전체 합을 그대로
+        두어야 `rng.choices` 의 상대 비율이 의도한 값이 된다 — 그냥 더하면
+        피크 타입(3·4)의 몫이 함께 줄어드는 양을 계산할 수 없다.
+
+        ``floor`` 가 0 이면 실측 그대로 돌려준다(끄는 경로).
+        """
+        total = float(sum(weights))
+        if floor <= 0 or total <= 0:
+            return [float(w) for w in weights]
+
+        target = total * floor
+        out = [float(w) for w in weights]
+        # ① 바닥 미만을 끌어올리고 필요한 양을 센다
+        need = 0.0
+        donors: list[int] = []
+        for i, (v, w) in enumerate(zip(types, out)):
+            if v in cls.CALL_TYPE_FLOOR_EXCLUDE:
+                continue
+            if w < target:
+                need += target - w
+                out[i] = target
+            else:
+                donors.append(i)
+        if need <= 0 or not donors:
+            return out
+        # ② 바닥 위에 있는 타입에서 비례 차감. 차감해도 바닥을 깨지 않는다 —
+        #    실측에서 3·4 가 95% 이므로 몇 % 를 덜어도 여유가 크다.
+        pool = sum(out[i] for i in donors)
+        if pool <= need:
+            return out                      # 덜 수 없으면 비율만 올린 채 둔다
+        for i in donors:
+            out[i] -= need * (out[i] / pool)
+        return out
 
     def _pick(self, pool: list, weights: list):
         return self.rng.choices(pool, weights=weights, k=1)[0]
@@ -578,71 +661,50 @@ def xdr_mapping(conn, database: str) -> XdrMapping:
 
 
 @dataclass
-class UplaneMapping:
-    """계열 하나의 적재 명세 — `(GP_ 컬럼, 생성기 필드 인덱스, varchar 폭)`."""
+class UplaneSpec:
+    """계열 하나의 Parquet 적재 명세.
 
-    table: str
-    columns: list[str]              # UPLANE_SLOT 을 포함한 INSERT 컬럼 순서
+    구 `UplaneMapping` 의 후신이다. **테이블 이름 대신 계열 이름을 들고 있고,
+    타입·폭을 `information_schema` 가 아니라 `UPLANE_FIELDS` 에서 받는다** —
+    테이블을 지우면 DB 에 물어볼 곳이 없어지기 때문이다(2026-10-14).
+    """
+
+    series: str
+    columns: list[str]              # UPLANE_SLOT 을 포함한 Parquet 컬럼 순서
     picks: list[int]                # 생성기 값 리스트에서 뽑을 위치 (SLOT 제외)
-    widths: list[int | None]        # picks 와 같은 길이
-    #: 숫자 타입 컬럼인가 — `picks` 와 같은 길이.
-    #:
-    #: **빈 문자열을 NULL 로 번역해야 하는 자리를 가린다.** 측정값이
-    #: `varchar(20)` 에서 숫자로 바뀐 뒤(2026-10-14) 빈 문자열을 그대로 넘기면
-    #: `STRICT_TRANS_TABLES` 가 `ERROR 1366 Incorrect integer value` 로 거부해
-    #: 적재가 통째로 멈춘다. 실측 분포에 그런 값이 있다 — `data/profile.json`
-    #: 의 `dns.categorical` 에서 `ReplyCode`·`AnswerCount`·`QueryRetryCount`
-    #: 가 각각 0.385% 확률로 빈 문자열을 낸다(원본 .dat 에 그렇게 들어 있었다).
-    numeric: list[bool]
+    kinds: list[str]                # picks 와 같은 길이 — DTYPES 의 키
+    widths: list[int | None]        # picks 와 같은 길이 — str 컬럼의 문자 폭
 
 
-def uplane_mapping(conn, database: str) -> dict[str, UplaneMapping]:
-    """`GP_RAW_*` 세 테이블의 적재 명세를 만든다.
+def uplane_specs(series_on: Iterable[str] | None = None) -> dict[str, UplaneSpec]:
+    """계열별 Parquet 적재 명세를 만든다.
 
-    **이름으로 맞추고, 어긋나면 멈춘다.** DDL 쪽 컬럼이 `UPLANE_FIELDS` 에
-    없거나 반대로 없는 컬럼을 적재하려 하면 둘 다 에러다. 조용히 빠지면 그
+    **생성기 필드와 이름으로 맞추고, 어긋나면 멈춘다.** 조용히 빠지면 그
     카운터가 영원히 NULL 이고, NULL 은 "모름"으로 읽혀 해당 KPI 가 산출 불가로
     내려간다 — 데이터는 들어오는데 지표만 안 서는 형태라 추적이 어렵다.
 
-    테이블이 아직 없으면(DDL 미적용) 그 계열을 **생략한다**. 멈추지 않는
-    이유는 C-Plane 적재가 U-Plane 때문에 막혀서는 안 되기 때문이다 —
-    호출부가 돌려받은 dict 의 키로 "무엇이 살아 있는가"를 판정한다.
+    ``series_on`` 은 켜 둔 계열(`PemdbGen.series`)이다. 주지 않으면 셋 다
+    만든다. **구 `uplane_mapping` 과 달리 DB 를 보지 않는다** — 전에는 테이블
+    존재 여부가 "그 계열이 살아 있는가"의 답이었고, 지금은 생성 설정
+    (`pemdb1.rates`)이 그 답이다.
     """
-    out: dict[str, UplaneMapping] = {}
+    want = set(series_on) if series_on is not None else set(UPLANE_SERIES)
+    out: dict[str, UplaneSpec] = {}
     for series in UPLANE_SERIES:
-        table = GP_XDR[series]
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH, DATA_TYPE "
-                "FROM information_schema.COLUMNS "
-                "WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s ORDER BY ORDINAL_POSITION",
-                [database, table],
-            )
-            rows = cur.fetchall()
-        if not rows:
+        if series not in want:
             continue
-        db_cols = {r[0].upper(): (int(r[1]) if r[1] is not None else None) for r in rows}
-        # **타입을 DB 에서 읽는다.** 코드에 목록을 적으면 DDL 을 바꿀 때
-        # 한쪽만 고쳐지고, 그러면 빈 문자열이 다시 적재를 멈춘다.
-        db_numeric = {r[0].upper(): str(r[2]).lower() in _NUMERIC_TYPES for r in rows}
         spec = UPLANE_FIELDS[series]
-        want = {c for c, _ in spec} | {UPLANE_SLOT}
-        if missing := want - set(db_cols):
-            raise RuntimeError(f"{table} 에 없는 컬럼: {sorted(missing)}")
-        if extra := set(db_cols) - want:
-            raise RuntimeError(
-                f"{table} 에 적재 명세가 없는 컬럼: {sorted(extra)} — "
-                "UPLANE_FIELDS 를 채우지 않으면 그 컬럼은 영원히 NULL 이다"
-            )
         idx = {name: i for i, name in enumerate(SERIES_FIELDS[series])}
-        if absent := [f for _, f in spec if f not in idx]:
+        if absent := [f for _, f, _, _ in spec if f not in idx]:
             raise RuntimeError(f"{series} 생성기에 없는 규격 필드: {absent}")
-        out[series] = UplaneMapping(
-            table=table,
-            columns=[UPLANE_SLOT] + [c for c, _ in spec],
-            picks=[idx[f] for _, f in spec],
-            widths=[db_cols[c] for c, _ in spec],
-            numeric=[db_numeric[c] for c, _ in spec],
+        if bad := [k for _, _, k, _ in spec if k not in uplane_parquet.DTYPES]:
+            raise RuntimeError(f"{series} UPLANE_FIELDS 의 모르는 타입: {bad}")
+        out[series] = UplaneSpec(
+            series=series,
+            columns=[UPLANE_SLOT] + [c for c, _, _, _ in spec],
+            picks=[idx[f] for _, f, _, _ in spec],
+            kinds=[k for _, _, k, _ in spec],
+            widths=[w for _, _, _, w in spec],
         )
     return out
 
@@ -652,19 +714,62 @@ def uplane_mapping(conn, database: str) -> dict[str, UplaneMapping]:
 # --------------------------------------------------------------------------
 
 
+#: 계열별 **페이로드 바이트** 필드. 제어 화면 툴팁이 "그 분에 얼마나 흘렸나"를
+#: 보여주는 데 쓴다.
+#:
+#: `PayloadSize` 만 센다 — `DataSize` 는 헤더를 포함하고 `RetransDataSize` 는
+#: 재전송이라 **같은 바이트를 두 번 세게 된다.** 사용자가 보는 "사용량"은
+#: 실제로 흘러간 페이로드다.
+_BYTE_FIELDS = ("Traffic_Total_Uplink_PayloadSize",
+                "Traffic_Total_Dnlink_PayloadSize")
+
+#: 필드 인덱스 캐시. 분당 5만 행을 도는 자리라 매번 `.index()` 를 부르면
+#: 그것만으로 틱이 눈에 띄게 느려진다.
+_BYTE_IDX: dict[str, tuple[int, ...]] = {}
+
+
+def series_stat(lte_rows: list, uplane_rows: dict[str, list]) -> dict:
+    """계열별 ``{n, bytes}`` — `CM_DATAGEN_HISTORY.SERIES_STAT` 에 들어간다.
+
+    C-Plane(`lte_call`)은 건수만 센다. 시그널링 기록이라 페이로드 바이트가
+    없다 — 0 으로 적지 않고 **키 자체를 두지 않는다**(불변규칙 17: 모름을
+    0으로 적지 않는다). 화면은 그 계열에 바이트를 표시하지 않는다.
+    """
+    out: dict[str, dict] = {"lte_call": {"n": len(lte_rows)}}
+    for series, rows in (uplane_rows or {}).items():
+        if series not in _BYTE_IDX:
+            fields = SERIES_FIELDS.get(series) or []
+            _BYTE_IDX[series] = tuple(
+                fields.index(f) for f in _BYTE_FIELDS if f in fields)
+        idx = _BYTE_IDX[series]
+        total = 0
+        for r in rows:
+            for i in idx:
+                v = r[i]
+                if v:
+                    try:
+                        total += int(float(v))
+                    except (TypeError, ValueError):
+                        pass        # 생성값이 비정상이면 그 행만 건너뛴다
+        out[series] = {"n": len(rows), "bytes": total}
+    return out
+
+
 class PemdbGen:
     """상용 스키마용 생성기 — 셀 마스터는 DB, 분포는 실측 JSON."""
 
     def __init__(self, conn, data_dir: Path, rates: dict, seed: int = 20260903,
                  subscriber_pool: int = 20_000, success_only: bool = True,
                  enb_limit: int | None = None,
-                 drawable: set[str] | None = None):
+                 drawable: set[str] | None = None,
+                 call_type_floor: float | None = None):
         self.cells = load_cells(conn, enb_limit=enb_limit, drawable=drawable)
         if not self.cells:
             raise RuntimeError("CL_CELL_MAP 이 비어 있다 — 마스터를 먼저 적재하라")
         self.dist = Distributions(
             data_dir / "pemdb1" / "_distributions.json",
             random.Random(seed + 101), success_only=success_only,
+            call_type_floor=call_type_floor,
         )
         profiles = load_profiles(data_dir / "profile.json")
         # **`lte_call` 이 반드시 첫 자리여야 한다.** `Generator.__init__` 이
@@ -856,7 +961,7 @@ class PemdbGen:
         self.gen._bind_scenario_targets()
 
     def set_fault_rows(self, active: list[dict]) -> tuple[list[Scenario], list[int]]:
-        """`datagen_fault` 활성 행 목록을 걸어 둔다 — 실시간 틱(`cli.cmd_run`)용.
+        """`CM_DATAGEN_FAULT` 활성 행 목록을 걸어 둔다 — 실시간 틱(`cli.cmd_run`)용.
 
         해석은 `faults.resolve_active` 가 한다. 구 창고 경로(`engine.DataGen`)와
         **같은 함수**를 쓴다 — 두 경로가 각자 해석하면 같은 fault 가 서로 다른
@@ -876,11 +981,25 @@ class PemdbGen:
 
 
 class PemdbWriter:
-    """상용 테이블 적재 — 구간 멱등(DELETE→INSERT)."""
+    """원시 xDR 적재 — 구간 멱등.
 
-    def __init__(self, conn, mapping: XdrMapping):
+    **쓰는 곳이 두 군데다**(2026-10-14). C-Plane(`write_xdr`)은 MySQL
+    `GP_RAW_LTE_CALL_KPI` 로, U-Plane 3종(`write_uplane`)은 로컬 Parquet 로
+    간다. 가른 이유는 읽는 쪽이 다르기 때문이다 — C-Plane 은 화면·RCA 가 원시
+    레코드를 직접 조회하고, U-Plane 은 1분 집계의 입력 전용이다
+    (`uplane_parquet` 머리말).
+    """
+
+    def __init__(self, conn, mapping: XdrMapping,
+                 uplane_root: Path | None = None,
+                 uplane_retain_minutes: int = UPLANE_RETAIN_MINUTES):
         self.conn = conn
         self.map = mapping
+        #: U-Plane Parquet 루트. **없으면 쓰지 않는다** — `write_uplane` 을
+        #: 부르면 멈춘다. 경로를 기본값으로 숨기면 설정을 빠뜨린 실행이
+        #: 엉뚱한 디렉터리에 쌓고, 집계는 그것을 못 찾아 0행이 된다.
+        self.uplane_root = uplane_root
+        self.uplane_retain_minutes = uplane_retain_minutes
         self.clamped = 0
         #: 숫자 컬럼에 온 빈 문자열을 NULL 로 바꾼 횟수. **조용히 바꾸지
         #: 않는다** — 실측 분포가 내는 "모름"이라 정상이지만, 갑자기 늘면
@@ -918,72 +1037,108 @@ class PemdbWriter:
         return len(data)
 
     def write_uplane(self, ts: datetime, series: str, rows: list[list[str]],
-                     mapping: UplaneMapping) -> int:
-        """`GP_RAW_*` 한 계열 적재 — `write_xdr` 과 같은 구간 멱등이다.
+                     spec: UplaneSpec) -> int:
+        """한 계열의 한 분을 **Parquet 파일로** 쓴다 — `write_xdr` 과 같은 구간
+        멱등이다(같은 분을 다시 돌리면 그 파일을 덮어쓴다).
 
-        `EVENT_TIME` 에는 **분 시각을 넣는다.** 규격 필드(`SummaryCreateTime`)는 epoch
-        실수지만 DB 컬럼은 파티션 키라 `datetime` 이어야 하고, 1분 집계에
-        분 안의 초는 쓰이지 않는다. `write_xdr` 이 `EVENT_TIME` 에 하는 것과
-        같은 처리다 — 네 테이블의 분 귀속이 같아야 같은 분의 C-Plane·U-Plane
-        이 한 Incident 로 상관된다. **이제 컬럼 이름까지 같다.**
+        `EVENT_TIME` 에는 **분 시각을 넣는다.** 규격 필드(`SummaryCreateTime`)는
+        epoch 실수지만 분 귀속 컬럼은 `datetime` 이어야 하고, 1분 집계에 분 안의
+        초는 쓰이지 않는다. `write_xdr` 이 C-Plane 에 하는 것과 같은 처리다 —
+        같은 분의 C-Plane·U-Plane 이 한 Incident 로 상관되려면 분 귀속이 같아야
+        한다. 파일 이름에도 그 분이 들어가지만 **컬럼을 지우지 않는다**: 읽는
+        쪽이 파일 이름이 아니라 데이터로 분을 판정할 수 있어야 한다(이름과
+        내용이 어긋나도 집계가 조용히 틀리지 않는다).
 
         응답시간 계열(`RESPONSE_TIME`·`REQUEST_TIME`·`REQUEST_FIRST_TIME`)은
         **원래의 epoch 값을 그대로 둔다.** 집계가 둘의 차이를 쓰므로 분 시각으로
         덮으면 모든 응답시간이 0 이 된다.
+
+        ## 값을 컬럼 단위로 세운다
+
+        구 구현은 행마다 Python 루프를 돌며 튜플을 만들었다. 여기서는 문자열
+        컬럼을 먼저 세우고 캐스팅·절단을 polars 식으로 한 번에 돌린다 — 분당
+        4.6만 행을 도는 자리라 행 루프가 틱 시간의 대부분이었다.
+
+        **빈 문자열은 "모름"이고 숫자 컬럼에서 그 표현은 NULL 이다**(불변규칙
+        17). 0 으로 채우면 `REPLY_CODE` 에서는 NOERROR(성공)가 되고
+        `ANSWER_COUNT` 에서는 "응답 0건"이 되어, 모르는 것이 사실처럼 집계된다.
+        실측 분포가 0.385% 확률로 그런 값을 낸다 — `data/profile.json` 의
+        `dns.categorical` 에서 `ReplyCode`·`AnswerCount`·`QueryRetryCount` 가
+        그렇다(원본 .dat 에 그렇게 들어 있었다).
+
+        **캐스팅 실패는 막지 않는다.** DB 시절 `STRICT_TRANS_TABLES` 가
+        `ERROR 1366` 으로 적재를 멈춘 자리이고, 조용히 NULL 로 삼키면 그
+        카운터만 비어 추적할 수 없게 된다 — 에러가 나는 쪽이 낫다.
         """
-        cols = ",".join(f"`{c}`" for c in mapping.columns)
-        marks = ",".join(["%s"] * len(mapping.columns))
-        data = []
-        for values in rows:
-            out: list = [ts]
-            for pos, width, is_num in zip(mapping.picks, mapping.widths,
-                                          mapping.numeric):
-                v = values[pos]
-                if is_num and isinstance(v, str) and not v.strip():
-                    # **빈 문자열은 "모름"이고, 숫자 컬럼에서 그 표현은 NULL
-                    # 이다**(불변규칙 17). 0 으로 채우면 `REPLY_CODE` 에서는
-                    # NOERROR(성공)가 되고 `ANSWER_COUNT` 에서는 "응답 0건"이
-                    # 되어, 모르는 것이 사실처럼 집계된다.
-                    #
-                    # 그대로 넘기면 `STRICT_TRANS_TABLES` 가 `ERROR 1366` 으로
-                    # **적재를 통째로 멈춘다** — 실측 분포가 0.385% 확률로
-                    # 그런 값을 내므로 1분이면 반드시 걸린다.
-                    out.append(None)
-                    self.nulled += 1
-                    continue
-                if width is not None and len(v) > width:
-                    # STRICT_TRANS_TABLES 에서는 길이 초과가 에러다. 잘라서
-                    # 넘기되 횟수를 센다 — 조용히 자르면 값이 틀린 것을 모른다.
-                    v = v[:width]
-                    self.clamped += 1
-                out.append(v)
-            data.append(tuple(out))
-        with self.conn.cursor() as cur:
-            cur.execute(
-                f"DELETE FROM `{mapping.table}` "
-                f"WHERE `{UPLANE_SLOT}` >= %s AND `{UPLANE_SLOT}` < %s",
-                [ts, ts + timedelta(minutes=1)],
-            )
-            for i in range(0, len(data), 2000):
-                cur.executemany(
-                    f"INSERT INTO `{mapping.table}` ({cols}) VALUES ({marks})",
-                    data[i:i + 2000],
-                )
-        self.conn.commit()
-        return len(data)
+        if self.uplane_root is None:
+            raise RuntimeError(
+                "U-Plane Parquet 루트가 없다 — PemdbWriter(uplane_root=...) 로 "
+                "주거나 설정 pemdb1.uplane_parquet.root 를 채워라")
+        cols: dict[str, pl.Series] = {}
+        exprs: list[pl.Expr] = []
+        for name, pos, kind, width in zip(spec.columns[1:], spec.picks,
+                                          spec.kinds, spec.widths):
+            cols[name] = pl.Series(name, [r[pos] for r in rows], dtype=pl.String)
+            e = pl.col(name)
+            if kind == "str":
+                if width is not None:
+                    # 폭을 넘기면 자른다 — DB 의 `varchar(n)` 과 같은 값이
+                    # 집계에 들어가야 전후 결과가 같다. 횟수는 아래에서 센다.
+                    e = e.str.slice(0, width)
+            else:
+                # 빈 문자열(공백만 있는 것까지) → NULL. 그 뒤 캐스팅한다.
+                e = (pl.when(e.str.strip_chars() == "")
+                       .then(None)
+                       .otherwise(e)
+                       .cast(uplane_parquet.DTYPES[kind]))
+            exprs.append(e.alias(name))
+
+        frame = pl.DataFrame(cols)
+        # 절단·NULL 치환 횟수를 **세어서 보고한다.** 조용히 바꾸면 값이 틀린
+        # 것을 모른다. 벡터 연산이라 비용은 컬럼당 한 번이다.
+        for name, kind, width in zip(spec.columns[1:], spec.kinds, spec.widths):
+            if kind == "str":
+                if width is not None and frame.height:
+                    self.clamped += int(
+                        frame.select(
+                            (pl.col(name).str.len_chars() > width).sum()
+                        ).item() or 0)
+            elif frame.height:
+                self.nulled += int(
+                    frame.select(
+                        (pl.col(name).str.strip_chars() == "").sum()
+                    ).item() or 0)
+
+        frame = frame.with_columns(exprs).with_columns(
+            # 분 귀속 컬럼. `datetime` 이고 **마이크로초 해상도**다 — 분으로
+            # 내린 값만 들어가지만, 읽는 쪽이 `[lo, hi)` 비교를 하므로
+            # 해상도가 달라지면 경계에서 어긋난다.
+            pl.lit(ts).cast(pl.Datetime("us")).alias(UPLANE_SLOT)
+        ).select(spec.columns)
+        return uplane_parquet.write_minute(self.uplane_root, series, ts, frame)
 
     def write_uplane_all(self, ts: datetime, batches: dict[str, list[list[str]]],
-                         mappings: dict[str, UplaneMapping]) -> dict[str, int]:
-        """계열별 적재를 한 번에. 테이블이 없는 계열은 **건너뛴다.**
+                         specs: dict[str, UplaneSpec]) -> dict[str, int]:
+        """계열별 적재를 한 번에. 명세가 없는 계열은 **건너뛴다.**
 
-        `uplane_mapping` 이 DDL 미적용 계열을 명세에서 빼므로, 여기서 그
-        계열의 레코드는 버려진다. 생성은 했는데 적재되지 않는 상태를 조용히
-        두면 "왜 비어 있나"를 추적할 수 없으니 호출부가 반환값으로 센다.
+        `uplane_specs` 가 꺼 둔 계열을 명세에서 빼므로, 여기서 그 계열의
+        레코드는 버려진다. 생성은 했는데 적재되지 않는 상태를 조용히 두면
+        "왜 비어 있나"를 추적할 수 없으니 호출부가 반환값으로 센다.
+
+        **쓴 뒤에 보존 정리를 돌린다.** 10분치만 남긴다(사람 지시,
+        2026-10-14) — 집계 여부를 보지 않는 이유는 `uplane_parquet.purge`
+        머리말에 있다. 지우는 주체를 쓰는 쪽에 둔 것은 그쪽이 "방금 어느 분을
+        썼는가"를 알기 때문이다.
         """
-        return {
-            s: self.write_uplane(ts, s, rows, mappings[s])
-            for s, rows in batches.items() if s in mappings
+        out = {
+            s: self.write_uplane(ts, s, rows, specs[s])
+            for s, rows in batches.items() if s in specs
         }
+        if self.uplane_retain_minutes > 0:
+            for series in out:
+                uplane_parquet.purge(self.uplane_root, series,
+                                     self.uplane_retain_minutes)
+        return out
 
     def last_event_time(self, table: str = XDR_TABLE) -> datetime | None:
         with self.conn.cursor() as cur:
@@ -1187,10 +1342,15 @@ def aggregate_all(conn, lo: datetime, hi: datetime) -> dict[str, int]:
 
 #: 생성기가 **쓰는** 테이블과 그 시각 컬럼 — 보존 정리의 대상이다.
 #:
-#: **기준은 접두가 아니라 쓰기 주체다.** `GP_RAW_*` 는 이름이 `GP_` 지만
-#: **생성기가 쓰는 원시 XDR** 이므로 여기 들어간다. 빼면 두 가지가 같이 깨진다 —
-#: 디스크가 무한히 자라고, `ensure_partitions` 가 앞을 늘려 주지 않아 범위를
-#: 벗어난 분이 전부 `pmax` 한 칸에 몰려 프루닝이 죽는다(에러 없이 느려진다).
+#: **기준은 접두가 아니라 쓰기 주체다.** `GP_RAW_LTE_CALL_KPI` 는 이름이 `GP_`
+#: 지만 **생성기가 쓰는 원시 XDR** 이므로 여기 들어간다. 빼면 두 가지가 같이
+#: 깨진다 — 디스크가 무한히 자라고, `ensure_partitions` 가 앞을 늘려 주지
+#: 않아 범위를 벗어난 분이 전부 `pmax` 한 칸에 몰려 프루닝이 죽는다(에러 없이
+#: 느려진다).
+#:
+#: **U-Plane 3종은 여기 없다**(2026-10-14). MySQL 을 떠나 로컬 Parquet 가
+#: 됐고, 보존은 파티션 드롭이 아니라 파일 삭제다
+#: (`uplane_parquet.purge` · 10분치).
 #:
 #: **`GP_KPI_*`·`GP_INCIDENT` 류 분석 산출물은 넣지 않는다.** 그것은 graphio 가
 #: 쓰고 (`graphio/store/tables.py:RESETTABLE_TABLES`), 남의 산출물을 생성기가
@@ -1203,7 +1363,7 @@ WRITTEN_TABLES: tuple[tuple[str, str], ...] = (
     (PM_ENB, "EVENT_TIME"),
     (PM_ENB_CAUSE, "EVENT_TIME"),
     (PM_EPC, "EVENT_TIME"),
-) + tuple((GP_XDR[s], UPLANE_SLOT) for s in UPLANE_SERIES)
+)
 
 
 #: 원시 xDR 의 보관 시간. **시간 파티션이라 이 입도로 자를 수 있다** —

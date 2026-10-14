@@ -1,4 +1,4 @@
-"""datagen_fault 행 → Scenario 변환.
+"""CM_DATAGEN_FAULT 행 → Scenario 변환.
 
 UI 가 DB 에 남기는 fault 는 "무엇을(kind)·어디에(target)·언제부터(start_ts)·
 얼마나(duration·intensity)"만 담는다. 생성기가 받는 Scenario 에는 그 외에
@@ -191,7 +191,7 @@ def _resolve_target(raw: str | None, kind: str, cells: list[Cell], rng: random.R
 
 
 def build(fault: dict, cells: list[Cell], anchor: datetime, rng: random.Random) -> Scenario | None:
-    """datagen_fault 한 행을 Scenario 로 바꾼다.
+    """CM_DATAGEN_FAULT 한 행을 Scenario 로 바꾼다.
 
     시간창은 anchor(분 인덱스 0의 시각) 기준 분 좌표로 옮긴다 — Scenario 가
     intensity() 로 스스로 창을 자르므로, 창 밖 분에 걸려 있어도 무해하다.
