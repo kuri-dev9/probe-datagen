@@ -12,3 +12,16 @@ dist
 run
 tests
 README.md
+
+# ── DB 적재용 원본은 이미지에 넣지 않는다 (2026-10-16) ──────────────────
+#
+# `Dockerfile` 이 `COPY data/` 로 통째로 굽는데 `data/pemdb1` 이 349MB 다
+# (`CL_CELL_MAP.json` 167MB · `CM_CELL_REP_RU_LOC.json` 167MB). 그것들은
+# **로컬에서 DB 를 채울 때 한 번 쓰는 원본**이고 런타임에는 쓰지 않는다 —
+# 생성기는 `CL_CELL_MAP` 테이블을 읽는다(`pemdb1.load_cells`).
+#
+# 런타임에 필요한 것은 `_distributions.json`(상용 334만행 실측 분포) 하나뿐이라
+# 그것만 남긴다. 이미지가 350MB 가벼워지고 반출·빌드가 그만큼 빨라진다.
+data/pemdb1/*
+!data/pemdb1/_distributions.json
+data/repairs
