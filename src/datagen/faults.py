@@ -9,7 +9,7 @@ UI 가 DB 에 남기는 fault 는 "무엇을(kind)·어디에(target)·언제부
 
 대상 해석(_resolve_target)은 **결정적이어야 한다.** 같은 fault 가 틱마다 다시
 와도 같은 셀 집합이 나와야 하며(데몬 재시작 포함), 그렇지 않으면 한 장애가
-1분짜리 조각으로 흩어져 탐지가 성립하지 않는다. 호출자(engine.set_faults)가
+1분짜리 조각으로 흩어져 탐지가 성립하지 않는다. 호출자(`PemdbGen.set_fault_rows`)가
 fault_id 로 시드한 rng 를 넘겨 이를 보장한다.
 """
 
@@ -223,7 +223,7 @@ def resolve_active(cells: list[Cell], anchor: datetime, seed: int,
                    ) -> tuple[list[Scenario], list[int]]:
     """활성 fault 행 목록 → (Scenario 목록, 해석 실패한 fault_id 목록).
 
-    **구 창고 경로(`engine.DataGen`)와 상용 경로(`pemdb1.PemdbGen`)가 이 함수를
+    **구 창고 경로(`engine.DataGen`, 2026-10-15 삭제)와 상용 경로(`pemdb1.PemdbGen`)가 이 함수를
     공유한다.** 두 경로가 각자 해석하면 같은 fault 가 서로 다른 셀 집합에
     걸리고, 그것은 에러 없이 다른 데이터를 만든다.
 

@@ -1,18 +1,36 @@
-"""U-Plane 원시 XDR 의 로컬 Parquet 보관소 — **MySQL 을 거치지 않는다.**
+"""원시 XDR 의 로컬 Parquet 보관소 — **MySQL 을 거치지 않는다.**
 
 ## 왜 DB 에서 뺐나 (2026-10-14)
 
-분당 6.3만 행의 원시 XDR 을 MySQL 에 INSERT 하는 것이 이 PoC 의 쓰기 I/O 의
-거의 전부였고, 그중 **U-Plane 3종이 68%** 를 차지했다(실측). 그런데 이 세
-테이블은 1분 집계(`GP_KPI_U_CELL_1M`·`GP_KPI_DOMAIN_1M`)의 **입력 전용**이다 —
-집계가 끝난 뒤 화면·RCA·채점 어디에서도 다시 읽지 않는다. 아무도 읽지 않는
-데이터를 트랜잭션·undo log·바이너리 로그·인덱스를 모두 태워 가며 DB 에 넣을
-이유가 없다.
+처음에는 U-Plane 3종만 뺐다. 분당 6.3만 행의 원시 XDR 을 MySQL 에 INSERT
+하는 것이 이 PoC 의 쓰기 I/O 의 거의 전부였고, 그중 **U-Plane 3종이 68%** 를
+차지했다(실측). 그 세 테이블은 1분 집계의 **입력 전용**이었다.
 
-**C-Plane(`GP_RAW_LTE_CALL_KPI`)은 그대로 MySQL 에 둔다.** 그쪽은 SCR-06
-(세션)·SCR-07(가입자) 화면과 RCA 증거팩이 원시 레코드를 직접 조회한다.
+**그 뒤 C-Plane(`lte_call`)도 같은 길로 보냈다**(2026-10-14, 2차). 근거가
+U-Plane 과 조금 다르다 — C-Plane 원시는 "아무도 읽지 않는" 데이터가 아니었다
+(SCR-06 호 조회 · SCR-07 가입자 추적 · RCA 증거팩이 직접 읽었다). 그런데
+**읽는 쪽이 먼저 1차 통계로 옮겨 갔고**(`PM_COR_*_1M`), 남은 유일한 소비자가
+1분 집계가 되었다. 그 상태에서 154컬럼 varchar 를 분당 2만 행씩 트랜잭션·
+undo log·바이너리 로그·인덱스를 모두 태워 가며 DB 에 넣을 이유가 없다.
 
 원칙은 하나로 줄었다 — **MySQL 에는 통계만 올라간다.**
+
+## 두 평면의 차이는 보관 기간뿐이다
+
+레이아웃·쓰기·보존 코드는 **이 한 파일**이고 계열 이름과 보관 분 수만 다르다.
+전에는 이 파일이 `uplane_parquet` 이었는데, C-Plane 이 들어오면서 같은 규칙을
+두 벌로 적을 자리가 생겼다 — 두 벌이 되면 한쪽만 고쳐질 때 **집계가 조용히
+0행이 된다**(에러가 나지 않는 종류다). 그래서 이름을 평면에서 떼어 냈다.
+
+| 평면 | 계열 | 기본 보관 | 근거 |
+| --- | --- | --- | --- |
+| U-Plane | `transport`·`dns`·`http` | 10분 | 집계의 입력 전용 — 집계가 끝나면 쓸 데가 없다 |
+| C-Plane | `lte_call` | 1440분(24시간) | **끊어 둔 SCR-06·07 을 되살릴 여지를 남긴다** + 구 MySQL 파티션 보관(`RETAIN_HOURS=24`)과 같은 창 |
+
+C-Plane 을 10분으로 두면 안 되는 이유: 구 MySQL 세대는 24시간을 들고 있었고
+그 창 안에서 호·가입자 조회가 가능했다. 보관을 줄이면 **되살릴 수 있는
+기능의 범위가 조용히 좁아진다** — 설정을 바꾼 것이 아니라 저장소를 바꾼
+것인데 기능이 따라 줄면 원인을 짚기 어렵다.
 
 ## 레이아웃 — 파일 하나가 1분이다
 
@@ -22,8 +40,8 @@
 한다. 날짜 디렉터리를 한 겹 두는 이유는 한 디렉터리에 파일이 무한히 쌓이지
 않게 하는 것이고, 보존 정리도 디렉터리째로 지울 수 있다.
 
-압축은 **zstd** 다. 실측으로 1분치 3종 합이 1.17MB — 같은 데이터의 MySQL
-적재가 수십 MB 의 쓰기를 유발하던 자리다.
+압축은 **zstd** 다. 실측으로 U-Plane 1분치 3종 합이 1.17MB — 같은 데이터의
+MySQL 적재가 수십 MB 의 쓰기를 유발하던 자리다.
 
 **쓰기는 멱등이다.** 같은 분을 다시 돌리면 그 파일을 덮어쓴다 — DB 시절의
 `DELETE` + `INSERT` 와 같은 성질이다. 임시 파일에 쓴 뒤 `os.replace` 로
@@ -32,13 +50,14 @@
 
 ## 레이아웃은 두 저장소가 함께 지킨다
 
-읽는 쪽은 graphio 의 `src/graphio/store/uplane_parquet.py` 다. **경로 규칙이
+읽는 쪽은 graphio 의 `src/graphio/store/raw_parquet.py` 다. **경로 규칙이
 같아야 하고**, 어긋나면 집계가 조용히 0행이 된다 — 에러가 나지 않는 종류다
-(`UPLANE_SLOT` ↔ graphio `tables.UPLANE_TIME` 과 같은 관계).
+(`CPLANE_SLOT`·`UPLANE_SLOT` ↔ graphio `tables.XDR_TIME`·`UPLANE_TIME` 과
+같은 관계).
 
 경로 자체는 **설정으로 받는다**(`config/datagen.yaml` 의
-`pemdb1.uplane_parquet.root`). 코드에 박으면 컨테이너로 옮길 때 volume mount
-지점을 바꿀 수 없다.
+`pemdb1.uplane_parquet.root` · `pemdb1.cplane_parquet.root`). 코드에 박으면
+컨테이너로 옮길 때 volume mount 지점을 바꿀 수 없다.
 """
 
 from __future__ import annotations
@@ -81,7 +100,7 @@ DTYPES: dict[str, pl.DataType] = {
 def series_dir(root: Path, series: str) -> Path:
     """계열 디렉터리. **존재 여부가 "그 계열이 있는가" 의 답이다.**
 
-    읽는 쪽(`graphio.store.uplane_parquet.available_series`)이 이 디렉터리로
+    읽는 쪽(`graphio.store.raw_parquet.available_series`)이 이 디렉터리로
     계열 유무를 판정한다. 그래서 쓰기 주체는 **레코드가 0건이어도 디렉터리는
     만들어 둔다** — 그 계열은 "있고 그 분에 트래픽이 없었다"는 뜻이다. 반대로
     디렉터리가 없으면 "원천이 없다"이고, 집계는 그것을 0 으로 적지 않는다
@@ -129,14 +148,14 @@ def write_minute(root: Path, series: str, ts: datetime,
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name[:-len(SUFFIX)] + TMP_SUFFIX)
     # zstd — gzip 보다 빠르고 snappy 보다 작다. 이 자리는 분당 한 번 돌고
-    # 파일은 10분만 남으므로 압축률보다 쓰기 지연이 중요하다.
+    # 보관도 분 단위로 짧으므로 압축률보다 쓰기 지연이 중요하다.
     frame.write_parquet(tmp, compression="zstd")
     os.replace(tmp, path)
     return frame.height
 
 
 # --------------------------------------------------------------------------
-# 보존 — 10분치만 남긴다
+# 보존 — 최근 N분치만 남긴다 (평면마다 다르다 · 머리말의 표)
 # --------------------------------------------------------------------------
 
 
@@ -202,3 +221,58 @@ def disk_usage(root: Path, series: str) -> tuple[int, int]:
                 n += 1
                 total += f.stat().st_size
     return (n, total)
+
+
+# --------------------------------------------------------------------------
+# 읽기 — 쓰는 쪽도 "무엇을 이미 썼나" 를 알아야 한다
+#
+# 집계는 graphio 가 하고 이쪽은 쓰기 전용이다. 그래도 두 자리에서 디스크를
+# 되읽어야 한다 —
+#
+#   · `cmd_pemfill --resume` 이 "이미 만든 분"을 건너뛴다. 전에는
+#     `SELECT DISTINCT EVENT_TIME FROM GP_RAW_LTE_CALL_KPI` 였다.
+#   · 제어 화면(`ui.api_status`)이 "마지막 적재 슬롯"을 보여준다. 전에는
+#     `SELECT MAX(EVENT_TIME)` 이었다.
+#
+# **파일 이름의 분을 믿는다.** 쓰는 쪽이 분으로 내린 시각을 이름에 넣고
+# `os.replace` 로 원자적으로 바꿔치므로, 이름이 있으면 그 분은 완성된 것이다
+# (반쯤 쓰인 파일은 `.parquet.tmp` 라 `_parse_minute` 가 거른다). 파일을 열어
+# `EVENT_TIME` 을 읽지 않는 이유는 24시간치 1,440개를 매번 여는 비용이고,
+# **집계 쪽은 반대로 데이터로 판정한다** — 거기서는 결과가 조용히 틀리면
+# 안 되기 때문이다(graphio `raw_parquet.scan` 머리말).
+# --------------------------------------------------------------------------
+
+
+def minutes(root: Path | None, series: str,
+            lo: datetime | None = None,
+            hi: datetime | None = None) -> list[datetime]:
+    """디스크에 있는 분 목록. `[lo, hi)` 를 주면 그 구간만. 정렬되어 있다."""
+    if root is None:
+        return []
+    base = series_dir(root, series)
+    if not base.is_dir():
+        return []
+    out: list[datetime] = []
+    for day in base.iterdir():
+        if not day.is_dir():
+            continue
+        for f in day.iterdir():
+            when = _parse_minute(day, f.name)
+            if when is None:
+                continue
+            if lo is not None and when < lo:
+                continue
+            if hi is not None and when >= hi:
+                continue
+            out.append(when)
+    out.sort()
+    return out
+
+
+def last_minute(root: Path | None, series: str) -> datetime | None:
+    """가장 늦은 분. 없으면 ``None`` — **0 이나 epoch 로 떨어지지 않는다.**
+
+    "아직 아무것도 안 썼다"와 "1970년치를 썼다"는 다른 사실이다(불변규칙 17).
+    """
+    got = minutes(root, series)
+    return got[-1] if got else None

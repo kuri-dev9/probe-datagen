@@ -87,13 +87,13 @@ CREATE TABLE IF NOT EXISTS `{T_FAULT}` (
 -- UNIQUE 키를 걸지 않는 이유는 그 함수 주석에 있다.
 CREATE TABLE IF NOT EXISTS `{T_HISTORY}` (
   `HISTORY_ID`    int      NOT NULL AUTO_INCREMENT,
-  `SLOT_TIME`     datetime NOT NULL             COMMENT '분 슬롯 — GP_KPI_*_1M.SLOT_TIME 과 같은 축',
+  `EVENT_TIME`    datetime NOT NULL             COMMENT '분 슬롯 — PM_COR_*_1M.EVENT_TIME 과 같은 축',
   `RECORD_CNT`    int      NOT NULL             COMMENT '그 분에 생성한 C-Plane 호 수',
   `FAULT_IDS`     varchar(255) DEFAULT NULL     COMMENT '그 분에 적용된 FAULT_ID 목록 (쉼표)',
   `SERIES_STAT`   json         DEFAULT NULL     COMMENT '계열별 {{n, bytes}} — 제어 화면 툴팁용',
   `CREATED_TIME`  datetime NOT NULL,
   PRIMARY KEY (`HISTORY_ID`),
-  KEY `IX_CM_DATAGEN_HISTORY_SLOT` (`SLOT_TIME`)
+  KEY `IX_CM_DATAGEN_HISTORY_SLOT` (`EVENT_TIME`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_general_ci
   COMMENT='분 단위 생성 이력 — 제어 화면의 인입 현황';
 """
@@ -223,10 +223,10 @@ def record_tick(conn, slot_ts: datetime, records: int,
     죽는다.
     """
     with conn.cursor() as cur:
-        cur.execute(f"DELETE FROM {T_HISTORY} WHERE SLOT_TIME=%s", [slot_ts])
+        cur.execute(f"DELETE FROM {T_HISTORY} WHERE EVENT_TIME=%s", [slot_ts])
         cur.execute(
             f"INSERT INTO {T_HISTORY} "
-            "(SLOT_TIME, RECORD_CNT, FAULT_IDS, SERIES_STAT, CREATED_TIME) "
+            "(EVENT_TIME, RECORD_CNT, FAULT_IDS, SERIES_STAT, CREATED_TIME) "
             "VALUES (%s,%s,%s,%s,%s)",
             [slot_ts, records, faults or None,
              json.dumps(series_stat, separators=(",", ":")) if series_stat else None,

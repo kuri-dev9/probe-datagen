@@ -294,14 +294,49 @@ class Sampler:
         keys, weights = self._cat_cache[field_name]
         return self.rng.choices(keys, weights=weights, k=1)[0]
 
+    #: 마지막 구간(p90~p100)의 꼬리 가중. **1 이면 균등(구 동작)이고 클수록
+    #: p90 쪽에 몰린다.** 4 는 실측으로 정했다 — 아래 근거.
+    TAIL_K = 4.0
+
     def numeric(self, field_name: str, default: float = 0.0) -> float:
+        """백분위 11개(p0~p100)에서 하나를 뽑는다.
+
+        ## 마지막 구간은 선형이 아니다 (2026-10-15)
+
+        구 구현은 **전 구간을 선형 보간**했다. 그런데 백분위의 끝 두 점이
+        `p90 = 28,416` · `p100 = 1,420,573,216`(실측 transport 하향
+        PayloadSize)처럼 다섯 자릿수 차이가 나는 필드가 있다. 선형이면 상위
+        10% 가 그 사이에 **균등하게** 깔려 그 구간 평균이 710MB 가 되고,
+        전체 평균이 **71MB** 로 올라간다 — 세션 하나가 1분에 수백 MB 를 나른
+        꼴이다(실측 Parquet 평균 63MB 로 확인했다).
+
+        `p100` 은 표본 전체의 **최댓값 한 건**이다. 그것을 구간의 끝점으로
+        쓰면서 균등 보간하면 **이상치 하나가 상위 10% 전부를 끌어올린다.**
+
+        그래서 마지막 구간만 ① **기하(로그) 보간** — 값이 자릿수로 움직이는
+        꼬리에 맞다 — 과 ② **꼬리 가중**(`frac ** TAIL_K`)을 쓴다. 둘을 합치면
+        p90 근처가 대부분이고 GB 급은 드물게 나온다:
+
+            지수   평균        p90       p99
+              1    13.2M     31,485    482M      (로그만)
+              4     3.6M     28,416     34M      ← 채택
+              6     2.5M     28,416      9M
+
+        **다른 구간은 그대로 선형이다.** p0~p90 은 값이 고르게 늘어 선형이
+        맞고, 바꾸면 중앙값이 흔들린다(실측 3,385 로 전후 동일).
+
+        0 이 끼면 기하 보간이 성립하지 않으므로 그 구간은 선형으로 둔다.
+        """
         dec = self.p.numeric.get(field_name)
         if not dec or len(dec) < 2:
             return default
         u = self.rng.random() * 10
         i = min(9, int(u))
         frac = u - i
-        return dec[i] + (dec[i + 1] - dec[i]) * frac
+        a, b = dec[i], dec[i + 1]
+        if i == 9 and a > 0 and b > a:
+            return a * (b / a) ** (frac ** self.TAIL_K)
+        return a + (b - a) * frac
 
     def domain(self) -> str:
         """Zipf 가중 도메인 선택.

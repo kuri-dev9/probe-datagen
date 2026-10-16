@@ -1,6 +1,6 @@
 """상용 스키마(pemdb1) 어댑터 — 생성한 xDR 을 상용 테이블에 그대로 적재한다.
 
-**상용이 정본이다.** 자체 창고 스키마(`store.py` · `aggregate.py`)를 거치지 않고
+**상용이 정본이다.** 자체 창고 스키마(구 `store.py` · `aggregate.py`, 2026-10-15 삭제)를 거치지 않고
 `XDR_LTE_CALL_KPI` 에 직접 쓰고, 1분 집계는 MySQL 안에서 SQL 로 돈다. 중간에
 DuckDB 를 두면 컬럼 이름·타입을 두 번 번역해야 하고, 그 번역이 틀렸을 때
 알아낼 방법이 없다.
@@ -41,7 +41,7 @@ from pathlib import Path
 
 import polars as pl
 
-from . import uplane_parquet
+from . import raw_parquet
 from .cells import Cell
 from .faults import resolve_active as resolve_active_faults
 from .fields import SERIES_FIELDS
@@ -74,24 +74,33 @@ IF_PROTO_NAME = {
 #: 2 = 호 종료 레코드 — 플래그가 실려 있는 유일한 레코드다.
 ONGOING_END = "2"
 
-#: C-Plane 원시 xDR. **`GP_RAW_LTE_CALL_KPI` 다**(2026-10-14) — `pemdb6` 가
-#: 정본이 되면서 원시 네 종을 `GP_RAW_*` 한 묶음으로 묶었다. 구조는 상용
-#: 테이블을 그대로 옮겼고(154컬럼·타입 동일) 파티션만 **시간 단위**다.
-XDR_TABLE = "GP_RAW_LTE_CALL_KPI"
+#: "없음" 센티널. 상용 Cause 컬럼은 NULL 이 아니라 **문자열 `'0'`** 으로
+#: "없음"을 적는다(`FIRST_ERROR_CAUSE` 의 99.6%). 집계가 이것을 거르지 않으면
+#: `C_02000000` 같은 **존재하지 않는 Cause 코드가 만들어진다.**
+#: graphio 쪽 정본은 `store/tables.py:NONE_SENTINEL` 이고 같은 값이어야 한다.
+NONE_CODE = "0"
+
+#: **원시 xDR 은 MySQL 에 없다 — 전부 로컬 Parquet 다**(2026-10-14).
+#:
+#: 1차로 U-Plane 3종(`GP_RAW_TRANSPORT`·`GP_RAW_DNS`·`GP_RAW_HTTP`)을 뺐다.
+#: 세 테이블에 분당 6.3만 행을 INSERT 하는 것이 전체 쓰기 I/O 의 68% 였고
+#: (실측) 집계의 **입력 전용**이라 집계 후 아무도 읽지 않았다.
+#:
+#: 2차로 **C-Plane(`GP_RAW_LTE_CALL_KPI`)도 뺐다.** 근거가 조금 다르다 —
+#: 그쪽은 SCR-06(호)·SCR-07(가입자)·RCA 증거팩이 원시 레코드를 직접 읽고
+#: 있었다. 그런데 **읽는 쪽이 먼저 1차 통계(`PM_COR_*_1M`)로 옮겨 갔고**,
+#: 남은 소비자가 1분 집계뿐이 되었다. 그 상태에서 154컬럼 varchar 를 분당
+#: 2만 행씩 DB 에 넣을 이유가 없다.
+#:
+#: 설계와 레이아웃은 `raw_parquet` 머리말에 있다. 보관 기간만 평면마다
+#: 다르다 — U-Plane 10분 · C-Plane 1440분(그쪽 표 참조).
+#:
+#: **`XDR_TABLE` 상수는 지웠다.** 이름을 남겨 두면 "테이블이 아직 있나"로
+#: 읽히고, 실제로 개명 때 한 줄이 남아서 제어 화면이 조용히 빈 값을 띄운
+#: 전력이 있다(`ui.api_status` 주석).
 PM_ENB = "PM_ENB_KPI_1M"
 PM_ENB_CAUSE = "PM_ENB_CAUSE_1M"
 PM_EPC = "PM_EPC_KPI_1M_ORG"
-
-#: **U-Plane 원시 XDR 은 MySQL 에 없다 — 로컬 Parquet 다**(2026-10-14).
-#:
-#: 전에는 `GP_RAW_TRANSPORT`·`GP_RAW_DNS`·`GP_RAW_HTTP` 세 테이블에 분당 6.3만
-#: 행을 INSERT 했고, 그 쓰기가 전체 I/O 의 68% 였다(실측). 세 테이블은 1분
-#: 집계의 **입력 전용**이라 집계 후 아무도 읽지 않는다 — 읽는 쪽이 없는
-#: 데이터를 트랜잭션·undo log·인덱스를 태워 가며 DB 에 넣을 이유가 없다.
-#: 설계와 레이아웃은 `uplane_parquet` 머리말에 있다.
-#:
-#: **C-Plane(`XDR_TABLE`)은 그대로 MySQL 이다.** 그쪽은 SCR-06·SCR-07 과 RCA
-#: 증거팩이 원시 레코드를 직접 조회한다.
 
 #: 계열별 `(컬럼, 규격 필드명, 타입, 문자 폭)` — **이름으로 맞춘다.**
 #:
@@ -214,7 +223,7 @@ UPLANE_FIELDS: dict[str, tuple[tuple[str, str, str, int | None], ...]] = {
 #: 분 귀속 컬럼 — **C-Plane 과 U-Plane 이 같은 이름을 쓴다**(2026-10-14).
 #: 예전에는 U-Plane 만 `SUMMARY_CREATE_TIME`(규격 `SummaryCreateTime`)이고
 #: C-Plane 은 `EVENT_TIME` 이었다. 한 묶음으로 묶으면서 통일했다 — 상용
-#: `PM_*` 와 집계 `GP_KPI_*`(`SLOT_TIME`)에 대응이 분명한 쪽이다.
+#: `PM_*` 와 집계 `PM_COR_*`(`EVENT_TIME`)에 대응이 분명한 쪽이다.
 #: U-Plane 이 Parquet 로 나간 뒤에도 **컬럼 이름은 그대로다** — graphio 쪽
 #: 정본은 `store/tables.py:UPLANE_TIME` 이고 **같은 값이어야 한다.**
 UPLANE_SLOT = "EVENT_TIME"
@@ -225,15 +234,248 @@ UPLANE_SLOT = "EVENT_TIME"
 UPLANE_SERIES: tuple[str, ...] = ("transport", "dns", "http")
 
 #: U-Plane Parquet 를 몇 분치 남길지. **사람이 10분으로 정했다**(2026-10-14).
-#: 집계 여부를 보지 않는다 — 근거는 `uplane_parquet.purge` 머리말.
+#: 집계 여부를 보지 않는다 — 근거는 `raw_parquet.purge` 머리말.
 #: 설정으로 덮어쓴다(`pemdb1.uplane_parquet.retain_minutes`).
 UPLANE_RETAIN_MINUTES = 10
 
 #: U-Plane Parquet 루트의 기본값. **설정이 정본이다**
 #: (`pemdb1.uplane_parquet.root`) — 이 값은 설정을 빠뜨렸을 때의 폴백이고,
-#: 읽는 쪽 기본값(graphio `paths.uplane_raw` = `data/uplane_raw`)과 **같은
-#: 디렉터리를 가리켜야 한다.** 어긋나면 집계가 조용히 0행이 된다.
-UPLANE_ROOT_DEFAULT = "../graphio-probe-rca/data/uplane_raw"
+#: 읽는 쪽 기본값(graphio `paths.uplane_raw`)과 **같은 디렉터리를 가리켜야
+#: 한다.** 어긋나면 집계가 조용히 0행이 된다.
+#:
+#: **데이터를 양쪽 코드 저장소 밖으로 옮겼다**(2026-10-14 저녁). 전에는
+#: `../graphio-probe-rca/data/uplane_raw` 로 **읽는 쪽 git 작업 디렉터리**를
+#: 가리켰다 — 쓰는 쪽이 남의 저장소에 분당 수 MB 를 쌓는 모양이었다.
+#: `graphio-data-generator/` 는 git 저장소가 아니어서 그 자리에 맞고,
+#: 운영의 `/DATA1/summary` 와 같은 성격이 된다.
+#:
+#: 상대경로는 `cli._uplane_store` 가 **`HERE`(저장소 루트) 기준**으로 푼다 —
+#: cwd 와 무관하므로 어디서 띄워도 같은 디렉터리다.
+UPLANE_ROOT_DEFAULT = "../graphio-data-generator/data/uplane_raw"
+
+
+# --------------------------------------------------------------------------
+# C-Plane 원시 Parquet — 2차 전환 (2026-10-14)
+# --------------------------------------------------------------------------
+
+#: C-Plane 계열 이름. **디렉터리 이름이 되고 `graphio` 쪽과 같아야 한다**
+#: (`store/tables.py:CPLANE_SERIES`). 생성기 쪽 `SERIES_FIELDS` 의 키와도
+#: 같은 값이라 한 글자만 어긋나도 집계가 조용히 0행이 된다.
+CPLANE_SERIES = "lte_call"
+
+#: 분 귀속 컬럼. U-Plane 과 **같은 이름**이고 graphio 쪽 정본은
+#: `store/tables.py:XDR_TIME` 이다.
+CPLANE_SLOT = "EVENT_TIME"
+
+#: C-Plane Parquet 를 몇 분치 남길지. **1440분 = 24시간이다.**
+#:
+#: U-Plane(10분)보다 길게 두는 이유가 둘이다.
+#:
+#: 1. **구 MySQL 세대와 같은 창을 유지한다.** 파티션 보관이 `RETAIN_HOURS=24`
+#:    였다. 저장소를 바꾼 것이 기능 범위를 조용히 줄이면 안 된다.
+#: 2. **끊어 둔 기능을 되살릴 여지다.** SCR-06(호 조회)·SCR-07(가입자 추적)·
+#:    EV-01·02·03·04c 는 "원시를 직접 조회"가 필요해서 끊었다(사람 지시).
+#:    되살리기로 결정되면 **이 보관 기간 안의 구간만** 조회할 수 있다 —
+#:    10분으로 두면 되살려도 쓸 수 없다.
+#:
+#: 설정으로 덮어쓴다(`pemdb1.cplane_parquet.retain_minutes`).
+#: 디스크 비용은 실측 1분치 zstd 약 1.4MB → 24시간 약 2GB 다.
+CPLANE_RETAIN_MINUTES = 1440
+
+#: C-Plane Parquet 루트의 기본값. **설정이 정본이다**
+#: (`pemdb1.cplane_parquet.root`) — 읽는 쪽 기본값(graphio
+#: `paths.cplane_raw`)과 **같은 디렉터리를 가리켜야 한다.** 어긋나면 집계가
+#: 조용히 0행이 된다. 저장소 밖으로 옮긴 근거는 위 `UPLANE_ROOT_DEFAULT`.
+CPLANE_ROOT_DEFAULT = "../graphio-data-generator/data/cplane_raw"
+
+#: C-Plane `(Parquet 컬럼, 규격 필드명, varchar 폭)` 153개 — **위치 대응이다.**
+#:
+#: ## 왜 코드에 있나
+#:
+#: 전에는 `xdr_mapping()` 이 `information_schema` 에서 컬럼 순서와 폭을
+#: 읽었다. 테이블을 지우면 그 원천이 없어지므로 정본이 코드로 옮겨 온다 —
+#: `UPLANE_FIELDS` 가 같은 이유로 그렇게 되어 있다. 값은 **삭제 직전의
+#: `GP_RAW_LTE_CALL_KPI` 에서 그대로 떠 왔다**(154컬럼 중 `EVENT_TIME` 을 뺀
+#: 153개). 집계 결과가 전후 동일해야 하고, 폭이 바뀌면 절단 결과가 조용히
+#: 달라진다.
+#:
+#: ## 왜 이름이 아니라 위치로 맞추나
+#:
+#: U-Plane 은 규격 415필드 중 55개만 뽑으므로 위치 대응이 없어 이름으로
+#: 맞췄다. C-Plane 은 생성기 필드 153개가 테이블 컬럼과 **1:1 순서 대응**이고
+#: 이름이 서로 다르다(`AuthenticationInformation_Time` →
+#: `AUTHINFORMATION_TIME` 처럼 8개가 줄여져 있고, `RESERVED_151` →
+#: `RESERVED3` 처럼 번호도 다르다). 구 `xdr_mapping` 이 위치로 맞춘 이유가
+#: 그것이고, 그 대응을 그대로 굳혔다. 두 번째 자리에 규격 필드명을 함께
+#: 적어 두는 것은 **대응이 어긋났을 때 사람이 짚을 수 있게** 하려는 것이다 —
+#: `cplane_spec()` 이 기동 때 생성기 필드와 대조한다.
+#:
+#: ## 타입이 없다 — 전부 `str` 이다
+#:
+#: `GP_RAW_LTE_CALL_KPI` 는 153컬럼이 전부 varchar 였고(§3 "모든 컬럼이
+#: varchar 다") 집계가 그 전제로 쓰여 있다. Parquet 에서 숫자로 바꾸면
+#: `'0'` 센티널·빈 문자열·`'021'` 같은 0채움이 전부 다르게 접히고,
+#: **플래그 비교(`= '1'`)부터 어긋난다.** 저장소만 바꾸는 작업이므로
+#: 표현은 그대로 둔다 — 숫자 판정은 읽는 쪽(graphio `metrics/cell_agg.py`)이
+#: 구 SQL 과 같은 식으로 한다.
+#:
+#: 폭은 **0 이 "제한 없음"이 아니라 `EVENT_TIME` 뿐이고, 그것은 이 표에
+#: 없다.** 153개 전부 양수다.
+CPLANE_FIELDS: tuple[tuple[str, str, int], ...] = (
+    ("SUMMARYCREATETIME", "SummaryCreateTime", 20),
+    ("ONGOINGFLAG", "OngoingFlag", 1),
+    ("IMSI", "IMSI", 30),
+    ("mdn", "MDN", 30),
+    ("IMEI", "IMEI", 30),
+    ("SERVICECODE", "ServiceCode", 30),
+    ("PAYCODE", "PayCode", 10),
+    ("GENDER", "Gender", 2),
+    ("AGE", "Age", 4),
+    ("VENDOR", "Vendor", 6),
+    ("MODEL", "Model", 4),
+    ("PGW_ID", "PGW_ID", 10),
+    ("IMS_PGW_ID", "ims_PGW_ID", 10),
+    ("SGW_ID", "SGW_ID", 10),
+    ("MME_ID", "MME_ID", 10),
+    ("S6A_AUTHENTICATION_EQUIP_TYPE", "S6a_Authentication_Equip_Type", 1),
+    ("S6A_AUTHENTICATION_EQUIP_ID", "S6a_Authentication_Equip_ID", 10),
+    ("S6A_LOCATION_EQUIP_TYPE", "S6a_Location_Equip_Type", 1),
+    ("S6A_LOCATION_EQUIP_ID", "S6a_Location_Equip_ID", 10),
+    ("S13_EQUIP_TYPE", "S13_Equip_Type", 1),
+    ("S13_EQUIP_ID", "S13_Equip_ID", 10),
+    ("FIRST_ENB_ID", "First_eNB_ID", 30),
+    ("FIRST_CELL_ID", "First_Cell_ID", 3),
+    ("FIRST_ENB_VLAN_ID", "First_eNB_VLAN_ID", 30),
+    ("LAST_ENB_ID", "Last_eNB_ID", 30),
+    ("LAST_CELL_ID", "Last_Cell_ID", 3),
+    ("LAST_ENB_VLAN_ID", "Last_eNB_VLAN_ID", 30),
+    ("PDN_TYPE", "PDN_Type", 1),
+    ("PDN_IPV4", "PDN_IPv4", 10),
+    ("PDN_IPV6", "PDN_IPv6", 32),
+    ("IMS_PDN_TYPE", "ims_PDN_Type", 1),
+    ("IMS_PDN_IPV4", "ims_PDN_IPv4", 10),
+    ("IMS_PDN_IPV6", "ims_PDN_IPv6", 32),
+    ("OLD_CALL_TYPE", "old_call_type", 2),
+    ("OLD_CALL_END_TIME", "old_call_end_time", 20),
+    ("OLD_CALL_LAST_ENB_ID", "old_call_Last_eNB_ID", 30),
+    ("OLD_CALL_LAST_CELL_ID", "old_call_Last_Cell_ID", 3),
+    ("OLD_CALL_LAST_TAC", "old_call_Last_TAC", 10),
+    ("CALL_TYPE", "call_type", 2),
+    ("CALL_START_TIME", "call_start_time", 20),
+    ("CALL_END_TIME", "call_end_time", 20),
+    ("CALL_DURATION_TIME", "call_duration_time", 20),
+    ("APN", "APN", 100),
+    ("IMS_APN", "ims_APN", 100),
+    ("S6A_ERROR_MESSAGE", "s6a_error_Message", 3),
+    ("S6A_ERROR_TIME", "s6a_error_Time", 20),
+    ("S6A_ERROR_CAUSE", "s6a_error_Cause", 10),
+    ("AUTHINFORMATION_TIME", "AuthenticationInformation_Time", 20),
+    ("AUTHINFORMATION_CAUSE", "AuthenticationInformation_Cause", 10),
+    ("UPDATELOCATION_TIME", "UpdateLocation_Time", 20),
+    ("UPDATELOCATION_CAUSE", "UpdateLocation_Cause", 10),
+    ("S13_ERROR_MESSAGE", "s13_error_Message", 3),
+    ("S13_ERROR_TIME", "s13_error_Time", 20),
+    ("S13_ERROR_CAUSE", "s13_error_Cause", 10),
+    ("MEIDENTITYCHECK_TIME", "MEIdentityCheck_Time", 20),
+    ("MEIDENTITYCHECK_CAUSE", "MEIdentityCheck_Cause", 10),
+    ("S1AP_ERROR_MESSAGE", "s1ap_error_Message", 10),
+    ("S1AP_ERROR_TIME", "s1ap_error_Time", 20),
+    ("S1AP_ERROR_CAUSE", "s1ap_error_Cause", 10),
+    ("CNDOMAIN", "CNDomain", 2),
+    ("INITMSG_RRC_ESTABLISH_CAUSE", "InitialUEMessage_RRC_Establishment_Cause", 2),
+    ("PATHSWITCH_COUNT", "PathSwitch_count", 10),
+    ("PATHSWITCHFAILURE_COUNT", "PathSwitchFailure_count", 10),
+    ("UECONTEXTRELEASEREQUEST_TIME", "UEContextReleaseRequest_Time", 20),
+    ("UECONTEXTRELEASEREQUEST_CAUSE", "UEContextReleaseRequest_Cause", 10),
+    ("UECONTEXTRELEASE_TIME", "UEContextRelease_Time", 20),
+    ("UECONTEXTRELEASE_CAUSE", "UEContextRelease_Cause", 10),
+    ("EMM_ERROR_MESSAGE", "emm_error_Message", 10),
+    ("EMM_ERROR_TIME", "emm_error_Time", 20),
+    ("EMM_ERROR_CAUSE", "emm_error_Cause", 10),
+    ("DETACHREQUEST_TIME", "DetachRequest_Time", 20),
+    ("DETACHREQUEST_CAUSE", "DetachRequest_Cause", 10),
+    ("DETACHREQUEST_TYPE", "DetachRequest_Type", 2),
+    ("DETACHREQUEST_SWITCHOFF", "DetachRequest_Switchoff", 2),
+    ("DETACHREQUEST_DIRECTION", "DetachRequest_Direction", 2),
+    ("ESM_ERROR_MESSAGE", "esm_error_Message", 10),
+    ("ESM_ERROR_TIME", "esm_error_Time", 20),
+    ("ESM_ERROR_CAUSE", "esm_error_Cause", 10),
+    ("S11_ERROR_MESSAGE", "s11_error_Message", 10),
+    ("S11_ERROR_TIME", "s11_error_Time", 20),
+    ("S11_ERROR_CAUSE", "s11_error_Cause", 10),
+    ("S10_ERROR_MESSAGE", "s10_error_Message", 10),
+    ("S10_ERROR_TIME", "s10_error_Time", 20),
+    ("S10_ERROR_CAUSE", "s10_error_Cause", 10),
+    ("S3_ERROR_MESSAGE", "s3_error_Message", 10),
+    ("S3_ERROR_TIME", "s3_error_Time", 20),
+    ("S3_ERROR_CAUSE", "s3_error_Cause", 10),
+    ("SMS_MO_CP_ERROR_CAUSE", "sms_mo_cp_error_cause", 10),
+    ("SMS_MO_RP_ERROR_CAUSE", "sms_mo_rp_error_cause", 10),
+    ("SMS_MO_TP_ERROR_CAUSE", "sms_mo_tp_error_cause", 10),
+    ("SMS_MT_CP_ERROR_CAUSE", "sms_mt_cp_error_cause", 10),
+    ("SMS_MT_RP_ERROR_CAUSE", "sms_mt_rp_error_cause", 10),
+    ("SMS_MT_TP_ERROR_CAUSE", "sms_mt_tp_error_cause", 10),
+    ("ATTEMPT_FLAG", "attempt_flag", 1),
+    ("SUCCESS_FLAG", "success_flag", 1),
+    ("DATA_ATTEMPT_FLAG", "data_attempt_flag", 1),
+    ("DATA_SUCCESS_FLAG", "data_success_flag", 1),
+    ("IMS_ATTEMPT_FLAG", "ims_attempt_flag", 1),
+    ("IMS_SUCCESS_FLAG", "ims_success_flag", 1),
+    ("DROP_FLAG", "drop_flag", 1),
+    ("PAGING_ATTEMPT_FLAG", "paging_attempt_flag", 1),
+    ("PAGING_SUCCESS_FLAG", "paging_success_flag", 1),
+    ("DETACH_FLAG", "detach_flag", 1),
+    ("NPR_FLAG", "npr_flag", 1),
+    ("AUTH_ATTEMPT_FLAG", "auth_attempt_flag", 1),
+    ("AUTH_SUCCESS_FLAG", "auth_success_flag", 1),
+    ("LOCATION_ATTEMPT_FLAG", "location_attempt_flag", 1),
+    ("LOCATION_SUCCESS_FLAG", "location_success_flag", 1),
+    ("MECHECK_ATTEMPT_FLAG", "mecheck_attempt_flag", 1),
+    ("MECHECK_SUCCESS_FLAG", "mecheck_success_flag", 1),
+    ("FIRST_ERROR_INTERFACE_PROTOCOL", "first_error_interface_protocol", 2),
+    ("FIRST_ERROR_MESSAGE", "first_error_message", 3),
+    ("FIRST_ERROR_TIME", "first_error_time", 20),
+    ("FIRST_ERROR_CAUSE", "first_error_cause", 10),
+    ("LAST_ERROR_INTERFACE_PROTOCOL", "last_error_interface_protocol", 2),
+    ("LAST_ERROR_MESSAGE", "last_error_message", 3),
+    ("LAST_ERROR_TIME", "last_error_time", 20),
+    ("LAST_ERROR_CAUSE", "last_error_cause", 10),
+    ("INTERVAL_FIRST_ENB_ID", "interval_First_eNB_ID", 30),
+    ("INTERVAL_FIRST_ENB_IP", "interval_First_eNB_IP", 10),
+    ("INTERVAL_FIRST_CELL_ID", "interval_First_Cell_ID", 3),
+    ("INTERVAL_FIRST_TAC", "interval_First_TAC", 10),
+    ("INTERVAL_FIRST_ENB_C_UID", "interval_First_eNB_C_UID", 10),
+    ("INTERVAL_FIRST_ENB_VLAN_ID", "interval_First_eNB_VLAN_ID", 30),
+    ("INTERVAL_CALL_START_TIME", "interval_call_start_time", 20),
+    ("OLD_CALL_S1AP_RELEASE_CAUSE", "old_call_s1ap_release_cause", 10),
+    ("INITIAL_ACCESS_DURATION", "initial_access_duration", 20),
+    ("INITIAL_ACCESS_MSG_COUNT", "initial_access_msg_count", 10),
+    ("INITIAL_CORE_DURATION", "initial_core_duration", 20),
+    ("INITIAL_CORE_MSG_COUNT", "initial_core_msg_count", 10),
+    ("INITIAL_PAGING_DURATION", "initial_paging_duration", 20),
+    ("INITIAL_PAGING_MSG_COUNT", "initial_paging_msg_count", 10),
+    ("INITIAL_PAGING_ATTEMPT_COUNT", "initial_paging_attempt_count", 10),
+    ("IMSI_MCC_MNC_INFO", "imsi_mcc_mnc_info", 7),
+    ("UE_DCNR", "ue_dcnr", 2),
+    ("INITIAL_NR_CONN_TIME", "initial_nr_conn_time", 20),
+    ("UE_USAGE_TYPE", "ue_usage_type", 3),
+    ("MME_RESTRICT_DCNR", "mme_restrict_dcnr", 2),
+    ("MODIFYBEARER_SUCCESS_COUNT", "ModifyBearer_success_count", 10),
+    ("INITIALUEMESSAGE_TIME", "InitialUEMessage_Time", 20),
+    ("EXCHANGENUMBER", "ExchangeNumber", 4),
+    ("NAS_KEY_VALIDITY", "nas_key_validity", 3),
+    ("EQUIP_NW", "equip_nw", 3),
+    ("FIRST_ENB_PLMN", "First_eNB_PLMN", 6),
+    ("LAST_ENB_PLMN", "Last_eNB_PLMN", 6),
+    ("OLD_CALL_LAST_ENB_PLMN", "old_call_Last_eNB_PLMN", 6),
+    ("INTERVAL_FIRST_ENB_PLMN", "interval_First_eNB_PLMN", 6),
+    ("OLD_CALL_ERROR_INF_PROTOCOL", "old_call_error_interface_protocol", 2),
+    ("OLD_CALL_ERROR_CAUSE", "old_call_error_cause", 10),
+    ("RESERVED3", "RESERVED_151", 10),
+    ("RESERVED4", "RESERVED_152", 10),
+    ("RESERVED5", "RESERVED_153", 10),
+    ("RESERVED6", "RESERVED_154", 10),
+)
 
 
 # --------------------------------------------------------------------------
@@ -663,34 +905,56 @@ def load_cells(conn, enb_limit: int | None = None,
 
 @dataclass
 class XdrMapping:
-    columns: list[str]              # EVENT_TIME 을 포함한 상용 컬럼 순서
-    widths: list[int | None]        # varchar 최대 길이 (datetime 은 None)
+    """C-Plane Parquet 적재 명세. **DB 를 보지 않는다**(2026-10-14).
 
+    구 구현은 `information_schema` 에서 컬럼 순서·폭을 읽었다. 테이블을
+    지우면 물어볼 곳이 없어지므로 정본이 `CPLANE_FIELDS` 로 옮겨 왔다 —
+    `UplaneSpec` 이 같은 이유로 그렇게 되어 있다.
 
-def xdr_mapping(conn, database: str) -> XdrMapping:
-    """상용 XDR 컬럼 순서·길이를 읽고 생성기 필드와 1:1 인지 검증한다.
-
-    이름이 아니라 위치로 맞추므로, 길이가 어긋나면 **전부 한 칸씩 밀려** 조용히
-    틀린 값이 들어간다. 그래서 여기서 멈춘다.
+    이름(`XdrMapping`)과 필드 구성(`columns`·`widths`)은 그대로 둔다.
+    `cmd_pemfill` 이 컬럼 수를 로그에 찍고 `PemdbWriter` 가 두 리스트를
+    쓰므로, 이름을 바꾸면 전후 대조 때 "무엇이 바뀐 것인지" 가 흐려진다.
     """
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS "
-            "WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s ORDER BY ORDINAL_POSITION",
-            [database, XDR_TABLE],
-        )
-        rows = cur.fetchall()
-    cols = [r[0] for r in rows]
-    widths = [int(r[1]) if r[1] is not None else None for r in rows]
-    fields = SERIES_FIELDS["lte_call"]
-    if not cols or cols[0].upper() != "EVENT_TIME":
-        raise RuntimeError(f"{XDR_TABLE} 첫 컬럼이 EVENT_TIME 이 아니다: {cols[:1]}")
-    if len(cols) - 1 != len(fields):
+
+    columns: list[str]              # EVENT_TIME 을 포함한 Parquet 컬럼 순서
+    widths: list[int | None]        # varchar 최대 길이 (EVENT_TIME 은 None)
+    fields: list[str]               # 규격 필드명 (widths 와 같이 EVENT_TIME 자리는 없다)
+
+
+def xdr_mapping(conn=None, database: str | None = None) -> XdrMapping:
+    """C-Plane Parquet 컬럼 순서·폭. **생성기 필드와 1:1 인지 검증한다.**
+
+    인자 두 개는 **서명 호환으로 남긴다.** 호출부(`cmd_pemfill`·`cmd_run`)가
+    커넥션을 들고 있고, 거기서 인자를 떼면 "DB 를 안 본다"는 변화가 호출부
+    diff 에 묻힌다. 둘 다 쓰이지 않는다.
+
+    위치로 맞추므로 **한 칸만 밀려도 153개 값이 전부 엉뚱한 컬럼에 들어가고
+    에러가 나지 않는다.** 그래서 여기서 멈춘다 — 구 구현이 컬럼 수를 검증한
+    것과 같은 취지이고, 지금은 **규격 필드명까지** 대조할 수 있다(그 대응이
+    `CPLANE_FIELDS` 두 번째 자리에 적혀 있다).
+    """
+    fields = SERIES_FIELDS[CPLANE_SERIES]
+    spec_fields = [f for _, f, _ in CPLANE_FIELDS]
+    if len(spec_fields) != len(fields):
         raise RuntimeError(
-            f"컬럼 수 불일치 — 상용 {len(cols) - 1} vs 생성기 {len(fields)}. "
-            "위치 매핑이 성립하지 않는다"
+            f"컬럼 수 불일치 — CPLANE_FIELDS {len(spec_fields)} vs 생성기 "
+            f"{len(fields)}. 위치 매핑이 성립하지 않는다"
         )
-    return XdrMapping(cols, widths)
+    # 위치별 규격 필드명 대조. 생성기가 필드를 추가·삭제·재배치하면 여기서
+    # 걸린다 — 통과하면 위치 대응이 성립한다는 뜻이다.
+    if drift := [(i, a, b) for i, (a, b) in enumerate(zip(spec_fields, fields))
+                 if a != b]:
+        head = ", ".join(f"[{i}] {a} != {b}" for i, a, b in drift[:5])
+        raise RuntimeError(
+            f"C-Plane 위치 매핑이 어긋났다 ({len(drift)}자리): {head}. "
+            "CPLANE_FIELDS 와 fields.SERIES_FIELDS['lte_call'] 중 "
+            "무엇이 맞는지 사람이 판단해야 한다"
+        )
+    return XdrMapping(
+        columns=[CPLANE_SLOT] + [c for c, _, _ in CPLANE_FIELDS],
+        widths=[None] + [w for _, _, w in CPLANE_FIELDS],
+        fields=list(spec_fields),
+    )
 
 
 @dataclass
@@ -730,7 +994,7 @@ def uplane_specs(series_on: Iterable[str] | None = None) -> dict[str, UplaneSpec
         idx = {name: i for i, name in enumerate(SERIES_FIELDS[series])}
         if absent := [f for _, f, _, _ in spec if f not in idx]:
             raise RuntimeError(f"{series} 생성기에 없는 규격 필드: {absent}")
-        if bad := [k for _, _, k, _ in spec if k not in uplane_parquet.DTYPES]:
+        if bad := [k for _, _, k, _ in spec if k not in raw_parquet.DTYPES]:
             raise RuntimeError(f"{series} UPLANE_FIELDS 의 모르는 타입: {bad}")
         out[series] = UplaneSpec(
             series=series,
@@ -842,6 +1106,19 @@ class PemdbGen:
         #: 만들면 세션이 매번 끊기고 종료 레코드가 나오지 않는다.
         self.sessions = SessionEngine(
             self.gen, series_rates, Shape.from_cfg(uplane_session), seed=seed)
+        #: **100% 기준 요율.** `set_volume_pct` 가 여기서 곱해 쓴다 — 현재 값
+        #: (`self.gen.rates`)에서 거꾸로 계산하면 반올림 오차가 누적된다
+        #: (70% → 50% 를 두 번 거치면 35% 가 아니라 34.x% 가 된다).
+        self._base_rates: dict[str, int] = dict(series_rates)
+        self._volume_pct: float = 100.0
+        #: 계열 차단 (2026-10-15). **생성 자체를 막는다** — 요율 0 으로 눌러도
+        #: 되지만 그러면 `set_volume_pct` 가 기준값을 곱해 되살린다.
+        #: "원래 안 쓰는 계열"(요율 0)과 "일부러 끊은 계열"은 다른 상태다.
+        self._blocked: frozenset[str] = frozenset()
+        #: 재배정 전 원본 노드 배치. `reassign_nodes` 가 처음 불릴 때 뜬다 —
+        #: 되돌리려면 원본이 있어야 하고, 누적 적용은 되돌릴 수 없다.
+        self._nodes0: dict[str, tuple] | None = None
+        self._reassign: dict = {}
         #: `records()` 가 담고 `uplane_records()` 가 꺼내는 그 분의 성공 호.
         #: 두 호출 사이에 끼어 있는 이유는 **U-Plane 이 C-Plane 레코드에서
         #: 나와야** 하기 때문이다 — 분이 어긋나면 멈춘다(`uplane_records`).
@@ -909,6 +1186,150 @@ class PemdbGen:
 
         return mutate
 
+    def reassign_nodes(self, spec: dict | None) -> dict:
+        """장비 재배정 — ``{"SGW": {"0015": "0103"}, ...}``. 적용 결과를 돌려준다.
+
+        ## 총량은 그대로고 쏠림만 만든다
+
+        호 수를 건드리지 않는다. 셀이 어느 노드를 거쳤다고 **기록하는지**만
+        바꾸므로 분당 생성량은 유지되고, 비운 노드의 구간이 0 이 되면서 받은
+        노드로 몰린다 — "장애는 아닌데 한쪽으로 몰린 것처럼" 이 그 모양이다
+        (2026-10-15 사람 요청).
+
+        **장비를 지우거나 만들지 않는다.** UI 가 "장비 추가·삭제는 미지원 —
+        셀 재배정 설계가 선행되어야 한다"고 적어 둔 것은 **토폴로지 변경**
+        이야기이고, 이미 있는 장비 사이에서 셀을 옮기는 것은 그 설계가 필요
+        없다. 레코드 생성이 매번 `cell.sgw_id` 를 다시 읽기 때문이다
+        (`generator._c_plane`·`session._emit`).
+
+        ## 마스터(`CL_CELL_MAP`)는 건드리지 않는다
+
+        메모리상 셀만 바꾼다. 그래서 **구성정보는 A 인데 관측은 B** 가 되는데,
+        graphio 가 경로를 구성이 아니라 **관측된 호**에서 얻으므로
+        (`PM_LINK_CELL_NODE_1M`) 화면은 재배정된 대로 그린다. 마스터를 고치면
+        되돌릴 수 없고, PoC 에서 원하는 것은 일시적 쏠림이다.
+
+        ``spec`` 이 비면 **원래 배치로 되돌린다** — 기동 시 스냅숏을 떠 둔다.
+        """
+        if self._nodes0 is None:                    # 최초 1회 원본 보관
+            self._nodes0 = {c.cell_key: (c.mme_id, c.sgw_id, c.pgw_id)
+                            for c in self.cells}
+        # 항상 원본에서 다시 적용한다 — 누적하면 A→B→C 가 되어 되돌릴 수 없고,
+        # 같은 spec 을 두 번 주면 결과가 달라진다.
+        for c in self.cells:
+            c.mme_id, c.sgw_id, c.pgw_id = self._nodes0[c.cell_key]
+        moved: dict[str, int] = {}
+        for kind, pairs in (spec or {}).items():
+            attr = {"MME": "mme_id", "SGW": "sgw_id", "PGW": "pgw_id"}.get(
+                str(kind).upper())
+            if not attr:
+                continue
+            for src, dst in (pairs or {}).items():
+                n = 0
+                for c in self.cells:
+                    # **문자열로 비교한다.** 노드 ID 는 `'0015'` 꼴 0채움이고
+                    # 숫자로 접으면 `'0015'` 와 `'15'` 가 섞인다.
+                    if str(getattr(c, attr)) == str(src):
+                        setattr(c, attr, type(getattr(c, attr))(dst))
+                        n += 1
+                if n:
+                    moved[f"{kind}:{src}→{dst}"] = n
+        self._reassign = dict(spec or {})
+        return moved
+
+    def reassign_spec(self) -> dict:
+        """지금 적용된 재배정. UI·로그가 인용한다."""
+        return dict(self._reassign)
+
+    def set_volume_pct(self, pct: float) -> float:
+        """생성량을 기준의 ``pct`` %로 맞춘다. 적용된 값을 돌려준다.
+
+        ## 왜 요율 dict 수정만으로는 부족한가
+
+        `Generator._volume()` 은 매 분 `self.rates` 를 다시 읽으므로 C-Plane
+        호 수는 dict 를 제자리에서 고치면 바로 따라온다. **그런데 U-Plane 은
+        줄지 않는다** — `SessionEngine.session_lambda()` 가
+        ``sessions_peak / n_calls`` 로 **호당** 세션 수를 내므로, 호가 줄면
+        호당 세션이 늘어 분당 세션 총량이 그대로 유지된다. 그래서
+        `sessions_peak` 도 함께 줄인다.
+
+        **비율 계수는 건드리지 않는다.** `p_dns`·`http_per_session` 은
+        `rates.dns / rates.transport` 꼴이라 분자·분모에 같은 비율을 곱하면
+        값이 변하지 않는다 — 다시 계산하면 반올림만 흔들린다.
+
+        **생성기를 다시 만들지 않는다.** `SessionEngine` 이 활성 세션을 분
+        사이에 들고 있어서 새로 만들면 세션이 끊기고 종료 레코드가 나오지
+        않는다(`self.sessions` 주석). 요율만 갈아 끼우면 다음 분부터 반영된다.
+
+        0% 도 받는다 — "만들지 않는다"는 뜻이고 `_volume()` 이 0 을 돌려준다.
+        그 구간은 **비어 있고 그것이 사실이다**(불변규칙 4: 0 으로 채우지
+        않는다). 다만 `enabled=false` 와는 다르다 — 그쪽은 틱 자체를 건너뛴다.
+        """
+        # **상한을 두지 않는다.** 0~100 은 UI·API 의 정책이고(`ui.api_set_settings`
+        # 가 거부한다) 이 메서드는 비율을 받아 적용하는 일만 한다 — `capacity`
+        # 측정이 200%·400% 를 재야 하는데, 여기서 100 으로 자르면 **같은 값을
+        # 다른 배수로 측정하고 그 결과로 기울기를 외삽한다.** 실제로 그렇게
+        # 7,362% 라는 엉뚱한 한계가 나왔다(2026-10-15).
+        pct = max(0.0, float(pct))
+        for s, base in self._base_rates.items():
+            if s in self.gen.rates:
+                self.gen.rates[s] = max(0, int(round(base * pct / 100.0)))
+        tp = self._base_rates.get("transport", 0)
+        if tp:
+            # `max(1, ...)` 은 `SessionEngine.__init__` 과 같은 규칙이다 —
+            # 0 이면 나눗셈이 깨진다. 0% 에서는 호 자체가 없어 무해하다.
+            self.sessions.sessions_peak = max(1, int(round(tp * pct / 100.0)))
+        self._volume_pct = pct
+        return pct
+
+    def volume_pct(self) -> float:
+        """현재 적용된 비율(%). 로그·UI 가 인용한다."""
+        return self._volume_pct
+
+    def set_blocked(self, series: Iterable[str] | None) -> frozenset[str]:
+        """계열을 끊는다. 적용된 집합을 돌려준다.
+
+        **요율을 0 으로 누르지 않는다.** 그러면 `set_volume_pct` 가 기준값
+        (`_base_rates`)을 다시 곱해 되살리고, 더 나쁜 것은 "이 환경은 그 계열을
+        원래 안 만든다"(요율 0)와 "지금 일부러 끊었다"가 **구분되지 않는다** —
+        화면이 경고를 띄울 근거가 사라진다(불변규칙 17 의 취지).
+
+        `lte_call` 을 끊으면 **U-Plane 도 함께 멈춘다.** 세션이 성공 호에서
+        파생되므로(설계 §1.1) 호가 없으면 열 세션이 없다. 숨기지 않고 화면이
+        그렇게 적는다 — 조용히 넷이 다 비면 "생성기가 죽었다"로 읽힌다.
+
+        끊긴 계열은 **파일을 만들지 않는다.** 빈 Parquet 를 쓰면 집계가 0행을
+        "값이 0" 으로 읽을 자리가 생긴다(불변규칙 4).
+        """
+        want = frozenset(str(x) for x in (series or ()) if str(x))
+        bad = want - set(BLOCKABLE_SERIES)
+        if bad:
+            raise ValueError(f"끊을 수 없는 계열이다: {sorted(bad)}")
+        self._blocked = want
+        return want
+
+    def blocked(self) -> frozenset[str]:
+        """지금 끊어 둔 계열. 화면·로그가 인용한다."""
+        return self._blocked
+
+    def set_diurnal(self, on: bool) -> bool:
+        """시간대 곡선 on/off. 적용값을 돌려준다.
+
+        **플래그가 하나다.** `Generator.diurnal` 이 레코드 개수(`_volume`) ·
+        레코드당 바이트(`_traffic_scale`) · 호당 세션 수
+        (`SessionEngine.session_lambda`) 세 자리를 함께 가린다 — 따로 두면
+        한쪽만 꺼져 총 트래픽 배수가 설계(4배)와 조용히 달라진다.
+
+        끄면 **모든 시각이 피크(19시)와 같아진다.** 배율 1.0 이 기준이므로
+        평탄화는 저점을 끌어올리는 쪽이다 — 야간에도 주간 수준이 나온다.
+        """
+        self.gen.diurnal = bool(on)
+        return self.gen.diurnal
+
+    def diurnal(self) -> bool:
+        """시간대 곡선이 켜져 있나."""
+        return bool(self.gen.diurnal)
+
     def records(self, minute: int, ts: datetime) -> list[list[str]]:
         """한 분의 레코드(생성기 필드 순서의 값 리스트)를 만든다.
 
@@ -929,10 +1350,17 @@ class PemdbGen:
         i_user = tuple(idx[f] for f in USER_FIELDS)      # 필드 인덱스 캐시
         i_apn, i_end = idx["APN"], idx["call_end_time"]
         i_rel = idx["UEContextRelease_Cause"]
+        # **세션 수가 Call Type 에 따라 갈린다**(`session.CT_SESSION_W`).
+        # 없으면 전부 기준 가중 1.0 이 되어 구 동작과 같다.
+        i_ct = idx.get("CALL_TYPE", -1)
 
         out: list[list[str]] = []
         calls: list[Call] = []
-        for _ in range(gen._volume("lte_call", ts)):
+        # **끊긴 계열은 만들지 않는다**(2026-10-15). `_calls` 를 비워 두면
+        # U-Plane 도 자연히 멈춘다 — 세션이 호에서 파생되므로 따로 막을 필요가
+        # 없고, 그 인과를 끊어 두면 "호는 0인데 트래픽은 있다"가 된다.
+        n_calls = 0 if "lte_call" in self._blocked else gen._volume("lte_call", ts)
+        for _ in range(n_calls):
             rec, cell = gen.base_lte_call(ts, slot_start)
             self._coerce(rec)
             if mutate is not None:
@@ -951,7 +1379,8 @@ class PemdbGen:
                     t = slot_start
                 calls.append(Call(
                     cell=cell, user=tuple(vals[i] for i in i_user),
-                    apn=vals[i_apn], t=t, outcome=outcome, rel=vals[i_rel]))
+                    apn=vals[i_apn], t=t, outcome=outcome, rel=vals[i_rel],
+                    call_type=(vals[i_ct] if i_ct >= 0 else "")))
         self._calls, self._calls_at = calls, ts
         return out
 
@@ -978,7 +1407,11 @@ class PemdbGen:
                 "호에서 파생된다 — 순서를 바꾸면 인과가 끊어진다")
         mutate = self._mutator(minute, self._active(minute))
         got = self.sessions.minute(ts, self._calls, mutate)
-        return {s: rows for s, rows in got.items() if s in self.series}
+        # 끊긴 계열은 **목록에서 뺀다** — 빈 리스트로 두면 적재가 빈 Parquet
+        # 파일을 만들고, 집계가 그 0행을 "값이 0" 으로 읽을 자리가 생긴다
+        # (불변규칙 4). 파일이 없으면 그 분은 **없는 것**이고 그게 사실이다.
+        return {s: rows for s, rows in got.items()
+                if s in self.series and s not in self._blocked}
 
     def _coerce(self, rec) -> None:
         """자체 프로파일에서 나온 값을 상용 실측값으로 바꾼다."""
@@ -1053,7 +1486,7 @@ class PemdbGen:
     def set_fault_rows(self, active: list[dict]) -> tuple[list[Scenario], list[int]]:
         """`CM_DATAGEN_FAULT` 활성 행 목록을 걸어 둔다 — 실시간 틱(`cli.cmd_run`)용.
 
-        해석은 `faults.resolve_active` 가 한다. 구 창고 경로(`engine.DataGen`)와
+        해석은 `faults.resolve_active` 가 한다. 구 창고 경로(`engine.DataGen`, 삭제됨)와
         **같은 함수**를 쓴다 — 두 경로가 각자 해석하면 같은 fault 가 서로 다른
         셀 집합에 걸리고, 그 차이는 에러 없이 다른 데이터로 나타난다.
         """
@@ -1071,18 +1504,26 @@ class PemdbGen:
 
 
 class PemdbWriter:
-    """원시 xDR 적재 — 구간 멱등.
+    """원시 xDR 적재 — 구간 멱등. **전부 로컬 Parquet 다**(2026-10-14).
 
-    **쓰는 곳이 두 군데다**(2026-10-14). C-Plane(`write_xdr`)은 MySQL
-    `GP_RAW_LTE_CALL_KPI` 로, U-Plane 3종(`write_uplane`)은 로컬 Parquet 로
-    간다. 가른 이유는 읽는 쪽이 다르기 때문이다 — C-Plane 은 화면·RCA 가 원시
-    레코드를 직접 조회하고, U-Plane 은 1분 집계의 입력 전용이다
-    (`uplane_parquet` 머리말).
+    처음에는 C-Plane 만 MySQL 이었다(`GP_RAW_LTE_CALL_KPI`). 화면 SCR-06·07 과
+    RCA 증거팩이 그 원시 레코드를 직접 조회해서 DB 에 둘 이유가 있었다.
+    **그 조회가 1차 통계(`PM_COR_*_1M`)로 옮겨 가면서 이유가 없어졌다** —
+    남은 소비자는 1분 집계뿐이고, 그것은 파일에서 더 빠르게 돈다.
+
+    그래서 두 평면이 같은 모양이 되었다. 다른 것은 **보관 기간**뿐이다
+    (`raw_parquet` 머리말의 표: U-Plane 10분 · C-Plane 1440분).
+
+    `conn` 은 **여전히 받는다.** 1분 집계 `PM_ENB_KPI_1M`·`PM_ENB_CAUSE_1M`·
+    `PM_EPC_KPI_1M_ORG` 가 MySQL 로 가고(`aggregate_all`) 호출부가 같은
+    커넥션을 쓴다 — "MySQL 에는 통계만 올라간다".
     """
 
     def __init__(self, conn, mapping: XdrMapping,
                  uplane_root: Path | None = None,
-                 uplane_retain_minutes: int = UPLANE_RETAIN_MINUTES):
+                 uplane_retain_minutes: int = UPLANE_RETAIN_MINUTES,
+                 cplane_root: Path | None = None,
+                 cplane_retain_minutes: int = CPLANE_RETAIN_MINUTES):
         self.conn = conn
         self.map = mapping
         #: U-Plane Parquet 루트. **없으면 쓰지 않는다** — `write_uplane` 을
@@ -1090,41 +1531,81 @@ class PemdbWriter:
         #: 엉뚱한 디렉터리에 쌓고, 집계는 그것을 못 찾아 0행이 된다.
         self.uplane_root = uplane_root
         self.uplane_retain_minutes = uplane_retain_minutes
+        #: C-Plane Parquet 루트. 같은 이유로 **없으면 `write_xdr` 이 멈춘다.**
+        self.cplane_root = cplane_root
+        self.cplane_retain_minutes = cplane_retain_minutes
         self.clamped = 0
         #: 숫자 컬럼에 온 빈 문자열을 NULL 로 바꾼 횟수. **조용히 바꾸지
         #: 않는다** — 실측 분포가 내는 "모름"이라 정상이지만, 갑자기 늘면
         #: 생성 쪽이 바뀐 것이다.
         self.nulled = 0
 
-    def _row(self, ts: datetime, values: list[str]) -> tuple:
-        """생성기 값 리스트 → 상용 컬럼 순서 튜플 (EVENT_TIME 선두)."""
-        out: list = [ts]
-        for i, v in enumerate(values):
-            w = self.map.widths[i + 1]
-            if w is not None and len(v) > w:
-                # STRICT_TRANS_TABLES 에서는 길이 초과가 에러다. 잘라서 넘기되
-                # 횟수를 세어 보고한다 — 조용히 자르면 값이 틀린 것을 모른다.
-                v = v[:w]
-                self.clamped += 1
-            out.append(v)
-        return tuple(out)
-
     def write_xdr(self, ts: datetime, rows: list[list[str]]) -> int:
-        cols = ",".join(f"`{c}`" for c in self.map.columns)
-        marks = ",".join(["%s"] * len(self.map.columns))
-        data = [self._row(ts, r) for r in rows]
-        with self.conn.cursor() as cur:
-            cur.execute(
-                f"DELETE FROM `{XDR_TABLE}` WHERE EVENT_TIME >= %s AND EVENT_TIME < %s",
-                [ts, ts + timedelta(minutes=1)],
-            )
-            for i in range(0, len(data), 2000):
-                cur.executemany(
-                    f"INSERT INTO `{XDR_TABLE}` ({cols}) VALUES ({marks})",
-                    data[i:i + 2000],
-                )
-        self.conn.commit()
-        return len(data)
+        """C-Plane 한 분을 **Parquet 파일로** 쓴다 — 구간 멱등이다.
+
+        구 구현은 `DELETE` + `INSERT` 로 멱등을 얻었다. 지금은 그 분의 파일을
+        덮어쓴다 — 임시 이름으로 쓴 뒤 `os.replace` 라 **읽는 쪽이 반쯤 쓰인
+        파일을 보지 않는다**(같은 머신의 `corr` 가 그 분을 집계하러 들어온다).
+
+        ## 153컬럼 전부 `pl.String` 이다
+
+        `GP_RAW_LTE_CALL_KPI` 가 전부 varchar 였고 집계가 그 전제로 쓰여 있다
+        (플래그는 문자열 `'1'`, "없음"은 센티널 `'0'`). 숫자로 접으면
+        `'021'`·`'0'`·`''` 이 전부 다르게 접히고 **플래그 비교부터 어긋난다.**
+        저장소만 바꾸는 작업이므로 표현은 그대로 둔다 — 근거는
+        `CPLANE_FIELDS` 주석.
+
+        ## 길이 절단은 유지한다
+
+        Parquet 에는 길이 제한이 없다. 그래도 `varchar(n)` 폭으로 자르는 이유는
+        **자르지 않으면 DB 시절과 다른 값이 집계에 들어가기 때문이다** —
+        전후 동일성이 이 작업의 판정 기준이다(`write_uplane` 과 같은 태도).
+        횟수는 세어서 보고한다. 조용히 자르면 값이 틀린 것을 모른다.
+
+        ## 행 루프를 돌지 않는다
+
+        구 `_row()` 는 행마다 Python 루프로 튜플을 만들며 폭을 쟀다 — 분당
+        2만 행 × 153컬럼 = 306만 번의 비교다. 여기서는 프레임을 한 번에 세우고
+        절단·계수를 polars 식으로 컬럼당 한 번 돌린다(`write_uplane` 이 같은
+        이유로 그렇게 바뀌었다).
+        """
+        if self.cplane_root is None:
+            raise RuntimeError(
+                "C-Plane Parquet 루트가 없다 — PemdbWriter(cplane_root=...) 로 "
+                "주거나 설정 pemdb1.cplane_parquet.root 를 채워라")
+        names = self.map.columns[1:]            # EVENT_TIME 제외
+        widths = self.map.widths[1:]
+        # **열 지향으로 한 번에 세운다.** `orient="row"` 는 polars 쪽에서
+        # 전치하므로 Python 루프가 없다. 생성기 값은 전부 `str` 이다.
+        frame = pl.DataFrame(
+            rows, schema={n: pl.String for n in names}, orient="row")
+        if frame.height:
+            # 절단 횟수를 **먼저 센다.** 자른 뒤에 세면 전부 폭 이하라 0 이
+            # 나온다 — 구 구현이 자르면서 셌던 자리다.
+            over = frame.select([
+                (pl.col(n).str.len_chars() > w).sum().alias(n)
+                for n, w in zip(names, widths) if w is not None
+            ])
+            self.clamped += int(sum(over.row(0)))
+            frame = frame.with_columns([
+                pl.col(n).str.slice(0, w)
+                for n, w in zip(names, widths) if w is not None
+            ])
+        frame = frame.with_columns(
+            # 분 귀속 컬럼. **마이크로초 해상도**다 — 읽는 쪽이 `[lo, hi)`
+            # 비교를 하므로 해상도가 달라지면 경계에서 어긋난다
+            # (`write_uplane` 과 같은 처리).
+            pl.lit(ts).cast(pl.Datetime("us")).alias(CPLANE_SLOT)
+        ).select(self.map.columns)
+        n = raw_parquet.write_minute(self.cplane_root, CPLANE_SERIES, ts, frame)
+        # **쓴 뒤에 보존 정리를 돌린다** — 지우는 주체를 쓰는 쪽에 둔 것은
+        # 그쪽이 "방금 어느 분을 썼는가"를 알기 때문이다(`write_uplane_all`
+        # 과 같다). 기준은 벽시계가 아니라 디스크의 가장 늦은 분이다
+        # (`raw_parquet.purge` 머리말 — 백필이 쓰는 즉시 지워지지 않게).
+        if self.cplane_retain_minutes > 0:
+            raw_parquet.purge(self.cplane_root, CPLANE_SERIES,
+                              self.cplane_retain_minutes)
+        return n
 
     def write_uplane(self, ts: datetime, series: str, rows: list[list[str]],
                      spec: UplaneSpec) -> int:
@@ -1180,7 +1661,7 @@ class PemdbWriter:
                 e = (pl.when(e.str.strip_chars() == "")
                        .then(None)
                        .otherwise(e)
-                       .cast(uplane_parquet.DTYPES[kind]))
+                       .cast(raw_parquet.DTYPES[kind]))
             exprs.append(e.alias(name))
 
         frame = pl.DataFrame(cols)
@@ -1205,7 +1686,7 @@ class PemdbWriter:
             # 해상도가 달라지면 경계에서 어긋난다.
             pl.lit(ts).cast(pl.Datetime("us")).alias(UPLANE_SLOT)
         ).select(spec.columns)
-        return uplane_parquet.write_minute(self.uplane_root, series, ts, frame)
+        return raw_parquet.write_minute(self.uplane_root, series, ts, frame)
 
     def write_uplane_all(self, ts: datetime, batches: dict[str, list[list[str]]],
                          specs: dict[str, UplaneSpec]) -> dict[str, int]:
@@ -1216,7 +1697,7 @@ class PemdbWriter:
         "왜 비어 있나"를 추적할 수 없으니 호출부가 반환값으로 센다.
 
         **쓴 뒤에 보존 정리를 돌린다.** 10분치만 남긴다(사람 지시,
-        2026-10-14) — 집계 여부를 보지 않는 이유는 `uplane_parquet.purge`
+        2026-10-14) — 집계 여부를 보지 않는 이유는 `raw_parquet.purge`
         머리말에 있다. 지우는 주체를 쓰는 쪽에 둔 것은 그쪽이 "방금 어느 분을
         썼는가"를 알기 때문이다.
         """
@@ -1226,44 +1707,174 @@ class PemdbWriter:
         }
         if self.uplane_retain_minutes > 0:
             for series in out:
-                uplane_parquet.purge(self.uplane_root, series,
+                raw_parquet.purge(self.uplane_root, series,
                                      self.uplane_retain_minutes)
         return out
 
-    def last_event_time(self, table: str = XDR_TABLE) -> datetime | None:
-        with self.conn.cursor() as cur:
-            cur.execute(f"SELECT MAX(EVENT_TIME) FROM `{table}`")
-            return cur.fetchone()[0]
+    def last_event_time(self, series: str = CPLANE_SERIES) -> datetime | None:
+        """마지막으로 쓴 분. 없으면 ``None`` — **epoch 로 떨어지지 않는다.**
+
+        구 구현은 `SELECT MAX(EVENT_TIME)` 이었다. 원시가 파일로 나가면서
+        디렉터리를 훑는다 — 파일 이름이 분이고, 이름이 있으면 그 분은 완성된
+        것이다(근거는 `raw_parquet.minutes` 머리말).
+
+        인자 이름이 `table` 에서 `series` 로 바뀌었다. **기본값으로 받던
+        호출부는 그대로 돈다**(실제로 전부 기본값이다).
+        """
+        return raw_parquet.last_minute(self.cplane_root, series)
 
 
 # --------------------------------------------------------------------------
-# 1분 집계 — MySQL 안에서 돈다
+# 1분 집계 — **원시는 Parquet, 산출물은 MySQL**
+#
+# 전에는 `INSERT INTO PM_* SELECT ... FROM GP_RAW_LTE_CALL_KPI` 로 MySQL 이
+# 혼자 했다. 원시가 DB 를 떠나면서(2026-10-14) 집계 엔진을 polars 로 옮겼다 —
+# graphio 쪽 `metrics/uplane_agg.py` 가 U-Plane 에서 먼저 밟은 길이고 같은
+# 모양이다.
+#
+# **산출물은 그대로 MySQL 이다.** 이 세 테이블은 상용 `PM_*` 를 재현하는
+# 것이고, 운영에서는 다른 주체가 넣어 준다 — PoC 가 그 자리를 대신 메운다.
+# 원칙은 "MySQL 에는 통계만 올라간다".
+#
+# ## 조건식이 SQL 문자열에서 `pl.Expr` 로 바뀌었다
+#
+# Parquet 컬럼이 **여전히 전부 문자열**이므로(`CPLANE_FIELDS` 주석) 판정은
+# 구 SQL 과 같다 — 플래그는 `= '1'`, "없음"은 센티널 `'0'`. 달라진 것은
+# 표현형뿐이다. 식을 손으로 다시 쓰지 않고 헬퍼를 한 벌 두고 재사용한다.
 # --------------------------------------------------------------------------
 
 #: eNB 단위 대표 속성. CL_CELL_MAP 은 (ENB_ID, CELLNUM) 단위라 eNB 하나에
 #: 여러 행이 있다. C_UID·MME_GRP_ID 는 eNB 당 유일(215/215 실측)하지만
 #: EMS_ID 는 셀마다 다를 수 있어(855쌍) 대표값 하나를 고른다.
-_ENB_MASTER = (
-    "(SELECT ENB_ID, MIN(C_UID) AS C_UID, MIN(MME_GRP_ID) AS MME_GRP_ID, "
-    "        MIN(EMS_ID) AS EMS_ID "
-    "   FROM CL_CELL_MAP WHERE ENB_ID IS NOT NULL GROUP BY ENB_ID) AS m"
+#:
+#: **여전히 MySQL 질의다.** 마스터는 원시가 아니라 다른 주체가 관리하는
+#: 테이블이고 파일로 나가지 않았다. 결과(약 3.2만 행)를 polars 로 받아
+#: 조인한다 — LEFT JOIN 의 의미를 그대로 보존한다.
+_ENB_MASTER_SQL = (
+    "SELECT ENB_ID, MIN(C_UID) AS C_UID, MIN(MME_GRP_ID) AS MME_GRP_ID, "
+    "       MIN(EMS_ID) AS EMS_ID "
+    "  FROM CL_CELL_MAP WHERE ENB_ID IS NOT NULL GROUP BY ENB_ID"
 )
 
-#: 절단 — DROP_FLAG 가 섰고 해제 Cause 가 정상 종료가 아닌 것만. 정상 종료를
-#: 절단으로 세면 이동이 잦은 지역이 상시 붉어진다 (불변규칙 6).
-_DROP = (
-    "COUNT(CASE WHEN x.DROP_FLAG='1' AND x.UECONTEXTRELEASE_CAUSE NOT IN "
-    "(" + ",".join(f"'{c}'" for c in NORMAL_RELEASE) + ") THEN 1 END)"
-)
+#: MySQL 에 한 번에 보낼 행 수. 너무 크면 `max_allowed_packet` 에 걸린다.
+_AGG_BATCH = 2000
 
 
-def _flag(col: str) -> str:
-    """플래그 합산. `SUM(CASE..)` 는 0행에서 NULL 이 되므로 COUNT 를 쓴다."""
-    return f"COUNT(CASE WHEN x.{col}='1' THEN 1 END)"
+def _s(col: str) -> pl.Expr:
+    return pl.col(col)
 
 
-def aggregate_enb(conn, lo: datetime, hi: datetime) -> int:
-    """`XDR_LTE_CALL_KPI` → `PM_ENB_KPI_1M`.
+def _p_flag(col: str) -> pl.Expr:
+    """플래그 1건. 상용 플래그는 `varchar(1)` 의 `'1'`/`'0'` 이다.
+
+    구 `_flag()` 의 `COUNT(CASE WHEN x.col='1' THEN 1 END)` 와 같은 판정이다.
+    `SUM(CASE..)` 를 쓰지 않은 이유(0행 그룹에서 NULL)는 polars 에서는
+    해당되지 않지만, **값이 같아야 하므로 식 자체를 바꾸지 않는다.**
+    """
+    return pl.when(_s(col) == "1").then(1).otherwise(0)
+
+
+def _p_drop() -> pl.Expr:
+    """절단 — `DROP_FLAG` 가 섰고 해제 Cause 가 정상 종료가 **아닌** 것만.
+
+    정상 종료를 절단으로 세면 이동이 잦은 지역이 상시 붉어진다(불변규칙 6).
+    구 `_DROP` 과 같은 식이다.
+    """
+    return pl.when(
+        (_s("DROP_FLAG") == "1")
+        & ~_s("UECONTEXTRELEASE_CAUSE").is_in(list(NORMAL_RELEASE))
+    ).then(1).otherwise(0)
+
+
+def _p_end_only(lf: pl.LazyFrame) -> pl.LazyFrame:
+    """완결 호만 — `ONGOINGFLAG = '2'`.
+
+    **문자열로 비교한다.** Parquet 컬럼이 문자열이라 숫자로 비교하면 전량이
+    탈락하고 집계가 0행이 된다 — 에러가 나지 않는 종류다(graphio
+    `uplane_agg._counted` 가 반대 방향으로 같은 함정을 적어 두고 있다).
+    """
+    return lf.filter(_s("ONGOINGFLAG") == ONGOING_END)
+
+
+def _p_derived() -> list[pl.Expr]:
+    """`PM_*` 관례의 유도 컬럼. `EVENT_TIME` 에서 나온다 — 저장하는 값이지
+    산식이 아니다. 구 SQL 의 `DATE_FORMAT` 세 개와 같다."""
+    t = pl.col(CPLANE_SLOT)
+    return [
+        t.dt.strftime("%Y%m%d").alias("CDATE"),
+        t.dt.strftime("%H").alias("CHOUR"),
+        t.dt.strftime("%H%M").alias("CTIME"),
+    ]
+
+
+def _enb_master(conn) -> pl.DataFrame:
+    """eNB 대표 속성을 polars 프레임으로. 조인 키는 **평문 문자열**이다."""
+    with conn.cursor() as cur:
+        cur.execute(_ENB_MASTER_SQL)
+        rows = cur.fetchall()
+    schema = {"ENB_ID": pl.String, "C_UID": pl.String,
+              "MME_GRP_ID": pl.String, "EMS_ID": pl.String}
+    if not rows:
+        return pl.DataFrame(schema=schema)
+    # 값이 숫자로 올 수 있다(`C_UID` 가 int 인 스키마). 전부 문자열로 세운다 —
+    # MySQL 에 되넣을 때 varchar 컬럼이라 표기가 같아야 한다.
+    return pl.DataFrame(
+        [[None if v is None else str(v) for v in r] for r in rows],
+        schema=schema, orient="row")
+
+
+def _scan_cplane(root: Path | None, lo: datetime,
+                 hi: datetime) -> pl.LazyFrame | None:
+    """`[lo, hi)` 구간의 C-Plane 원시. 파일이 없으면 ``None``.
+
+    **``None`` 과 0행은 다른 사실이다** — 파일이 없으면 그 구간에 원천이 안 온
+    것이고, 0행이면 원천은 왔는데 레코드가 없는 것이다(불변규칙 17).
+
+    파일 선택은 프루닝이고 구간 판정은 **데이터가 한다** — 이름과 내용이
+    어긋나도 집계가 조용히 틀리지 않게 `EVENT_TIME` 으로 한 번 더 거른다
+    (graphio `raw_parquet.scan` 과 같은 태도).
+    """
+    if root is None:
+        return None
+    mins = raw_parquet.minutes(root, CPLANE_SERIES, lo, hi)
+    if not mins:
+        return None
+    files = [raw_parquet.minute_path(root, CPLANE_SERIES, m) for m in mins]
+    col = pl.col(CPLANE_SLOT)
+    return (pl.scan_parquet(files)
+              .filter((col >= pl.lit(lo)) & (col < pl.lit(hi))))
+
+
+def _wipe_insert(conn, table: str, time_col: str, cols: list[str],
+                 frame: pl.DataFrame, lo: datetime, hi: datetime) -> int:
+    """`[lo, hi)` 를 지우고 다시 넣는다 — 구 `DELETE` + `INSERT` 와 같다.
+
+    **범위 DELETE 다.** U-Plane 쪽(`uplane_agg._wipe`)이 "파일이 있는 분만"
+    지우는 것과 다른데, 이유는 보관 기간이다 — 거기는 원시가 10분뿐이라
+    범위를 통째로 지우면 되살릴 수 없는 과거 집계가 날아간다. 여기는 호출부가
+    항상 **방금 쓴 분**(또는 백필 구간)만 넘기므로 범위와 재생 가능 구간이
+    같다.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            f"DELETE FROM `{table}` WHERE {time_col} >= %s AND {time_col} < %s",
+            [lo, hi])
+        n = 0
+        if frame.height:
+            names = ",".join(f"`{c}`" for c in cols)
+            marks = ",".join(["%s"] * len(cols))
+            sql = f"INSERT INTO `{table}` ({names}) VALUES ({marks})"
+            rows = frame.select(cols).rows()
+            for i in range(0, len(rows), _AGG_BATCH):
+                cur.executemany(sql, rows[i:i + _AGG_BATCH])
+            n = len(rows)
+    conn.commit()
+    return n
+
+
+def aggregate_enb(conn, lo: datetime, hi: datetime,
+                  cplane_root: Path | None = None) -> int:
+    """C-Plane Parquet → `PM_ENB_KPI_1M`.
 
     키는 (EVENT_TIME, FIRST_ENB_ID, CALL_TYPE) 다. CALL_TYPE 을 섞으면 트래픽
     구성비가 바뀔 때 품질이 그대로여도 소통률이 움직인다(불변규칙 3).
@@ -1277,154 +1888,184 @@ def aggregate_enb(conn, lo: datetime, hi: datetime) -> int:
       · BTS_NAME        — CM_CELL_REP_RU_LOC.RU_NAME 의 한글이 깨져 있다
       · COMPANY/REGION/BRANCH/OPTEAM/PART_ID — eNB→조직 매핑 테이블이 없다
       · MNO · EX_*      — 상용 산출 정의를 확인하지 못했다 (README 참조)
+
+    ## `UNIQ_IMSI_CNT` 가 MySQL 과 갈릴 수 있고, polars 가 맞다
+
+    구 `COUNT(DISTINCT x.IMSI)` 는 컬럼 collation(`utf8mb3_general_ci`)을
+    따라 **대소문자를 무시**했다. polars 는 바이트 비교다 — 운영에서 IMSI 가
+    암호문으로 오면 `A` 와 `a` 는 다른 가입자이므로 이쪽이 옳다(불변규칙 14).
+    로컬 합성 평문에서는 실측 차이가 0 이다(distinct 20,000 양쪽 동일).
     """
-    sql = f"""
-    INSERT INTO `{PM_ENB}`
-      (EVENT_TIME, CDATE, CHOUR, CTIME, ENB_ID, CALL_TYPE, C_UID,
-       MME_GRP_ID, EMS_ID,
-       ATTEMPT_CNT, SUCCESS_CNT, DROP_CNT,
-       DATA_ATTEMPT_CNT, DATA_SUCESS_CNT, IMS_ATTEMPT_CNT, IMS_SUCESS_CNT,
-       UNIQ_IMSI_CNT, DETACH_CNT)
-    SELECT x.EVENT_TIME,
-           DATE_FORMAT(x.EVENT_TIME, '%%Y%%m%%d'),
-           DATE_FORMAT(x.EVENT_TIME, '%%H'),
-           DATE_FORMAT(x.EVENT_TIME, '%%H%%i'),
-           x.FIRST_ENB_ID, x.CALL_TYPE,
-           m.C_UID, m.MME_GRP_ID, m.EMS_ID,
-           {_flag('ATTEMPT_FLAG')}, {_flag('SUCCESS_FLAG')}, {_DROP},
-           {_flag('DATA_ATTEMPT_FLAG')}, {_flag('DATA_SUCCESS_FLAG')},
-           {_flag('IMS_ATTEMPT_FLAG')}, {_flag('IMS_SUCCESS_FLAG')},
-           COUNT(DISTINCT x.IMSI), {_flag('DETACH_FLAG')}
-      FROM `{XDR_TABLE}` AS x
-      LEFT JOIN {_ENB_MASTER} ON m.ENB_ID = x.FIRST_ENB_ID
-     WHERE x.EVENT_TIME >= %s AND x.EVENT_TIME < %s
-       AND x.ONGOINGFLAG = '{ONGOING_END}'
-       AND x.FIRST_ENB_ID IS NOT NULL AND x.FIRST_ENB_ID <> ''
-     GROUP BY x.EVENT_TIME, x.FIRST_ENB_ID, x.CALL_TYPE,
-              m.C_UID, m.MME_GRP_ID, m.EMS_ID
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            f"DELETE FROM `{PM_ENB}` WHERE EVENT_TIME >= %s AND EVENT_TIME < %s", [lo, hi])
-        cur.execute(sql, [lo, hi])
-        n = cur.rowcount
-    conn.commit()
-    return n
+    lf = _scan_cplane(cplane_root, lo, hi)
+    cols = ["EVENT_TIME", "CDATE", "CHOUR", "CTIME", "ENB_ID", "CALL_TYPE",
+            "C_UID", "MME_GRP_ID", "EMS_ID",
+            "ATTEMPT_CNT", "SUCCESS_CNT", "DROP_CNT",
+            "DATA_ATTEMPT_CNT", "DATA_SUCESS_CNT",
+            "IMS_ATTEMPT_CNT", "IMS_SUCESS_CNT",
+            "UNIQ_IMSI_CNT", "DETACH_CNT"]
+    if lf is None:
+        # 원천이 없다. **지우기만 하고 0 을 넣지 않는다** — 0 행을 쓰면
+        # "값이 0" 과 "원천이 없음" 이 구분되지 않는다(불변규칙 17).
+        return _wipe_insert(conn, PM_ENB, "EVENT_TIME", cols,
+                            pl.DataFrame(), lo, hi)
+    enb = _s("FIRST_ENB_ID")
+    frame = (
+        _p_end_only(lf)
+        # 노드·셀 ID 가 없는 레코드는 그 축에 계상할 수 없다. 0 으로 채우면
+        # 존재하지 않는 eNB 0 번의 장애가 만들어진다(불변규칙 4).
+        .filter(enb.is_not_null() & (enb != ""))
+        .group_by([CPLANE_SLOT, "FIRST_ENB_ID", "CALL_TYPE"])
+        .agg([
+            _p_flag("ATTEMPT_FLAG").sum().alias("ATTEMPT_CNT"),
+            _p_flag("SUCCESS_FLAG").sum().alias("SUCCESS_CNT"),
+            _p_drop().sum().alias("DROP_CNT"),
+            _p_flag("DATA_ATTEMPT_FLAG").sum().alias("DATA_ATTEMPT_CNT"),
+            _p_flag("DATA_SUCCESS_FLAG").sum().alias("DATA_SUCESS_CNT"),
+            _p_flag("IMS_ATTEMPT_FLAG").sum().alias("IMS_ATTEMPT_CNT"),
+            _p_flag("IMS_SUCCESS_FLAG").sum().alias("IMS_SUCESS_CNT"),
+            # `COUNT(DISTINCT)` 는 NULL 을 세지 않는다. polars `n_unique()` 는
+            # NULL 을 하나의 값으로 세므로 먼저 버린다.
+            _s("IMSI").drop_nulls().n_unique().alias("UNIQ_IMSI_CNT"),
+            _p_flag("DETACH_FLAG").sum().alias("DETACH_CNT"),
+        ])
+        .rename({"FIRST_ENB_ID": "ENB_ID"})
+        .with_columns(_p_derived())
+        .collect()
+    )
+    # LEFT JOIN 이다 — 마스터에 없는 eNB 도 행이 남아야 한다. `how="left"` 가
+    # 그 의미이고, 없으면 그 eNB 의 트래픽이 통째로 사라진다(불변규칙 12).
+    frame = frame.join(_enb_master(conn), on="ENB_ID", how="left")
+    return _wipe_insert(conn, PM_ENB, "EVENT_TIME", cols, frame, lo, hi)
 
 
-def aggregate_enb_cause(conn, lo: datetime, hi: datetime) -> int:
-    """`XDR_LTE_CALL_KPI` → `PM_ENB_CAUSE_1M`.
+def aggregate_enb_cause(conn, lo: datetime, hi: datetime,
+                        cplane_root: Path | None = None) -> int:
+    """C-Plane Parquet → `PM_ENB_CAUSE_1M`.
 
     CAUSE 표기는 CAUSE_DEF·CD_CAUSE 를 따른다 — `C_<IF_PROTO 2자리><Cause 6자리>`
     (실측: `C_02000504` = S1MME_S1AP + Cause 504).
 
     **First Error 구간이 원인이고 하류 Cause 는 증상이다**(불변규칙 7). 그래서
     First Error 쪽을 주로 담고, S1AP 해제 Cause 는 정상 종료를 뺀 비정상만
-    따로 담는다.
+    따로 담는다. 두 갈래를 구 SQL 이 `UNION ALL` 로 합쳤고 여기서는
+    `pl.concat` 이다.
+
+    `LPAD` 의 polars 판이 `str.pad_start` 다. **`'0'` 센티널을 걸러낸 뒤**
+    채우므로 `C_02000000` 같은 가짜 코드가 생기지 않는다 — 구 SQL 의
+    `NOT IN ('', '0')` 조건과 같은 자리다.
     """
-    normal = ",".join(f"'{c}'" for c in NORMAL_RELEASE)
-    proto_case = " ".join(
-        f"WHEN '{k}' THEN '{v}'" for k, v in IF_PROTO_NAME.items())
-    sql = f"""
-    INSERT INTO `{PM_ENB_CAUSE}`
-      (EVENT_TIME, CDATE, CHOUR, CTIME, ENB_ID, CALL_TYPE, C_UID,
-       MME_GRP_ID, EMS_ID, CAUSE_TYPE, CAUSE, CAUSE_CNT)
-    SELECT s.EVENT_TIME,
-           DATE_FORMAT(s.EVENT_TIME, '%%Y%%m%%d'),
-           DATE_FORMAT(s.EVENT_TIME, '%%H'),
-           DATE_FORMAT(s.EVENT_TIME, '%%H%%i'),
-           s.ENB_ID, s.CALL_TYPE, m.C_UID, m.MME_GRP_ID, m.EMS_ID,
-           s.CAUSE_TYPE, s.CAUSE, COUNT(*)
-      FROM (
-            SELECT x.EVENT_TIME, x.FIRST_ENB_ID AS ENB_ID, x.CALL_TYPE,
-                   CASE x.FIRST_ERROR_INTERFACE_PROTOCOL {proto_case}
-                        ELSE 'NONE' END AS CAUSE_TYPE,
-                   CONCAT('C_',
-                          LPAD(x.FIRST_ERROR_INTERFACE_PROTOCOL, 2, '0'),
-                          LPAD(x.FIRST_ERROR_CAUSE, 6, '0')) AS CAUSE
-              FROM `{XDR_TABLE}` AS x
-             WHERE x.EVENT_TIME >= %s AND x.EVENT_TIME < %s
-               AND x.ONGOINGFLAG = '{ONGOING_END}'
-               AND x.FIRST_ERROR_CAUSE NOT IN ('', '0')
-            UNION ALL
-            SELECT x.EVENT_TIME, x.FIRST_ENB_ID AS ENB_ID, x.CALL_TYPE,
-                   'S1AP' AS CAUSE_TYPE,
-                   CONCAT('C_02', LPAD(x.UECONTEXTRELEASE_CAUSE, 6, '0')) AS CAUSE
-              FROM `{XDR_TABLE}` AS x
-             WHERE x.EVENT_TIME >= %s AND x.EVENT_TIME < %s
-               AND x.ONGOINGFLAG = '{ONGOING_END}'
-               AND x.UECONTEXTRELEASE_CAUSE NOT IN ('', '0', {normal})
-           ) AS s
-      LEFT JOIN {_ENB_MASTER} ON m.ENB_ID = s.ENB_ID
-     WHERE s.ENB_ID IS NOT NULL AND s.ENB_ID <> ''
-     GROUP BY s.EVENT_TIME, s.ENB_ID, s.CALL_TYPE, s.CAUSE_TYPE, s.CAUSE,
-              m.C_UID, m.MME_GRP_ID, m.EMS_ID
-    """
-    with conn.cursor() as cur:
-        cur.execute(
-            f"DELETE FROM `{PM_ENB_CAUSE}` WHERE EVENT_TIME >= %s AND EVENT_TIME < %s",
-            [lo, hi])
-        cur.execute(sql, [lo, hi, lo, hi])
-        n = cur.rowcount
-    conn.commit()
-    return n
+    cols = ["EVENT_TIME", "CDATE", "CHOUR", "CTIME", "ENB_ID", "CALL_TYPE",
+            "C_UID", "MME_GRP_ID", "EMS_ID", "CAUSE_TYPE", "CAUSE", "CAUSE_CNT"]
+    lf = _scan_cplane(cplane_root, lo, hi)
+    if lf is None:
+        return _wipe_insert(conn, PM_ENB_CAUSE, "EVENT_TIME", cols,
+                            pl.DataFrame(), lo, hi)
+    enb = _s("FIRST_ENB_ID")
+    base = _p_end_only(lf).filter(enb.is_not_null() & (enb != ""))
+
+    def code(proto: pl.Expr, cause: pl.Expr) -> pl.Expr:
+        """`C_<proto 2자리><cause 6자리>`. 구 `CONCAT('C_', LPAD(..), LPAD(..))`."""
+        return pl.concat_str([
+            pl.lit("C_"),
+            proto.str.pad_start(2, "0"),
+            cause.str.pad_start(6, "0"),
+        ])
+
+    # ① First Error 갈래. `IF_PROTO_NAME` 으로 CAUSE_TYPE 을 붙이고, 표에 없는
+    #    구간은 `'NONE'` 이다 — 구 SQL 의 `CASE ... ELSE 'NONE'` 과 같다.
+    proto = _s("FIRST_ERROR_INTERFACE_PROTOCOL")
+    ctype = proto
+    for k, v in IF_PROTO_NAME.items():
+        ctype = pl.when(proto == k).then(pl.lit(v)).otherwise(ctype)
+    first = (
+        base.filter(~_s("FIRST_ERROR_CAUSE").is_in(["", NONE_CODE]))
+            .with_columns([
+                pl.when(proto.is_in(list(IF_PROTO_NAME)))
+                  .then(ctype).otherwise(pl.lit("NONE")).alias("CAUSE_TYPE"),
+                code(proto, _s("FIRST_ERROR_CAUSE")).alias("CAUSE"),
+            ])
+    )
+    # ② S1AP 해제 Cause 갈래 — 정상 종료 14종은 뺀다(불변규칙 6).
+    rel = (
+        base.filter(~_s("UECONTEXTRELEASE_CAUSE")
+                    .is_in(["", NONE_CODE, *NORMAL_RELEASE]))
+            .with_columns([
+                pl.lit("S1AP").alias("CAUSE_TYPE"),
+                code(pl.lit("02"), _s("UECONTEXTRELEASE_CAUSE")).alias("CAUSE"),
+            ])
+    )
+    keys = [CPLANE_SLOT, "FIRST_ENB_ID", "CALL_TYPE", "CAUSE_TYPE", "CAUSE"]
+    frame = (
+        pl.concat([first.select(keys), rel.select(keys)])
+          .group_by(keys)
+          .agg(pl.len().alias("CAUSE_CNT"))
+          .rename({"FIRST_ENB_ID": "ENB_ID"})
+          .with_columns(_p_derived())
+          .collect()
+          .join(_enb_master(conn), on="ENB_ID", how="left")
+    )
+    return _wipe_insert(conn, PM_ENB_CAUSE, "EVENT_TIME", cols, frame, lo, hi)
 
 
-def aggregate_epc(conn, lo: datetime, hi: datetime) -> int:
-    """`XDR_LTE_CALL_KPI` → `PM_EPC_KPI_1M_ORG` (MME/SGW/PGW 노드 축).
+def aggregate_epc(conn, lo: datetime, hi: datetime,
+                  cplane_root: Path | None = None) -> int:
+    """C-Plane Parquet → `PM_EPC_KPI_1M_ORG` (MME/SGW/PGW 노드 축).
+
+    한 레코드가 세 노드에 **모두** 계상된다 — 노드마다 따로 보는 지표이므로
+    중복이 아니다. 그래서 이 테이블의 `ATTEMPT_CNT` 총합은 eNB 테이블의 약
+    3배가 된다. **이것을 롤업에서 더하면 안 된다.**
 
     MCC/MNC/MNO 는 가입자 차원이라 노드·분 단위 집계에 단일 값이 없다. 임의로
     고르면 없는 사실을 만들므로 NULL 로 둔다(불변규칙 17).
     """
-    def leg(node_type: str, col: str) -> str:
-        return (
-            f"SELECT x.EVENT_TIME, '{node_type}' AS NODE_TYPE, x.{col} AS NODE_ID, "
-            f"       x.CALL_TYPE, x.IMSI, x.ATTEMPT_FLAG, x.SUCCESS_FLAG, x.DROP_FLAG, "
-            f"       x.DATA_ATTEMPT_FLAG, x.DATA_SUCCESS_FLAG, x.IMS_ATTEMPT_FLAG, "
-            f"       x.IMS_SUCCESS_FLAG, x.DETACH_FLAG, x.UECONTEXTRELEASE_CAUSE "
-            f"  FROM `{XDR_TABLE}` AS x "
-            f" WHERE x.EVENT_TIME >= %s AND x.EVENT_TIME < %s "
-            f"   AND x.ONGOINGFLAG = '{ONGOING_END}' "
-            f"   AND x.{col} IS NOT NULL AND x.{col} <> ''"
+    cols = ["EVENT_TIME", "CDATE", "CHOUR", "CTIME", "NODE_TYPE", "NODE_ID",
+            "CALL_TYPE", "ATTEMPT_CNT", "SUCCESS_CNT", "DROP_CNT",
+            "DATA_ATTEMPT_CNT", "DATA_SUCESS_CNT",
+            "IMS_ATTEMPT_CNT", "IMS_SUCESS_CNT",
+            "UNIQ_IMSI_CNT", "DETACH_CNT"]
+    lf = _scan_cplane(cplane_root, lo, hi)
+    if lf is None:
+        return _wipe_insert(conn, PM_EPC, "EVENT_TIME", cols,
+                            pl.DataFrame(), lo, hi)
+    base = _p_end_only(lf)
+    legs = []
+    for kind, col in (("MME", "MME_ID"), ("SGW", "SGW_ID"), ("PGW", "PGW_ID")):
+        c = _s(col)
+        legs.append(
+            base.filter(c.is_not_null() & (c != ""))
+                .with_columns([pl.lit(kind).alias("NODE_TYPE"),
+                               c.alias("NODE_ID")])
+                .group_by([CPLANE_SLOT, "NODE_TYPE", "NODE_ID", "CALL_TYPE"])
+                .agg([
+                    _p_flag("ATTEMPT_FLAG").sum().alias("ATTEMPT_CNT"),
+                    _p_flag("SUCCESS_FLAG").sum().alias("SUCCESS_CNT"),
+                    _p_drop().sum().alias("DROP_CNT"),
+                    _p_flag("DATA_ATTEMPT_FLAG").sum().alias("DATA_ATTEMPT_CNT"),
+                    _p_flag("DATA_SUCCESS_FLAG").sum().alias("DATA_SUCESS_CNT"),
+                    _p_flag("IMS_ATTEMPT_FLAG").sum().alias("IMS_ATTEMPT_CNT"),
+                    _p_flag("IMS_SUCCESS_FLAG").sum().alias("IMS_SUCESS_CNT"),
+                    _s("IMSI").drop_nulls().n_unique().alias("UNIQ_IMSI_CNT"),
+                    _p_flag("DETACH_FLAG").sum().alias("DETACH_CNT"),
+                ])
         )
+    # 세 축을 한 프레임으로 모은다. `NODE_TYPE` 이 키에 있으므로 섞이지
+    # 않는다 — 축별로 따로 INSERT 하면 멱등 삭제 범위를 세 번 계산해야 한다.
+    frame = pl.concat(legs).with_columns(_p_derived()).collect()
+    return _wipe_insert(conn, PM_EPC, "EVENT_TIME", cols, frame, lo, hi)
 
-    legs = " UNION ALL ".join(
-        leg(t, c) for t, c in (("MME", "MME_ID"), ("SGW", "SGW_ID"), ("PGW", "PGW_ID")))
-    sql = f"""
-    INSERT INTO `{PM_EPC}`
-      (EVENT_TIME, CDATE, CHOUR, CTIME, NODE_TYPE, NODE_ID, CALL_TYPE,
-       ATTEMPT_CNT, SUCCESS_CNT, DROP_CNT,
-       DATA_ATTEMPT_CNT, DATA_SUCESS_CNT, IMS_ATTEMPT_CNT, IMS_SUCESS_CNT,
-       UNIQ_IMSI_CNT, DETACH_CNT)
-    SELECT x.EVENT_TIME,
-           DATE_FORMAT(x.EVENT_TIME, '%%Y%%m%%d'),
-           DATE_FORMAT(x.EVENT_TIME, '%%H'),
-           DATE_FORMAT(x.EVENT_TIME, '%%H%%i'),
-           x.NODE_TYPE, x.NODE_ID, x.CALL_TYPE,
-           {_flag('ATTEMPT_FLAG')}, {_flag('SUCCESS_FLAG')}, {_DROP},
-           {_flag('DATA_ATTEMPT_FLAG')}, {_flag('DATA_SUCCESS_FLAG')},
-           {_flag('IMS_ATTEMPT_FLAG')}, {_flag('IMS_SUCCESS_FLAG')},
-           COUNT(DISTINCT x.IMSI), {_flag('DETACH_FLAG')}
-      FROM ({legs}) AS x
-     GROUP BY x.EVENT_TIME, x.NODE_TYPE, x.NODE_ID, x.CALL_TYPE
+
+def aggregate_all(conn, lo: datetime, hi: datetime,
+                  cplane_root: Path | None = None) -> dict[str, int]:
+    """[lo, hi) 구간의 1분 집계 전부. 구간 멱등이다.
+
+    ``cplane_root`` 가 ``None`` 이면 세 테이블의 그 구간을 **비우기만** 한다 —
+    원천이 없는 것을 0 으로 적지 않는다(불변규칙 17).
     """
-    with conn.cursor() as cur:
-        cur.execute(
-            f"DELETE FROM `{PM_EPC}` WHERE EVENT_TIME >= %s AND EVENT_TIME < %s", [lo, hi])
-        cur.execute(sql, [lo, hi] * 3)
-        n = cur.rowcount
-    conn.commit()
-    return n
-
-
-def aggregate_all(conn, lo: datetime, hi: datetime) -> dict[str, int]:
-    """[lo, hi) 구간의 1분 집계 전부. 구간 멱등이다."""
     return {
-        PM_ENB: aggregate_enb(conn, lo, hi),
-        PM_ENB_CAUSE: aggregate_enb_cause(conn, lo, hi),
-        PM_EPC: aggregate_epc(conn, lo, hi),
+        PM_ENB: aggregate_enb(conn, lo, hi, cplane_root),
+        PM_ENB_CAUSE: aggregate_enb_cause(conn, lo, hi, cplane_root),
+        PM_EPC: aggregate_epc(conn, lo, hi, cplane_root),
     }
-
 
 # --------------------------------------------------------------------------
 # 보존 정리 — 파티션 단위로 버린다
@@ -1438,9 +2079,11 @@ def aggregate_all(conn, lo: datetime, hi: datetime) -> dict[str, int]:
 #: 않아 범위를 벗어난 분이 전부 `pmax` 한 칸에 몰려 프루닝이 죽는다(에러 없이
 #: 느려진다).
 #:
-#: **U-Plane 3종은 여기 없다**(2026-10-14). MySQL 을 떠나 로컬 Parquet 가
-#: 됐고, 보존은 파티션 드롭이 아니라 파일 삭제다
-#: (`uplane_parquet.purge` · 10분치).
+#: **원시 xDR 4종이 전부 여기 없다**(2026-10-14). U-Plane 3종이 먼저,
+#: C-Plane(`lte_call`)이 뒤이어 MySQL 을 떠나 로컬 Parquet 가 됐다. 보존은
+#: 파티션 드롭이 아니라 파일 삭제다(`raw_parquet.purge` — U-Plane 10분 ·
+#: C-Plane 1440분). 그래서 **남은 것은 1분 집계 세 테이블뿐이고**, 이름은
+#: `WRITTEN_TABLES` 그대로 둔다(쓰기 주체 기준이라는 뜻이 변하지 않았다).
 #:
 #: **`GP_KPI_*`·`GP_INCIDENT` 류 분석 산출물은 넣지 않는다.** 그것은 graphio 가
 #: 쓰고 (`graphio/store/tables.py:RESETTABLE_TABLES`), 남의 산출물을 생성기가
@@ -1449,18 +2092,37 @@ def aggregate_all(conn, lo: datetime, hi: datetime) -> dict[str, int]:
 #: 화면에서는 "장애 없음"으로 보인다(불변규칙 17 이 금지하는 형태).
 #: `CL_*`·`CM_*` 마스터도 대상이 아니다 — 다른 주체가 관리하고 시각 컬럼이 없다.
 WRITTEN_TABLES: tuple[tuple[str, str], ...] = (
-    (XDR_TABLE, "EVENT_TIME"),
     (PM_ENB, "EVENT_TIME"),
     (PM_ENB_CAUSE, "EVENT_TIME"),
     (PM_EPC, "EVENT_TIME"),
 )
 
 
-#: 원시 xDR 의 보관 시간. **시간 파티션이라 이 입도로 자를 수 있다** —
-#: 일 파티션으로는 "보존 1일"이 실제로 1~2일분이 남았다(상한이 cutoff 이하인
-#: 날만 떨어뜨릴 수 있기 때문이다). graphio 쪽 DDL 생성기
-#: (`docker/mysql/gen_gp_xdr_ddl.py`)의 `RETAIN_HOURS` 와 같은 값이어야 한다.
+#: 시간 파티션의 보관 시간. **지금 이 입도의 테이블이 없다**(2026-10-14).
+#:
+#: 원시 xDR 4종만 시간 파티션이었고 전부 로컬 Parquet 로 나갔다. 남은
+#: `PM_*` 셋은 일 파티션이라 `retain_days` 를 따른다.
+#:
+#: **상수를 지우지 않는 이유**: `purge_partitions` 가 입도별로 분기하고
+#: (`_GRAIN_BY_LEN`) 호출부가 이 값을 로그에 찍는다. 시간 파티션 테이블이
+#: 다시 생기면 그때 쓸 값이고, 지우면 분기 자체가 없어져 그런 테이블이
+#: 생겼을 때 **아무것도 지우지 않는다** — 에러 없이 디스크가 자란다.
+#:
+#: C-Plane Parquet 보관(`CPLANE_RETAIN_MINUTES` = 1440분)이 이 값과 같은
+#: 창인 것은 **일부러 맞춘 것이다** — 저장소를 바꾼 것이 조회 가능 범위를
+#: 조용히 줄이지 않게 하려는 것이다.
 RETAIN_HOURS = 24
+
+#: 끊을 수 있는 계열. **`UPLANE_SERIES` + `lte_call` 이다.**
+#:
+#: 목록을 따로 적지 않고 거기서 유도한다 — 계열이 늘 때 한쪽만 고쳐지면
+#: "끊었는데 계속 나온다"가 되고, 에러는 나지 않는다.
+#:
+#: `lte_call` 을 넣는 이유는 **그것만 끊는 상황이 실제로 있다** — 상용에서
+#: C-Plane 프로브와 U-Plane 프로브가 따로 붙으므로 한쪽만 미연동일 수 있다.
+#: 다만 여기서는 그 역이 성립하지 않는다: 호가 없으면 세션이 없으므로
+#: `lte_call` 차단은 U-Plane 까지 멈춘다(`PemdbGen.set_blocked`).
+BLOCKABLE_SERIES: tuple[str, ...] = ("lte_call",) + tuple(UPLANE_SERIES)
 
 #: 파티션 이름 → 입도. **이름 길이로 판정한다.**
 #:

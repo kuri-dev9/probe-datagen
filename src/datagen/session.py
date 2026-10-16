@@ -73,7 +73,7 @@
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from .cells import Cell
@@ -186,6 +186,10 @@ class Shape:
 
     #: 세션 길이(분) 평균. 1 에서 잘린 기하분포라 **짧은 게 많고 가끔 길다**.
     #: 이 값이 곧 `transport` 원시 레코드의 증가 배수다(활성 = 새 세션 × 수명).
+    #: Call Type 별 세션 확률 가중. **빈 dict 가 기본이고 `CT_SESSION_W` 위에
+    #: 덮인다.** `None` 으로 두면 `from_cfg` 의 `type(기본값)(v)` 가
+    #: `NoneType(v)` 가 되어 기동이 죽는다 — 실제로 그렇게 깨졌다.
+    call_type_weight: dict = field(default_factory=dict)
     span_mean: float = 2.0
     #: 수명 상한(분). §1.3 의 "1~10분".
     span_max: int = 10
@@ -227,6 +231,36 @@ class Shape:
 # --------------------------------------------------------------------------
 
 
+#: Call Type → **세션을 열 상대 확률**(`CD_CALL_TYPE` 코드).
+#:
+#: 전에는 모든 성공 호가 같은 확률로 세션을 열었다. `_k()` 주석은 "Paging·TAU·
+#: Detach 처럼 사용자 트래픽과 무관한 절차가 있다"고 적어 두었는데 **구현이
+#: 그것을 보지 않았다** — 알림만 받고 끝나는 호도 데이터 세션을 열었고, 그래서
+#: U-Plane 양이 실제보다 많고 고르게 퍼졌다(2026-10-15 사람 지적).
+#:
+#: 값은 **상대 가중이고 총량을 바꾸지 않는다** — `session_lambda` 가 그 분
+#: 호들의 가중 평균으로 정규화하므로 `rates.transport`(분당 새 세션 수)는
+#: 그대로다. 바뀌는 것은 **어떤 호가 그 세션을 여는가**의 분포다.
+#:
+#:   SRMO(01)   발신 데이터 요청 — 데이터를 쓰려고 거는 호다. 기준 1.0
+#:   SRMT(02)   착신 — **상당수가 알림만 받고 끝난다.** 낮게 둔다
+#:   ESRMO/MT   VoLTE(06·07). 음성이라 데이터가 적다
+#:   ATTACH     등록(00·08). 붙는 순간 약간의 트래픽은 있다
+#:   TAU/PAGING/DETACH/AUTH  시그널링뿐 — **0 이다**(세션을 열지 않는다)
+#:   APP(60)    앱 트래픽
+#:
+#: `config/datagen.yaml` 의 `pemdb1.uplane_session.call_type_weight` 로 덮는다.
+CT_SESSION_W: dict[str, float] = {
+    "00": 0.10, "08": 0.10,          # ATTACH · ATTACH_LOC
+    "01": 1.00,                      # SRMO  — 발신 데이터
+    "02": 0.30,                      # SRMT  — 착신 알림이 많다
+    "03": 0.00, "04": 0.00,          # TAU · PAGING
+    "05": 0.00, "40": 0.00,          # DETACH · AUTH
+    "06": 0.20, "07": 0.20,          # ESRMO · ESRMT (VoLTE)
+    "60": 1.00,                      # APP
+}
+
+
 @dataclass(slots=True)
 class Call:
     """성공 호 하나 — U-Plane 이 상속할 사실만 담는다.
@@ -242,6 +276,9 @@ class Call:
     t: float                    #: 베어러가 선 시각(epoch) — 호의 `call_end_time`
     outcome: str
     rel: str = "0"              #: UEContextRelease_Cause — 핸드오버 판정에 쓴다
+    #: `CALL_TYPE` 코드(`CD_CALL_TYPE`). **세션을 몇 개 열지가 여기서 갈린다** —
+    #: Paging·TAU·Detach 는 사용자 트래픽과 무관한 절차다(`CT_SESSION_W`).
+    call_type: str = ""
 
 
 @dataclass(slots=True)
@@ -323,6 +360,11 @@ class SessionEngine:
         self.rng = random.Random(seed + 909)
         self.active: list[Session] = []
         self._sid_n = 0
+
+        #: Call Type 가중 — 설정이 있으면 기본표 위에 덮는다(키만 바꿀 수 있게).
+        self._ctw = dict(CT_SESSION_W)
+        self._ctw.update({str(k): float(v)
+                          for k, v in (self.shape.call_type_weight or {}).items()})
 
         base = max(1, int(rates.get("transport", 0) or 0))
         #: 분당 **새 세션 수**(피크). `rates.transport` 를 그대로 쓴다 — 정상
@@ -409,6 +451,15 @@ class SessionEngine:
         f_sess = diurnal_factor(ts.hour, "uplane_sessions")
         return self.sessions_peak * f_call * f_sess / n_calls
 
+    def _ct_weight(self, call: Call) -> float:
+        """그 호가 세션을 열 상대 가중. 모르는 코드는 1.0(기준)이다.
+
+        **0 으로 떨어뜨리지 않는다** — 코드 테이블에 없는 Call Type 이 오면
+        그 호의 트래픽이 통째로 사라지고, 그것은 "그 절차는 데이터를 안
+        쓴다"와 구분되지 않는다(불변규칙 17).
+        """
+        return self._ctw.get(str(call.call_type or ""), 1.0)
+
     def _k(self, p: float) -> int:
         """호 하나가 여는 세션 수 — 상한에서 잘린 기하분포.
 
@@ -455,10 +506,25 @@ class SessionEngine:
         carried = self.active
         self.active = []
 
-        # ① 새 세션 — 성공 호에서 파생된다
+        # ① 새 세션 — 성공 호에서 파생된다.
+        #
+        # **Call Type 마다 확률이 다르다**(2026-10-15). 알림만 받고 끝나는
+        # 호(PAGING·TAU·DETACH)는 데이터 세션을 열지 않는다. 총량은 그대로
+        # 유지하려고 **그 분 호들의 가중 평균으로 정규화**한다 — 안 하면
+        # `rates.transport`(분당 새 세션 수)가 가중치에 끌려 조용히 줄어든다.
+        w_of = self._ct_weight
+        wsum = sum(w_of(c) for c in calls)
         lam = self.session_lambda(ts, len(calls))
-        p = geom_p(lam, self.shape.sessions_max)
+        # 가중 평균이 0 이면 그 분은 트래픽을 낼 호가 하나도 없다는 뜻이다 —
+        # 0 으로 나누지 않고 세션을 만들지 않는다(불변규칙 4: 비어 있는 것이
+        # 사실이다).
+        norm = (len(calls) / wsum) if wsum > 0 else 0.0
         for call in calls:
+            w = w_of(call) * norm
+            if w <= 0:
+                continue
+            p = geom_p(min(lam * w, float(self.shape.sessions_max)),
+                       self.shape.sessions_max)
             for _ in range(self._k(p)):
                 self._open(ts, slot, tf, call, out, mutate)
 
