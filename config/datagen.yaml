@@ -218,7 +218,7 @@ pemdb1:
     # **상대경로는 이 저장소 루트 기준이다** — `cli._uplane_store` 가
     # `(HERE / raw).resolve()` 로 푼다. cwd 와 무관하므로 어디서 띄워도 같은
     # 디렉터리이고, `gp.sh start gen` 이 `cd probe-datagen` 에서 띄우는 것과
-    # 결과가 같다. 컨테이너에서는 `config/container.yaml` 이
+    # 결과가 같다. 컨테이너에서는 `config/local.yaml` 이
     # `/app/data/uplane_raw`(절대경로)로 덮고 호스트의 이 디렉터리가 거기
     # 마운트된다 — 로컬 프로세스와 컨테이너가 **같은 호스트 디렉터리**를 본다.
     root: ../graphio-data-generator/data/uplane_raw

@@ -70,7 +70,7 @@ def _cfg() -> dict:
 
     **`cli.load_cfg` 를 쓴다** (2026-10-14). 전에는 `datagen.yaml` 을 직접
     읽었고 ``--config`` 는 그 파일을 **통째로 대체**했다 — 얇은 환경별 파일
-    (`config/container.yaml` 처럼 `mysql.host` 만 적은 것)을 주면 `pemdb1:`
+    (`config/local.yaml` 처럼 `mysql.host` 만 적은 것)을 주면 `pemdb1:`
     절 전체를 잃고, 그러면 UI 가 **생성기와 다른 셀 집합·요율을 보여 준다.**
     주입 대상이 생성 대상과 어긋나도 에러가 나지 않는 종류다.
     """
@@ -1733,7 +1733,7 @@ def main(argv=None) -> int:
         #
         # `load_cfg` 가 기본 yaml 위에 겹치므로(2026-10-14) **얇은 환경별 파일을
         # 줘도 그 위험이 없다.** 전에는 여기서 통째로 대체해서, 컨테이너용
-        # `container.yaml`(mysql.host 와 parquet root 만 적은 것)을 주면 생성
+        # `local.yaml`(mysql.host 와 parquet root 만 적은 것)을 주면 생성
         # 모수를 전부 잃었다.
         from .cli import load_cfg
         global _CFG

@@ -25,3 +25,11 @@ README.md
 data/pemdb1/*
 !data/pemdb1/_distributions.json
 data/repairs
+
+# ── 현장 설정은 이미지에 굽지 않는다 (2026-10-20) ─────────────────
+#
+# `Dockerfile` 이 `COPY config/ ./config/` 로 디렉터리째 담는다. 빌드하는
+# 사람의 작업 디렉터리에 `config/prod.yaml` 이 있으면 **현장 MySQL 주소와
+# 비밀번호가 이미지 레이어에 박힌다.** compose 가 마운트하므로 이미지에는
+# 없어야 한다 (graphio 쪽 `.dockerignore` 와 같은 이유).
+config/prod.yaml

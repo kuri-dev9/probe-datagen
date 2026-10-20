@@ -8,8 +8,8 @@
 #   docker compose -f ../graphio-probe-rca/docker-compose.dev.yml \
 #     --profile pipe up -d --build
 #
-# compose 가 `run --config config/container.yaml` 로 부른다.
-# 짝이 되는 읽는 쪽 설정은 graphio 의 `config/container.yaml` 이다.
+# compose 가 `run --config config/local.yaml` 로 부른다.
+# 짝이 되는 읽는 쪽 설정은 graphio 의 `config/local.yaml` 이다.
 
 # ── DB 접속 ──────────────────────────────────────────────────────────────
 #
@@ -39,7 +39,7 @@ mysql:
 # 마운트한다. 좌변은 compose 의 `x-raw-mounts` anchor 한 곳에만 적혀 있고,
 # 운영에서는 `GP_RAW_ROOT=/DATA1/summary` 로 그 좌변만 바뀐다.
 #
-# **읽는 쪽과 같은 값이어야 한다**(graphio `config/container.yaml` 의
+# **읽는 쪽과 같은 값이어야 한다**(graphio `config/local.yaml` 의
 # `paths.uplane_raw`·`cplane_raw`). 어긋나면 집계가 조용히 0행이 된다 —
 # 에러가 나지 않는 종류다(`src/datagen/raw_parquet.py` 머리말).
 #

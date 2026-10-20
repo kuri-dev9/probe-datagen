@@ -33,3 +33,17 @@ data/pemdb1/CM_CELL_REP_RU_LOC.json
 data/
 docker/mysql/pemdb1_local.sql
 docker/mysql/pemdb1_masters.sql
+
+# ── 현장 설정 — **추적하지 않는다** (2026-10-20) ─────────────────────────
+#
+# `config/prod.yaml` 은 현장마다 다르고 **비밀번호가 평문으로 들어 있다.**
+# 추적하면 현장에서 MySQL 주소·포트를 고칠 때마다 `git pull` 이 체크아웃을
+# 거부한다 — graphio 쪽에서 실제로 PoC 서버가 그것으로 막혔다.
+#
+# 추적본은 `config/prod.yaml.example` 이다. 현장은 한 번 복사해 고친다:
+#   cp config/prod.yaml.example config/prod.yaml
+#
+# 이 파일은 2026-10-20 에 `graphio-probe-rca/config/datagen-prod.yaml` 에서
+# 넘어왔다. 근거는 그 파일 머리말에 있다 — 현장이 git clone + 직접 빌드로
+# 바뀌면서 "운영에 이 저장소 소스가 없다"는 전제가 무효가 됐다.
+config/prod.yaml

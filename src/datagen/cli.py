@@ -70,8 +70,8 @@ def load_cfg(path: str | None) -> dict:
     자신이다). 호스트용 값 하나만 덮어쓸 자리가 없어서 호스트 파일이 그대로
     쓰인 것이다.
 
-    병합이면 `config/container.yaml` 처럼 **다른 키만 적은 얇은 파일**을 둘 수
-    있다. graphio 가 `default.yaml` → `container.yaml`/`prod.yaml` 로 하는
+    병합이면 `config/local.yaml` 처럼 **다른 키만 적은 얇은 파일**을 둘 수
+    있다. graphio 가 `default.yaml` → `local.yaml`/`prod.yaml` 로 하는
     것과 같은 구조다.
 
     **역호환이다.** 완전한 파일을 주던 기존 호출은 모든 키를 덮으므로 결과가
