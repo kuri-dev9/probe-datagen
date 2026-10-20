@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import time
 from datetime import datetime, timedelta
@@ -80,10 +81,49 @@ def load_cfg(path: str | None) -> dict:
     """
     base = yaml.safe_load(
         (HERE / "config" / "datagen.yaml").read_text(encoding="utf-8")) or {}
-    if not path:
-        return base
-    extra = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
-    return _deep_merge(base, extra)
+    if path:
+        extra = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+        base = _deep_merge(base, extra)
+    return _apply_env(base)
+
+
+#: 환경변수 → 설정 키. **graphio 쪽 `config._ENV_KEYS` 와 같은 변수 이름을
+#: 쓴다** (2026-10-20). 같은 DB 를 보는 두 프로세스가 서로 다른 변수를 읽으면
+#: 한쪽만 고쳐질 때 **에러 없이** gen 과 corr 이 다른 창고를 본다.
+#:
+#: 접속 정보가 전에는 `datagen.yaml`(추적본)과 `prod.yaml` 두 벌에 평문으로
+#: 있었고, graphio 쪽까지 합치면 환경마다 네 자리였다. 이제 `.gp.env` 하나에
+#: 적으면 compose 가 네 컨테이너에 같은 값을 넣는다.
+#:
+#: **`GP_MYSQL_DB` 는 `pemdb1.database` 로 간다.** 실제 쓰기 경로가 그쪽이고
+#: (`cli.cmd_run` → `datagen.pemdb1`), `mysql.database` 는 막아 둔 `backfill`
+#: 전용이다. 둘 다 덮어 두 값이 갈라지지 않게 한다.
+_ENV_KEYS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("GP_MYSQL_HOST",     ("mysql", "host")),
+    ("GP_MYSQL_PORT",     ("mysql", "port")),
+    ("GP_MYSQL_USER",     ("mysql", "user")),
+    ("GP_MYSQL_PASSWORD", ("mysql", "password")),
+    ("GP_MYSQL_DB",       ("mysql", "database")),
+    ("GP_MYSQL_DB",       ("pemdb1", "database")),
+)
+
+
+def _apply_env(cfg: dict) -> dict:
+    """`_ENV_KEYS` 를 설정 위에 덮는다.
+
+    **빈 문자열은 설정하지 않은 것으로 본다.** compose 가 `${GP_MYSQL_HOST}`
+    를 넘길 때 호스트에 그 변수가 없으면 빈 값이 들어오는데, 그것으로 yaml 의
+    멀쩡한 값을 덮으면 접속이 거부되고 원인이 설정 파일처럼 보인다.
+
+    **환경변수가 없으면 아무것도 하지 않는다** — 현장이 `prod.yaml` 에 실값을
+    갖고 돌고 있으므로 그쪽이 `.gp.env` 를 고치기 전에 받아도 멈추지 않는다.
+    """
+    for var, (sec, key) in _ENV_KEYS:
+        raw = os.environ.get(var)
+        if raw is None or raw == "":
+            continue
+        cfg.setdefault(sec, {})[key] = int(raw) if key == "port" else raw
+    return cfg
 
 
 #: `backfill` 을 막는 이유. 조용히 아무것도 안 하는 것보다 **왜 막혔는지

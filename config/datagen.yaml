@@ -44,7 +44,10 @@ mysql:
   host: 127.0.0.1               # 서버에서는 192.168.100.216
   port: 3306                    # 서버에서는 3307
   user: pem
-  password: "tnsfPans2013^_"
+  # **비워 둔다.** 접속 정보는 `.gp.env` → 환경변수 `GP_MYSQL_PASSWORD` 로
+  # 온다(2026-10-20). 저장소에 평문을 두면 git 히스토리에 영구히 남고,
+  # 환경마다 **두 저장소 네 자리**를 고쳐야 해서 한 곳을 빠뜨린다.
+  password: ""
   database: graphio
 
 # ── 상용 스키마(pemdb1) 적재 — `pemfill` · `run` · `ui` ──────────────────
