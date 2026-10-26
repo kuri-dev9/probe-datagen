@@ -20,6 +20,7 @@ from pathlib import Path
 
 from .fields import SERIES_FIELDS
 from .cells import Cell, encrypt_id
+from .plmn import Plmn
 from .profile import Sampler, SeriesProfile
 from .identity import synth_imei, synth_imsi, synth_mdn
 from .scenarios import Rec, MUTATORS, Scenario
@@ -174,6 +175,8 @@ class Generator:
         subscriber_pool: int = 0,
         success_only: bool = True,
         end_only: bool = False,
+        #: 홈 PLMN · IMSI 접두. `None` 이면 한국 기본값(현 동작)이다.
+        plmn: "Plmn | None" = None,
     ):
         self.cells = cells
         self.profiles = profiles
@@ -193,6 +196,9 @@ class Generator:
         # 허위 Critical 이 됐다 — 없는 장애를 만든 것이다(불변규칙 4·17).
         self.end_only = end_only
         self.rng = random.Random(seed)
+        #: 홈 PLMN · IMSI 접두 (`plmn.Plmn`). `None` 이면 한국 기본값이고
+        #: 그것이 현 동작이다 — 구 경로(`generate_minute`)가 설정을 모른다.
+        self.plmn = plmn or Plmn()
         self.samplers = {
             s: Sampler(p, random.Random(seed + i)) for i, (s, p) in enumerate(profiles.items())
         }
@@ -251,13 +257,15 @@ class Generator:
             # `mcc_mnc` 를 먼저 정한다 — 규격이 `imsi_mcc_mnc_info` 를 "first 7
             # characters of imsi" 로 못 박았으므로 IMSI 가 그것에서 파생돼야
             # 한다. 거꾸로 하면 두 컬럼이 어긋나고 에러는 나지 않는다.
-            mcc_mnc = smp.categorical("imsi_mcc_mnc_info", "4500503") if smp else "4500503"
-            if not (len(mcc_mnc) == 7 and mcc_mnc.isdigit()):
-                # 프로파일에 `""`(1.2%)와 `"__other__"`(0.6%)가 있다. 그대로 두면
-                # IMSI 를 만들 수 없고, 빈 값을 쓰면 `imsi_mcc_mnc_info` 와
-                # IMSI 앞 7자가 어긋난다 — 규격이 선언한 관계가 깨진다.
-                # 대표값으로 채우고 **두 컬럼을 함께** 그 값으로 쓴다.
-                mcc_mnc = "4500503"
+            # **설정이 프로파일을 이긴다.** `data/profile.json` 의
+            # `imsi_mcc_mnc_info` 분포는 상용 실측이라 전부 한국 값이다 —
+            # 그대로 쓰면 `plmn.home` 을 일본으로 바꿔도 가입자 IMSI 가
+            # `450` 으로 나오고 **에러가 없다.** `normalize` 가 분포 모양
+            # (끝 2자 = 사업자 하위 버킷)은 유지하고 앞 5자만 바꾼다.
+            # 7자가 아닌 값(`""` 1.2% · `"__other__"` 0.6%)도 그쪽이
+            # 대표값으로 채운다 — 빈 값이면 IMSI 를 만들 수 없다.
+            mcc_mnc = self.plmn.normalize(
+                smp.categorical("imsi_mcc_mnc_info", "") if smp else "")
             subs.append(
                 Subscriber(
                     # 합성 평문이다 — 암호문을 만들지 않는다(`identity` 머리말).

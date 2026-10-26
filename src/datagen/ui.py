@@ -750,7 +750,11 @@ def api_topo():
                  "suffix": topo.DUMP_SUFFIX,
                  "files": [{"table": i["table"], "rows": i.get("rows"),
                             "error": i.get("error")}
-                           for i in gate["tables"].values()]},
+                           for i in gate["tables"].values()],
+                 # **복구 범위를 함께 내린다** — "되돌릴 수 있다"가 실제보다
+                 # 넓게 읽히면 안 된다(불변규칙 17 의 결)
+                 "scope": gate["scope"],
+                 "not_restored": gate["not_restored"]},
     }
 
 
@@ -2058,6 +2062,7 @@ _HTML_TOPO = """<!doctype html>
   <div class="panel">
     <h2>복귀 사본 <small>— 파괴적 조작의 선행 조건</small></h2>
     <div id="dump" class="dim">불러오는 중…</div>
+    <div id="dump-scope" class="dim" style="font-size:12px; margin-top:6px"></div>
     <div class="row" style="margin-top:10px">
       <button onclick="run('dump', {})">사본 뜨기</button>
       <button class="ghost" onclick="run('restore', {dry_run:true})">복귀 점검</button>
@@ -2220,6 +2225,10 @@ async function load() {
         `<tr><td>${esc(f.table)}</td><td class="n">${imp(f.rows)}</td>` +
         `<td class="${f.error ? "bad" : "dim"}">${esc(f.error || "읽힘")}</td></tr>`
       ).join("") + `</tbody></table>`;
+    $("dump-scope").innerHTML =
+      `복구 범위 <b>${(dm.scope || []).map(esc).join(" · ")}</b>` +
+      (dm.not_restored || []).map(t =>
+        `<br><span class="bad">복구 대상 아님</span> — ${esc(t)}`).join("");
     // **쓰기 버튼은 "되돌릴 수 있는가"로 잠근다** — 파일 존재가 아니다.
     // 서버도 409 로 막지만(이쪽이 정본이다), 눌린 뒤 거부되면 "왜 안
     // 되는지"를 사람이 찾아야 한다.

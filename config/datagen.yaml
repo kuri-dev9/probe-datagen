@@ -6,6 +6,33 @@
 paths:
   data: data                    # cells.json · core_nodes.json · profile.json
 
+# ── 홈 PLMN · IMSI 접두 — **한 값에서 유도한다** (2026-10-26) ───────────
+#
+# 전에는 세 파일에 흩어진 리터럴이었다(`pemdb1.py` 의 `plmn="45005"` 와
+# `"4500503"`/`"2340500"`, `generator.py` 의 `"4500503"`). **한쪽만 바꾸면
+# 전 가입자가 외국 가입자가 된다** — 셀 PLMN `45005` 와 IMSI 접두
+# `4500503` 의 앞 5자가 같아야 한다. 지금은 로밍 판정 로직이 없어 증상이
+# 안 나오지만, `identity.py` 머리말이 하겠다고 적어 둔 분석을 넣는 순간
+# 전부 로밍으로 나온다(에러는 없다).
+#
+# **`imsi_mcc_mnc_info`(규격 폭 7자) 칸을 따로 두지 않는다** —
+# `home + imsi_msin_head` 로 유도한다. 칸이 둘이면 같은 함정이 설정
+# 파일로 옮겨간다. 근거는 `src/datagen/plmn.py` 머리말.
+#
+# **`data/profile.json` 의 `imsi_mcc_mnc_info` 분포를 이 값이 이긴다** —
+# 그 분포는 상용 실측이라 전부 한국 값(`4500502`~`4500513`)이다. 끝 2자
+# (사업자 하위 버킷)는 유지하고 앞 5자만 바꾼다(`Plmn.normalize`).
+# 로밍(MCC 3자가 `roaming` 과 같은 것)은 손대지 않는다.
+#
+# 일본 — docomo `44010`/`01` · SoftBank `44020` · KDDI `44050`.
+# MCC 3 + MNC 2 가 한국과 같은 모양이라 IMSI 15자리 구성이 그대로 성립한다.
+# **locale 과 자동으로 엮지 않는다** — `topo --locale jp` 가 식별자까지
+# 바꾸면 지리만 바꾸려던 사람이 놀란다. 여기서 사람이 바꾼다.
+plmn:
+  home: "45005"              # 셀 PLMN · 5자 (MCC 3 + MNC 2)
+  imsi_msin_head: "03"       # IMSI 접두 7자 = home + 이것
+  roaming: "2340500"         # 인바운드 로머 · 7자 (MCC 234 = 영국, APN 분포 2.6%)
+
 generate:
   start: "2026-08-27 09:00:00"  # 백필 시작 (실시간 틱 단계에서는 now-N 으로)
   minutes: 60                   # 생성할 분 수

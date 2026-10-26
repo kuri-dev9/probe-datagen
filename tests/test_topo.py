@@ -962,3 +962,21 @@ def test_dump_is_gzip_and_restore_reads_it(tmp_path, monkeypatch):
         p = topo.dump_path("kr", key)
         p.rename(p.with_suffix(""))          # .json.gz → .json
     assert topo.restore(conn, "kr", dry_run=True)["ok"] is False
+
+def test_restore_says_what_it_does_not_restore(tmp_path, monkeypatch):
+    """**되돌렸다고 읽히면 안 된다.**
+
+    `restore` 는 DB 네 테이블만 복구하고 `data/geo/` 를 보지 않는다 —
+    `code_crosswalk.json` 은 이 경로 밖이다. 그리고 `CL_CELL_MAP` 은
+    `DUMP_TABLES` 밖이라 사본이 아예 없다. 그 둘을 **반환값이 말해야**
+    CLI·UI 가 사람에게 내릴 수 있다(불변규칙 17 의 결).
+    """
+    _write_dump(tmp_path, monkeypatch, ROUNDTRIP)
+    rep = topo.restore(_RestoreConn(_ddl_map()), "kr", dry_run=True)
+    assert rep["ok"] is True
+    assert rep["scope"] == [topo.TABLES[k][0] for k in topo.DUMP_TABLES]
+    joined = " ".join(rep["not_restored"])
+    assert topo.XW_FILE in joined
+    assert "CL_CELL_MAP" in joined
+    # 범위에 그 둘이 **들어가 있으면** 안 된다 — 그러면 두 말이 모순이다
+    assert topo.TABLES["cellmap"][0] not in rep["scope"]

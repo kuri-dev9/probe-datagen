@@ -448,6 +448,15 @@ def restore(conn, locale: str = "kr", dry_run: bool = True) -> dict:
     **순서는 `DUMP_TABLES` 순(city → gu → dong → cell)이다.** `pemdb6` 에
     외래키가 없어(실측 0건) 순서가 적재를 막지는 않지만, 중간에 멈췄을 때
     상위 계층부터 들어가 있는 편이 읽기 쉽다.
+
+    ## 복구 범위는 **DB 네 테이블뿐이다**
+
+    `data/geo/` 를 보지 않는다 — `code_crosswalk.json` 은 이 경로 밖이다.
+    그래서 `seed-geo --locale jp` 뒤에 `restore kr` 을 해도 DB 는 돌아오지만
+    그 나라의 crosswalk 는 **그 자리에 그대로 남는다.** 지금은
+    `crosswalk_path` 가 나라별로 갈라 서로를 덮지 않지만, "되돌렸다"가
+    실제보다 넓게 읽히면 안 되므로 **반환값이 그 사실을 말한다**
+    (`scope` · 불변규칙 17 의 결).
     """
     tables: dict[str, dict] = {}
     ok = True
@@ -479,7 +488,17 @@ def restore(conn, locale: str = "kr", dry_run: bool = True) -> dict:
             ok = False
         tables[key] = info
 
-    out = {"ok": ok, "dry_run": dry_run, "locale": locale, "tables": tables}
+    out = {
+        "ok": ok, "dry_run": dry_run, "locale": locale, "tables": tables,
+        # **되돌렸다고 읽히면 안 된다.** 호출부(CLI·UI)가 이 두 줄을 그대로
+        # 사람에게 내린다.
+        "scope": [TABLES[k][0] for k in DUMP_TABLES],
+        "not_restored": [
+            f"{XW_FILE} (행정코드 crosswalk) — `data/geo/` 는 이 경로 밖이다. "
+            "나라를 바꿨다면 그쪽 crosswalk 는 그대로 남아 있다",
+            "CL_CELL_MAP (셀 대장 · 167MB) — `DUMP_TABLES` 밖이라 사본이 없다",
+        ],
+    }
     if dry_run or not ok:
         # **못 넣을 상태면 지우지 않는다.** `wipe` 를 먼저 하는 구조라
         # 하나라도 틀렸을 때 진행하면 "지웠는데 못 넣는" 상태가 된다.
@@ -893,3 +912,757 @@ def fill_coords(conn, xw_path: Path | None = None, enb_limit: int = 0,
             "fillable": len(gaps), "fillable_enbs": len({e for e, _ in gaps}),
             "intended_unmapped": len(missing) - len(gaps),
             "intended_enbs": len({e for e, _ in missing} - {e for e, _ in gaps})}
+
+
+# --------------------------------------------------------------------------
+# 행정구역 생성 — `CM_CITY` · `CM_GU` · `CM_DONG` 을 **처음부터** 만든다
+# --------------------------------------------------------------------------
+#
+# 지금까지 이 셋은 **상용 `pemdb1` 반출 JSON** 이었다(`docker/mysql/load_master.py`
+# 가 적재한다). 받아온 덤프라 일본용을 받을 자리가 없고, `topo` 에 있는 것은
+# 단건 CRUD 와 `dump`/`restore` 뿐이어서 **"없는 상태에서 만들기"가 0** 이었다.
+# `seed_enb` 가 `CM_GU` 의 좌표와 `CM_DONG` 의 동 목록을 **전제로** 돈다.
+#
+# ## 입력은 경계 GeoJSON 이다 — 사람이 좌표를 찍지 않는다
+#
+# 이름은 `properties.name`, 좌표는 **폴리곤 centroid** 에서 나온다. 구글맵에서
+# 사람이 찍어 넣는 경로를 만들면 그 수가 어디서 왔는지 다음 사람이 알 수 없고,
+# 273개를 손으로 옮기는 동안 오타가 섞인다.
+#
+# ## 코드는 **우리가 매기지 않는다 — 받는다** (한국)
+#
+# `CM_CELL_REP_RU_LOC` 442,689행과 1분 집계가 이미 `CITY_ID`·`GU_ID`·`DONG_ID`
+# 를 참조한다. 우리가 코드를 새로 매기면 그 전부가 끊어진다. 그래서 코드는
+# **코드 맵**에서 받는다 — 번들 geojson 코드(구 통계청 · 부산 `21`) →
+# pemdb1 코드(행정표준 · 부산 `26`). 맵이 없으면 **멈춘다**(추측으로 매기면
+# 조용히 다른 세대가 된다).
+#
+# 일본은 같은 자리에 **일본 geojson 코드 → 한국 코드** 맵을 둔다. 그것이
+# 사용자 방침("테이블 스위칭만으로 전환")의 구현이다 — 트래픽 테이블의 코드가
+# 그대로 남아야 스위칭이 성립한다.
+#
+# ## crosswalk 를 **함께 낸다** — 이름 매칭이 아니라 생성의 산물이다
+#
+# `CM_DONG` 을 생성하면 상용 동 이름에 맞춰진 `code_crosswalk.json` 과 매칭이
+# 끊기고, `drawable_dongs` 가 비어 `seed_enb` 의 `DONG_ID` 가 **에러 없이
+# 전부 NULL** 이 된다. 그래서 `seed_geo` 가 **자기가 쓴 대응을 그대로** 그
+# 파일로 쓴다. 우리가 양쪽을 알고 있으므로 추측이 없다 — graphio 의
+# `geo_xw`(도 약칭·`수원시장안구` 분리·행정동/법정동)가 하던 이름 매칭이
+# 필요 없어진다.
+
+#: locale → 레벨 → 경계 파일 이름. **graphio `geo.py:19` 의 `SOURCES` 사본**
+#: 이다 — 그쪽이 내려받고 이쪽이 읽는다. 파일 이름이 어긋나면 "경계 데이터
+#: 없음" 으로 멈추므로 조용히 틀리지는 않는다.
+GEO_SOURCES: dict[str, dict[str, str]] = {
+    "kr": {
+        # **한국은 `geo_dir` 바로 아래다.** graphio `geo.py`·`/api/geojson` 이
+        # 그 자리를 읽으므로 하위 디렉터리로 옮기면 지도가 503 이 된다.
+        "_dir": ".",
+        "sido": "skorea-provinces-2018-geo.json",
+        "sgg": "skorea-municipalities-2018-geo.json",
+        "emd": "skorea-submunicipalities-2018-geo.json",
+    },
+    "jp": {
+        "_dir": "jp",
+        "sido": "prefectures.json",            # 47 도도부현
+        "sgg": "N03-21_210101.json",           # 1,897 시구정촌 (정령시 区 분해)
+        # **읍면동(町丁・字)은 받지 않는다.** e-Stat 에 있지만 수십만 건이고
+        # 사용자 방침이 시군구급이다 — `seed_geo` 가 생성으로 채운다.
+    },
+}
+
+#: locale 별 경계 파일 출처. **번들 디렉터리가 `.gitignore` 안이라 크레딧이
+#: 파일과 함께 가야 한다** — `fetch_boundaries` 가 `SOURCE.txt` 로 쓴다.
+#: 한국 번들은 graphio `geo.py:3` 머리말이 같은 일을 한다.
+GEO_CREDIT: dict[str, dict[str, str]] = {
+    "jp": {
+        "base": "https://raw.githubusercontent.com/smartnews-smri/"
+                "japan-topography/main/data/municipality/geojson/s0001",
+        "credit": (
+            "일본 행정구역 경계\n"
+            "  재배포: smartnews-smri/japan-topography (s0001)\n"
+            "  원출처: 국토교통성 국토수치정보 행정구역 데이터 "
+            "(2021-09-28 취득) · CC BY 4.0\n"
+            "  가공: 위 저장소가 국토수치정보를 가공한 것이다.\n"
+            "\n"
+            "  `s0001` 을 쓴 이유 — 1.87MB 로 한국 번들(57MB)의 1/30 이고,\n"
+            "  화면이 geoMercator().fitSize() 로 자동 맞추므로 PoC 축척에서\n"
+            "  더 상세한 `s0010`(26MB)과 차이가 보이지 않는다.\n"
+            "  `*_designated_city.json` 은 쓰지 않는다 — 정령시를 통으로 묶어\n"
+            "  입도가 거칠다(区 분해본이 한국 시군구와 같은 입도다)."
+        ),
+    },
+}
+
+#: locale 별 `properties` 키. **한쪽만 보면 빈 이름이 나온다** —
+#: 일본 파일은 도쿄 23구가 `N03_003=None`(구 이름만), 일반 시가
+#: `N03_004=None`(시 이름만)이라 **둘을 이어야** 이름이 선다.
+#:
+#: 도도부현 파일(`prefectures.json`)에는 **코드가 없다**(`N03_001` 하나뿐) —
+#: 시구정촌의 `N03_007[:2]` 에서 역산한다(`read_boundaries` 참조).
+def _props_kr(props: dict, level: str) -> tuple[str | None, str | None]:
+    code = props.get("code") or props.get("CODE") or props.get("adm_cd")
+    name = (props.get("name") or props.get("NAME")
+            or props.get("name_local") or props.get("adm_nm"))
+    return (str(code) if code is not None else None,
+            str(name).strip() if name else None)
+
+
+def _props_jp(props: dict, level: str) -> tuple[str | None, str | None]:
+    if level == "sido":
+        # 코드는 호출부가 시구정촌에서 역산해 넣는다
+        name = props.get("N03_001")
+        return None, (str(name).strip() if name else None)
+    code = props.get("N03_007")
+    name = f"{props.get('N03_003') or ''}{props.get('N03_004') or ''}".strip()
+    return (str(code) if code else None), (name or None)
+
+
+GEO_PROPS = {"kr": _props_kr, "jp": _props_jp}
+
+#: graphio 가 굽는 crosswalk 파일 이름. **`geo_xw.XW_FILE` 사본이다.**
+#:
+#: **이름이 같아서 서로를 덮는 것이 실제 위험이었다.** 경계 파일은 locale 로
+#: 갈라 뒀는데 crosswalk 출력이 루트 한 곳이라, `seed-geo --locale jp` 가
+#: `data/geo/code_crosswalk.json` 을 일본 대응으로 덮었다. 그러면 graphio 가
+#:
+#:     한국 폴리곤(skorea-*) + 일본 crosswalk → remap 전량 unresolved
+#:     → 지도 전체 회색
+#:
+#: 이 되고 **에러가 나지 않는다.** 게다가 `restore kr` 은 DB 네 테이블만
+#: 되돌리고 `data/geo/` 를 보지 않아 **복구되지도 않는다.** 그래서 경로를
+#: `xw_path()` 로 가른다 — 경계 파일과 **같은 자리**에서 나온다.
+XW_FILE = "code_crosswalk.json"
+
+#: 생성한 읍면동의 코드 규칙 — `GU_ID * 1000 + 순번`. 상용 실측과 같은 모양
+#: 이다(`12000` 구의 동이 `12000035`). 자리수를 바꾸면 `int` 컬럼은 받지만
+#: 화면·조인이 상용과 다른 폭을 보게 된다.
+DONG_CODE_STEP = 1000
+
+
+def _ring_centroid(ring: list) -> tuple[float, float, float]:
+    """폴리곤 고리의 면적 가중 중심과 면적(도²). shoelace 공식이다.
+
+    **bbox 중심을 쓰지 않는다** — 해안선이 한쪽으로 뻗은 시군구에서 중심이
+    바다로 나가고, 그 좌표를 기준으로 셀을 뿌리면 `seed_enb` 가 만든 eNB 가
+    물 위에 선다. 면적이 0 이면(한 점에 모인 고리) 첫 점을 준다.
+    """
+    a = cx = cy = 0.0
+    n = len(ring)
+    for i in range(n):
+        x0, y0 = float(ring[i][0]), float(ring[i][1])
+        x1, y1 = float(ring[(i + 1) % n][0]), float(ring[(i + 1) % n][1])
+        f = x0 * y1 - x1 * y0
+        a += f
+        cx += (x0 + x1) * f
+        cy += (y0 + y1) * f
+    if abs(a) < 1e-12:
+        return float(ring[0][0]), float(ring[0][1]), 0.0
+    return cx / (3.0 * a), cy / (3.0 * a), abs(a) / 2.0
+
+
+def largest_piece(geom: dict) -> tuple[float, float, float]:
+    """`(lon, lat, area)` — 가장 넓은 조각의 중심과 그 면적(도²).
+
+    면적을 함께 돌려주는 이유: **같은 코드가 두 폴리곤일 때 큰 쪽을 고르는
+    판정**에 쓴다(`read_boundaries`). 중심만 받으면 뒤의 것이 앞을 덮는다.
+    """
+    polys = ([geom.get("coordinates") or []] if geom.get("type") == "Polygon"
+             else (geom.get("coordinates") or []))
+    best = None
+    for poly in polys:
+        if not poly or len(poly[0]) < 3:
+            continue
+        x, y, area = _ring_centroid(poly[0])
+        if best is None or area > best[2]:
+            best = (x, y, area)
+    if best is None:
+        raise ValueError("폴리곤에서 중심을 구할 수 없다")
+    return best
+
+
+def geom_centroid(geom: dict) -> tuple[float, float]:
+    """`Polygon`/`MultiPolygon` 의 중심 `(lon, lat)`.
+
+    **가장 넓은 조각의 중심**을 쓴다. 조각 전체를 면적 가중 평균하면 본토와
+    먼 섬이 있는 시군구(옹진군 등)에서 중심이 둘 사이 바다로 간다.
+    """
+    lon, lat, _area = largest_piece(geom)
+    return lon, lat
+
+
+def geo_level_path(geo_dir: Path, locale: str, level: str) -> Path:
+    """경계 파일 경로 — **정본이 이 함수 하나다.**
+
+    한국은 `geo_dir` 바로 아래(graphio 가 그 자리를 읽는다), 일본은
+    `geo_dir/jp/` 다. 호출부가 각자 조립하면 한쪽만 고쳐질 때 "경계 데이터
+    없음" 으로 멈춘다.
+    """
+    src = GEO_SOURCES.get(locale)
+    if not src:
+        raise RuntimeError(
+            f"locale '{locale}' 의 경계 파일 이름이 `GEO_SOURCES` 에 없다 — "
+            "그 나라 번들을 추가해야 한다")
+    if level not in src:
+        raise RuntimeError(
+            f"locale '{locale}' 에 {level} 레벨 경계가 없다 "
+            f"(있는 것: {[k for k in src if not k.startswith('_')]})")
+    sub = src.get("_dir", ".")
+    return (geo_dir if sub == "." else geo_dir / sub) / src[level]
+
+
+def crosswalk_path(geo_dir: Path, locale: str = "kr") -> Path:
+    """그 locale 의 crosswalk 경로 — **경계 파일과 같은 규칙이다.**
+
+    `kr` 은 `geo_dir` 바로 아래다(graphio `geo_xw.load` 가 그 자리를 읽으므로
+    바꿀 수 없다). 다른 나라는 `geo_dir/<_dir>/` 다 — 그래야 한 나라를
+    만들어도 다른 나라의 대응이 남는다.
+
+    **`_dir` 기본값이 `geo_level_path` 와 같아야 한다**(`.`). 다르게 두면
+    경계 파일과 crosswalk 가 **다른 디렉터리**에 떨어져 `drawable_dongs` 가
+    빈 집합을 받고, 그러면 `seed_enb` 의 `DONG_ID` 가 조용히 전부 NULL 이
+    된다. 이름을 `xw_path` 로 짓지 않은 이유는 `seed_enb`·`pick_report`·
+    `fill_coords` 의 **인자 이름이 이미 `xw_path`** 라 가려지기 때문이다.
+    """
+    sub = GEO_SOURCES.get(locale, {}).get("_dir", ".")
+    return (geo_dir if sub == "." else geo_dir / sub) / XW_FILE
+
+
+def read_boundaries(geo_dir: Path, locale: str, level: str) -> list[dict]:
+    """경계 GeoJSON → `[{code, name, lon, lat, area}]`. 파일이 없으면 멈춘다.
+
+    ## 세 가지를 조용히 통과시키지 않는다 (일본 파일 실측 2026-10-26)
+
+    1. **코드 없는 feature 3건**(경계 미정 지역) — **버린다.** 넣으면 코드
+       없는 시군구가 생기고, 그 지역 셀은 영원히 조인되지 않는다.
+    2. **같은 코드 두 폴리곤** — 큰 쪽만 쓴다(섬이 따로 떨어진 경우).
+       받은 판본에서는 **0건**이지만(고유 1,894 + 무코드 3 = 1,897) 다음
+       판본에서 생길 수 있고, 생기면 뒤의 것이 앞을 덮어 중심이 섬으로 간다.
+    3. **이름이 비는 것** — 멈춘다. 이름 없는 시군구는 화면에서 코드로만
+       보이고, 그것은 "데이터가 왔는데 이름이 없다"로 읽혀 원인을 엉뚱한
+       데서 찾게 만든다.
+
+    도도부현 파일에는 코드가 없어 **시구정촌에서 역산한다**(`N03_007[:2]`).
+    """
+    path = geo_level_path(geo_dir, locale, level)
+    if not path.exists():
+        raise RuntimeError(
+            f"경계 데이터가 없다: {path}\n"
+            + ("  받아라 — python -m datagen topo geo-fetch --locale "
+               f"{locale}" if locale in GEO_CREDIT
+               else "  graphio 쪽에서 먼저 받아라 — python -m graphio geo"))
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    props_of = GEO_PROPS.get(locale, _props_kr)
+
+    by_name: dict[str, str] = {}
+    if locale == "jp" and level == "sido":
+        # 도도부현 코드 역산 — 시구정촌의 `N03_001`(도도부현명)과
+        # `N03_007[:2]` 를 짝지어 이름 → 코드 표를 만든다
+        mpath = geo_level_path(geo_dir, locale, "sgg")
+        if not mpath.exists():
+            raise RuntimeError(
+                f"도도부현 코드를 역산할 시구정촌 파일이 없다: {mpath}")
+        for f in json.loads(mpath.read_text(encoding="utf-8")).get("features") or []:
+            pr = f.get("properties") or {}
+            nm, cd = pr.get("N03_001"), pr.get("N03_007")
+            if nm and cd:
+                by_name.setdefault(str(nm).strip(), str(cd)[:2])
+
+    out: dict[str, dict] = {}
+    dropped = 0
+    for feat in doc.get("features") or []:
+        props = feat.get("properties") or {}
+        code, name = props_of(props, level)
+        if code is None and by_name:
+            code = by_name.get(name or "")
+        if code is None:
+            dropped += 1          # 경계 미정 — 버린다
+            continue
+        if not name:
+            raise RuntimeError(
+                f"{path.name} 의 feature 에 이름이 없다: {sorted(props)[:8]}"
+                " — 번들 포맷이 다르다")
+        lon, lat, area = largest_piece(feat.get("geometry") or {})
+        prev = out.get(code)
+        if prev is None or area > prev["area"]:
+            out[code] = {"code": code, "name": name,
+                         "lon": lon, "lat": lat, "area": area}
+    if not out:
+        raise RuntimeError(f"{path.name} 에서 읽은 것이 0건이다 — 포맷이 다르다")
+    return [out[k] for k in sorted(out)]
+
+
+def code_map_path(locale: str) -> Path:
+    """locale 의 코드 맵. `dump` 사본과 **같은 디렉터리**에 둔다 — 그 둘이
+    한 벌이다(사본을 되넣으면 그 코드 체계로 돌아간다)."""
+    return LOCALE_DIR / locale / "code_map.json"
+
+
+def load_code_map(locale: str, geo_dir: Path) -> dict:
+    """geojson 코드 → DB 코드. `{"sido": {...}, "sgg": {...}}`.
+
+    우선순위 — ① `locale/<locale>/code_map.json`(우리가 쓴 것)
+    ② 한국만: `code_crosswalk.json` 의 `map`(graphio 가 이름 매칭으로 만든 것).
+
+    **없으면 멈춘다.** 코드를 추측으로 매기면 `CM_CELL_REP_RU_LOC` 44만행과
+    1분 집계가 참조하는 코드와 어긋나고, 그것은 에러가 아니라 "그 지역에
+    트래픽이 없다"로 보인다.
+    """
+    p = code_map_path(locale)
+    if p.exists():
+        doc = json.loads(p.read_text(encoding="utf-8"))
+        return {"sido": dict(doc.get("sido") or {}), "sgg": dict(doc.get("sgg") or {})}
+    xw = crosswalk_path(geo_dir, locale)
+    if xw.exists():
+        m = (json.loads(xw.read_text(encoding="utf-8")).get("map") or {})
+        # crosswalk 의 `sgg` 값은 `"CITY_ID-GU_ID"` 다 — 뒷자리만 쓴다.
+        return {"sido": dict(m.get("sido") or {}),
+                "sgg": {k: str(v).split("-")[-1] for k, v in (m.get("sgg") or {}).items()}}
+    raise RuntimeError(
+        f"코드 맵이 없다: {p}\n"
+        f"  한국은 {xw} 가 대신 쓰인다 — python -m graphio geo-xw\n"
+        "  일본은 '일본 geojson 코드 → 한국 코드' 맵을 그 자리에 둔다")
+
+
+#: 생성한 crosswalk 의 `emd` 쪽이 어디서 왔는지.
+#:
+#: * `polygon` — 읍면동 경계 폴리곤 하나당 동 하나. 지도가 동까지 그려진다
+#: * `generated` — 폴리곤 없이 시군구 중심에서 뿌렸다. **그 경우에도 맵을
+#:   비우지 않고 항등으로 채운다** — 비우면 `drawable_dongs` 가 비고
+#:   `seed_enb` 의 `DONG_ID` 가 에러 없이 전부 `NULL` 이 된다. "안 만들어도
+#:   되는 상태"와 "없는 상태"는 다른 것이다(불변규칙 17 의 결).
+EMD_FROM_POLYGON = "polygon"
+EMD_GENERATED = "generated"
+
+
+def seed_geo(conn, geo_dir: Path, locale: str = "kr",
+             dongs_per_gu: int = 8, spread_km: float = 3.0,
+             seed: int = 20260903, replace: bool = False,
+             dry_run: bool = True) -> dict:
+    """`CM_CITY`·`CM_GU`·`CM_DONG` 을 경계 GeoJSON 에서 만든다.
+
+    `replace=False` 면 **행이 있으면 거부한다** — 44만 셀이 참조하는 코드를
+    덮어쓰는 일이라 사람이 의도를 말해야 한다. `replace=True` 는 세 테이블을
+    비우고 전량 다시 넣는다(멱등보다 **전량 교체**가 맞다 — 부분 갱신이면
+    옛 코드가 남아 어느 세대인지 알 수 없다).
+
+    컬럼 타입이 테이블마다 다르다(실측) —
+
+        CM_CITY   LONGITUDE·LATITUDE  varchar(20)   '126.9917942707449'
+        CM_GU     LONGITUDE·LATITUDE  float         126.787
+        CM_DONG   LONGITUDE·LATITUDE  float         (+ LATITUDE_IMSI)
+
+    DMS 가 아니다 — `CM_CELL_REP_RU_LOC` 만 DMS 문자열이다. 섞으면
+    `gu_points()` 의 `float(la)` 가 깨지거나 좌표가 0 이 된다.
+    """
+    cmap = load_code_map(locale, geo_dir)
+    sido = read_boundaries(geo_dir, locale, "sido")
+    sgg = read_boundaries(geo_dir, locale, "sgg")
+
+    city_rows: list[dict] = []
+    city_name: dict[int, str] = {}
+    skipped = {"sido": [], "sgg": []}
+    for a in sido:
+        cid = cmap["sido"].get(a["code"])
+        if cid is None:
+            # **코드 맵에 없는 폴리곤은 넣지 않는다.** 코드를 지어내면 그
+            # 지역의 셀이 영원히 조인되지 않는다 — 그 수를 보고한다.
+            skipped["sido"].append(a["code"])
+            continue
+        city_name[int(cid)] = a["name"]
+        city_rows.append({
+            "CITY_ID": int(cid), "CITY_NAME": a["name"],
+            "MAP_X": None, "MAP_Y": None, "MAP_CODE": None,
+            # varchar 다 — 문자열로 넣는다
+            "LONGITUDE": f"{a['lon']:.6f}", "LATITUDE": f"{a['lat']:.6f}",
+        })
+
+    gu_rows: list[dict] = []
+    gu_at: dict[int, tuple[int, float, float, str]] = {}
+    for a in sgg:
+        gid = cmap["sgg"].get(a["code"])
+        if gid is None:
+            skipped["sgg"].append(a["code"])
+            continue
+        gid = int(gid)
+        # 시도는 시군구 코드 앞 2자리다 — 상용 실측(`41195` → `41`).
+        cid = int(str(gid)[:2])
+        gu_at[gid] = (cid, a["lat"], a["lon"], a["code"])
+        gu_rows.append({
+            "CITY_ID": cid, "GU_ID": gid,
+            "CITY_NAME": city_name.get(cid), "GU_NAME": a["name"],
+            "P_GU_ID": None, "MAP_X": None, "MAP_Y": None,
+            "USE_YN": "Y", "MAP_CODE": None,
+            "LONGITUDE": a["lon"], "LATITUDE": a["lat"],
+        })
+
+    # ── 읍면동 ─────────────────────────────────────────────────────────
+    rng = random.Random(seed)
+    dong_rows: list[dict] = []
+    emd_map: dict[str, str] = {}
+    emd_src = EMD_GENERATED
+    # **`in` 으로 본다.** `.get("emd", "")` 로 경로를 만들면 `geo_dir / ""`
+    # 가 `geo_dir` 자신이 되고 `.exists()` 가 참이라, 일본처럼 emd 가 없는
+    # locale 이 폴리곤 분기로 들어가 "emd 레벨 경계가 없다"로 죽는다.
+    has_emd = "emd" in GEO_SOURCES.get(locale, {})
+    if has_emd and geo_level_path(geo_dir, locale, "emd").exists():
+        # 폴리곤이 있으면 **그것 하나당 동 하나**다. 코드는 우리가 매기므로
+        # 1:1 이고, graphio 쪽 "행정동 3,504 vs 법정동 8,079" 불일치가
+        # 사라진다(그 때문에 지도 커버리지가 51.7% 였다).
+        emd_src = EMD_FROM_POLYGON
+        seq: dict[int, int] = {}
+        for a in read_boundaries(geo_dir, locale, "emd"):
+            gid = cmap["sgg"].get(a["code"][:5])
+            if gid is None:
+                continue
+            gid = int(gid)
+            if gid not in gu_at:
+                continue
+            seq[gid] = seq.get(gid, 0) + 1
+            did = gid * DONG_CODE_STEP + seq[gid]
+            cid = gu_at[gid][0]
+            dong_rows.append({
+                "CITY_ID": cid, "GU_ID": gid, "DONG_ID": did,
+                "CITY_NAME": city_name.get(cid),
+                "GU_NAME": next(r["GU_NAME"] for r in gu_rows if r["GU_ID"] == gid),
+                "DONG_NAME": a["name"], "P_DONG_ID": did,
+                "MAP_X": None, "MAP_Y": None, "USE_YN": "Y", "MAP_CODE": None,
+                "LONGITUDE": a["lon"], "LATITUDE": a["lat"],
+                "LATITUDE_IMSI": None,
+            })
+            emd_map[a["code"]] = f"{cid}-{gid}-{did}"
+    else:
+        for gid, (cid, lat, lon, _code) in sorted(gu_at.items()):
+            pts = scatter(lat, lon, dongs_per_gu, spread_km, rng)
+            gname = next(r["GU_NAME"] for r in gu_rows if r["GU_ID"] == gid)
+            for i, (dlat, dlon) in enumerate(pts, start=1):
+                did = gid * DONG_CODE_STEP + i
+                dong_rows.append({
+                    "CITY_ID": cid, "GU_ID": gid, "DONG_ID": did,
+                    "CITY_NAME": city_name.get(cid), "GU_NAME": gname,
+                    "DONG_NAME": f"{gname} {i}동", "P_DONG_ID": did,
+                    "MAP_X": None, "MAP_Y": None, "USE_YN": "Y",
+                    "MAP_CODE": None, "LONGITUDE": dlon, "LATITUDE": dlat,
+                    "LATITUDE_IMSI": None,
+                })
+                # **항등으로 채운다** — 비우면 `drawable_dongs` 가 비고
+                # `seed_enb` 의 `DONG_ID` 가 에러 없이 전부 NULL 이 된다.
+                emd_map[str(did)] = f"{cid}-{gid}-{did}"
+
+    xw_doc = {
+        "source": f"topo seed-geo · locale={locale} · emd={emd_src}",
+        "map": {
+            "sido": {a["code"]: str(cmap["sido"][a["code"]])
+                     for a in sido if a["code"] in cmap["sido"]},
+            "sgg": {code: f"{gu_at[int(gid)][0]}-{int(gid)}"
+                    for code, gid in cmap["sgg"].items() if int(gid) in gu_at},
+            "emd": emd_map,
+        },
+        "matched": {"sido": len(city_rows), "sgg": len(gu_rows), "emd": len(emd_map)},
+        "total": {"sido": len(sido), "sgg": len(sgg), "emd": len(dong_rows)},
+        "unmatched": {"sido": skipped["sido"], "sgg": skipped["sgg"], "emd": []},
+        "notes": [
+            "`topo seed-geo` 가 **자기가 쓴 대응을 그대로** 적은 것이다 — "
+            "이름 매칭이 아니라 생성의 산물이라 추측이 없다.",
+            "`emd=generated` 면 폴리곤 없이 뿌린 동이고 맵은 **항등**이다. "
+            "비우면 `drawable_dongs` 가 비어 셀의 DONG_ID 가 조용히 NULL 이 된다.",
+        ],
+    }
+
+    stats = {"locale": locale, "city": len(city_rows), "gu": len(gu_rows),
+             "dong": len(dong_rows), "emd_source": emd_src,
+             "skipped_sido": len(skipped["sido"]), "skipped_sgg": len(skipped["sgg"]),
+             "crosswalk": str(crosswalk_path(geo_dir, locale)),
+             "no_coord": sum(1 for r in gu_rows if r["LATITUDE"] is None)}
+    if dry_run:
+        return stats
+
+    have = {k: _rows(conn, f"SELECT COUNT(*) FROM `{TABLES[k][0]}`")[0][0]
+            for k in ("city", "gu", "dong")}
+    if any(have.values()) and not replace:
+        raise RuntimeError(
+            f"행이 이미 있다 — {have}. 덮어쓰려면 replace 를 켠다.\n"
+            "  44만 셀이 참조하는 코드를 바꾸는 일이다 — 사본을 먼저 뜬다")
+    for k in ("dong", "gu", "city"):      # 자식부터 비운다
+        wipe(conn, TABLES[k][0])
+    insert_rows(conn, "CM_CITY", city_rows)
+    insert_rows(conn, "CM_GU", gu_rows)
+    insert_rows(conn, "CM_DONG", dong_rows)
+    out_xw = crosswalk_path(geo_dir, locale)
+    out_xw.parent.mkdir(parents=True, exist_ok=True)
+    out_xw.write_text(json.dumps(xw_doc, ensure_ascii=False, indent=1),
+                      encoding="utf-8")
+    return stats
+
+
+# --------------------------------------------------------------------------
+# 일본 locale — **코드는 한국 것을 그대로 쓴다**
+# --------------------------------------------------------------------------
+#
+# 사용자 방침은 *"동일한 ID 체계로 가고 테이블 스위칭으로 전환"* 이다. 그래서
+# JIS 코드를 **DB 에 넣지 않는다** — 선정에만 쓰고, `CM_CITY`·`CM_GU` 에는
+# 한국 코드가 들어간다. 트래픽 테이블(`CM_CELL_REP_RU_LOC` 44만행 · 1분 집계)
+# 이 그 코드를 참조하므로 **그대로 남아야 스위칭이 성립한다.**
+#
+#     JP 폴리곤 01101(札幌市中央区)  →  KR 코드 11110(종로구) 자리에 들어간다
+#     트래픽은 11110 을 그대로 가리키고, 이름·좌표만 일본 것이 된다
+
+#: KR 시도 코드 → JP 도도부현 이름. **17줄 상수이고 사람이 정했다.**
+#:
+#: **인구 순위 자동 대응을 넣지 않는다.** 그러면 사용자가 지정한 둘이
+#: 모두 깨진다 — KR 3위 부산 → JP 3위 大阪(지정은 福岡), KR 13위 대전 →
+#: JP 13위 京都(지정은 大阪). 사용자 예시는 인구 순위가 아니라 **지리적
+#: 성격**으로 짝지은 것이다.
+#:
+#: 고치려면 이 표만 고친다. 다음 사람이 "인구 순위로 바꾸자"고 할 때
+#: **그것이 결정이었음**을 알 수 있게 지정 둘에 표시를 남긴다.
+#: **키는 `CM_CITY.CITY_ID` 실측값이다 — 행정표준코드가 아니다.**
+#: 세종은 `36` 이 아니라 **`12`**, 제주는 `50` 이 아니라 **`49`** 다(실측
+#: 2026-10-26). 상용 반출본이 그렇게 왔고 트래픽이 그 코드를 참조하므로,
+#: 표준코드로 "고치면" 그 두 시도가 조용히 빠진다.
+SIDO_MAP_JP: dict[str, str] = {
+    "11": "東京都",      # 서울 25 — 수도
+    "12": "滋賀県",      # 세종  1 — 시군구가 하나뿐이다
+    "26": "福岡県",      # 부산 16 ← **사용자 지정** (2026-10-26)
+    "27": "愛知県",      # 대구  9
+    "28": "神奈川県",    # 인천 10 — 수도권 항만
+    "29": "広島県",      # 광주  5
+    "30": "大阪府",      # 대전  5 ← **사용자 지정** (2026-10-26)
+    "31": "兵庫県",      # 울산  5 — 공업항만
+    "41": "北海道",      # 경기 52 — 그 수를 수용할 수 있는 유일한 급
+    "42": "長野県",      # 강원 18 — 산악
+    "43": "栃木県",      # 충북 16
+    "44": "静岡県",      # 충남 18
+    "45": "新潟県",      # 전북 16
+    "46": "鹿児島県",    # 전남 22 — 도서
+    "47": "岩手県",      # 경북 24
+    "48": "岡山県",      # 경남 27
+    "49": "沖縄県",      # 제주  4 — 섬↔섬
+}
+
+
+def _jp_rank(name: str, props_had_ward: bool) -> int:
+    """시구정촌의 **도시 위계** — 작을수록 도심.
+
+    **이 파일에 인구가 없다.** 인구 상위로 고를 수 없고 별도 수급도
+    불필요하다 — 접미사가 위계 신호다.
+
+        0  정령시의 区 (`N03_004` 가 있다) = 도심. 한국 273도 구 위주다
+        1  市
+        2  町 · 村 · 그 외
+    """
+    if props_had_ward:
+        return 0
+    return 1 if name.endswith("市") else 2
+
+
+def build_jp_code_map(geo_dir: Path, kr_gu: list[tuple[int, int]]) -> dict:
+    """JP 경계 코드 → KR 코드 맵. `locale/jp/code_map.json` 의 내용이다.
+
+    `kr_gu` 는 **지금 DB 에 있는** `(CITY_ID, GU_ID)` 목록이다 — 번들에서
+    유도하지 않는다. 트래픽이 참조하는 것이 DB 의 코드이고, 번들(250개)과
+    DB(273개)가 다르기 때문이다. 다르면 스위칭 후 그 차이만큼 조용히
+    미매핑이 된다.
+
+    시도 대응은 `SIDO_MAP_JP` 가 정하고, 그 안에서 `_jp_rank` 순으로 필요
+    수만큼 채운다. **공급이 모자라면 멈춘다** — 부족분을 다른 도도부현에서
+    끌어오면 한 시도 코드에 떨어진 두 지역이 들어가고, 지리 롤업이 원시
+    재집계라 `geo_pattern` 반경이 거짓으로 커진다(`WIDE` 가 상시로 난다).
+    """
+    sgg_path = geo_level_path(geo_dir, "jp", "sgg")
+    doc = json.loads(sgg_path.read_text(encoding="utf-8"))
+    by_pref: dict[str, list[tuple[int, str, str]]] = {}
+    for feat in doc.get("features") or []:
+        pr = feat.get("properties") or {}
+        code, pref = pr.get("N03_007"), pr.get("N03_001")
+        if not code or not pref:
+            continue          # 경계 미정 — `read_boundaries` 와 같은 판정
+        name = f"{pr.get('N03_003') or ''}{pr.get('N03_004') or ''}".strip()
+        if not name:
+            continue
+        by_pref.setdefault(str(pref).strip(), []).append(
+            (_jp_rank(name, bool(pr.get("N03_004"))), str(code), name))
+
+    need: dict[int, list[int]] = {}
+    for city, gu in sorted(set(kr_gu)):
+        need.setdefault(int(city), []).append(int(gu))
+
+    sido: dict[str, str] = {}
+    sgg: dict[str, str] = {}
+    picked: dict[int, list[dict]] = {}
+    for city, gus in sorted(need.items()):
+        pref = SIDO_MAP_JP.get(f"{city}")
+        if pref is None:
+            raise RuntimeError(
+                f"KR 시도 {city} 의 일본 대응이 `SIDO_MAP_JP` 에 없다 — "
+                "17줄 표를 고친다")
+        pool = sorted(by_pref.get(pref) or [])
+        if len(pool) < len(gus):
+            raise RuntimeError(
+                f"{pref} 의 시구정촌 {len(pool)}개로 KR 시도 {city} 의 "
+                f"{len(gus)}개를 채울 수 없다 — `SIDO_MAP_JP` 에서 더 큰 "
+                "도도부현으로 바꾼다 (부족분을 다른 현에서 끌어오면 한 시도에 "
+                "떨어진 두 지역이 섞여 geo_pattern 반경이 거짓으로 커진다)")
+        sido[pool[0][1][:2]] = str(city)
+        rows = []
+        for gu, (_rank, code, name) in zip(gus, pool):
+            sgg[code] = str(gu)
+            rows.append({"jis": code, "name": name, "gu_id": gu})
+        picked[city] = rows
+
+    return {
+        "source": "topo code-map --locale jp",
+        "note": [
+            "JP geojson 코드 → KR 코드. **JIS 는 선정에만 쓰고 DB 에 넣지 "
+            "않는다** — 트래픽이 KR 코드를 참조하므로 그대로 남아야 "
+            "테이블 스위칭이 성립한다.",
+            "시도 대응은 `SIDO_MAP_JP`(사람이 정한 17줄)이고 사용자 지정 "
+            "둘(부산→福岡県 · 대전→大阪府)이 들어 있다. 인구 순위 자동 "
+            "대응은 그 둘을 깬다.",
+            "쓰지 않는 도도부현 30개는 **묶지 않는다** — 회색 배경으로 "
+            "그릴 자리다(불변규칙 12 의 결).",
+        ],
+        "sido": sido,
+        "sgg": sgg,
+        "picked": picked,
+        "unused_prefectures": sorted(set(by_pref) - set(SIDO_MAP_JP.values())),
+    }
+
+
+def save_code_map(doc: dict, locale: str) -> Path:
+    path = code_map_path(locale)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=1),
+                    encoding="utf-8")
+    return path
+
+
+def fetch_boundaries(geo_dir: Path, locale: str, force: bool = False) -> dict:
+    """경계 파일을 받아 `geo_dir/<locale>/` 에 둔다. 크레딧을 함께 쓴다.
+
+    **번들 디렉터리가 `.gitignore` 안이라 크레딧이 파일과 함께 가야 한다** —
+    저장소에 적어 두면 반출본에서 사라진다. 한국 번들은 graphio
+    `geo.py:3` 머리말이 같은 일을 하고 그쪽은 코드와 함께 간다.
+    """
+    import urllib.request
+
+    cr = GEO_CREDIT.get(locale)
+    if not cr:
+        raise RuntimeError(
+            f"locale '{locale}' 의 받을 자리가 `GEO_CREDIT` 에 없다 — "
+            "한국 번들은 graphio 가 받는다 (python -m graphio geo)")
+    out: dict[str, int] = {}
+    for level in [k for k in GEO_SOURCES[locale] if not k.startswith("_")]:
+        dest = geo_level_path(geo_dir, locale, level)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if force or not dest.exists() or dest.stat().st_size == 0:
+            with urllib.request.urlopen(f"{cr['base']}/{dest.name}") as r:
+                dest.write_bytes(r.read())
+        out[dest.name] = dest.stat().st_size
+    (dest.parent / "SOURCE.txt").write_text(
+        cr["credit"] + f"\n\n  받은 자리: {cr['base']}\n", encoding="utf-8")
+    return out
+
+
+# --------------------------------------------------------------------------
+# 셀 좌표 재배치 — **키를 유지하고 좌표만 다시 쓴다**
+# --------------------------------------------------------------------------
+#
+# 이것이 "테이블 스위칭"의 마지막 조각이다. 코드 맵이 KR 코드를 그대로
+# 쓰므로 `seed-geo --locale jp` 뒤에도 셀의 `(ENB_ID, SECTOR)`·`GU_ID` 는
+# **그대로 유효하다** — 바뀌어야 하는 것은 **좌표뿐**이다. 그 44만행에는
+# 한국 좌표가 들어 있어서, 전환하면 **시군구는 오사카인데 셀은 대전
+# 앞산에 찍힌다.** 지도가 그 상태로 그려지고 에러는 나지 않는다.
+
+
+def relocate_cells(conn, locale: str = "kr", spread_km: float = 0.35,
+                   seed: int = 20260903, only_active: bool = True,
+                   dry_run: bool = True) -> dict:
+    """셀 좌표를 그 `GU_ID` 의 **현 `CM_GU` 중심** 주변으로 다시 쓴다.
+
+    ## 키 집합을 바꾸지 않는다
+
+    `UPDATE` 만 한다 — 행을 넣거나 지우지 않는다. `CL_CELL_MAP`·1분 집계·
+    원시 Parquet·`ground_truth.json` 이 `(ENB_ID, SECTOR)` 를 참조하고,
+    그것이 `ensure_sector_coords` 가 이미 지키는 불변이다. 그래서 이
+    함수는 `fill_coords` 계열과 **역할이 갈린다** —
+
+        ensure_sector_coords   행이 없는 셀에 **INSERT**  (결손 채우기)
+        relocate_cells         있는 행의 좌표만 **UPDATE** (나라 전환)
+
+    ## eNB 단위로 묶는다
+
+    한 eNB 의 섹터들이 흩어지면 그 eNB 가 `POINT` 가 아니라 `SCATTER` 로
+    보이고 **없는 광역 장애가 만들어진다.** eNB 마다 기준점을 하나 뽑아
+    그 주변 `spread_km` 안에 섹터를 둔다 — `fill_coords` 가 하던 모양 그대로다.
+
+    기본 `0.35km` 는 graphio 임계에서 나온 값이다 —
+
+        detector.py:1512   if radius < 0.9:   return "POINT"
+        detector.py:1533   if radius <= 3.0:  return "CLUSTER"
+
+    올리면 같은 eNB 가 `CLUSTER`·`SCATTER` 로 보여 `geo_hit` 채점이 흔들린다.
+
+    `only_active=True` 면 **1분 집계에 나타나는 셀만** 고친다(실측 2,161).
+    44만행 전부를 고치는 것은 전환에 필요하지 않고, 되돌릴 범위만 넓힌다.
+    """
+    gus = {g: (c, la, lo) for c, g, _n, la, lo in gu_points(conn)}
+    if not gus:
+        raise RuntimeError(
+            f"CM_GU 에 좌표가 없다 — 먼저 지리 계층을 만든다 "
+            f"(topo seed-geo --locale {locale})")
+
+    sql = """SELECT l.ENB_ID, l.SECTOR, l.GU_ID
+               FROM CM_CELL_REP_RU_LOC l"""
+    if only_active:
+        # **활성 셀로 좁힌다.** 1분 집계에 나타나는 키만 지도·탐지에
+        # 올라간다 — 나머지를 고쳐도 보이는 것이 달라지지 않는다.
+        sql += """
+               JOIN (SELECT DISTINCT ENB_ID, CELLNUM
+                       FROM PM_COR_LTE_CALL_1M) a
+                 ON a.ENB_ID = l.ENB_ID AND a.CELLNUM = l.SECTOR"""
+    rows = _rows(conn, sql + " ORDER BY l.ENB_ID, l.SECTOR")
+
+    by_enb: dict[str, list[tuple[int, int | None]]] = {}
+    for enb, sector, gu in rows:
+        by_enb.setdefault(str(enb), []).append((int(sector), gu))
+
+    rng = random.Random(seed)
+    stats = {"locale": locale, "cells": len(rows), "enbs": len(by_enb),
+             "updated": 0, "skipped_no_gu": 0, "patterns": {}}
+    updates: list[tuple[str, str, str, int]] = []
+
+    for enb in sorted(by_enb):
+        sectors = sorted(by_enb[enb])
+        # 기준 시군구는 **그 eNB 의 섹터 다수결**이다. 섹터가 두 시군구에
+        # 걸쳐 있을 때(경계 eNB) 섹터마다 다른 중심을 쓰면 그 eNB 가
+        # 흩어진다 — 하나로 묶는 것이 `POINT` 를 지키는 조건이다.
+        votes: dict[int, int] = {}
+        for _s, gu in sectors:
+            if gu is not None and int(gu) in gus:
+                votes[int(gu)] = votes.get(int(gu), 0) + 1
+        if not votes:
+            # `GU_ID` 를 모르거나 그 시군구에 좌표가 없다 — **건드리지
+            # 않는다.** 아무 데나 놓으면 미매핑이 "매핑된 거짓 좌표"로
+            # 바뀌어 `H-07` 이 그 셀을 놓친다(불변규칙 12).
+            stats["skipped_no_gu"] += len(sectors)
+            continue
+        gu = max(sorted(votes), key=lambda g: votes[g])
+        _city, lat, lon = gus[gu]
+        pts = scatter(lat, lon, len(sectors), spread_km, rng)
+        pat, _r = pattern_of(pts)
+        stats["patterns"][pat] = stats["patterns"].get(pat, 0) + 1
+        for (sector, _gu), (clat, clon) in zip(sectors, pts):
+            updates.append((decimal_to_dms(clat), decimal_to_dms(clon),
+                            enb, sector))
+
+    stats["updated"] = len(updates)
+    if dry_run:
+        return stats
+    with conn.cursor() as cur:
+        for i in range(0, len(updates), 5000):
+            cur.executemany(
+                "UPDATE CM_CELL_REP_RU_LOC SET LATITUDE = %s, LONGITUDE = %s "
+                "WHERE ENB_ID = %s AND SECTOR = %s", updates[i:i + 5000])
+    conn.commit()
+    return stats

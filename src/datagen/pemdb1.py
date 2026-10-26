@@ -56,6 +56,7 @@ from .faults import resolve_active as resolve_active_faults
 from .fields import SERIES_FIELDS
 from .generator import Generator, USER_FIELDS
 from .identity import synth_imei, synth_imsi
+from .plmn import Plmn
 from .profile import load as load_profiles
 from .scenarios import (
     PACKET_DENOM_KPIS,
@@ -1125,7 +1126,8 @@ def _pick_enbs(uniq: dict, enb_limit: int | None) -> set[str] | None:
 
 def load_cells(conn, enb_limit: int | None = None,
                drawable: set[str] | None = None,
-               ensure_coords: bool = False) -> list[Cell]:
+               ensure_coords: bool = False,
+               plmn: Plmn | None = None) -> list[Cell]:
     """`CL_CELL_MAP` + `CM_CELL_REP_RU_LOC` → `Cell` 목록.
 
     조인 키는 실측으로 확인된 것을 쓴다. `CM_CELL_REP_RU_LOC.ENB_ID` 는
@@ -1238,7 +1240,10 @@ def load_cells(conn, enb_limit: int | None = None,
             enb_seq=h % 1_000_000,
             c_uid=str(c_uid or ""),
             tac=0,                      # CL_CELL_MAP 에 TAC 가 없다 — 모름
-            plmn="45005",
+            # 전 셀이 같은 홈 PLMN 이다 — `CL_CELL_MAP` 에 그 컬럼이 없다.
+            # 리터럴이 아니라 설정에서 온다(`plmn.Plmn` 머리말): 셀 PLMN 과
+            # 가입자 IMSI 접두가 어긋나면 **전 가입자가 외국 가입자**가 된다.
+            plmn=(plmn or Plmn()).home,
             vlan_id="",
             latitude=_dms(lat),
             longitude=_dms(lon),
@@ -1425,12 +1430,15 @@ class PemdbGen:
                  #: 셀 좌표 결손을 생성 시점에 채운다. **`cmd_run`·`cmd_pemfill`
                  #: 만 켠다** — `cmd_capacity` 는 읽기뿐이다(그 docstring 의 보증).
                  ensure_coords: bool = False,
+                 #: 홈 PLMN · IMSI 접두(`plmn.Plmn`). `None` 이면 한국 기본값.
+                 plmn: Plmn | None = None,
                  call_type_floor: float | None = None,
                  uplane_session: dict | None = None,
                  baseline: dict | None = None,
                  fault: dict | None = None):
+        self.plmn = plmn or Plmn()
         self.cells = load_cells(conn, enb_limit=enb_limit, drawable=drawable,
-                                ensure_coords=ensure_coords)
+                                ensure_coords=ensure_coords, plmn=self.plmn)
         if not self.cells:
             raise RuntimeError("CL_CELL_MAP 이 비어 있다 — 마스터를 먼저 적재하라")
         #: 평시 배경 모수(`pemdb1.baseline`). **장애 mutator 와 무관하다** —
@@ -1467,6 +1475,7 @@ class PemdbGen:
             # 필드가 60% 에서 빈다** — `_coerce` 가 플래그는 덮지만
             # `initial_*_duration`·`initial_nr_conn_time` 은 못 덮는다.
             end_only=True,
+            plmn=self.plmn,
         )
         self._reseat_subscribers(random.Random(seed + 202))
         # 평시 PathSwitch 는 `_coerce` 가 셀 마스터를 보고 심는다. 생성기 쪽에도
@@ -1526,8 +1535,11 @@ class PemdbGen:
         dist = self.dist
         for i, sub in enumerate(self.gen.subs):
             sub.vendor, sub.model = dist.vendor_model()
-            # 인바운드 로머 — APN 분포에 mcc234 가 2.6% 있다 (sg1.super...)
-            sub.mcc_mnc = "2340500" if rng.random() < 0.026 else "4500503"
+            # 인바운드 로머 — APN 분포에 mcc234 가 2.6% 있다 (sg1.super...).
+            # **둘 다 설정에서 온다**(`plmn.Plmn`). 홈 쪽을 리터럴로 두면
+            # 셀 PLMN 과 어긋나 전 가입자가 외국 가입자가 된다.
+            sub.mcc_mnc = (self.plmn.roaming if rng.random() < 0.026
+                           else self.plmn.imsi_prefix)
             # **식별자를 다시 만든다.** `mcc_mnc` 와 기종을 여기서 덮으므로,
             # `_make_subscribers` 가 만든 IMSI·IMEI 는 이미 어긋났다. IMSI 는
             # 규격상 `imsi_mcc_mnc_info` 로 시작해야 하고(앞 7자), IMEI 의 TAC 는

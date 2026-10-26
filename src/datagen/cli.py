@@ -433,6 +433,8 @@ def cmd_capacity(args) -> int:
             conn, data_dir, rates=base_rates,
             seed=int(cfg["generate"].get("seed", 20260903)),
             subscriber_pool=int(pem.get("subscriber_pool", 20_000)),
+            # 홈 PLMN·IMSI 접두는 **설정 하나**에서 온다 (`plmn.Plmn` 머리말)
+            plmn=P.Plmn.from_cfg(cfg.get("plmn")),
             success_only=bool(pem.get("success_only", True)),
             enb_limit=int(pem.get("enb_limit", 0)), drawable=drawable,
             call_type_floor=pem.get("call_type_floor"),
@@ -572,6 +574,8 @@ def cmd_run(args) -> int:
         gen = P.PemdbGen(
             conn, data_dir, rates=rates, seed=seed,
             subscriber_pool=int(pem.get("subscriber_pool", 20_000)),
+            # 홈 PLMN·IMSI 접두는 **설정 하나**에서 온다 (`plmn.Plmn` 머리말)
+            plmn=P.Plmn.from_cfg(cfg.get("plmn")),
             success_only=bool(pem.get("success_only", True)),
             enb_limit=int(pem.get("enb_limit", 0)),
             # 셀 좌표 결손을 **생성기가 채운다** — 수동 백필
@@ -910,6 +914,8 @@ def cmd_pemfill(args) -> int:
         gen = P.PemdbGen(
             conn, data_dir, rates=_pem_rates(cfg, pem, rate), seed=seed,
             subscriber_pool=int(pem.get("subscriber_pool", 20_000)),
+            # 홈 PLMN·IMSI 접두는 **설정 하나**에서 온다 (`plmn.Plmn` 머리말)
+            plmn=P.Plmn.from_cfg(cfg.get("plmn")),
             # 실측 실패·절단 비율을 그대로 재현하는 모드. 기본은 성공 전용
             # (평시 전부 녹색)이고, Cause 집계 경로를 확인할 때 쓴다.
             success_only=(False if args.with_failures
@@ -1214,6 +1220,22 @@ def _limit_advice(rep: dict) -> str:
             f"한도를 올려 해결하지 않는다")
 
 
+def _topo_geo_dir(cfg: dict) -> Path:
+    """경계 GeoJSON 디렉터리.
+
+    **`pemdb1.geo_crosswalk` 가 가리키는 자리와 같은 디렉터리**다 — 그 파일이
+    그 안에 있고(`code_crosswalk.json`), `seed-geo` 가 그것을 다시 쓴다.
+    둘을 다른 데서 찾으면 생성한 대응과 읽는 대응이 갈라진다.
+    """
+    raw = (cfg.get("pemdb1") or {}).get("geo_crosswalk")
+    if raw:
+        p = Path(str(raw))
+        return (p if p.is_absolute() else (HERE / p).resolve()).parent
+    raise RuntimeError(
+        "pemdb1.geo_crosswalk 가 설정에 없다 — 경계 디렉터리를 알 수 없다.\n"
+        "  --geo-dir 로 직접 주거나 설정에 그 키를 넣는다")
+
+
 def _topo_xw_path_opt(cfg: dict, override: str | None) -> Path | None:
     """crosswalk 경로 — **`pemfill` 과 같은 키를 읽는다**(`pemdb1.geo_crosswalk`).
 
@@ -1319,6 +1341,11 @@ def cmd_topo(args) -> int:
                     + (f" · 사본에만 있는 컬럼 제외 {', '.join(info['dropped'])}"
                        if info.get("dropped") else ""))
                 print(f"  {info['table']:22} {tail}")
+            # **복구 범위를 말한다.** 안 적으면 "되돌렸다"가 실제보다 넓게
+            # 읽힌다 — `data/geo/` 는 이 경로 밖이다(불변규칙 17 의 결).
+            print(f"  복구 범위: {' · '.join(rep['scope'])}")
+            for line in rep["not_restored"]:
+                print(f"  ✗ 복구 대상 아님 — {line}")
             if not rep["ok"]:
                 print("✗ 복귀 경로가 서 있지 않다 — 위 사유를 먼저 고친다",
                       file=sys.stderr)
@@ -1382,6 +1409,93 @@ def cmd_topo(args) -> int:
             return 0
 
         xw = _topo_xw_path(cfg, args.geo_crosswalk)
+
+        if act == "geo-fetch":
+            gd = Path(args.geo_dir) if args.geo_dir else _topo_geo_dir(cfg)
+            got = topo.fetch_boundaries(gd, args.locale, force=args.replace)
+            print(f"▶ geo-fetch — locale {args.locale} · "
+                  f"{topo.geo_level_path(gd, args.locale, 'sgg').parent}")
+            for name, size in got.items():
+                print(f"  {name:28} {size / 1e6:6.2f} MB")
+            print("  SOURCE.txt 에 출처를 함께 적었다 — 번들 디렉터리가"
+                  " 추적 밖이라 크레딧이 파일과 같이 가야 한다")
+            return 0
+
+        if act == "code-map":
+            # **DB 의 `(CITY_ID, GU_ID)` 가 입력이다.** 번들에서 유도하지
+            # 않는다 — 트래픽이 참조하는 것은 DB 의 코드이고, 번들(250)과
+            # DB(273)가 다르면 스위칭 후 그 차이만큼 조용히 미매핑이 된다.
+            gd = Path(args.geo_dir) if args.geo_dir else _topo_geo_dir(cfg)
+            kr_gu = [(int(c), int(g)) for c, g in topo._rows(
+                conn, "SELECT CITY_ID, GU_ID FROM CM_GU ORDER BY GU_ID")]
+            doc = topo.build_jp_code_map(gd, kr_gu)
+            print(f"▶ code-map — locale {args.locale} · KR 시군구 {len(kr_gu)}개 기준")
+            for city, rows in sorted(doc["picked"].items()):
+                print(f"  {city:>3} ({topo.SIDO_MAP_JP[str(city)]:6}) "
+                      f"{len(rows):>3}개  예: {rows[0]['name']}"
+                      f"({rows[0]['jis']}) → GU_ID {rows[0]['gu_id']}")
+            print(f"  쓰지 않는 도도부현 {len(doc['unused_prefectures'])}곳 — "
+                  "**묶지 않는다**(회색 배경으로 그릴 자리다)")
+            if args.dry_run:
+                print("  저장하지 않았다 — --dry-run 을 떼면 쓴다")
+            else:
+                print(f"  → {topo.save_code_map(doc, args.locale)}")
+            return 0
+
+        if act == "seed-geo":
+            # **경계 GeoJSON 이 입력이다.** graphio 가 받아 둔 디렉터리를
+            # 그대로 읽는다(`graphio/config` 의 `paths.geo`) — 두 저장소가
+            # 같은 파일을 보게 하려고 경로를 인자로 받는다.
+            gd = Path(args.geo_dir) if args.geo_dir else _topo_geo_dir(cfg)
+            r = topo.seed_geo(conn, gd, locale=args.locale,
+                              dongs_per_gu=args.dongs,
+                              spread_km=args.spread_km,
+                              seed=int(cfg["generate"].get("seed", 20260903)),
+                              replace=args.replace,
+                              dry_run=args.dry_run)
+            print(f"▶ seed-geo{' (dry-run)' if args.dry_run else ''} — "
+                  f"locale {r['locale']} · {gd}")
+            print(f"  CM_CITY {r['city']:,} · CM_GU {r['gu']:,} · "
+                  f"CM_DONG {r['dong']:,}  (읍면동 출처: {r['emd_source']})")
+            if r["skipped_sido"] or r["skipped_sgg"]:
+                # **코드 맵에 없는 폴리곤은 넣지 않는다.** 코드를 지어내면
+                # 그 지역 셀이 영원히 조인되지 않는다 — 수를 말한다.
+                print(f"  ⚠ 코드 맵에 없어 제외 — 시도 {r['skipped_sido']} · "
+                      f"시군구 {r['skipped_sgg']}")
+            if r["emd_source"] == topo.EMD_GENERATED:
+                print("  읍면동은 폴리곤 없이 생성했다 — crosswalk 의 emd 는"
+                      " **항등**이다 (비우면 셀의 DONG_ID 가 조용히 NULL 이 된다)")
+            if args.dry_run:
+                print("  적재하지 않았다. 넣으려면 --dry-run 을 떼고, 행이"
+                      " 이미 있으면 --replace 를 함께 준다")
+            else:
+                print(f"  crosswalk 를 다시 썼다 — {r['crosswalk']}")
+            return 0
+
+        if act == "relocate-cells":
+            # **키를 유지하고 좌표만 다시 쓴다** — 전환의 마지막 조각이다.
+            # 코드 맵이 KR 코드를 그대로 쓰므로 `(ENB_ID, SECTOR)`·`GU_ID`
+            # 는 유효하고, 그 44만행에 들어 있는 **한국 좌표**만 바꾼다.
+            # 안 바꾸면 시군구는 오사카인데 셀은 대전 앞산에 찍힌다.
+            if not args.dry_run and not _topo_gate(conn, args.locale):
+                return 1
+            r = topo.relocate_cells(conn, locale=args.locale,
+                                    spread_km=args.spread_km,
+                                    seed=int(cfg["generate"].get("seed", 20260903)),
+                                    only_active=not args.all,
+                                    dry_run=args.dry_run)
+            print(f"▶ relocate-cells{' (dry-run)' if args.dry_run else ''} — "
+                  f"locale {r['locale']} · "
+                  f"{'전체' if args.all else '활성'} 셀 {r['cells']:,} / "
+                  f"eNB {r['enbs']:,}")
+            print(f"  좌표 갱신 {r['updated']:,} · 분포 패턴 {r['patterns']}"
+                  f"  (POINT 가 아니면 spread-km 를 의심한다)")
+            if r["skipped_no_gu"]:
+                # 시군구를 모르는 셀은 **건드리지 않는다** — 아무 데나 놓으면
+                # 미매핑이 "매핑된 거짓 좌표"가 되어 H-07 이 놓친다
+                print(f"  시군구를 모르거나 그 시군구에 좌표가 없어 제외 "
+                      f"{r['skipped_no_gu']:,}셀 — 미매핑으로 남는다")
+            return 0
 
         if act == "seed-enb":
             r = topo.seed_enb(conn, xw, per_gu=args.per_gu,
@@ -1544,8 +1658,9 @@ def main(argv=None) -> int:
     # 읽기만 하고, 쓰기를 그쪽에 넣으면 gen 이 둘 떴을 때 마스터가 흔들린다.
     t = sub.add_parser("topo", help="마스터 토폴로지 관리 — 행정구역·장비·셀 (1회성)")
     t.add_argument("action",
-                   choices=["list", "add", "rm", "dump", "restore", "seed-enb",
-                            "fill-coords"])
+                   choices=["list", "add", "rm", "dump", "restore", "geo-fetch",
+                            "code-map", "seed-geo", "seed-enb",
+                            "relocate-cells", "fill-coords"])
     t.add_argument("target", nargs="?", choices=list(topo.TABLES),
                    help="add/rm 의 대상 테이블")
     t.add_argument("--config")
@@ -1554,12 +1669,19 @@ def main(argv=None) -> int:
                    help="dump/restore/rm --all 이 쓰는 사본 이름")
     t.add_argument("--write", action="store_true",
                    help="restore: 실제로 넣는다 (기본은 점검만)")
+    t.add_argument("--geo-dir", help="seed-geo: 경계 GeoJSON 디렉터리 "
+                                     "(기본 pemdb1.geo_crosswalk 의 디렉터리)")
+    t.add_argument("--dongs", type=int, default=8,
+                   help="seed-geo: 읍면동 폴리곤이 없을 때 시군구당 생성할 동 수")
+    t.add_argument("--replace", action="store_true",
+                   help="seed-geo: 행이 있어도 세 테이블을 비우고 다시 넣는다")
     t.add_argument("--set", action="append", default=[], metavar="COL=VAL",
                    help="add: 넣을 컬럼 (여러 번)")
     t.add_argument("--key", action="append", default=[], metavar="COL=VAL",
                    help="rm: 지울 행의 키 (여러 번 · AND)")
     t.add_argument("--all", action="store_true",
-                   help="rm: 테이블 전체 — 확인 입력 + locale 사본을 요구한다")
+                   help="rm: 테이블 전체 (확인 입력 + 사본 요구) · "
+                        "relocate-cells: 활성 셀이 아니라 44만행 전부")
     t.add_argument("--per-gu", type=int, default=1,
                    help="seed-enb: 시군구당 eNB 수 (최대 2 — ENB_ID 대역 제약)")
     t.add_argument("--cells", type=int, default=3, help="seed-enb: eNB 당 셀 수")
