@@ -78,7 +78,7 @@ from datetime import datetime
 
 from .cells import Cell
 from .generator import USER_FIELDS, diurnal_factor
-from .scenarios import Rec
+from .scenarios import Plan, Rec
 
 # --------------------------------------------------------------------------
 # ONGOINGFLAG — 규격 값. graphio `schema/codes.ONGOING_FLAG` 와 같아야 한다
@@ -250,14 +250,28 @@ class Shape:
 #:   APP(60)    앱 트래픽
 #:
 #: `config/datagen.yaml` 의 `pemdb1.uplane_session.call_type_weight` 로 덮는다.
+#:
+#: ⚠️ **키 체계를 2026-10-22 에 고쳤다.** 전에는 `"00"`~`"60"`(`CD_CALL_TYPE`
+#: 2자리 체계)이었는데 레코드의 `call_type` 에 들어가는 값은 규격 체계
+#: `"1"`~`"11"` 이다(`_distributions.json` 실측: 3 Service MO 51.3% ·
+#: 4 Service MT 43.9% · 5 TAU 3.2% · 6 Paging 1.2% · 1 Attach MO 0.29%).
+#: 키가 한 개도 맞지 않아 `_ct_weight` 가 전부 기본 1.0 을 돌려줬고 —
+#: 거기에 `pemdb1.records()` 의 인덱스 버그(`idx.get("CALL_TYPE")` → 항상
+#: `-1`)까지 겹쳐 **`call_type` 자체가 빈 문자열이었다.** 둘 다 고쳤다.
+#:
+#: **총량은 바뀌지 않는다** — `session_lambda` 가 그 분 호들의 가중 평균으로
+#: 정규화한다. 바뀌는 것은 "어떤 호가 세션을 여는가"다. Service(3·4)가 95%
+#: 이상이라 총량 변화는 작지만 **TAU·Paging 호의 세션이 사라져 셀별 U-Plane
+#: 표본이 재분포한다.**
 CT_SESSION_W: dict[str, float] = {
-    "00": 0.10, "08": 0.10,          # ATTACH · ATTACH_LOC
-    "01": 1.00,                      # SRMO  — 발신 데이터
-    "02": 0.30,                      # SRMT  — 착신 알림이 많다
-    "03": 0.00, "04": 0.00,          # TAU · PAGING
-    "05": 0.00, "40": 0.00,          # DETACH · AUTH
-    "06": 0.20, "07": 0.20,          # ESRMO · ESRMT (VoLTE)
-    "60": 1.00,                      # APP
+    "1": 0.10, "2": 0.10,            # Attach MO/MT — 붙는 순간 약간
+    "3": 1.00,                       # Service MO — 발신 데이터. 기준 1.0
+    "4": 0.30,                       # Service MT — 착신 알림이 많다
+    "5": 0.00,                       # TAU        — 시그널링뿐
+    "6": 0.00,                       # Paging     — 알림만
+    "7": 0.20, "8": 0.20,            # Ext Service (VoLTE)
+    "9": 0.00,                       # Detach
+    "10": 0.00, "11": 0.00,          # S1 HO · Reroute
 }
 
 
@@ -486,7 +500,7 @@ class SessionEngine:
     # -- 분 단위 ---------------------------------------------------------
 
     def minute(self, ts: datetime, calls: list[Call],
-               mutate=None) -> dict[str, list[list[str]]]:
+               mutate=None, plan_mutate=None) -> dict[str, list[list[str]]]:
         """한 분의 U-Plane 레코드를 계열별로 낸다.
 
         ``mutate(series, rec, cell)`` 는 활성 시나리오의 뮤테이터를 거는
@@ -494,6 +508,13 @@ class SessionEngine:
         를 만든다 — `SC-05`(DNS 열화)가 심은 실패가 그 세션의 연결을 실제로
         막아야 한다(§1.2). 순서를 뒤집으면 "DNS 장애 중에도 HTTP 가 정상"인
         지금의 문제가 그대로 남는다.
+
+        ``plan_mutate(cell, plan)`` 는 **세션 총량**에 거는 콜백이다
+        (`scenarios.PLAN_MUTATORS`). 양(量) 필드를 분 레코드에서 고치면
+        `Traffic_Total_*` 의 누적이 역전하므로 — `_emit` 의 분 쪼개기를 통과해야
+        단조성이 원리적으로 보장된다 — 총량 단계에서만 바꾼다(V3 규칙 U-1·U-2).
+        **이월 세션에는 걸지 않는다**: 세션이 열릴 때 한 번 정해지고, 분마다 다시
+        걸면 같은 세션의 누적이 분 경계에서 점프한다.
         """
         slot = ts.timestamp()
         out: dict[str, list[list[str]]] = {"transport": [], "dns": [], "http": []}
@@ -526,7 +547,7 @@ class SessionEngine:
             p = geom_p(min(lam * w, float(self.shape.sessions_max)),
                        self.shape.sessions_max)
             for _ in range(self._k(p)):
-                self._open(ts, slot, tf, call, out, mutate)
+                self._open(ts, slot, tf, call, out, mutate, plan_mutate)
 
         # ② 이월 세션 — 이번 분의 레코드를 낸다
         for s in carried:
@@ -536,7 +557,7 @@ class SessionEngine:
         return out
 
     def _open(self, ts: datetime, slot: float, tf: float, call: Call,
-              out: dict, mutate) -> None:
+              out: dict, mutate, plan_mutate=None) -> None:
         """세션 하나를 열고 그 분의 레코드를 낸다.
 
         순서는 실제 call flow 다 — 도메인을 풀고(DNS), 연결하고(TCP), 요청한다
@@ -569,7 +590,7 @@ class SessionEngine:
         if call.outcome == OUT_RST:
             # 즉시 끊김 — 무선이 끊어졌으므로 길게 못 간다
             span = 1 if rng.random() < 0.7 else 2
-        sess = self._plan(ts, tf, call, t0, span, sid)
+        sess = self._plan(ts, tf, call, t0, span, sid, plan_mutate)
         self._emit(ts, slot, sess, out, mutate)
         if sess.i < sess.span:
             self.active.append(sess)
@@ -608,7 +629,7 @@ class SessionEngine:
         return ans is not None and ans <= 0
 
     def _plan(self, ts: datetime, tf: float, call: Call, t0: float,
-              span: int, sid: str) -> Session:
+              span: int, sid: str, plan_mutate=None) -> Session:
         """세션 하나의 수명치를 **한 번에** 정한다.
 
         짧은 단위로 레코드 하나씩 만들지 않는 이유는 성능이다(설계 §5.1) —
@@ -642,6 +663,36 @@ class SessionEngine:
                     traffic[i] = max(1.0, traffic[i]) * rng.uniform(8.0, 20.0)
 
         const = [vals[idx[f]] for f in TRANSPORT_CONST]
+
+        # ── 장애 훅 (V3 규칙 U-1) ─────────────────────────────────────
+        #
+        # **여기가 양(量) 필드를 바꾸는 유일한 자리다.** `_emit` 의
+        # `now = 1.0 if last else (i+1)/span` 쪼개기를 통과하므로 `Total` 역전이
+        # 원리적으로 불가능하다. 분 레코드에서 직접 고치면 같은 세션의 누적이
+        # 분 경계에서 거꾸로 갈 수 있고, 그것은 에러 없이 `U-12` 를 음수로
+        # 만든다. `Traffic_Delta_*` 는 Parquet 에 없으므로 건드리지 않는다.
+        #
+        # **`size_f` 를 곱한 뒤에 건다**(규칙 U-5). 순서를 바꾸면 긴 세션만
+        # 과도하게 나빠진다 — 길이와 양의 느슨한 연동이 장애 배율에 증폭된다.
+        if plan_mutate is not None:
+            totals = {f"Traffic_Total_{n}": traffic[i]
+                      for i, n in enumerate(TRAFFIC_PAIRS)}
+            totals.update({n: plain[i] for i, n in enumerate(CUM_PLAIN)})
+            pl = Plan(totals, dict(zip(TRANSPORT_CONST, const)),
+                      call.outcome, span)
+            plan_mutate(call.cell, pl)
+            traffic = [totals[f"Traffic_Total_{n}"] for n in TRAFFIC_PAIRS]
+            plain = tuple(totals[n] for n in CUM_PLAIN)
+
+        # 규칙 U-4 — **재전송은 페이로드 패킷을 넘지 않는다.** 배율이 겹치면
+        # (`OUT_STALL` 의 8~20배 × 장애 훅) 넘을 수 있다. 장애가 없는 분에도
+        # 적용한다 — 조건부로 두면 "장애 중에만 규칙이 지켜진다"가 되고,
+        # 그 차이는 음수·100% 넘는 재전송률로 조용히 나타난다.
+        for _d in ("Uplink", "Dnlink"):
+            _ir = TRAFFIC_PAIRS.index(f"{_d}_RetransPacketCount")
+            _ip = TRAFFIC_PAIRS.index(f"{_d}_PayloadPacketCount")
+            traffic[_ir] = max(0.0, min(traffic[_ir], traffic[_ip]))
+
         if call.outcome == OUT_RST:
             const[_C["RstCount"]] = "1"
             const[_C["FinCount"]] = "0"
@@ -755,7 +806,7 @@ class SessionEngine:
             vals[i_last] = t_now
 
         if mutate is not None:
-            mutate("transport", Rec(vals, gen.index["transport"]), s.cell)
+            mutate("transport", Rec(vals, gen.index["transport"], "transport"), s.cell)
         out["transport"].append(vals)
 
         # HTTP — 남은 트랜잭션을 남은 분에 나눠 흘린다

@@ -36,19 +36,34 @@ HERE = Path(__file__).resolve().parents[2]
 #: kind → 운영자용 한국어 라벨. KINDS(control.py)와 1:1 — 빠진 키가 있으면
 #: 셀렉트에서 영문 코드가 그대로 보여 금방 눈에 띈다.
 KIND_LABELS = {
+    # ── 기존 13종 ────────────────────────────────────────────────────────
     "gw_resource": "SGW 자원 소진",
-    "gw_node_down": "SGW 노드 다운",
+    "gw_node_down": "SGW 노드 다운 (무응답)",
     "ran_radio": "무선 구간 열화",
     "mme_overload": "MME 과부하",
-    "auth_failure": "인증(S6a) 이상",
+    "auth_failure": "인증(S6a) 거절",
     "dns_degradation": "DNS 열화",
     "external_server": "외부 서버 5xx",
     "transport_loss": "전송망 손실",
     "ue_model": "특정 단말 기종",
     "mobility": "핸드오버 이상",
-    "change_suspected": "작업/변경 의심",
+    "change_suspected": "작업/변경 의심 (MME×APN)",
     "ims_pdn": "IMS PDN 이상",
     "nsa_nr_leg": "NSA NR leg 실패",
+    # ── 하위 변형 ────────────────────────────────────────────────────────
+    "gw_pgw_restart": "PGW 재기동 통보",
+    "external_path_latency": "외부 경로 지연 (백본)",
+    "nsa_policy_restrict": "DCNR 정책 제한",
+    # ── 신규 8종 ─────────────────────────────────────────────────────────
+    "auc_no_response": "S6a 무응답 (TIMEOUT)",
+    "dra_route_failure": "S6a 라우팅 계층 이상",
+    "s6a_undetermined": "S6a 무응답 (장비 미특정)",
+    "pgw_uplane_degradation": "PGW 사용자평면 저하",
+    "enb_s1_outage": "eNB 전송 단절 (무호)",
+    "partial_recovery": "부분 복구 (단계적 회복)",
+    "apn_pdn_failure": "APN 접속 실패",
+    "dns_flap": "DNS 간헐 실패",
+    "compound_causal_failure": "복합 장애 (전송→DNS)",
 }
 
 # ── MySQL 접속 ──────────────────────────────────────────────────────────────
@@ -576,6 +591,11 @@ def api_targets():
             sgg[c.adm_sgg_cd] = sgg.get(c.adm_sgg_cd, 0) + 1
     return {
         "sgw": tally("sgw_id"), "mme": tally("mme_id"), "pgw": tally("pgw_id"),
+        # eNB — `enb_s1_outage`(무호) 전용 축이다. **상위 30개만 내린다**:
+        # 로컬은 60개지만 현장 마스터는 22,722개여서 전량을 내리면 select 가
+        # 쓸 수 없고 응답도 무겁다. 셀 수가 많은 eNB 라야 D4 의 베이스라인
+        # 조건(직전 60분 중앙값 ≥ 20호)을 넘긴다.
+        "enb": tally("enb_id")[:30],
         # 시군구 이름은 추출 단계에서 한글이 깨져 비어 있다 — 지어내지 않고
         # 코드를 그대로 보여 준다(불변규칙 17).
         "sgg": [{"code": k, "name": "", "cells": n}
@@ -1006,6 +1026,7 @@ async function loadTargets() {
     + og("SGW", t.sgw.map(x => ({v:`SGW-${x.id}`, t:`SGW-${x.id} (셀 ${x.cells})`})))
     + og("MME", t.mme.map(x => ({v:`MME-${x.id}`, t:`MME-${x.id} (셀 ${x.cells})`})))
     + og("PGW", t.pgw.map(x => ({v:`PGW-${x.id}`, t:`PGW-${x.id} (셀 ${x.cells})`})))
+    + og("eNB (무호 전용)", (t.enb || []).map(x => ({v:`ENB:${x.id}`, t:`eNB-${x.id} (셀 ${x.cells})`})))
     + og("시군구", t.sgg.map(x => ({v:`SGG:${x.code}`, t:`${x.name} (셀 ${x.cells})`})));
 }
 

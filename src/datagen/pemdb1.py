@@ -35,7 +35,7 @@ import hashlib
 import json
 import random
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -48,7 +48,13 @@ from .fields import SERIES_FIELDS
 from .generator import Generator, USER_FIELDS
 from .identity import synth_imei, synth_imsi
 from .profile import load as load_profiles
-from .scenarios import MUTATORS, Scenario
+from .scenarios import (
+    MUTATORS,
+    PLAN_MUTATORS,
+    SUPPRESSORS,
+    Scenario,
+    set_fault_cfg,
+)
 from .scenarios import build_scenarios as build_sim_scenarios
 from .session import Call, SessionEngine, Shape
 
@@ -479,6 +485,153 @@ CPLANE_FIELDS: tuple[tuple[str, str, int], ...] = (
 
 
 # --------------------------------------------------------------------------
+# 평시 배경 — 장애가 없을 때도 분모가 있어야 한다
+# --------------------------------------------------------------------------
+
+#: Call Type(`CD_CALL_TYPE` 규격 체계 `1`~`11`) → 절차 그룹.
+#:
+#: 평시 배경이 그룹별로 다른 비율을 쓴다 — Attach 는 인증을 100% 하고
+#: Service 는 2% 만 한다. **모르는 코드는 `"service"` 다**(불변규칙 17) —
+#: 0 으로 떨어뜨리면 "그 절차는 인증을 안 한다"와 "코드를 모른다"가 섞인다.
+_CT_GROUP = {
+    "1": "attach", "2": "attach", "8": "attach",    # Attach MO/MT · Ext Svc MT
+    "5": "tau",
+    "3": "service", "4": "service", "7": "service",
+    "6": "paging",
+    "9": "detach", "10": "handover", "11": "handover",
+}
+
+#: 절단 사유 그룹 → S1AP Cause 후보. **전부 `S1AP_NORMAL_CAUSES` 밖이어야
+#: `DROP_CNT` 가 세어진다**(불변규칙 6 · `_p_drop`).
+#:
+#: ⚠️ `201`·`303`·`406`·`504` 는 graphio `S1AP_UNSPECIFIED` 라
+#: `DROP_TRANSPORT`/`NAS`/`PROTO`/`NODE` 가 아니라 **`DROP_UNSPEC` 으로 간다**
+#: (`cell_agg._drop_group` 이 `exclude=UNSPEC_CODES`). V3 §3.4-③ 의 표가
+#: `transport` 에 `201` 을, `unspec` 에도 `201` 을 둔 것은 그 사정을 반영한
+#: 것이고, 결과적으로 `DROP_TRANSPORT` 실측 비중은 적어 둔 12% 의 절반이 된다.
+_DROP_CAUSES = {
+    # **정상 종료도 절단으로 센다** (2026-10-22 운영 실측 교정).
+    #
+    # 구 구현은 여섯 그룹 전부 `S1AP_NORMAL_CAUSES` **밖**이었다. 근거는
+    # "정상 종료면 `DROP_CNT` 가 안 세어진다" 였는데 **그것이 틀렸다** —
+    # `cell_agg.py:491` 의 `DROP_CNT` 는 `DROP_FLAG` 만 본다(Cause 무관).
+    # 정상 종료는 `DROP_NORMAL`(:536)이 **따로** 세고, 상용과 대조할 때만
+    # `DROP_CNT - DROP_NORMAL` 을 쓴다(그 파일 §"다른 담당자에게").
+    #
+    # 그 결과 `DROP_NORMAL` 이 **항상 0** 이라 한 번도 검증되지 않았다.
+    # 운영 실측(`drop_flag=1` 157건)은 정반대다:
+    #
+    #     normal (300·302)   72건  45.9%   ← 가장 많다
+    #     unspec (504)       61건  38.9%
+    #     radio  (1xx)       24건  15.3%
+    #     transport/node/nas/proto  0건
+    #
+    # **`C-04` 는 바뀌지 않는다** — `drop_rate` 가 그대로고 `DROP_CNT` 는
+    # 플래그만 보므로 절단 **분류**만 달라진다.
+    "normal": (300, 302),                   # S1AP_NORMAL_CAUSES → DROP_NORMAL
+    "radio": (121, 125, 126, 110, 112),     # S1AP 1xx → DROP_RADIO
+    "transport": (200, 201),                # 2xx → DROP_TRANSPORT
+    "node": (500, 501, 502, 503),           # 5xx → DROP_NODE
+    "nas": (301, 303, 304),                 # 3xx → DROP_NAS
+    "proto": (400, 401, 402, 403, 404, 405, 406),   # 4xx → DROP_PROTO
+    "unspec": (201, 303, 406, 504),         # S1AP_UNSPECIFIED → DROP_UNSPEC
+}
+
+
+@dataclass
+class Baseline:
+    """평시 배경의 모수 — `config/datagen.yaml` 의 `pemdb1.baseline`.
+
+    ## 왜 필요한가
+
+    `success_only=True` 가 "평소 전부 녹색"을 만드는데, 그것이 지나쳐 **분모까지
+    0 으로 만들었다**. 실측(`cplane_raw` 194만 건) —
+
+        P-01 인증 성공률     상시 0%   ← 분모가 장애 호뿐이었다
+        P-02 가입정보 성공률  분모 0    ← `location_*_flag` 미기입
+        P-03 단말식별 성공률  분모 0    ← `mecheck_*_flag` 미기입
+        P-04 페이징 성공률    상시 100% ← 실패 0건
+        P-07 NPR 발생률      전부 0    ← `npr_flag` 미기입
+        C-04 절단률          0.0036%   ← `success_only` 가 `drop=0` 강제
+        PSF  PathSwitch 실패  분모 0    ← `PathSwitch_count` 미기입
+
+    분모가 없으면 `R-01`(P-01)·`R-01b`(P-02)·`R-25`(P-04)·`R-17`(PSF) 이
+    **구조적으로 발동할 수 없고**, SC-04·14·15·09 는 주입해도 아무 일이
+    일어나지 않는다. 평시 배경은 "실패를 만드는 것"이 아니라 **분모를 만드는
+    것**이고, 그래서 `success_only` 와 무관하게 적용한다.
+
+    ## 🔴 전부 PoC 기본값이다
+
+    운영 실측이 아니다(V3 §12.1 의 1~8번). 운영 값이 들어오면 yaml 한 곳만
+    고친다 — 주석·문서에 "실측"이라고 적지 않는다.
+    """
+
+    #: 절차 시도 비율 — `_CT_GROUP` 의 그룹별. 이 값이 `P-01` 의 **분모**를
+    #: 정한다. 너무 낮으면 `MIN_PROCEDURE_DENOM=40` 을 못 채워 `R-01` 이
+    #: 발동하지 않고, 너무 높으면 인증이 모든 호에 붙어 비현실적이 된다.
+    #: 분당 6,000호 기준 Attach 0.29% + TAU 3.2%×0.35 + Service 95%×0.02
+    #: ≈ 2.9% → 분당 174건이라 1분 창에서 분모 40을 넘는다.
+    auth_attempt: dict = field(
+        default_factory=lambda: {"attach": 1.00, "tau": 0.35, "service": 0.02})
+    auth_success: float = 0.999
+    location_attempt: dict = field(
+        default_factory=lambda: {"attach": 1.00, "tau": 0.90, "service": 0.00})
+    location_success: float = 0.9995
+    mecheck_attempt: dict = field(
+        default_factory=lambda: {"attach": 0.60, "tau": 0.00, "service": 0.00})
+    mecheck_success: float = 0.9998
+    #: `paging_attempt` 는 실측 `proc_ratio` 를 그대로 쓴다 — 여기는 성공률만
+    paging_success: float = 0.98
+    npr_rate: float = 0.0008
+    #: 연결 **후** 절단. `success=1` 인 호에만 선다(규칙 C-2)
+    drop_rate: float = 0.003
+    #: 절단 사유 구성비. **합이 1.0 이어야 한다** — 아니면 멈춘다
+    #: 절단 사유 구성비. **운영 실측 기반**(2026-10-22) — 근거는
+    #: `_DROP_CAUSES` 머리말. 관측된 세 그룹이 0.93 이고 나머지 넷은
+    #: 실측 0건이지만 **표본이 157건이라 "없다"로 단정하지 않고** 최소치만
+    #: 남긴다. KPI 를 켜려고 비중을 올리지는 않는다.
+    drop_cause_mix: dict = field(default_factory=lambda: {
+        "normal": 0.45, "unspec": 0.33, "radio": 0.15,
+        "transport": 0.03, "node": 0.02, "nas": 0.01, "proto": 0.01,
+    })
+    #: PathSwitch 시도 비율 — 그룹별. `PSF` 의 분모(`ps_cnt + psf_cnt`)다
+    pathswitch_attempt: dict = field(
+        default_factory=lambda: {"service": 0.08, "handover": 1.00})
+    pathswitch_fail: float = 0.02
+
+    @classmethod
+    def from_cfg(cls, cfg: dict | None) -> "Baseline":
+        """`Shape.from_cfg` 와 같은 모양 — **모르는 키는 멈춘다.**
+
+        오타가 "기본값으로 돌았다"로 끝나면 평시 분모가 조용히 어긋나고,
+        그것은 탐지가 안 되는 형태로만 나타난다.
+
+        dict 필드는 **덮지 않고 합친다** — `auth_attempt: {service: 0.05}` 만
+        적어도 attach·tau 가 살아 있어야 한다.
+        """
+        b = cls()
+        for k, v in (cfg or {}).items():
+            if not hasattr(b, k):
+                raise RuntimeError(f"pemdb1.baseline 의 모르는 키: {k}")
+            cur = getattr(b, k)
+            if isinstance(cur, dict):
+                unknown = set(v or {}) - set(cur)
+                if unknown:
+                    raise RuntimeError(
+                        f"pemdb1.baseline.{k} 의 모르는 키: {sorted(unknown)}")
+                cur.update({ik: float(iv) for ik, iv in (v or {}).items()})
+            else:
+                setattr(b, k, float(v))
+        total = sum(b.drop_cause_mix.values())
+        if abs(total - 1.0) > 1e-6:
+            raise RuntimeError(
+                f"pemdb1.baseline.drop_cause_mix 의 합이 {total:g} 다 — 1.0 이어야 "
+                "한다. 합이 1 이 아니면 그룹 비율이 적어 둔 값과 달라지고, "
+                "`DROP_RADIO/DROP_CNT` 통과 조건이 왜 안 맞는지 알 수 없다")
+        return b
+
+
+# --------------------------------------------------------------------------
 # 실측 분포
 # --------------------------------------------------------------------------
 
@@ -514,10 +667,15 @@ class Distributions:
     CALL_TYPE_FLOOR_EXCLUDE = frozenset({"0"})
 
     def __init__(self, path: Path, rng: random.Random, success_only: bool = True,
-                 call_type_floor: float | None = None):
+                 call_type_floor: float | None = None,
+                 baseline: "Baseline | None" = None):
         d = json.loads(path.read_text(encoding="utf-8"))
         self.rng = rng
         self.success_only = success_only
+        #: 평시 배경 모수. ``None`` 이면 절차 플래그·절단을 만들지 않는다 —
+        #: 구 동작이고, 그때 `P-01`~`P-04`·`C-04`·`PSF` 의 분모가 비는 것도
+        #: 그대로다(`Baseline` 머리말의 실측 표).
+        self.baseline = baseline
 
         self.call_types = [e["v"] for e in d["call_type"]]
         self.call_type_w = self._floored_call_type_w(
@@ -655,14 +813,20 @@ class Distributions:
         if not r:
             return {"att": 0, "suc": 0, "drop": 0, "detach": 0,
                     "data_att": 0, "data_suc": 0, "ims_att": 0, "ims_suc": 0,
-                    "pg_att": 0, "pg_suc": 0}
+                    "pg_att": 0, "pg_suc": 0,
+                    "auth_att": 0, "auth_suc": 0, "loc_att": 0, "loc_suc": 0,
+                    "mec_att": 0, "mec_suc": 0, "npr": 0}
         rng = self.rng
         att = 1 if rng.random() < r["att"] else 0
         if self.success_only:
             suc, drop = att, 0
         else:
             suc = 1 if att and rng.random() < (r["suc"] / r["att"] if r["att"] else 0) else 0
-            drop = 1 if rng.random() < r["drop"] else 0
+            # **시도하지 않은 호는 절단되지 않는다** (2026-10-22 교정).
+            # 구 구현은 `att` 와 독립으로 뽑아 `att=0 · drop=1` 을 만들었다 —
+            # 운영 10만 행에서 `att=0` 인 조합 5종은 **전부 drop=0** 이다.
+            # 드물지만(4만 건 중 1건) 분모 없는 분자라 `C-04` 를 흔든다.
+            drop = 1 if att and rng.random() < r["drop"] else 0
         detach = 1 if rng.random() < r["detach"] else 0
 
         p = self.proc_ratio.get(call_type) or {}
@@ -673,6 +837,19 @@ class Distributions:
             ("pg", "paging_attempt", "paging_success"),
         ):
             a = 1 if rng.random() < p.get(a_name, 0.0) else 0
+            # **접속 시도가 없으면 Data·IMS 도 없다** (2026-10-22 운영 실측).
+            #
+            # 구 구현은 `att` 와 **독립 추첨**해서 "시도하지 않은 호에 데이터
+            # 세션이 있는" 조합을 2% 만들었다(4만 건 중 812·779건). 운영
+            # 10만 행에서 `att=0` 인 조합은 5종뿐이고 **전부 data/ims 가 0** 이다:
+            #
+            #     0000000000 · 0000000100(detach) · 0000001000(authA)
+            #     0000010000(pgA) · 0000010100(pgA+detach)
+            #
+            # **`pg` 는 제외한다** — 페이징은 망이 UE 를 부르는 것이라 접속
+            # 시도와 독립이고, 운영에도 `att=0 · pg_att=1` 이 16,266건 있다.
+            if key in ("data", "ims") and not att:
+                a = 0
             if not a:
                 out[f"{key}_att"], out[f"{key}_suc"] = 0, 0
                 continue
@@ -682,7 +859,60 @@ class Distributions:
                 num, den = p.get(s_name, 0.0), p.get(a_name, 0.0)
                 sv = 1 if rng.random() < (num / den if den else 0.0) else 0
             out[f"{key}_att"], out[f"{key}_suc"] = a, sv
+
+        # ── 평시 배경 (2026-10-22) ────────────────────────────────────────
+        #
+        # **분모를 만드는 것이지 실패를 만드는 것이 아니다.** 그래서
+        # `success_only` 와 무관하게 적용한다 — 성공률은 99.9% 대이고 바뀌는
+        # 것은 "그 절차를 몇 건 수행했나"다. 이것이 없으면 `P-01`·`P-02`·
+        # `P-03` 의 분모가 0 이라 **그 지표가 한 번도 판정되지 않는다.**
+        bl = self.baseline
+        if bl is None:
+            for k in ("auth_att", "auth_suc", "loc_att", "loc_suc",
+                      "mec_att", "mec_suc", "npr"):
+                out[k] = 0
+            return out
+        grp = _CT_GROUP.get(call_type, "service")
+        for key, att_map, suc_p in (
+            ("auth", bl.auth_attempt, bl.auth_success),
+            ("loc", bl.location_attempt, bl.location_success),
+            ("mec", bl.mecheck_attempt, bl.mecheck_success),
+        ):
+            a = 1 if rng.random() < att_map.get(grp, 0.0) else 0
+            out[f"{key}_att"] = a
+            # 포함 관계 — `성공 ≤ 시도`(규칙 C-4). 시도하지 않은 절차에
+            # 성공을 세우면 분자가 분모를 넘는다
+            out[f"{key}_suc"] = 1 if a and rng.random() < suc_p else 0
+        # 페이징은 **시도 비율을 실측에서 받고**(위 `proc_ratio`) 성공률만 덮는다.
+        # 실패 0건이면 `P-04` 가 상시 100% 라 `R-25` 가 발동할 수 없다.
+        if out["pg_att"]:
+            out["pg_suc"] = 1 if rng.random() < bl.paging_success else 0
+        # NPR 은 **페이징을 했을 때만** 성립한다 — 시도가 없으면 "응답이 없다"를
+        # 말할 수 없다(2026-10-22 교정). 구 구현은 `pg_att` 와 무관하게 뽑아
+        # 4만 건 중 17건의 모순을 만들었다. 운영에서 `npr=1` 인 조합은
+        # `1000010010`(pg_att=1) 하나뿐이다.
+        out["npr"] = 1 if out["pg_att"] and rng.random() < bl.npr_rate else 0
+        # 연결 **후** 절단. `success_only` 모드에서만 평시 배경이 만든다 —
+        # 실측 재현 모드(`success_only=False`)는 이미 실측 비율로 절단을
+        # 뽑았고(위), 그 위에 또 걸면 두 분포가 겹친다.
+        if self.success_only and out["att"] and out["suc"]:
+            out["drop"] = 1 if rng.random() < bl.drop_rate else 0
         return out
+
+    def drop_cause(self) -> int:
+        """평시 절단의 해제 Cause — `drop_cause_mix` 로 그룹을 뽑고 그 안에서 고른다.
+
+        **`normal` 그룹이 있다**(2026-10-22). 구 docstring 은 *"전부
+        `S1AP_NORMAL_CAUSES` 밖이다. 안에 있으면 `DROP_CNT` 가 세어지지 않아
+        `C-04` 가 0 으로 남는다"* 였는데 **그 전제가 틀렸다** —
+        `cell_agg.DROP_CNT` 는 `DROP_FLAG` 만 보고 Cause 를 보지 않는다.
+        근거와 운영 실측은 `_DROP_CAUSES` 머리말.
+        """
+        bl = self.baseline
+        groups = list(bl.drop_cause_mix)
+        g = self.rng.choices(groups, weights=[bl.drop_cause_mix[k] for k in groups],
+                             k=1)[0]
+        return self.rng.choice(_DROP_CAUSES[g])
 
 
 # --------------------------------------------------------------------------
@@ -1065,14 +1295,22 @@ class PemdbGen:
                  enb_limit: int | None = None,
                  drawable: set[str] | None = None,
                  call_type_floor: float | None = None,
-                 uplane_session: dict | None = None):
+                 uplane_session: dict | None = None,
+                 baseline: dict | None = None,
+                 fault: dict | None = None):
         self.cells = load_cells(conn, enb_limit=enb_limit, drawable=drawable)
         if not self.cells:
             raise RuntimeError("CL_CELL_MAP 이 비어 있다 — 마스터를 먼저 적재하라")
+        #: 평시 배경 모수(`pemdb1.baseline`). **장애 mutator 와 무관하다** —
+        #: 분모를 만드는 자리이고 실패는 시나리오가 꽂는다.
+        self.baseline = Baseline.from_cfg(baseline)
+        #: 장애 공통 설정(`pemdb1.fault`) — TIMEOUT 대기시간. mutator 가
+        #: 모듈 전역(`scenarios.FAULT`)으로 읽는다(서명에 설정을 받을 자리가 없다).
+        self.fault = set_fault_cfg(fault)
         self.dist = Distributions(
             data_dir / "pemdb1" / "_distributions.json",
             random.Random(seed + 101), success_only=success_only,
-            call_type_floor=call_type_floor,
+            call_type_floor=call_type_floor, baseline=self.baseline,
         )
         profiles = load_profiles(data_dir / "profile.json")
         # **`lte_call` 이 반드시 첫 자리여야 한다.** `Generator.__init__` 이
@@ -1099,6 +1337,22 @@ class PemdbGen:
             end_only=True,
         )
         self._reseat_subscribers(random.Random(seed + 202))
+        # 평시 PathSwitch 는 `_coerce` 가 셀 마스터를 보고 심는다. 생성기 쪽에도
+        # 걸어 두는 이유는 구 경로(`generate_minute`)가 `_coerce` 를 타지 않아
+        # **평시 배경이 없다**는 것을 코드에서 읽히게 하려는 것이다.
+        self.gen.baseline = self.baseline
+        # **시나리오의 APN 대상이 레코드에 실제로 있는 값이어야 한다.**
+        # `_coerce` 가 `Distributions.apn()` 으로 APN 을 덮으므로 프로파일에서
+        # 고르면 그 APN 이 한 건도 없을 수 있고, 그러면 SC-19·SC-11 이 주입돼도
+        # 아무 일이 일어나지 않는다 — 에러 없이 조용히.
+        #
+        # **`_bind_scenario_targets` 를 여기서 다시 부르지 않는다** — 이 시점에
+        # `gen.scenarios` 는 비어 있고, 시나리오가 걸릴 때 `set_faults` 가
+        # 부른다. 그때 이 풀이 이미 서 있어야 한다는 것이 순서의 전부다.
+        self.gen.apn_pool = [
+            a for a, _ in sorted(zip(self.dist.apns, self.dist.apn_w),
+                                 key=lambda kv: -kv[1])
+        ]
         #: U-Plane 세션 엔진 — **C-Plane 과 U-Plane 을 잇는 자리**(2026-10-14).
         #: `rates` 의 U-Plane 세 값이 여기서 파생 계수로 환산된다
         #: (`session` 머리말 §1.4). 활성 세션을 분 사이에 들고 있으므로
@@ -1171,20 +1425,68 @@ class PemdbGen:
         건너뛴다 — `SC-05`(DNS)·`SC-06`(HTTP)·`SC-07`(Transport)이 각각 자기
         계열만 건드리도록 이미 선언돼 있고, 전 계열에 걸면 한 장애가 세 축을
         동시에 흔들어 원인 판정이 섞인다.
+
+        **강도는 `intensity_for(series, …)` 로 받는다**(2026-10-22). 계열별
+        시작 오프셋이 있는 시나리오(SC-21: transport 0분 → dns 2분)가 있고,
+        오프셋이 없으면 `intensity()` 와 같은 값이다.
         """
-        if not active:
+        sel = [sc for sc in active if sc.kind in MUTATORS]
+        if not sel:
             return None
         rng = self.gen.rng
 
         def mutate(series: str, rec, cell) -> None:
-            for sc in active:
+            for sc in sel:
                 if series not in sc.series:
                     continue
                 if sc.target.cell_keys and cell.cell_key not in sc.active_cells_cache:
                     continue
-                MUTATORS[sc.kind](rec, sc, sc.intensity(minute), rng, cell)
+                sc._minute = minute     # SC-18 이 "5분 전 강도"를 본다
+                MUTATORS[sc.kind](rec, sc, sc.intensity_for(series, minute),
+                                  rng, cell)
 
         return mutate
+
+    def _plan_mutator(self, minute: int, active: list[Scenario]):
+        """U-Plane **세션 총량**에 거는 콜백 (`scenarios.PLAN_MUTATORS`).
+
+        양(量) 필드를 분 레코드에서 고치면 `Traffic_Total_*` 의 누적이
+        역전한다 — `session._plan` 단계에서만 바꾼다(V3 규칙 U-1·U-2).
+        세션은 transport 계열이므로 자격 판정도 그 계열로 한다.
+        """
+        sel = [sc for sc in active
+               if sc.kind in PLAN_MUTATORS and "transport" in sc.series]
+        if not sel:
+            return None
+        rng = self.gen.rng
+
+        def plan_mutate(cell, plan) -> None:
+            for sc in sel:
+                if sc.target.cell_keys and cell.cell_key not in sc.active_cells_cache:
+                    continue
+                sc._minute = minute
+                PLAN_MUTATORS[sc.kind](
+                    plan, sc, sc.intensity_for("transport", minute), rng, cell)
+
+        return plan_mutate
+
+    def _suppressor(self, minute: int, active: list[Scenario]):
+        """호 **생성을 막는** 콜백 (`scenarios.SUPPRESSORS`) — SC-17 무호.
+
+        mutator 로는 표현할 수 없다. 그 서명은 이미 만들어진 레코드를 받으므로
+        "레코드를 안 만드는 것"을 적을 자리가 없고, `set_volume_pct` 는
+        전역이라 셀·노드 단위가 아니다.
+        """
+        sel = [sc for sc in active if sc.kind in SUPPRESSORS]
+        if not sel:
+            return None
+        rng = self.gen.rng
+
+        def suppress(cell) -> bool:
+            return any(SUPPRESSORS[sc.kind](sc, cell, sc.intensity(minute), rng)
+                       for sc in sel)
+
+        return suppress
 
     def reassign_nodes(self, spec: dict | None) -> dict:
         """장비 재배정 — ``{"SGW": {"0015": "0103"}, ...}``. 적용 결과를 돌려준다.
@@ -1351,8 +1653,15 @@ class PemdbGen:
         i_apn, i_end = idx["APN"], idx["call_end_time"]
         i_rel = idx["UEContextRelease_Cause"]
         # **세션 수가 Call Type 에 따라 갈린다**(`session.CT_SESSION_W`).
-        # 없으면 전부 기준 가중 1.0 이 되어 구 동작과 같다.
-        i_ct = idx.get("CALL_TYPE", -1)
+        #
+        # ⚠️ **키는 `call_type`(소문자)이다.** 전에 `idx.get("CALL_TYPE", -1)`
+        # 로 적혀 있었는데 `CALL_TYPE` 은 **Parquet 컬럼명**이고
+        # `fields.SERIES_FIELDS["lte_call"]` 의 필드명은 `call_type` 이다
+        # (인덱스 38). 그래서 `i_ct` 가 항상 `-1` → `Call.call_type` 이 항상
+        # `""` → `session._ct_weight()` 가 전부 1.0 을 돌려줘 **`CT_SESSION_W`
+        # 가 한 번도 적용되지 않았다.** 알림만 받고 끝나는 호(Paging·TAU·
+        # Detach)도 데이터 세션을 열었고, 에러는 나지 않았다.
+        i_ct = idx.get("call_type", -1)
 
         out: list[list[str]] = []
         calls: list[Call] = []
@@ -1360,9 +1669,29 @@ class PemdbGen:
         # U-Plane 도 자연히 멈춘다 — 세션이 호에서 파생되므로 따로 막을 필요가
         # 없고, 그 인과를 끊어 두면 "호는 0인데 트래픽은 있다"가 된다.
         n_calls = 0 if "lte_call" in self._blocked else gen._volume("lte_call", ts)
+        suppress = self._suppressor(minute, active)
         for _ in range(n_calls):
-            rec, cell = gen.base_lte_call(ts, slot_start)
-            self._coerce(rec)
+            if suppress is None:
+                rec, cell = gen.base_lte_call(ts, slot_start)
+            else:
+                # ── 억제된 셀의 호는 **버리지 않고 다른 셀로 재추첨한다** ──
+                #
+                # 실제 망에서 인접 셀이 흡수하는 모습이고, **전국 호 수가
+                # 유지되어 "전국 트래픽 급감"이라는 가짜 신호가 생기지
+                # 않는다** — D4 「트래픽 소멸」의 ① 결측 가드가 바로 그
+                # 구분(수집 결측 vs 특정 eNB 무호)을 본다.
+                #
+                # 상한 8회: 대상 eNB 가 전체의 1/60 이므로 8회 연속 실패
+                # 확률이 `(1/60)^8` 로 무시할 수 있다. 그래도 상한을 두는
+                # 것은 운영자가 eNB 를 하나만 남기고 억제하는 설정을 넣을 수
+                # 있어서다 — 그때 무한 루프가 되면 데몬이 멈춘다.
+                for _retry in range(8):
+                    rec, cell = gen.base_lte_call(ts, slot_start)
+                    if not suppress(cell):
+                        break
+                else:
+                    continue
+            self._coerce(rec, cell)
             if mutate is not None:
                 mutate("lte_call", rec, cell)
             vals = rec.values
@@ -1405,16 +1734,27 @@ class PemdbGen:
                 f"uplane_records({ts:%Y-%m-%d %H:%M}) 앞에 records() 가 없다 "
                 f"(호 목록은 {self._calls_at} 것이다). U-Plane 은 그 분의 성공 "
                 "호에서 파생된다 — 순서를 바꾸면 인과가 끊어진다")
-        mutate = self._mutator(minute, self._active(minute))
-        got = self.sessions.minute(ts, self._calls, mutate)
+        active = self._active(minute)
+        got = self.sessions.minute(ts, self._calls,
+                                   self._mutator(minute, active),
+                                   self._plan_mutator(minute, active))
         # 끊긴 계열은 **목록에서 뺀다** — 빈 리스트로 두면 적재가 빈 Parquet
         # 파일을 만들고, 집계가 그 0행을 "값이 0" 으로 읽을 자리가 생긴다
         # (불변규칙 4). 파일이 없으면 그 분은 **없는 것**이고 그게 사실이다.
         return {s: rows for s, rows in got.items()
                 if s in self.series and s not in self._blocked}
 
-    def _coerce(self, rec) -> None:
-        """자체 프로파일에서 나온 값을 상용 실측값으로 바꾼다."""
+    def _coerce(self, rec, cell: Cell | None = None) -> None:
+        """자체 프로파일에서 나온 값을 상용 실측값으로 바꾼다.
+
+        ``cell`` 은 **평시 PathSwitch 가 Last 셀을 정하려고** 받는다. V3 §3.5 는
+        그것을 `generator._lte_call` 에 두라고 적었는데(그 함수가 셀을 안다),
+        거기서는 **`call_type` 이 아직 프로파일 값이다** — `_coerce` 가 바로
+        뒤에서 `d.call_type()` 으로 덮으므로 절차 그룹(`_CT_GROUP`)이 어긋난다.
+        PathSwitch 시도 비율은 Service 8% / Handover 100% 로 그룹마다 다르니
+        **최종 `call_type` 을 아는 자리**에 있어야 한다. 그래서 셀을 받는 쪽으로
+        돌렸다 (V3 대비 변경점 — `docs` 에 기록).
+        """
         d = self.dist
         # 상용 추출은 ONGOING_FLAG='2'(호 종료)만 담는다. 1(진행 중) 레코드를
         # 섞으면 플래그가 비어 분모가 조용히 줄어든다.
@@ -1437,8 +1777,27 @@ class PemdbGen:
         rec.set("paging_success_flag", f["pg_suc"])
         rec.set("APN", d.apn())
 
-        # 해제 Cause — 절단 호에는 비정상만 붙인다
-        rel = d.abnormal_release() if f["drop"] else d.release_cause()
+        # ── 평시 절차 플래그 (2026-10-22) ────────────────────────────────
+        #
+        # **`P-01`·`P-02`·`P-03`·`P-07` 의 분모가 여기서 생긴다.** 비워 두면
+        # 그 네 지표가 한 번도 판정되지 않고, 빈 값은 "이상 없음"으로 보인다
+        # (불변규칙 17). SC-04·14·15 는 `auth_attempt_flag` 가 선 호만
+        # 고르므로(V3 ⑥) 이것이 없으면 **주입 자체가 성립하지 않는다.**
+        if self.baseline is not None:
+            self._baseline_procedures(rec, f)
+
+        # 해제 Cause — 절단 호의 사유. **정상 종료도 포함한다**(운영 45.9%).
+        #
+        # 평시 배경이 있으면 `drop_cause_mix` 로 뽑는다 — **정상 종료를 포함한다**
+        # (2026-10-22, `_DROP_CAUSES` 머리말). 구 주석은 "둘 다
+        # `S1AP_NORMAL_CAUSES` 밖"이라 적었고 `DROP_RADIO/DROP_CNT` 통과 조건
+        # [0.45, 0.65] 를 근거로 들었는데, **운영 실측이 0.153 이다** — 그
+        # 조건 쪽이 운영과 맞지 않는다.
+        if f["drop"]:
+            rel = (str(d.drop_cause()) if self.baseline is not None
+                   else d.abnormal_release())
+        else:
+            rel = d.release_cause()
         rec.set("UEContextRelease_Cause", rel)
         rec.set("UEContextRelease_Time",
                 rec.get("call_end_time", "0.0") if rel != "0" else "0.0")
@@ -1450,6 +1809,78 @@ class PemdbGen:
             self._set_error(rec, *d.first_error())
         else:
             self._clear_error(rec)
+
+        # 평시 PathSwitch — `PSF` 의 분모. 셀 마스터를 봐야 하므로 마지막이다
+        if self.baseline is not None and cell is not None:
+            self._baseline_pathswitch(rec, ct, cell)
+
+    def _baseline_procedures(self, rec, f: dict) -> None:
+        """인증·가입정보·단말식별·NPR 플래그와 그 실패 기록.
+
+        **실패 호에 오류 기록을 남긴다.** 세 Cause 필드
+        (`AuthenticationInformation_Cause`·`UpdateLocation_Cause`·
+        `MEIdentityCheck_Cause`)는 집계·RCA 가 읽지 않는다 — 그래도 적는
+        이유는 "성공률이 99.9% 인데 실패 호에 아무 기록이 없다"가 **사람이
+        읽는 모순**이기 때문이고, `R-01` 의 설명문이
+        `AuthenticationInformation_Cause` 를 인용한다.
+
+        `drop_flag` 는 여기서 손대지 않는다 — `flags()` 가 정하고 호출부가
+        쓴다. 한 자리에서만 정해야 `success=1 AND drop=1`(연결 후 절단)과
+        `success=0 AND drop=0`(접속 실패)의 배타성이 지켜진다(규칙 C-2).
+        """
+        rng = self.dist.rng
+        t0 = rec.num("call_start_time")
+        for key, flag, cause_col, time_col, cause in (
+            ("auth", "auth", "AuthenticationInformation_Cause",
+             "AuthenticationInformation_Time", 5012),
+            ("loc", "location", "UpdateLocation_Cause",
+             "UpdateLocation_Time", 5420),
+            ("mec", "mecheck", "MEIdentityCheck_Cause",
+             "MEIdentityCheck_Time", 5030),
+        ):
+            att, suc = f[f"{key}_att"], f[f"{key}_suc"]
+            rec.set(f"{flag}_attempt_flag", att)
+            rec.set(f"{flag}_success_flag", suc)
+            if not att:
+                continue
+            t = t0 + rng.uniform(0.02, 0.20)
+            rec.set(time_col, f"{t:.6f}")
+            if not suc:
+                rec.set(cause_col, cause)
+        rec.set("npr_flag", f["npr"])
+
+    def _baseline_pathswitch(self, rec, call_type: str, cell: Cell) -> None:
+        """평시 PathSwitch — `PSF`(PathSwitch 실패율)의 분모를 만든다.
+
+        없으면 분모가 **장애 호뿐**이라 SC-09 의 실패율이 항상 100% 가 되고,
+        "평시 2% → 장애 25%" 라는 비교가 성립하지 않는다.
+
+        Last 셀은 **같은 eNB 의 다른 셀**로 둔다 — 다른 eNB 로 보내면 한 호가
+        두 노드를 탄 것처럼 되어 노드 축 집계가 호 안에서 갈린다
+        (`session._neighbour` 와 같은 이유). 그리고 그 두 필드가 **절단 귀속
+        셀**을 정하므로(`cell_agg._cell_specs` 의 `DROP_CNT` Last 갈래) 셀
+        선택과 같은 자리에 있어야 한다.
+        """
+        bl = self.baseline
+        rng = self.dist.rng
+        grp = _CT_GROUP.get(call_type, "service")
+        p = bl.pathswitch_attempt.get(grp, 0.0)
+        if p <= 0.0 or rng.random() >= p:
+            return
+        ps = rng.randint(1, 3)
+        psf = 1 if rng.random() < bl.pathswitch_fail else 0
+        rec.set("PathSwitch_count", ps)
+        # 규칙 — `실패 ≤ 시도`. 넘으면 `PSF` 분모(`ps + psf`)와 분자가
+        # 어긋나 100% 넘는 실패율이 나온다
+        rec.set("PathSwitchFailure_count", min(psf, ps))
+        if rng.random() < 0.7:
+            pool = self.gen.cells_by_enb.get(cell.enb_id) or ()
+            if len(pool) > 1:
+                nb = pool[rng.randrange(len(pool))]
+                if nb is cell:
+                    nb = pool[0] if pool[0] is not cell else pool[1]
+                rec.set("Last_eNB_ID", nb.enb_id)
+                rec.set("Last_Cell_ID", nb.cell_id)
 
     #: first_error_interface_protocol → 구간별 Cause 컬럼 접두어 (CD_IF_PROTO_CEI).
     _ERR_PREFIX = {"1": "s6a", "2": "s1ap", "3": "s11", "4": "s10",
@@ -2332,12 +2763,21 @@ def purge_partitions(conn, database: str, retain_hours: int = 24,
 #: down 재전송·`DnlinkRTTTime` → `RETRANS_DN`·`RTT_DN_TIME` 이라 전부 살아 있다.
 UNSUPPORTED: dict[str, str] = {}
 
-#: 돌아가는 13종 전부. **채점 상한이 10/13(76.9%)에서 13/13 으로 올라간다** —
+#: 돌아가는 전부 — **22 시나리오 + 하위 변형 2 = 24**(2026-10-22, V3).
+#:
 #: 구 벤치마크에서 SC-05·SC-06 은 C-Plane 이벤트가 0건이어서 탐지 자체가
-#: 불가능했고, 그것이 탐지율 저하가 아니라 **채점 상한**이었다.
+#: 불가능했고, 그것이 탐지율 저하가 아니라 **채점 상한**이었다. 지금은 24종
+#: 전부가 Incident 를 만들 경로를 갖는다 — 신규 축 둘(`U-12 NODE`·D4)은
+#: graphio 쪽에 함께 들어갔다.
+#:
+#: **순서가 배치 순서다**(`build_scenarios` 가 이 순서로 구간을 나눈다).
+#: 하위 변형(`SC-03b` 등)을 원본 바로 뒤에 두어, 짧은 구간을 돌릴 때
+#: 쌍 비교(V3 §10.3)의 양쪽이 함께 들어가거나 함께 빠지게 한다.
 SUPPORTED: tuple[str, ...] = (
-    "SC-01", "SC-02", "SC-03", "SC-04", "SC-05", "SC-06", "SC-07",
-    "SC-08", "SC-09", "SC-10", "SC-11", "SC-12", "SC-13",
+    "SC-01", "SC-02", "SC-03", "SC-03b", "SC-04", "SC-05",
+    "SC-06", "SC-06b", "SC-07", "SC-08", "SC-09", "SC-10",
+    "SC-11", "SC-12", "SC-13", "SC-13b", "SC-14", "SC-15",
+    "SC-15b", "SC-16", "SC-17", "SC-18", "SC-19", "SC-20", "SC-21",
 )
 
 
@@ -2357,8 +2797,13 @@ def build_scenarios(gen: "PemdbGen", minutes: int, selected: str = "all",
     `"SGW-0037"` 로 나와 graphio `GP_INCIDENT.DETAIL.axis_ids` 와 글자까지
     같아진다 (`detector._node_key` = `node_type || '-' || node_id`).
     """
+    # **대문자로 올리지 않는다.** 하위 변형 ID 는 `SC-03b` 처럼 소문자 접미가
+    # 붙어 있어서 `.upper()` 를 걸면 `SC-03B` 가 되고 `SUPPORTED` 와 어긋난다 —
+    # 교집합에서 조용히 빠져 "구간이 짧아 배치되지 않았다"로 보고된다.
+    _norm = {sid.upper(): sid for sid in SUPPORTED}
     wanted = set(SUPPORTED) if selected in ("all", None, "") else {
-        t.strip().upper() for t in selected.split(",") if t.strip()}
+        _norm.get(t.strip().upper(), t.strip())
+        for t in selected.split(",") if t.strip()}
     skipped = [f"{sid}: {why}" for sid, why in sorted(UNSUPPORTED.items())
                if sid in wanted]
     wanted &= set(SUPPORTED)

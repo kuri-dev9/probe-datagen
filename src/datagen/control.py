@@ -33,11 +33,25 @@ T_CONFIG = "CM_DATAGEN_CONFIG"
 T_FAULT = "CM_DATAGEN_FAULT"
 T_HISTORY = "CM_DATAGEN_HISTORY"
 
-#: 주입 가능한 장애 종류 — scenarios.MUTATORS 의 키와 1:1
+#: 주입 가능한 장애 종류 — **`scenarios.KIND_SPECS` 의 키와 1:1 이어야 한다.**
+#:
+#: `MUTATORS` 가 아니라 `KIND_SPECS` 와 맞춘다(2026-10-22). 레코드 변형이 없는
+#: kind 가 생겼기 때문이다 — `pgw_uplane_degradation` 은 `PLAN_MUTATORS` 로만
+#: 돌고 `enb_s1_outage` 는 `SUPPRESSORS` 가 주력이다. `MUTATORS` 기준으로
+#: 두면 그 둘이 UI 목록에서 빠지고, 빠진 이유가 어디에도 보이지 않는다.
+#: `tests/test_kind_registry.py` 가 세 자리(여기·`KIND_SPECS`·`ui.KIND_LABELS`)를
+#: 대조한다.
 KINDS = (
+    # 기존 13종
     "gw_resource", "gw_node_down", "ran_radio", "mme_overload", "auth_failure",
     "dns_degradation", "external_server", "transport_loss", "ue_model",
     "mobility", "change_suspected", "ims_pdn", "nsa_nr_leg",
+    # 하위 변형 3
+    "gw_pgw_restart", "external_path_latency", "nsa_policy_restrict",
+    # 신규 8종
+    "auc_no_response", "dra_route_failure", "s6a_undetermined",
+    "pgw_uplane_degradation", "enb_s1_outage", "partial_recovery",
+    "apn_pdn_failure", "dns_flap", "compound_causal_failure",
 )
 
 #: 상태 전이: pending → active → done. cancelled 는 pending/active 어디서든.

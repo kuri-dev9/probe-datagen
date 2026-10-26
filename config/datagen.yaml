@@ -153,6 +153,90 @@ pemdb1:
     transport: 22000
     dns: 9000
     http: 15000
+  # ── 평시 배경 (2026-10-22) ────────────────────────────────────────────
+  # **분모를 만드는 자리다. 실패를 만드는 자리가 아니다.**
+  #
+  # `success_only: true` 가 "평소 전부 녹색"을 만드는데 그것이 지나쳐 분모까지
+  # 0 으로 만들었다 — 실측(cplane_raw 194만 건)에서
+  #
+  #     P-01 인증 성공률     상시 0%    분모가 장애 호뿐
+  #     P-02 가입정보 성공률  분모 0     location_*_flag 미기입
+  #     P-03 단말식별 성공률  분모 0     mecheck_*_flag 미기입
+  #     P-04 페이징 성공률    상시 100%  실패 0건
+  #     P-07 NPR 발생률      전부 0     npr_flag 미기입
+  #     C-04 절단률          0.0036%   success_only 가 drop=0 강제
+  #     PSF  PathSwitch 실패  분모 0     PathSwitch_count 미기입
+  #
+  # 분모가 없으면 R-01(P-01)·R-01b(P-02)·R-25(P-04)·R-17(PSF) 이 **구조적으로
+  # 발동할 수 없고**, SC-04·09·14·15 는 주입해도 아무 일이 일어나지 않는다.
+  #
+  # 코드 기본값은 `src/datagen/pemdb1.py` 의 `Baseline` 이다. 여기 적은 키만
+  # 덮어쓰고 **모르는 키를 주면 멈춘다** — 오타가 "기본값으로 돌았다"로 끝나면
+  # 평시 분모가 조용히 어긋나고 그것은 탐지가 안 되는 형태로만 나타난다.
+  #
+  # ★ **전부 PoC 기본값이고 운영 실측이 아니다.** 운영 값이 들어오면 여기만
+  #   고친다. 주석·문서에 "실측"이라고 적지 않는다.
+  baseline:
+    # 절차 시도 비율 — call_type 그룹별(attach/tau/service/paging/detach/handover).
+    # **이 값이 P-01 의 분모를 정한다.** 너무 낮으면 MIN_PROCEDURE_DENOM=40 을
+    # 못 채워 R-01 이 발동하지 않고, 너무 높으면 인증이 모든 호에 붙어
+    # 비현실적이 된다. 분당 6,000호(= 20,000 × 30%) 기준
+    #   Attach 0.29% + TAU 3.2%×0.35 + Service 95%×0.02 ≈ 2.9% → 분당 174건
+    # 이라 1분 창에서 분모 40을 넘는다.
+    auth_attempt:     {attach: 1.00, tau: 0.35, service: 0.02}
+    auth_success:     0.999
+    location_attempt: {attach: 1.00, tau: 0.90, service: 0.00}
+    location_success: 0.9995
+    mecheck_attempt:  {attach: 0.60, tau: 0.00, service: 0.00}
+    mecheck_success:  0.9998
+    # 페이징은 **시도 비율을 실측(proc_ratio)에서 받고** 성공률만 여기서 정한다
+    paging_success:   0.98
+    npr_rate:         0.0008
+    # 연결 **후** 절단 (C-04 목표 0.3%). success=1 인 호에만 선다
+    drop_rate:        0.003
+    # 절단 사유 구성비 — **합이 1.0 이어야 하고 아니면 멈춘다.**
+    #
+    # 🔄 2026-10-22 운영 XDR 실측으로 교정. `drop_flag=1` 157건 분류:
+    #
+    #     normal (300·302)  45.9%   ← 가장 많다
+    #     unspec (504)      38.9%
+    #     radio  (1xx)      15.3%
+    #     transport/node/nas/proto   0건
+    #
+    # 구 설정은 **정상 종료를 하나도 만들지 않아** `DROP_NORMAL` 이 항상 0
+    # 이었고, 근거였던 "정상 종료면 DROP_CNT 가 안 세어진다"는 틀렸다 —
+    # `cell_agg.DROP_CNT` 는 `DROP_FLAG` 만 본다. 자세한 근거는
+    # `pemdb1._DROP_CAUSES` 머리말.
+    #
+    # 구 통과 조건 `DROP_RADIO/DROP_CNT ∈ [0.45, 0.65]` 는 **운영과 맞지
+    # 않는다**(실측 0.153). 조건을 맞추려고 비정상 Cause 를 늘리지 않는다.
+    # 실측 0건인 넷은 "없다"로 단정하지 않고(표본 157건) 최소치만 남긴다.
+    #
+    # ⚠️ 201·303·406·504 는 graphio `S1AP_UNSPECIFIED` 라 DROP_TRANSPORT/
+    #    NAS/PROTO/NODE 가 아니라 **DROP_UNSPEC 으로 간다.**
+    drop_cause_mix:
+      normal:     0.45        # 300·302   → DROP_NORMAL   (실측 45.9%)
+      unspec:     0.33        # 201·303·406·504 → DROP_UNSPEC (실측 38.9%)
+      radio:      0.15        # S1AP 1xx  → DROP_RADIO    (실측 15.3%)
+      transport:  0.03        # S1AP 2xx  → DROP_TRANSPORT
+      node:       0.02        # S1AP 5xx  → DROP_NODE
+      nas:        0.01        # S1AP 3xx  → DROP_NAS
+      proto:      0.01        # S1AP 4xx  → DROP_PROTO
+    # PathSwitch 시도 비율 — PSF 의 분모(ps_cnt + psf_cnt)다. 없으면 분모가
+    # 장애 호뿐이라 SC-09 의 실패율이 항상 100% 가 되고 "평시 2% → 장애 25%"
+    # 라는 비교가 성립하지 않는다.
+    pathswitch_attempt: {service: 0.08, handover: 1.00}
+    pathswitch_fail:    0.02
+  # ── 장애 주입 공통 (2026-10-22) ───────────────────────────────────────
+  # TIMEOUT 판정 대기시간(초). 무응답 호의 `initial_core_duration` 하한이
+  # 되므로(규칙 T-2: 대기한 시간이 지연에 반영되어야 한다) 값이 틀리면
+  # "무응답인데 지연이 짧은" 레코드가 남는다.
+  #
+  # 🔴 **프로브 실제값 미확인이다**(V3 §12-9·10). 운영 전환 시 재확인한다.
+  fault:
+    timeout_wait:
+      s6a: 3.0                # SC-14 S6a 무응답
+      s11: 5.0                # SC-03 · SC-18 S11 무응답
   # ── U-Plane 세션 분포 모수 (2026-10-14) ───────────────────────────────
   # 코드 기본값은 `src/datagen/session.py` 의 `Shape` 다. 여기 적은 키만
   # 덮어쓰고, **모르는 키를 주면 멈춘다** — 오타가 "기본값으로 돌았다"로

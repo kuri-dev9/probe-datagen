@@ -202,6 +202,20 @@ class Generator:
         self.cell_weights = [c.traffic_weight for c in cells]
         self._cum = self._cumulative(self.cell_weights)
         self.cell_by_key = {c.cell_key: c for c in cells}
+        #: eNB 별 셀 목록 — **평시 PathSwitch 의 Last 셀**이 같은 eNB 의 다른
+        #: 셀이어야 한다(`session._by_enb` 와 같은 이유). 다른 eNB 로 보내면
+        #: 한 호가 두 노드를 탄 것처럼 되어 노드 축 집계가 호 안에서 갈린다.
+        self.cells_by_enb: dict[str, list[Cell]] = {}
+        for c in cells:
+            self.cells_by_enb.setdefault(c.enb_id, []).append(c)
+        #: `pemdb1.Baseline` — 평시 배경(절차 플래그·절단·PathSwitch)의 모수.
+        #: `PemdbGen.__init__` 이 걸어 준다. 구 경로(`generate_minute`)는
+        #: `None` 이고 그때는 평시 배경이 **없다** — 그 경로는 상용 분포를
+        #: 덮지 않으므로 분모 자체를 프로파일이 들고 있다.
+        self.baseline = None
+        #: 상용 APN 풀(실측 빈도순). `PemdbGen` 이 걸어 준다 — 시나리오의 APN
+        #: 대상이 레코드에 실제로 존재하는 값이어야 한다.
+        self.apn_pool: list[str] = []
 
         pool = subscriber_pool or max(2000, len(cells) * 60)
         self.subs = self._make_subscribers(pool)
@@ -268,10 +282,20 @@ class Generator:
             )
         return subs
 
+    #: 도메인을 프로파일에서 받아야 하는 kind — 둘 다 한 Host 에 집중시킨다
+    _DOMAIN_KINDS = ("external_server", "external_path_latency")
+    #: APN 을 프로파일에서 받아야 하는 kind.
+    #:
+    #: **상위 트래픽 APN 을 고른다**(V3 §SC-19 권장안). 그래야 그 APN 의 실패가
+    #: `C-02 CELL/SGG` 를 임계 아래로 끌어내려 Incident 가 생기고, 그 위에서
+    #: `R-07` 이 APN 을 지목한다 — APN 축 `DetectSpec` 을 새로 만들지 않아도
+    #: 된다. 꼬리 APN 을 고르면 희석되어 **Incident 가 아예 생기지 않는다.**
+    _APN_KINDS = ("apn_pdn_failure", "change_suspected")
+
     def _bind_scenario_targets(self) -> None:
-        """프로파일에 의존하는 시나리오 대상(도메인·기종)을 실제 값으로 채운다."""
+        """프로파일에 의존하는 시나리오 대상(도메인·기종·APN)을 실제 값으로 채운다."""
         for sc in self.scenarios:
-            if sc.kind == "external_server" and not sc.target.domain:
+            if sc.kind in self._DOMAIN_KINDS and not sc.target.domain:
                 doms = self.profiles.get("http", SeriesProfile()).domains
                 # 상위 트래픽 도메인이어야 도메인 차원 탐지의 분모가 확보된다
                 sc.target.domain = doms[self.rng.randrange(min(4, len(doms)))] if doms else "cdn.example.com"
@@ -283,6 +307,24 @@ class Generator:
                 if cnt:
                     ranked = sorted(cnt.items(), key=lambda kv: -kv[1])
                     sc.target.vendor_model = ranked[min(2, len(ranked) - 1)][0]
+            if sc.kind in self._APN_KINDS and sc.target.apn is None:
+                sc.target.apn = self._top_apn()
+
+    def _top_apn(self) -> str | None:
+        """트래픽 상위 3위 안의 APN 하나.
+
+        **프로파일이 아니라 `apn_pool` 을 본다**(있으면). 상용 경로는
+        `pemdb1._coerce` 가 `Distributions.apn()` 으로 APN 을 덮으므로
+        프로파일 분포와 레코드의 분포가 다르다 — 프로파일에서 고르면 그 APN 이
+        레코드에 **한 건도 없을 수 있고**, 그러면 주입이 성립하지 않는다.
+        """
+        pool = getattr(self, "apn_pool", None)
+        if pool:
+            return pool[self.rng.randrange(min(3, len(pool)))]
+        apns = self.profiles.get("lte_call", SeriesProfile()).extras.get("apn_top")
+        if apns:
+            return apns[self.rng.randrange(min(3, len(apns)))]
+        return None
 
     # -- volume ----------------------------------------------------------
 
@@ -330,7 +372,7 @@ class Generator:
         sub = self.subs[rng.randrange(len(self.subs))]
 
         values = self.templates["lte_call"].copy()
-        rec = Rec(values, self.index["lte_call"])
+        rec = Rec(values, self.index["lte_call"], "lte_call")
         t = slot_start + rng.random() * 60
         rec.set("SummaryCreateTime", f"{t + 0.05:.6f}")
 
@@ -497,7 +539,7 @@ class Generator:
         smp = self.samplers[series]
         rng = self.rng
         values = self.templates[series].copy()
-        rec = Rec(values, self.index[series])
+        rec = Rec(values, self.index[series], series)
         rec.set("SummaryCreateTime", f"{t:.6f}")
         rec.set("OngoingFlag", ongoing)
         rec.set("SessionID", sid)
@@ -591,12 +633,51 @@ class Generator:
                 answers = "1"
             elif reply != "0":
                 answers = "0"
+            # ── 빈 값까지 본다 (2026-10-22) ────────────────────────────────
+            #
+            # 실 샘플에는 `AnswerCount` 가 **빈 문자열**인 행이 0.385% 있고,
+            # 그것은 "모름"이라 실패로 읽지 않는다(`session._dns_failed` 머리말).
+            # **원본에서는 그 행의 `ReplyCode` 도 함께 비어 있었다** — 짝이다.
+            #
+            # `success_only` 가 `ReplyCode` 만 `"0"` 으로 누르면서 그 짝이
+            # 깨져 **표본에 없던 조합**("rcode 0 · 답 모름")이 만들어졌다.
+            # `DNS_OK` 는 `REPLY_CODE=0 AND ANSWER_COUNT>0` 이므로 그 행이
+            # 성공으로 세어지지 않아 **평시 `U-29` 가 99.6% 에서 멈춘다.**
+            # 위 두 줄이 막으려던 바로 그 모순이고, 리터럴 `"0"` 만 보고
+            # 빈 값을 놓쳤다.
+            #
+            # **성공 전용 모드에서만 채운다.** 실측 재현 모드는 빈 값을 그대로
+            # 둔다 — 그쪽에서는 `ReplyCode` 도 비어 있어 짝이 유지되고,
+            # "모름"이 데이터에 남아야 H-계열 자기감시가 검증된다.
+            if self.success_only and not answers.strip().isdigit():
+                answers = "1"
             rec.set("AnswerCount", answers)
             rec.set("ResponseTime", f"{t:.6f}")
             rec.set("TimeToLive", smp.categorical("TimeToLive", "60"))
-            rec.set("QueryRetryCount", smp.categorical("QueryRetryCount", "0"))
-            rec.set("dns_retry_sequence", smp.categorical("dns_retry_sequence", "0"))
-            rec.set("dns_retry_interval", round(smp.numeric("dns_retry_interval"), 3))
+            # ── 재시도 카운터도 `success_only` 를 따른다 (2026-10-22) ──────
+            #
+            # **실 샘플의 `QueryRetryCount` 는 99.3% 가 `'1'` 이다.** 그대로
+            # 뽑으면 평시 `U-33`(DNS 재시도율)이 **99.6%** 가 되고 —
+            #
+            #   ① 그 지표가 **장애를 가리킬 수 없다.** 평시와 장애가 같은
+            #      값이면 화면·증거팩에서 신호가 아니다(불변규칙 17 의 취지).
+            #   ② "rcode 0 · 답 있음 · 그런데 1회 재시도"는 **레코드 내부
+            #      모순**이다. 바로 위에서 `ReplyCode` 를 성공으로 누르고
+            #      `AnswerCount` 를 맞춰 두는 것과 같은 자리인데 재시도만
+            #      빠져 있었다.
+            #   ③ SC-05·SC-20 의 통과 조건 `DNS_RETRY/DNS_Q ≥ 0.3` 이 평시에
+            #      이미 충족되어 **주입 검증이 성립하지 않는다.**
+            #
+            # 실패를 만드는 것이 아니라 **평시를 평시로 두는 것**이다. 실측
+            # 재현 모드(`success_only=False`)는 분포를 그대로 쓴다.
+            if self.success_only:
+                rec.set("QueryRetryCount", 0)
+                rec.set("dns_retry_sequence", 0)
+                rec.set("dns_retry_interval", "0.0")
+            else:
+                rec.set("QueryRetryCount", smp.categorical("QueryRetryCount", "0"))
+                rec.set("dns_retry_sequence", smp.categorical("dns_retry_sequence", "0"))
+                rec.set("dns_retry_interval", round(smp.numeric("dns_retry_interval"), 3))
             rec.set("ResolvedIP", f"{rng.randrange(1, 224)}.{rng.randrange(256)}."
                                   f"{rng.randrange(256)}.{rng.randrange(1, 255)}")
         else:  # http
@@ -677,7 +758,11 @@ class Generator:
                         continue
                     if sc.target.cell_keys and cell.cell_key not in sc.active_cells_cache:
                         continue
-                    MUTATORS[sc.kind](rec, sc, sc.intensity(minute), self.rng, cell)
+                    if sc.kind not in MUTATORS:
+                        continue        # PLAN/SUPPRESS 전용 kind — 구 경로엔 없다
+                    sc._minute = minute
+                    MUTATORS[sc.kind](rec, sc, sc.intensity_for(series, minute),
+                                      self.rng, cell)
                 lines.append(SEP.join(rec.values))
             out[series] = lines
         return out
