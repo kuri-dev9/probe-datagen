@@ -265,6 +265,41 @@ def _retention_sweep(conn, hours: float) -> dict[str, int]:
     return _purge_pemdb1(conn, hours)
 
 
+def _truth_path(pem: dict, data_dir: Path) -> Path:
+    """`ground_truth.json` 경로. 상대경로는 **저장소 루트 기준**으로 푼다 —
+    cwd 에 따라 정답이 엉뚱한 자리에 떨어지면 graphio 는 "ground_truth.json
+    없음" 으로 조용히 채점을 건너뛴다."""
+    q = Path(pem.get("truth_out") or (data_dir / "truth" / "ground_truth.json"))
+    return q if q.is_absolute() else (HERE / q).resolve()
+
+
+def _live_truth(P, gen, scs: list) -> None:
+    """실시간 주입(UI·`CM_DATAGEN_FAULT`)의 정답을 남긴다.
+
+    **전에는 `pemfill --scenarios` 만 정답을 썼다.** UI 로 주입한 장애는
+    `ground_truth.json` 에 없으니 채점 모집단에 들어가지 않고, RCA 가
+    맞혔는지 틀렸는지 **알 수 없는 상태로 남는다**(V3 §4.5 · 1차 ⑫).
+
+    활성 집합이 바뀔 때만 쓴다 — 틱마다 쓰면 분당 한 번 디스크를 건드리고
+    파일 시각이 계속 바뀌어 "언제 주입됐나"를 읽을 수 없다.
+
+    **활성 장애가 없으면 덮지 않는다.** 장애가 끝나면 `poll_transitions` 가
+    목록에서 빼는데, 그때 빈 파일을 쓰면 **방금 끝난 장애의 정답이 사라진다** —
+    채점은 장애가 끝난 뒤에 돌린다.
+    """
+    path = getattr(gen, "truth_path", None)
+    if path is None or gen.anchor is None or not scs:
+        return
+    key = tuple(sorted((sc.id, sc.kind, sc.start_minute, sc.duration)
+                       for sc in scs))
+    if key == getattr(gen, "_truth_key", None):
+        return
+    gen._truth_key = key
+    minutes = max(sc.start_minute + sc.duration for sc in scs) + 1
+    P.write_truth(path, gen.anchor, minutes, scs)
+    print(f"  정답 기록 — {len(scs)}건 → {path}", flush=True)
+
+
 def _uplane_store(cfg: dict, pem: dict) -> tuple[Path, int]:
     """U-Plane Parquet 루트와 보존 분 수 — `(root, retain_minutes)`.
 
@@ -398,7 +433,8 @@ def cmd_capacity(args) -> int:
             success_only=bool(pem.get("success_only", True)),
             enb_limit=int(pem.get("enb_limit", 0)), drawable=drawable,
             call_type_floor=pem.get("call_type_floor"),
-            uplane_session=pem.get("uplane_session"))
+            uplane_session=pem.get("uplane_session"),
+            baseline=pem.get("baseline"), fault=pem.get("fault"))
         # **보관 정리를 끈다**(retain 0). 측정 중에 지우면 쓴 바이트를 셀 수
         # 없고, 임시 디렉터리라 어차피 통째로 버린다.
         writer = P.PemdbWriter(conn, mapping,
@@ -541,7 +577,12 @@ def cmd_run(args) -> int:
             call_type_floor=pem.get("call_type_floor"),
             # U-Plane 세션 분포 모수. 없으면 `session.Shape` 기본값이다.
             uplane_session=pem.get("uplane_session"),
+            # 평시 배경(절차 플래그·절단·PathSwitch)과 TIMEOUT 대기시간.
+            # 없으면 `pemdb1.Baseline`·`scenarios.FaultCfg` 기본값이다.
+            baseline=pem.get("baseline"), fault=pem.get("fault"),
         )
+        # 실시간 주입도 정답을 남긴다 — `_live_truth` 가 활성 집합이 바뀔 때 쓴다
+        gen.truth_path = _truth_path(pem, data_dir)
         # ── 생성량 비율 (2026-10-14) ──────────────────────────────────
         # **기준은 `pemdb1.rates` 의 절대값이고 비율이 그 위에 걸린다.**
         # DB(`CM_DATAGEN_CONFIG.volume_pct`)가 있으면 그것이 이기고, 없으면
@@ -735,6 +776,7 @@ def cmd_run(args) -> int:
             scs, bad = gen.set_fault_rows(active)
             if bad:
                 _cancel_faults(conn, bad, _CANCEL_NOTE)
+            _live_truth(P, gen, scs)
 
             t0 = time.time()
             # **적재보다 먼저 파티션을 보장한다.** 생성기가 꺼져 있는 동안은
@@ -827,6 +869,23 @@ def cmd_pemfill(args) -> int:
         up_root, up_keep = _uplane_store(cfg, pem)
         cp_root, cp_keep = _cplane_store(cfg, pem)
 
+        # **백필은 요청 구간 전체를 남긴다** (2026-10-22).
+        #
+        # `raw_parquet.purge` 는 "디스크의 가장 늦은 분 − keep" 을 자른다.
+        # 실시간 틱에서는 그것이 곧 지금이라 10분 보관이 뜻대로 동작하지만,
+        # `pemfill` 은 과거 구간을 **앞에서 뒤로** 채우므로 마지막 분을 쓰는
+        # 순간 앞 `minutes − keep` 분이 통째로 사라진다. U-Plane 기본 보관이
+        # 10분이라 40분 백필에서 **30분치가 집계되기 전에 지워졌다** —
+        # `PM_COR_UPLANE_CELL_1M` 에 뒤 10분만 남고, U-12·U-29·U-23·U-25
+        # 탐지가 구조적으로 돌 수 없었다(에러는 나지 않는다).
+        #
+        # C-Plane 은 보관 1440분이라 같은 일이 40분 백필에서는 드러나지
+        # 않았을 뿐 조건은 같다 — 하루를 넘겨 채우면 똑같이 잘린다.
+        #
+        # **보관 자체를 끄지는 않는다.** 요청 구간 밖(이전 실행이 남긴 분)은
+        # 그대로 정리되어 디스크가 무한히 자라지 않는다.
+        up_keep, cp_keep = max(up_keep, minutes), max(cp_keep, minutes)
+
         # ── 그릴 수 있는 동으로 셀을 한정한다 ─────────────────────────────
         # 번들 경계 geojson 은 행정동, pemdb1 은 법정동이다. 매핑으로는 못 넘는
         # 차이라(`pemdb1.load_drawable_dongs` 참조) 셀 쪽을 좁힌다. 경로가
@@ -853,7 +912,9 @@ def cmd_pemfill(args) -> int:
             drawable=drawable,
             call_type_floor=pem.get("call_type_floor"),
             uplane_session=pem.get("uplane_session"),
+            baseline=pem.get("baseline"), fault=pem.get("fault"),
         )
+        gen.truth_path = _truth_path(pem, data_dir)
         mapped = [c for c in gen.cells if c.geo_status == "MAPPED"]
         print(f"▶ 셀 마스터 — {len(gen.cells):,}셀 / "
               f"eNB {len({c.enb_id for c in gen.cells}):,}개 "
@@ -885,8 +946,8 @@ def cmd_pemfill(args) -> int:
             # 상대 경로는 저장소 루트 기준으로 푼다 — cwd 에 따라 정답이
             # 엉뚱한 자리에 떨어지면 graphio 는 "ground_truth.json 없음" 으로
             # 조용히 채점을 건너뛴다.
-            truth_path = Path(args.truth_out or pem.get("truth_out")
-                              or (data_dir / "truth" / "ground_truth.json"))
+            truth_path = (Path(args.truth_out) if args.truth_out
+                          else _truth_path(pem, data_dir))
             if not truth_path.is_absolute():
                 truth_path = (HERE / truth_path).resolve()
             P.write_truth(truth_path, start, minutes, scs)
@@ -1018,6 +1079,7 @@ def _pem_follow(conn, P, gen, w, last_done, *, umaps: dict,
             scs, bad = gen.set_fault_rows(active)
             for fid in bad:
                 print(f"  ! fault {fid} 해석 실패 — 건너뛴다", flush=True)
+            _live_truth(P, gen, scs)
 
             t0 = time.time()
             minute_idx = int((pending - gen.anchor).total_seconds() // 60)
@@ -1168,8 +1230,11 @@ def main(argv=None) -> int:
     r.add_argument("--once", action="store_true", help="틱 1회만 수행하고 종료 (테스트용)")
     r.set_defaults(fn=cmd_run)
 
+    # `%` 는 **두 번 적는다.** argparse 가 help 문자열에 `% params` 를 걸므로
+    # 한 번만 적으면 `--help` 가 `ValueError: unsupported format character` 로
+    # 죽는다 — 그 명령뿐 아니라 **`--help` 전체**가 안 나온다(2026-10-22 발견).
     c = sub.add_parser("capacity",
-                       help="분당 생성 용량 측정 — 100% 기준을 정하는 근거")
+                       help="분당 생성 용량 측정 — 100%% 기준을 정하는 근거")
     c.add_argument("--config")
     c.add_argument("--steps", default="0.5,1,2,4",
                    help="측정할 배수 (기본 0.5,1,2,4 — 1 이 설정의 100%%)")
