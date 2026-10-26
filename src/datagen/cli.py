@@ -29,13 +29,15 @@ import argparse
 import json
 import os
 import random
+import sys
 import time
+import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import yaml
 
-from . import control, raw_parquet
+from . import control, raw_parquet, topo
 
 HERE = Path(__file__).resolve().parents[2]
 
@@ -296,7 +298,8 @@ def _live_truth(P, gen, scs: list) -> None:
         return
     gen._truth_key = key
     minutes = max(sc.start_minute + sc.duration for sc in scs) + 1
-    P.write_truth(path, gen.anchor, minutes, scs)
+    P.write_truth(path, gen.anchor, minutes, scs,
+                  getattr(gen, "cell_selection", None))
     print(f"  정답 기록 — {len(scs)}건 → {path}", flush=True)
 
 
@@ -571,6 +574,10 @@ def cmd_run(args) -> int:
             subscriber_pool=int(pem.get("subscriber_pool", 20_000)),
             success_only=bool(pem.get("success_only", True)),
             enb_limit=int(pem.get("enb_limit", 0)),
+            # 셀 좌표 결손을 **생성기가 채운다** — 수동 백필
+            # (`topo fill-coords`)을 대체한다. 의도된 미매핑 eNB 는
+            # 건드리지 않는다(`topo.coord_gaps`).
+            ensure_coords=True,
             drawable=drawable,
             # 희소 Call Type 바닥. `None` 이면 `Distributions.CALL_TYPE_FLOOR`
             # 기본값(0.3%)을 쓴다. 0 을 주면 실측 분포 그대로 돈다.
@@ -909,6 +916,8 @@ def cmd_pemfill(args) -> int:
                           else bool(pem.get("success_only", True))),
             enb_limit=(args.enb_limit if args.enb_limit is not None
                        else int(pem.get("enb_limit", 0))),
+            # cmd_run 과 같다 — 생성 주체가 좌표를 만든다
+            ensure_coords=True,
             drawable=drawable,
             call_type_floor=pem.get("call_type_floor"),
             uplane_session=pem.get("uplane_session"),
@@ -950,7 +959,8 @@ def cmd_pemfill(args) -> int:
                           else _truth_path(pem, data_dir))
             if not truth_path.is_absolute():
                 truth_path = (HERE / truth_path).resolve()
-            P.write_truth(truth_path, start, minutes, scs)
+            P.write_truth(truth_path, start, minutes, scs,
+                          getattr(gen, "cell_selection", None))
             print(f"▶ 정답 기록 — {truth_path}")
 
         umaps = P.uplane_specs(gen.series)
@@ -1154,6 +1164,292 @@ def _pem_follow(conn, P, gen, w, last_done, *, umaps: dict,
         print("\n틱 루프 종료", flush=True)
 
 
+def _pad(text: str, width: int) -> str:
+    """표 정렬 — **한글은 두 칸을 차지한다.** `f"{s:22}"` 는 코드포인트를 세므로
+    한글 라벨이 섞인 열이 어긋나고, 그러면 숫자 열을 잘못 읽는다."""
+    w = sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
+    return text + " " * max(1, width - w)
+
+
+def _topo_gate(conn, locale: str) -> bool:
+    """파괴적 경로의 선행 조건 — **`restore` 가 실제로 넣을 수 있는가.**
+
+    **파일의 존재는 복귀를 뜻하지 않는다.** 전에는 `dump_exists()` 가
+    게이트였는데, 그때 그 JSON 을 DB 로 되넣는 코드가 없었다 — 게이트가
+    통과시키는 조건이 "되돌릴 수 있다"가 아니라 "파일 4개가 존재한다"였고
+    그것은 안심만 준다. 그래서 **읽어서 넣을 수 있는지**를 묻는다
+    (`topo.restore(dry_run=True)` 는 아무것도 쓰지 않는다).
+
+    실패 사유를 테이블별로 찍는다 — "사본이 없다" 하나로는 넷 중 어느
+    파일이 반쪽인지 알 수 없고, 그러면 사람은 전부 다시 뜬다.
+    """
+    rep = topo.restore(conn, locale, dry_run=True)
+    if rep["ok"]:
+        return True
+    print(f"✗ 복귀 경로가 서 있지 않다: {topo.LOCALE_DIR / locale}", file=sys.stderr)
+    for info in rep["tables"].values():
+        if info.get("error"):
+            print(f"    {info['table']:22} {info['error']}", file=sys.stderr)
+    print(f"  먼저 떠라 — python -m datagen topo dump {locale}", file=sys.stderr)
+    return False
+
+
+def _limit_advice(rep: dict) -> str:
+    """대역 eNB 가 선택에서 빠졌을 때 쓰는 한 줄 — **이제는 버그 신호다.**
+
+    `pemdb1._pick_enbs` 가 `topo` 대역을 **한도 밖에서 항상 포함**하므로
+    (2026-10-26), 후보에 들어온 대역 eNB 가 선택에서 빠지는 일은 없다.
+    그래도 이 가지를 남기는 이유는, 빠졌다면 그것이 **include 절이 깨졌거나
+    `_filter_drawable` 이 그 셀을 전부 버렸다**는 뜻이고 둘 다 조용히
+    일어나기 때문이다.
+
+    **한도를 올리라는 안내도, `--cells` 를 늘리라는 안내도 하지 않는다.**
+    전자는 실측 23,586 이라 한도가 아니라 해제이고, 후자는 선택 규칙을
+    통과하려고 **자산 대장을 부풀리는 것**이다(시군구마다 37셀 eNB 는 거짓
+    마스터이고, 기존 eNB 를 밀어내 `ground_truth` 정답도 깬다).
+    """
+    return (f"`_pick_enbs` 의 topo 대역 include 가 동작하지 않았다 "
+            f"(한도 {rep['enb_limit']}). 대역 판정(`topo.in_new_band`)과 "
+            f"`_filter_drawable` 이 그 셀을 버렸는지를 본다 — "
+            f"한도를 올려 해결하지 않는다")
+
+
+def _topo_xw_path_opt(cfg: dict, override: str | None) -> Path | None:
+    """crosswalk 경로 — **`pemfill` 과 같은 키를 읽는다**(`pemdb1.geo_crosswalk`).
+
+    여기서 다른 키를 보거나 기본값을 지어내면 `topo` 가 놓은 동과 `pemfill`
+    이 그릴 수 있다고 믿는 동이 **다른 집합**이 되고, 에러 없이 셀이 버려진다.
+
+    설정에 없으면 `None` 이다 — `pemfill` 도 그 경우 `drawable=None` 으로
+    전량을 후보로 둔다. 조회(`list`)는 그 상태를 그대로 대조해야 한다.
+    """
+    raw = override or (cfg.get("pemdb1") or {}).get("geo_crosswalk")
+    if not raw:
+        return None
+    path = Path(str(raw))
+    return path if path.is_absolute() else (HERE / path).resolve()
+
+
+def _topo_xw_path(cfg: dict, override: str | None) -> Path:
+    """위와 같지만 **없으면 멈춘다.** 생성(`seed-enb`·`fill-coords`)은 그릴 수
+    있는 동만 써야 하므로, 집합을 모르는 채 놓으면 `pemfill` 이 조용히 버린다."""
+    path = _topo_xw_path_opt(cfg, override)
+    if path is None:
+        raise RuntimeError(
+            "pemdb1.geo_crosswalk 가 설정에 없다 — topo 는 그릴 수 있는 동만 쓴다")
+    return path
+
+
+def cmd_topo(args) -> int:
+    """마스터 토폴로지 — 1회성 관리 커맨드. 상주 경로(`pemfill`)와 분리돼 있다.
+
+    **`pemfill` 과 함께 돌리지 않는다.** 그쪽이 마스터를 읽어 셀 목록을
+    만드는 중에 이쪽이 행을 넣으면, 같은 분의 생성과 집계가 서로 다른 셀
+    집합을 보게 된다 — 에러가 아니라 값이 어긋난다.
+    """
+    cfg = load_cfg(args.config)
+    conn = topo.connect(cfg, args.database)
+    try:
+        act = args.action
+
+        if act == "list":
+            info = topo.survey(conn)
+            a = info.pop("_active")
+            print("▶ 마스터 현황")
+            for key, v in info.items():
+                miss = v.get("no_coord")
+                tail = "" if miss is None else f"  좌표 없음 {miss:,}"
+                print(f"  {key:8} {v['table']:22} {v['rows']:>9,}{tail}")
+            # **활성 셀을 따로 센다.** 마스터 44만 중 트래픽이 붙는 것만
+            # 지도·탐지에 나타나고, 채울 가치가 있는 자리도 그쪽이다.
+            print(f"\n▶ 활성 셀 (1분 집계에 나타나는 것) — eNB {a['enbs']:,}")
+            print(f"  셀 {a['cells']:,}  ·  위치 마스터에 행 없음 {a['unmapped']:,}")
+            if a["unmapped"]:
+                # **생성기가 만든다** — `topo fill-coords` 는 세는 커맨드다
+                # (2026-10-26 이동). 그리고 804 를 전부 채우지 않는다:
+                # 좌표 없는 eNB 는 불변규칙 12 검증용이다.
+                print("  → 좌표는 생성기가 만든다 (매 틱 ·"
+                      " load_cells(ensure_coords=True))")
+                print("     그중 몇 개가 대상이고 몇 개가 의도된 미매핑인지 —"
+                      " `topo fill-coords`")
+
+            # **마스터에 있는 것과 시뮬레이션이 쓰는 것은 다르다.**
+            # `_pick_enbs` 가 셀 수 내림차순으로 `enb_limit` 칸만 고르므로,
+            # `topo` 가 놓은 3셀 eNB 는 꼬리에 붙어 **에러 없이 빠진다.**
+            # 그 상태가 안 보이는 것이 이 커맨드를 고친 이유다.
+            pem = cfg.get("pemdb1") or {}
+            limit = int(pem.get("enb_limit", 0))
+            rep = topo.pick_report(
+                conn, _topo_xw_path_opt(cfg, args.geo_crosswalk), limit)
+            print(f"\n▶ 시뮬레이션 선택 (pemdb1.enb_limit = {limit or '0 → 전량'}"
+                  f" · load_cells 실측)")
+            others = rep["candidates"] - rep["band_master"]
+            o_pick = rep["picked_enbs"] - rep["band_picked"]
+            print(f"  {_pad('대역', 26)}{'마스터':>7} {'선택':>8}  통과")
+            print(f"  {_pad('기존 (topo 대역 밖)', 26)}{others:>8,} "
+                  f"{o_pick:>8,}  {'✓' if o_pick else '✗'}")
+            # 마스터에 0 개면 통과/탈락을 말할 대상이 없다 — `✗` 로 적으면
+            # "넣었는데 빠졌다"로 읽힌다(불변규칙 17 과 같은 결의 혼동).
+            mark = ("—" if not rep["band_master"]
+                    else "✓" if not rep["band_missing"] else "✗")
+            print(f"  {_pad(f'topo ({topo.NEW_BAND[0]}~{topo.NEW_BAND[1]})', 26)}"
+                  f"{rep['band_master']:>8,} {rep['band_picked']:>8,}  {mark}")
+            print(f"  후보 셀 {rep['candidate_cells']:,} → 선택 셀 "
+                  f"{rep['picked_cells']:,}")
+            if rep["band_missing"]:
+                m = rep["band_missing"]
+                print(f"  ✗ topo eNB {len(m)}개가 **트래픽을 받지 못한다** — "
+                      f"마스터에만 있고 시뮬레이션에는 없다")
+                print(f"    {', '.join(m[:10])}{' …' if len(m) > 10 else ''}")
+                print(f"    → {_limit_advice(rep)}")
+            return 0
+
+        if act == "restore":
+            # **기본이 점검이다.** `--write` 를 붙여야 실제로 넣는다 — 이
+            # 경로는 `wipe` 를 먼저 하므로, 못 넣을 상태에서 진행하면
+            # "지웠는데 못 넣는" 상태가 된다(`topo.restore` 가 그래서 ok 가
+            # 아니면 쓰지 않는다).
+            rep = topo.restore(conn, args.locale, dry_run=not args.write)
+            print(f"▶ restore{'' if args.write else ' (점검만)'} — "
+                  f"{topo.LOCALE_DIR / args.locale}")
+            for info in rep["tables"].values():
+                tail = info.get("error") or (
+                    f"{info.get('rows', 0):,}행"
+                    + (f" → 적재 {info['inserted']:,}" if "inserted" in info else "")
+                    + (f" · 사본에만 있는 컬럼 제외 {', '.join(info['dropped'])}"
+                       if info.get("dropped") else ""))
+                print(f"  {info['table']:22} {tail}")
+            if not rep["ok"]:
+                print("✗ 복귀 경로가 서 있지 않다 — 위 사유를 먼저 고친다",
+                      file=sys.stderr)
+            return 0 if rep["ok"] else 1
+
+        if act == "dump":
+            counts = topo.dump(conn, args.locale)
+            print(f"▶ {topo.LOCALE_DIR / args.locale} 로 떠냈다 — **추적 밖이다**")
+            for key in topo.DUMP_TABLES:
+                path = topo.dump_path(args.locale, key)
+                mb = path.stat().st_size / 1e6
+                print(f"  {path.name:30} {counts[topo.TABLES[key][0]]:>9,}행"
+                      f"  {mb:7.1f} MB")
+            print("  되돌릴 때 — python -m datagen topo restore "
+                  f"{args.locale} [--write]")
+            return 0
+
+        if act == "add":
+            table, _ = topo.TABLES[args.target]
+            row = dict(kv.split("=", 1) for kv in args.set)
+            n = topo.insert_rows(conn, table, [row])
+            print(f"▶ {table} +{n}행  {row}")
+            return 0
+
+        if act == "rm":
+            table, keys = topo.TABLES[args.target]
+            if args.all:
+                # **`cellmap` 은 받지 않는다.** `topo` 는 위치 마스터를 다루고
+                # `CL_CELL_MAP` 574,404행은 **셀 대장**이다. 전량 삭제할 이유가
+                # 없고 `DUMP_TABLES` 에도 없어서 지우면 되돌릴 원본이 아예
+                # 없다. 전에는 게이트(`dump_exists`)가 `CM_*` 네 파일만 보고
+                # 이 삭제를 통과시켰다.
+                if args.target not in topo.WIPEABLE:
+                    print(f"✗ {table} 는 전체 삭제 대상이 아니다.\n"
+                          "  `topo` 는 위치 마스터를 다룬다 — 셀 대장을 통째로"
+                          " 지울 이유가 없고 복귀 사본도 없다.\n"
+                          f"  단건은 된다 — topo rm {args.target} --key …",
+                          file=sys.stderr)
+                    return 1
+                # 복귀 사본이 **실제로 넣을 수 있는 상태**여야 한다.
+                if not _topo_gate(conn, args.locale):
+                    return 1
+                want = f"{table} 전체 삭제"
+                print(f"  {table} 를 통째로 지운다. 되돌리려면 "
+                      f"`topo restore {args.locale}` 를 돈다.")
+                if input(f"  확인하려면 '{want}' 를 그대로 입력: ").strip() != want:
+                    print("취소했다.")
+                    return 1
+                print(f"▶ {table} -{topo.wipe(conn, table):,}행")
+                return 0
+            if not args.key:
+                print(f"✗ --key 가 필요하다 (키 컬럼: {', '.join(keys)})", file=sys.stderr)
+                return 1
+            cond = dict(kv.split("=", 1) for kv in args.key)
+            where = " AND ".join(f"`{k}` = %s" for k in cond)
+            with conn.cursor() as cur:
+                n = cur.execute(f"DELETE FROM `{table}` WHERE {where}",
+                                list(cond.values()))
+            conn.commit()
+            print(f"▶ {table} -{n}행  {cond}")
+            return 0
+
+        xw = _topo_xw_path(cfg, args.geo_crosswalk)
+
+        if act == "seed-enb":
+            r = topo.seed_enb(conn, xw, per_gu=args.per_gu,
+                              cells_per_enb=args.cells, spread_km=args.spread_km,
+                              seed=int(cfg["generate"].get("seed", 20260903)),
+                              dry_run=args.dry_run)
+            print(f"▶ seed-enb{' (dry-run)' if args.dry_run else ''} — "
+                  f"시군구 {r['gus']} · eNB {r['enbs']} · 셀 {r['cells']}")
+            print(f"  분포 패턴: {r['patterns']}  (POINT 가 아니면 spread-km 를 의심한다)")
+            if r["gus_without_drawable_dong"]:
+                # **조용히 넘기지 않는다.** 이 시군구들은 `DONG_ID` 를 비워야
+                # 하고, 그 컬럼이 NOT NULL 이라 적재에서 빠진다. 0 으로 채우면
+                # `_filter_drawable` 이 버려서 "트래픽 없음"으로만 보인다.
+                g = r["gus_without_drawable_dong"]
+                print(f"  ⚠ 그릴 수 있는 동이 없는 시군구 {len(g)}곳 — "
+                      f"셀 {r['skipped_no_dong']}개를 넣지 않았다")
+                print(f"    {', '.join(str(x) for x in g[:20])}"
+                      f"{' …' if len(g) > 20 else ''}")
+            # **적재 규모 판단은 사용자 몫이므로 설정을 고치지 않는다.**
+            # 대신 얼마여야 하는지 말한다 — 이 수를 모르면 장비를 넣고도
+            # 트래픽이 0 인 채로 남는다(위 `list` 의 선택 열과 같은 사실).
+            if r["keys"]:
+                lim = int((cfg.get("pemdb1") or {}).get("enb_limit", 0))
+                rep = topo.pick_report(conn, xw, lim, extra_cells=r["keys"])
+                if rep["band_missing"]:
+                    print(f"  ✗ 이 eNB {len(rep['band_missing'])}개가 "
+                          f"선택되지 않았다 — **include 가 깨졌다**")
+                    print(f"    → {_limit_advice(rep)}")
+                else:
+                    # `enb_limit` 과 무관하다는 것이 요점이다 — 그 수를 보고
+                    # "60 이라 괜찮았다"로 읽으면, 한도를 줄였을 때 커버리지가
+                    # 따라 사라진다고 오해한다.
+                    print(f"  ✓ eNB {rep['band_picked']}개가 선택된다 — "
+                          f"`enb_limit`({lim}) 과 **무관하다** "
+                          f"(`_pick_enbs` 가 topo 대역을 한도 밖에서 포함한다)")
+                    print(f"  트래픽 가중은 기존의 {topo.TOPO_WEIGHT}배다 — "
+                          f"커버리지는 받고 기존 eNB 의 1분 창 표본은 지킨다")
+            return 0
+
+        if act == "fill-coords":
+            # **점검 전용이다** (2026-10-26). 적재는 생성기가 한다 —
+            # `cmd_run`·`cmd_pemfill` 이 `load_cells(ensure_coords=True)` 로
+            # 매 틱 채운다. 수동 커맨드로 두면 사람이 기억해서 쳐야 하고
+            # 현장에서는 아무도 치지 않으며, **적재 경로가 둘이면 어느 쪽이
+            # 넣었는지 모른다.**
+            #
+            # 생성기와 **같은 인자**를 준다(crosswalk · enb_limit). 안 주면
+            # 후보 집합이 달라져 점검이 다른 수를 말한다 — 실제로 한 번
+            # 768/36 대 696/108 로 갈렸다.
+            pem = cfg.get("pemdb1") or {}
+            r = topo.fill_coords(conn, xw, int(pem.get("enb_limit", 0)))
+            print(f"▶ fill-coords (점검) — 선택 셀 {r['cells']:,} 중 좌표 없음 "
+                  f"{r['targets']:,}")
+            print(f"  생성 대상 {r['fillable']}셀 / eNB {r['fillable_enbs']} — "
+                  f"좌표 있는 eNB 의 섹터 결손")
+            print(f"  건드리지 않는 의도된 미매핑 {r['intended_unmapped']}셀 / "
+                  f"eNB {r['intended_enbs']} — 좌표 없는 eNB")
+            print("    → `_pick_enbs` 가 불변규칙 12(H-07 · UNMAPPED 패널)"
+                  " 검증용으로 일부러 남긴다")
+            print("  적재는 생성기가 한다 — python -m datagen run (매 틱)")
+            return 0
+
+        print(f"✗ 모르는 action: {act}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+
+
 def cmd_ui(args) -> int:
     """제어 UI 기동 — 실제 구현은 datagen.ui 에 있다 (import 는 지연시킨다)."""
     from .ui import main as ui_main
@@ -1243,6 +1539,37 @@ def main(argv=None) -> int:
     c.add_argument("--target", type=float, default=20.0,
                    help="생성에 허용할 초 (기본 20 = 60초 틱 예산의 1/3)")
     c.set_defaults(fn=cmd_capacity)
+
+    # 마스터 토폴로지 — **1회성이다.** `pemfill`·`run` 은 상주하며 마스터를
+    # 읽기만 하고, 쓰기를 그쪽에 넣으면 gen 이 둘 떴을 때 마스터가 흔들린다.
+    t = sub.add_parser("topo", help="마스터 토폴로지 관리 — 행정구역·장비·셀 (1회성)")
+    t.add_argument("action",
+                   choices=["list", "add", "rm", "dump", "restore", "seed-enb",
+                            "fill-coords"])
+    t.add_argument("target", nargs="?", choices=list(topo.TABLES),
+                   help="add/rm 의 대상 테이블")
+    t.add_argument("--config")
+    t.add_argument("--database", help="대상 DB (기본 설정 pemdb1.database)")
+    t.add_argument("--locale", default="kr",
+                   help="dump/restore/rm --all 이 쓰는 사본 이름")
+    t.add_argument("--write", action="store_true",
+                   help="restore: 실제로 넣는다 (기본은 점검만)")
+    t.add_argument("--set", action="append", default=[], metavar="COL=VAL",
+                   help="add: 넣을 컬럼 (여러 번)")
+    t.add_argument("--key", action="append", default=[], metavar="COL=VAL",
+                   help="rm: 지울 행의 키 (여러 번 · AND)")
+    t.add_argument("--all", action="store_true",
+                   help="rm: 테이블 전체 — 확인 입력 + locale 사본을 요구한다")
+    t.add_argument("--per-gu", type=int, default=1,
+                   help="seed-enb: 시군구당 eNB 수 (최대 2 — ENB_ID 대역 제약)")
+    t.add_argument("--cells", type=int, default=3, help="seed-enb: eNB 당 셀 수")
+    # 기본 0.35 는 graphio `detector.py:1512` 의 POINT 임계 0.9km 에서 나왔다.
+    # 올리면 같은 eNB 가 CLUSTER·SCATTER 로 보이고 `geo_hit` 채점이 흔들린다.
+    t.add_argument("--spread-km", type=float, default=0.35,
+                   help="eNB 내부 좌표 분산 반경 (기본 0.35 — POINT 임계 0.9 의 안쪽)")
+    t.add_argument("--geo-crosswalk", help="행정코드 crosswalk (기본 설정 pemdb1.geo_crosswalk)")
+    t.add_argument("--dry-run", action="store_true", help="적재하지 않고 결과만 센다")
+    t.set_defaults(fn=cmd_topo)
     args = ap.parse_args(argv)
     return args.fn(args)
 

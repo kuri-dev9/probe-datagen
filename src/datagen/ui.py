@@ -24,7 +24,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from . import raw_parquet
+from . import raw_parquet, topo
 from .generator import diurnal_factor
 from .pemdb1 import BLOCKABLE_SERIES, CPLANE_ROOT_DEFAULT, CPLANE_SERIES
 from .control import (FAULT_SELECT, KINDS, T_CONFIG, T_FAULT, T_HISTORY,
@@ -661,6 +661,237 @@ def api_cancel_fault(fault_id: int):
     return {"ok": True}
 
 
+
+# ── 마스터 토폴로지 (`/topo`) ───────────────────────────────────────────────
+#
+# **CLI(`python -m datagen topo`)와 같은 함수를 부른다.** 화면이 자기 SQL 을
+# 쓰면 한쪽만 고쳐질 때 두 경로가 다른 마스터를 만들고, 그것은 에러가 아니라
+# 값이 어긋나는 종류다(`topo.py` 머리말).
+#
+# **파괴적 경로는 화면이 CLI 보다 느슨하지 않다.** `rm --all` 은 CLI 와 똑같이
+# `locale/<나라>` 사본을 선행 조건으로 요구하고, 여기서는 **실적재 전부**
+# (`seed-enb`·`fill-coords`)에도 같은 조건을 건다 — 화면은 눌리기 쉽고
+# `pemdb6` 가 그대로 운영이라 되돌릴 원본이 없다. 더 엄한 쪽으로만 다르다.
+
+
+def _topo_xw():
+    """crosswalk 경로 — **`pemfill` 과 같은 키**(`pemdb1.geo_crosswalk`).
+
+    다른 키를 보거나 기본값을 지어내면 화면이 놓은 동과 생성기가 그릴 수
+    있다고 믿는 동이 다른 집합이 되고, 에러 없이 셀이 버려진다. 설정에
+    없으면 `None` 이고 그 경우 `pemfill` 도 전량을 후보로 둔다.
+    """
+    raw = _pem_cfg().get("geo_crosswalk")
+    if not raw:
+        return None
+    q = Path(str(raw))
+    return q if q.is_absolute() else (HERE / q).resolve()
+
+
+def _require_dump(conn, locale: str) -> None:
+    """쓰기 전 공통 관문 — **`restore` 가 실제로 넣을 수 있는가.**
+
+    **파일의 존재는 복귀를 뜻하지 않는다.** 전에는 `topo.dump_exists()` 가
+    관문이었는데, 그때 그 JSON 을 DB 로 되넣는 코드가 없었다 — 통과 조건이
+    "되돌릴 수 있다"가 아니라 "파일 4개가 존재한다"였고 그것은 안심만 준다.
+    지금은 **읽어서 넣을 수 있는지**를 묻는다(`dry_run=True` 는 쓰지 않는다).
+
+    409 로 돌려 화면이 "무엇을 먼저 해야 하는지"를 말하게 한다 — 그냥 막으면
+    버튼이 안 먹는 것처럼 보인다. 실패한 테이블을 함께 실어, 넷 중 어느
+    사본이 반쪽인지 사람이 알 수 있게 한다.
+    """
+    rep = topo.restore(conn, locale, dry_run=True)
+    if rep["ok"]:
+        return
+    bad = {i["table"]: i["error"] for i in rep["tables"].values() if i.get("error")}
+    raise HTTPException(409, f"복귀 경로가 서 있지 않다: "
+                             f"{topo.LOCALE_DIR / locale} — 먼저 `사본 뜨기`를"
+                             f" 누른다 · {bad}")
+
+
+@app.get("/api/topo")
+def api_topo():
+    """마스터 현황 + **시뮬레이션 선택 통과 여부**.
+
+    둘을 한 응답에 담는 이유: "마스터에 행이 있다"와 "그 eNB 가 트래픽을
+    받는다"는 **다른 사실**이고, 화면에서 떨어뜨려 두면 사람이 전자만 보고
+    "넣었다"고 판단한다. 실측으로 3셀 eNB 는 셀 수 내림차순 22,557등이라
+    `enb_limit` 축으로는 들어가지 못했다 — 지금은 `_pick_enbs` 가 대역을
+    한도 밖에서 포함하므로 통과해야 하고, 통과하지 않으면 그것이 버그 신호다.
+    """
+    conn = _connect()
+    try:
+        info = topo.survey(conn)
+        active = info.pop("_active")
+        xw = _topo_xw()
+        limit = int(_pem_cfg().get("enb_limit", 0))
+        pick = topo.pick_report(conn, xw, limit)
+        drawable = topo.drawable_dongs(xw) if xw else {}
+        gus = topo.gu_points(conn)
+        no_dong = [g for _c, g, _n, _a, _o in gus
+                   if not drawable.get((_c, g))]
+        gate = topo.restore(conn, "kr", dry_run=True)
+    finally:
+        conn.close()
+    return {
+        "tables": info, "active": active, "pick": pick,
+        "enb_limit": limit, "topo_weight": topo.TOPO_WEIGHT,
+        "band": list(topo.NEW_BAND),
+        "crosswalk": str(xw) if xw else None,
+        # 좌표가 있어 seed 대상이 되는 시군구와, 그중 **그릴 수 있는 동이
+        # 없어 `DONG_ID` 를 비울 수밖에 없는** 곳. 0 으로 채우면
+        # `_filter_drawable` 이 조용히 버린다(불변규칙 12·17).
+        "seed_gus": len(gus), "gus_without_drawable_dong": len(no_dong),
+        # **`exists` 는 표시용이고 `restorable` 이 관문이다.** 둘을 함께
+        # 내리는 이유: 파일은 있는데 못 읽는 상태(중간에 끊긴 gzip)를
+        # 화면이 "사본 없음"으로만 말하면 사람이 또 뜬다.
+        "dump": {"locale": "kr", "exists": topo.dump_exists("kr"),
+                 "restorable": gate["ok"], "dir": str(topo.LOCALE_DIR / "kr"),
+                 "suffix": topo.DUMP_SUFFIX,
+                 "files": [{"table": i["table"], "rows": i.get("rows"),
+                            "error": i.get("error")}
+                           for i in gate["tables"].values()]},
+    }
+
+
+class TopoReq(BaseModel):
+    #: **기본이 `True` 다.** 화면에서 실행 버튼을 잘못 눌러도 세어 보기만
+    #: 한다 — 실적재는 "실제로 넣기"를 명시적으로 켜야 한다.
+    dry_run: bool = True
+    locale: str = "kr"
+    per_gu: int = 1
+    cells: int = 3
+    spread_km: float = 0.35
+    #: `add` 용 — 넣을 컬럼. DDL 에 없는 키는 `insert_rows` 가 빼고 알린다.
+    row: dict | None = None
+    #: `rm` 용 — 지울 행의 키(AND). `all=True` 면 무시된다.
+    key: dict | None = None
+    all: bool = False
+    #: `rm --all` 확인 문구. CLI 의 타이핑 확인과 같은 자리다.
+    confirm: str | None = None
+    target: str = "cell"
+
+
+@app.post("/api/topo/dump")
+def api_topo_dump(req: TopoReq):
+    """현 마스터를 `data/pemdb1/locale/<나라>/` 로 떠낸다 — **복귀의 유일한 보장**."""
+    conn = _connect()
+    try:
+        counts = topo.dump(conn, req.locale)
+    finally:
+        conn.close()
+    return {"ok": True, "dir": str(topo.LOCALE_DIR / req.locale), "counts": counts}
+
+
+@app.post("/api/topo/restore")
+def api_topo_restore(req: TopoReq):
+    """사본을 DB 로 되넣는다. **`dry_run` 기본 `True` 라 점검만 한다.**"""
+    conn = _connect()
+    try:
+        return topo.restore(conn, req.locale, dry_run=req.dry_run)
+    finally:
+        conn.close()
+
+
+@app.post("/api/topo/seed-enb")
+def api_topo_seed(req: TopoReq):
+    xw = _topo_xw()
+    if xw is None:
+        raise HTTPException(400, "pemdb1.geo_crosswalk 가 설정에 없다 —"
+                                 " 그릴 수 있는 동을 모르는 채로 놓지 않는다")
+    conn = _connect()
+    try:
+        if not req.dry_run:
+            _require_dump(conn, req.locale)
+        r = topo.seed_enb(conn, xw, per_gu=req.per_gu, cells_per_enb=req.cells,
+                          spread_km=req.spread_km,
+                          seed=int(_cfg()["generate"].get("seed", 20260903)),
+                          dry_run=req.dry_run)
+        # 놓은 eNB 가 **실제로 선택되는지** 같은 응답에 담는다. 떨어뜨려
+        # 두면 "행은 생겼는데 트래픽이 0" 인 상태가 화면에서 안 보인다.
+        pick = topo.pick_report(conn, xw, int(_pem_cfg().get("enb_limit", 0)),
+                                extra_cells=r["keys"]) if r["keys"] else None
+    finally:
+        conn.close()
+    r.pop("keys", None)
+    return {"ok": True, "dry_run": req.dry_run, "result": r, "pick": pick}
+
+
+@app.post("/api/topo/fill-coords")
+def api_topo_fill(req: TopoReq):
+    """좌표 결손 **점검** — 적재 경로가 아니다 (2026-10-26).
+
+    적재는 생성기가 한다 — `cmd_run`·`cmd_pemfill` 이
+    `load_cells(ensure_coords=True)` 로 매 틱 채운다
+    (`topo.ensure_sector_coords`). 화면에 버튼으로 두면 사람이 눌러야 하고,
+    **적재 경로가 둘이면 어느 쪽이 넣었는지 모른다.**
+
+    세어 주는 것이 둘이다 — 좌표 있는 eNB 의 **섹터 결손**(생성기가 채운다)
+    과 **좌표 없는 eNB**(`_pick_enbs` 가 불변규칙 12 검증용으로 일부러
+    남긴다 — 채우지 않는다). 섞어 보면 "결손 804" 로 읽힌다.
+    """
+    conn = _connect()
+    try:
+        # 생성기와 **같은 인자**다 — crosswalk·`enb_limit` 를 빼면 후보
+        # 집합이 달라져 점검이 다른 수를 말한다(실측 768/36 대 696/108).
+        r = topo.fill_coords(conn, _topo_xw(),
+                             int(_pem_cfg().get("enb_limit", 0)))
+    finally:
+        conn.close()
+    return {"ok": True, "check_only": True, "result": r}
+
+
+@app.post("/api/topo/add")
+def api_topo_add(req: TopoReq):
+    if req.target not in topo.TABLES:
+        raise HTTPException(400, f"대상은 {', '.join(topo.TABLES)} 다")
+    if not req.row:
+        raise HTTPException(400, "넣을 컬럼이 비어 있다")
+    table, _ = topo.TABLES[req.target]
+    conn = _connect()
+    try:
+        _require_dump(conn, req.locale)
+        n = topo.insert_rows(conn, table, [req.row])
+    finally:
+        conn.close()
+    return {"ok": True, "table": table, "rows": n}
+
+
+@app.post("/api/topo/rm")
+def api_topo_rm(req: TopoReq):
+    if req.target not in topo.TABLES:
+        raise HTTPException(400, f"대상은 {', '.join(topo.TABLES)} 다")
+    table, keys = topo.TABLES[req.target]
+    if req.all and req.target not in topo.WIPEABLE:
+        # **`cellmap` 은 받지 않는다** — `topo` 는 위치 마스터를 다루고
+        # `CL_CELL_MAP` 574,404행은 **셀 대장**이다. 전량 삭제할 이유가 없고
+        # `DUMP_TABLES` 에도 없어서 지우면 되돌릴 원본이 아예 없다. 전에는
+        # 관문이 `CM_*` 네 파일만 보고 이 삭제를 통과시켰다.
+        raise HTTPException(400, f"{table} 는 전체 삭제 대상이 아니다 — 셀 "
+                                 "대장을 통째로 지울 이유가 없고 복귀 사본도 "
+                                 "없다. 단건 삭제는 된다")
+    conn = _connect()
+    try:
+        _require_dump(conn, req.locale)
+        if req.all:
+            # CLI 와 **같은 문구**를 요구한다. 화면의 확인 입력을 생략하면
+            # 버튼 하나로 수십만 행이 사라진다.
+            want = f"{table} 전체 삭제"
+            if (req.confirm or "").strip() != want:
+                raise HTTPException(400, f"확인 문구가 다르다 — '{want}' 를 "
+                                         "그대로 입력한다")
+            return {"ok": True, "table": table, "deleted": topo.wipe(conn, table)}
+        if not req.key:
+            raise HTTPException(400, f"지울 행의 키가 필요하다: {', '.join(keys)}")
+        where = " AND ".join(f"`{k}` = %s" for k in req.key)
+        with conn.cursor() as cur:
+            n = cur.execute(f"DELETE FROM `{table}` WHERE {where}",
+                            list(req.key.values()))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "table": table, "deleted": n}
+
 # ── 화면 ────────────────────────────────────────────────────────────────────
 
 # 운영자용 단일 페이지. 상태 바·주입 폼은 즉시 그리고, 목록·슬롯은 5초 폴링 —
@@ -811,7 +1042,7 @@ _HTML = """<!doctype html>
 </style>
 </head>
 <body>
-<h1>probe-datagen 장애 주입 제어<small>생성 데몬이 1분 틱으로 반영한다</small></h1>
+<h1>probe-datagen 장애 주입 제어<small>생성 데몬이 1분 틱으로 반영한다 · <a href="/topo" style="color:var(--accent)">마스터 토폴로지</a></small></h1>
 
 <!-- 상태바 — **오늘만 본다. 항상 실시간이다** (2026-10-15 사람 지시).
      날짜 이동과 실시간 토글을 뺐다: 과거를 볼 일이 없고, 끌 이유도 없다.
@@ -1737,6 +1968,313 @@ def index():
     # 라벨 정본은 파이썬 쪽 KIND_LABELS 하나 — HTML 에 중복 정의하지 않는다
     return _HTML.replace("__KIND_LABELS__", json.dumps(KIND_LABELS, ensure_ascii=False))
 
+
+
+# ── 마스터 토폴로지 화면 (`/topo`) ──────────────────────────────────────────
+#
+# **별도 페이지다** (사람 지시 2026-10-26: "기존 UI 에 별도 화면으로 제어").
+# 장애 주입 화면과 섞지 않는 이유: 그쪽은 **상태를 주입**하고(데몬이 1분마다
+# 읽어 되돌린다) 이쪽은 **마스터를 영구히 바꾼다.** 같은 화면에 두면 "취소"가
+# 한쪽에만 있다는 것이 보이지 않는다.
+_HTML_TOPO = """<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>probe-datagen 마스터 토폴로지</title>
+<style>
+  :root { --bg:#14181f; --panel:#1d242e; --line:#2c3542; --fg:#d7dde6;
+          --dim:#8a94a3; --accent:#4e9af1; --red:#e5534b; --yellow:#d8a22a;
+          --green:#4caf7d; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:20px; background:var(--bg); color:var(--fg);
+         font:14px/1.5 "Pretendard","Apple SD Gothic Neo","Malgun Gothic",sans-serif; }
+  a { color:var(--accent); }
+  h1 { font-size:17px; margin:0 0 14px; }
+  h1 small { color:var(--dim); font-weight:normal; margin-left:8px; }
+  h2 { font-size:14px; margin:0 0 10px; }
+  h3 { margin:0 0 8px; font-size:13px; font-weight:600; }
+  h3 small, h2 small { font-weight:400; color:var(--dim); margin-left:4px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+           padding:14px; margin-bottom:14px; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  @media (max-width:980px) { .grid2 { grid-template-columns:1fr; } }
+  .sect { margin-top:16px; border-top:1px solid var(--line); padding-top:14px; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .dim { color:var(--dim); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); }
+  th { color:var(--dim); font-weight:600; }
+  td.n, th.n { text-align:right; font-variant-numeric:tabular-nums; }
+  button { background:var(--accent); color:#0d1117; border:0; border-radius:6px;
+           padding:6px 12px; font-weight:600; cursor:pointer; }
+  button.ghost { background:var(--panel); color:var(--fg);
+                 border:1px solid var(--line); font-weight:400; }
+  button.danger { background:var(--red); color:#fff; }
+  button:disabled { opacity:.4; cursor:default; }
+  input, select { background:#121720; color:var(--fg); border:1px solid var(--line);
+                  border-radius:5px; padding:5px 7px; }
+  .ok { color:var(--green); } .bad { color:var(--red); } .warn { color:var(--yellow); }
+  pre { background:#121720; border:1px solid var(--line); border-radius:6px;
+        padding:10px; overflow:auto; font-size:12px; white-space:pre-wrap;
+        max-height:280px; }
+</style>
+</head>
+<body>
+<h1>마스터 토폴로지 <small>행정구역 · 장비 · 셀 — <a href="/">장애 주입 화면</a></small></h1>
+
+<!-- **경고를 화면 맨 위에 둔다.** 여기서 넣는 행은 데몬이 되돌리지 않는다 —
+     장애 주입과 가장 다른 점이고, 아래 버튼을 누르기 전에 읽혀야 한다. -->
+<div class="panel" style="border-color:var(--yellow)">
+  <b class="warn">이 화면의 쓰기는 되돌아오지 않는다.</b>
+  <span class="dim">장애 주입은 데몬이 1분마다 읽어 끝내지만, 마스터는 영구히
+  바뀐다. <code>pemdb6</code> 가 그대로 운영이라 원본이 따로 없다 —
+  <b>실적재·삭제는 아래 사본이 있어야 눌린다.</b></span>
+</div>
+
+<div class="grid2">
+  <div class="panel">
+    <h2>마스터 현황 <small>좌표 없음은 0 이 아니라 모름이다</small></h2>
+    <table>
+      <thead><tr><th>테이블</th><th class="n">행</th><th class="n">좌표 없음</th></tr></thead>
+      <tbody id="tbl"><tr><td colspan="3" class="dim">불러오는 중…</td></tr></tbody>
+    </table>
+    <div class="sect">
+      <h3>활성 셀 <small>— 1분 집계에 실제로 나타나는 것</small></h3>
+      <div id="active" class="dim">불러오는 중…</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>시뮬레이션 선택 <small>마스터에 있는 것과 트래픽을 받는 것은 다르다</small></h2>
+    <table>
+      <thead><tr><th>대역</th><th class="n">마스터</th><th class="n">선택</th><th>통과</th></tr></thead>
+      <tbody id="pick"><tr><td colspan="4" class="dim">불러오는 중…</td></tr></tbody>
+    </table>
+    <div id="pick-note" class="dim" style="margin-top:10px; font-size:12px"></div>
+  </div>
+</div>
+
+<div class="grid2">
+  <div class="panel">
+    <h2>복귀 사본 <small>— 파괴적 조작의 선행 조건</small></h2>
+    <div id="dump" class="dim">불러오는 중…</div>
+    <div class="row" style="margin-top:10px">
+      <button onclick="run('dump', {})">사본 뜨기</button>
+      <button class="ghost" onclick="run('restore', {dry_run:true})">복귀 점검</button>
+      <button class="danger" id="rs-go" disabled
+              onclick="run('restore', {dry_run:false})">사본으로 되돌리기</button>
+    </div>
+    <div class="dim" style="font-size:12px; margin-top:6px">
+      CM_CITY · CM_GU · CM_DONG · CM_CELL_REP_RU_LOC 를
+      <code>.json.gz</code> 로 떠낸다 (<code>CL_CELL_MAP</code> 은 좌표가
+      없어 제외 — 그래서 <b>전체 삭제 대상도 아니다</b>).
+      <b>파일이 있다는 것과 되돌릴 수 있다는 것은 다르다</b> — 아래 잠금은
+      "읽어서 넣을 수 있는가"(<code>restore</code> 점검)를 본다.
+    </div>
+
+    <div class="sect">
+      <h3>좌표 결손 <small>— 적재는 생성기가 한다. 여기서는 센다</small></h3>
+      <div class="dim" style="font-size:12px; margin-bottom:8px">
+        <b>버튼이 없는 것이 의도다.</b> 좌표 생성은
+        <code>load_cells(ensure_coords=True)</code> 가 <b>매 틱</b> 한다
+        (<code>datagen run</code> · <code>pemfill</code>) — 사람이 기억해서
+        치는 커맨드로 두면 현장에서 아무도 치지 않고, 적재 경로가 둘이면
+        어느 쪽이 넣었는지 모른다.
+        <br>아래 둘을 <b>섞어 보지 않는다</b> — "좌표 없는 eNB" 는 결손이
+        아니라 <code>_pick_enbs</code> 가 <b>불변규칙 12</b>(H-07 · UNMAPPED
+        패널) 검증용으로 일부러 남기는 것이고 <b>채우지 않는다</b>.
+      </div>
+      <div class="row">
+        <button class="ghost" onclick="run('fill-coords', {})">결손 세어 보기</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>장비 놓기 <small>— 시군구마다 eNB 하나</small></h2>
+    <div class="row">
+      <label class="dim" style="font-size:12px">시군구당 eNB
+        <input id="se-pergu" type="number" min="1" max="2" value="1" style="width:56px"></label>
+      <label class="dim" style="font-size:12px">eNB 당 셀
+        <input id="se-cells" type="number" min="1" max="36" value="3" style="width:56px"></label>
+      <button class="ghost" onclick="run('seed-enb', {dry_run:true})">세어 보기</button>
+      <button class="danger" id="se-go" disabled
+              onclick="run('seed-enb', {dry_run:false})">실제로 넣기</button>
+    </div>
+    <div class="dim" style="font-size:12px; margin-top:8px">
+      <code>ENB_ID = 800000 + GU_ID</code> — 기존과 겹치지 않는 대역이고 ID 만 보고
+      어느 시군구인지 알 수 있다. <b>셀 수를 늘려 선택 규칙을 통과시키려 하지
+      않는다</b> — 그것은 자산 대장을 거짓으로 만든다. 대역은
+      <code>enb_limit</code> 과 무관하게 포함된다.
+    </div>
+
+    <div class="sect">
+      <h3>행 직접 추가 · 삭제 <small>— 사람이 판단하는 자리</small></h3>
+      <div class="row">
+        <select id="t-target" onchange="syncTarget()">
+          <option value="city">CM_CITY</option>
+          <option value="gu">CM_GU</option>
+          <option value="dong">CM_DONG</option>
+          <option value="cell" selected>CM_CELL_REP_RU_LOC</option>
+          <option value="cellmap">CL_CELL_MAP</option>
+        </select>
+        <input id="t-row" placeholder='추가: CITY_ID=41, GU_ID=41110, …'
+               style="flex:1; min-width:220px">
+        <button class="ghost" id="t-add" disabled onclick="rows('add')">추가</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input id="t-key" placeholder='삭제 키: ENB_ID=811110, SECTOR=0'
+               style="flex:1; min-width:220px">
+        <button class="danger" id="t-rm" disabled onclick="rows('rm')">삭제</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input id="t-confirm" placeholder='전체 삭제 확인 문구' style="flex:1; min-width:220px">
+        <button class="danger" id="t-rmall" disabled onclick="rows('rmall')">전체 삭제</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>결과</h2>
+  <pre id="out" class="dim">아직 실행하지 않았다.</pre>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const n = v => (v == null ? "—" : Number(v).toLocaleString());
+// **"모름"을 0 으로 적지 않는다**(graphio 불변규칙 17). 서버가 `null` 을 주면
+// 화면도 "산출 불가"로 말한다 — 0 으로 보이면 운영자는 "없다"로 읽는다.
+const imp = v => (v == null ? '<span class="dim">산출 불가</span>' : n(v));
+// `key=value, key=value` 를 dict 로. 값은 전부 문자열로 보낸다 — DDL 타입을
+// 화면이 추측하면 틀리고, MySQL 이 컬럼 타입대로 받는다.
+function kv(text) {
+  const out = {};
+  for (const part of String(text || "").split(",")) {
+    const i = part.indexOf("=");
+    if (i > 0) out[part.slice(0, i).trim()] = part.slice(i + 1).trim();
+  }
+  return out;
+}
+let STATE = null;
+// **`cellmap` 은 전체 삭제 대상이 아니다.** 서버가 400 으로 막지만, 누를 수
+// 있게 두면 "되는 조작"으로 읽힌다 — `CL_CELL_MAP` 은 사본이 없어서 지우면
+// 되돌릴 원본이 아예 없다.
+const WIPEABLE = ["city", "gu", "dong", "cell"];
+function syncTarget() {
+  const t = $("t-target").value, can = WIPEABLE.includes(t);
+  $("t-rmall").disabled = !can || !(STATE && STATE.dump.restorable);
+  $("t-rmall").title = can ? "" : "셀 대장은 전체 삭제 대상이 아니다 (사본이 없다)";
+}
+
+function show(obj, cls) {
+  $("out").className = cls || "";
+  $("out").textContent = typeof obj === "string" ? obj
+    : JSON.stringify(obj, null, 2);
+}
+
+async function load() {
+  try {
+    const d = await (await fetch("/api/topo")).json();
+    STATE = d;
+    $("tbl").innerHTML = Object.entries(d.tables).map(([k, v]) =>
+      `<tr><td>${esc(v.table)}</td><td class="n">${n(v.rows)}</td>` +
+      `<td class="n">${imp(v.no_coord)}</td></tr>`).join("");
+    const a = d.active;
+    $("active").innerHTML =
+      `eNB <b>${n(a.enbs)}</b> · 셀 <b>${n(a.cells)}</b> · ` +
+      `위치 마스터에 행 없음 <b class="${a.unmapped ? "warn" : "ok"}">` +
+      `${n(a.unmapped)}</b>` +
+      (a.unmapped ? ` <span class="dim">(좌표는 생성기가 매 틱 만든다 —` +
+        ` 아래 "좌표 결손" 참조)</span>` : "");
+
+    const p = d.pick, others = p.candidates - p.band_master,
+          opick = p.picked_enbs - p.band_picked;
+    const mark = !p.band_master ? '<span class="dim">—</span>'
+      : (p.band_missing.length ? '<b class="bad">✗</b>' : '<b class="ok">✓</b>');
+    $("pick").innerHTML =
+      `<tr><td>기존 (topo 대역 밖)</td><td class="n">${n(others)}</td>` +
+      `<td class="n">${n(opick)}</td><td>${opick ? '<b class="ok">✓</b>' : '<b class="bad">✗</b>'}</td></tr>` +
+      `<tr><td>topo (${p.band_master ? "" : "아직 없음 · "}${d.band[0]}~${d.band[1]})</td>` +
+      `<td class="n">${n(p.band_master)}</td><td class="n">${n(p.band_picked)}</td>` +
+      `<td>${mark}</td></tr>`;
+    $("pick-note").innerHTML =
+      `후보 셀 ${n(p.candidate_cells)} → 선택 셀 ${n(p.picked_cells)} · ` +
+      `<code>enb_limit</code> ${n(d.enb_limit)} · 신규 셀 트래픽 가중 ` +
+      `×${d.topo_weight}<br>seed 대상 시군구 ${n(d.seed_gus)} 중 ` +
+      `<b>${n(d.gus_without_drawable_dong)}곳은 그릴 수 있는 동이 없다</b> — ` +
+      `그 셀은 <code>DONG_ID</code> 를 비워야 하고 적재에서 빠진다 (0 으로 채우지 않는다)` +
+      (p.band_missing.length ? `<br><b class="bad">대역 eNB ${p.band_missing.length}개가
+         선택되지 않았다 — include 가 깨졌다는 뜻이다 (한도를 올려 해결하지 않는다)</b>` : "");
+
+    const dm = d.dump;
+    const head = dm.restorable
+      ? `<b class="ok">되돌릴 수 있다</b>`
+      : (dm.exists ? `<b class="bad">파일은 있는데 되돌릴 수 없다</b>`
+                   : `<b class="bad">없다</b>`);
+    $("dump").innerHTML = head + ` <span class="dim">${esc(dm.dir)}` +
+      ` (${esc(dm.suffix)})</span>` +
+      `<table style="margin-top:8px"><tbody>` + (dm.files || []).map(f =>
+        `<tr><td>${esc(f.table)}</td><td class="n">${imp(f.rows)}</td>` +
+        `<td class="${f.error ? "bad" : "dim"}">${esc(f.error || "읽힘")}</td></tr>`
+      ).join("") + `</tbody></table>`;
+    // **쓰기 버튼은 "되돌릴 수 있는가"로 잠근다** — 파일 존재가 아니다.
+    // 서버도 409 로 막지만(이쪽이 정본이다), 눌린 뒤 거부되면 "왜 안
+    // 되는지"를 사람이 찾아야 한다.
+    for (const id of ["se-go", "t-add", "t-rm", "t-rmall", "rs-go"])
+      $(id).disabled = !dm.restorable;
+    syncTarget();
+  } catch (e) { show("불러오지 못했다: " + e, "bad"); }
+}
+
+async function post(path, body) {
+  const r = await fetch("/api/topo/" + path, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body)});
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.detail || JSON.stringify(d));
+  return d;
+}
+
+async function run(what, opt) {
+  const body = Object.assign({
+    per_gu: Number($("se-pergu").value) || 1,
+    cells: Number($("se-cells").value) || 3,
+  }, opt);
+  if (opt.dry_run === false &&
+      !confirm("마스터에 실제로 넣는다. 되돌리려면 사본을 직접 복구해야 한다. 계속?"))
+    return;
+  show("실행 중…", "dim");
+  try { show(await post(what, body)); await load(); }
+  catch (e) { show(String(e.message || e), "bad"); }
+}
+
+async function rows(kind) {
+  const base = {target: $("t-target").value};
+  try {
+    let d;
+    if (kind === "add") d = await post("add", Object.assign(base, {row: kv($("t-row").value)}));
+    else if (kind === "rm") d = await post("rm", Object.assign(base, {key: kv($("t-key").value)}));
+    else {
+      if (!confirm("테이블을 통째로 지운다. 계속?")) return;
+      d = await post("rm", Object.assign(base, {all: true, confirm: $("t-confirm").value}));
+    }
+    show(d); await load();
+  } catch (e) { show(String(e.message || e), "bad"); }
+}
+
+load();
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/topo", response_class=HTMLResponse)
+def topo_page():
+    return _HTML_TOPO
 
 # ── 기동 ────────────────────────────────────────────────────────────────────
 

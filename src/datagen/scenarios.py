@@ -1703,9 +1703,45 @@ def _compound_causal_failure_plan(plan, sc, intensity, rng, cell) -> bool:
 # --------------------------------------------------------------------------
 
 
+#: **분모가 패킷인 지표.** 이 지표를 트리거로 쓰는 셀 축 시나리오만
+#: `traffic_weight` 하한(`pemdb1.WEIGHT_FLOOR`)을 받는다.
+#:
+#: graphio `metrics/kpi.py:178·184` 가 `U-12`·`U-14` 의 `denom` 을
+#: `paypkt_dn` 으로 선언하고, `detect/detector.py:832` 가 그 축의
+#: `min_denom` 을 **800** 으로 잡는다 — 셀당 U-Plane 표본이 얇아 30분 창
+#: 에서도 미달이 나오는 자리다.
+#:
+#: **호 수 분모는 넣지 않는다.** `C-01`~`C-05`·`N-02`·`PSF` 는 `min_sample`
+#: 기본값(20)이고 셀당 호가 분당 수 건이라 창 확대로 찬다 — 세션 31개인
+#: 셀도 호는 수백 건이다. 거기에 하한을 걸면 **불필요한 쏠림**만 생긴다
+#: (그 하한이 걸려 있던 동안 정답 셀 교체가 4개가 아니라 21개였다).
+PACKET_DENOM_KPIS = frozenset({"U-12", "U-14"})
+
+
+def _needs_weight_floor(*kinds: str) -> bool:
+    """이 kind 들 중 하나라도 **패킷 분모** 지표를 트리거로 쓰는가.
+
+    `KIND_SPECS` 에서 끌어온다 — kind→지표 대응을 호출부에 적으면 사본이
+    생기고, 시나리오의 `expect_kpi` 를 고칠 때 하한이 따라오지 않는다.
+    """
+    return any(KIND_SPECS.get(k, {}).get("expect_kpi") in PACKET_DENOM_KPIS
+               for k in kinds)
+
+
 def _cells_in_one_sgg(cells: list[Cell], rng: random.Random,
-                      want: int = 30) -> tuple[list[Cell], str]:
-    """한 시군구 안에서 셀을 고른다 — 지리적으로 뭉치는(Cluster) 열화용."""
+                      want: int = 30,
+                      eligible: set[str] | None = None
+                      ) -> tuple[list[Cell], str]:
+    """한 시군구 안에서 셀을 고른다 — 지리적으로 뭉치는(Cluster) 열화용.
+
+    `eligible`(관측 가능한 셀 키)이 오면 **추첨은 그대로 두고 미달 셀만
+    교체한다.** 후보 풀 자체를 좁히면 시군구별 셀 수가 달라져 `rng.choice`
+    가 **다른 시군구**를 고르고, 그러면 정답 셀이 통째로 바뀐다 — 실측으로
+    40개 중 유지 0개였다. 바뀌어야 하는 것은 "미달 셀이 빠지는 것"뿐이다.
+
+    교체분은 같은 시군구의 관측 가능한 셀에서 **목록 순서대로** 가져온다
+    (난수를 더 쓰지 않는다 — 그러면 뒤따르는 추첨이 전부 밀린다).
+    """
     by_sgg: dict[str, list[Cell]] = {}
     for c in cells:
         if c.geo_status == "MAPPED":
@@ -1715,7 +1751,16 @@ def _cells_in_one_sgg(cells: list[Cell], rng: random.Random,
         candidates = list(by_sgg)
     code = rng.choice(candidates)
     group = by_sgg[code]
-    return rng.sample(group, min(want, len(group))), code
+    picked = rng.sample(group, min(want, len(group)))
+    if eligible is not None:
+        keep = [c for c in picked if c.cell_key in eligible]
+        if len(keep) < len(picked):
+            chosen = {c.cell_key for c in picked}
+            spare = [c for c in group
+                     if c.cell_key in eligible and c.cell_key not in chosen]
+            keep += spare[: len(picked) - len(keep)]
+        picked = keep
+    return picked, code
 
 
 def _cells_scattered(cells: list[Cell], rng: random.Random, want: int = 40) -> list[Cell]:
@@ -1776,6 +1821,7 @@ def build_scenarios(
     rng: random.Random,
     selected: str | list[str] = "all",
     lead_minutes: int | None = None,
+    eligible: set[str] | None = None,
 ) -> list[Scenario]:
     """22종 시나리오를 시뮬레이션 구간에 배치한다.
 
@@ -1788,6 +1834,16 @@ def build_scenarios(
     """
     if not cells:
         return []
+    # **`eligible` 은 "관측 가능한 셀 키" 집합이다** (2026-10-26).
+    #
+    # 그 시나리오의 트리거 지표가 30분 창 안에 분모를 채우는 셀이고
+    # (`denom.eligible`), 관측 불가한 셀에 장애를 넣으면 채점이 RCA 품질이
+    # 아니라 "그 셀이 보였는가"를 재게 된다 — 실측으로 정답 40개 중 4개가
+    # 어떤 창에서도 `U-12` 분모(패킷 800)를 못 채웠다.
+    #
+    # **풀을 좁히지 않고 추첨 뒤에 교체한다**(`_cells_in_one_sgg` 참조).
+    # 그리고 **노드·전역 축에는 걸지 않는다** — 그쪽 분모는 수백 셀의 합이라
+    # 미달이 생기지 않고, 좁히면 "그 노드의 셀 전부"라는 전제가 깨진다.
     by_sgw: dict[str, list[Cell]] = {}
     by_mme: dict[str, list[Cell]] = {}
     by_pgw: dict[str, list[Cell]] = {}
@@ -1817,12 +1873,28 @@ def build_scenarios(
 
     # 한 시군구 안의 셀을 "전부" 가져간다. 일부만 고르면 같은 시군구의 정상 셀이
     # 지리 롤업에서 열화를 희석해 SGG 단위 탐지가 성립하지 않는다.
-    cluster_cells, cluster_sgg = _cells_in_one_sgg(cells, rng, 60)
-    loss_cells, loss_sgg = _cells_in_one_sgg(cells, rng, 40)
-    nsa_cells, nsa_sgg = _cells_in_one_sgg(cells, rng, 60)
-    compound_cells, compound_sgg = _cells_in_one_sgg(cells, rng, 40)
+    # **하한은 트리거 지표의 분모 종류에 따라 건다**(`_needs_weight_floor`).
+    # 전에는 셀 축 전체에 걸려 호 수 분모 시나리오(C-02·N-02)의 대상까지
+    # 바뀌었고, 그쪽은 세션이 얇아도 호가 수백 건이라 **불필요한 쏠림**이었다.
+    def _floor(*kinds: str):
+        return eligible if (eligible and _needs_weight_floor(*kinds)) else None
+
+    cluster_cells, cluster_sgg = _cells_in_one_sgg(
+        cells, rng, 60, _floor("gw_resource", "ran_radio", "gw_node_down"))
+    loss_cells, loss_sgg = _cells_in_one_sgg(
+        cells, rng, 40, _floor("transport_loss"))
+    nsa_cells, nsa_sgg = _cells_in_one_sgg(
+        cells, rng, 60, _floor("nsa_nr_leg", "nsa_policy_restrict"))
+    compound_cells, compound_sgg = _cells_in_one_sgg(
+        cells, rng, 40, _floor("partial_recovery", "dns_flap",
+                               "compound_causal_failure"))
     overload_cells = by_mme[busy_mme][:80]
 
+    # **CORRIDOR 는 걸러내지 않는다.** 방위각 ±25° 띠 안에서 고르므로
+    # 미달 셀을 빼면 띠가 끊어져 `elong > 3.2` 가 서지 않고, 그러면
+    # `EV-11.pattern == "CORRIDOR"` 통과 조건이 사라진다(그쪽 docstring).
+    # 이 시나리오의 트리거 지표는 `denom.KPI_DENOM` 에 등록돼 있지 않아
+    # 미등록으로 보고된다.
     anchor, corridor = corridor_cells(cells, rng, want=18)
     pairs = [(anchor.cell_key, c.cell_key) for c in corridor[:8]]
 

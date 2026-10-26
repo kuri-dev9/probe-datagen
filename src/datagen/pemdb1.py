@@ -39,6 +39,15 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
+# 대역 정의와 가중 배수의 **정본은 `topo.py` 다** — 여기 숫자를 다시
+# 적으면 사본이 둘이 되고, 한쪽만 고쳐질 때 `seed-enb` 가 놓은 eNB 가
+# 선택에서 조용히 빠진다. `topo` 는 `pemdb1` 을 지연 임포트하므로
+# 순환이 생기지 않는다(`topo.pick_report`).
+from . import topo
+# 별칭으로도 받는다 — `_weight` 는 셀마다 불리고(실측 37만 회),
+# 테스트가 `P._in_topo_band` 를 monkeypatch 해 대역 판정만 끈다.
+from .topo import TOPO_WEIGHT, in_new_band as _in_topo_band
+
 import polars as pl
 
 from . import raw_parquet
@@ -49,6 +58,7 @@ from .generator import Generator, USER_FIELDS
 from .identity import synth_imei, synth_imsi
 from .profile import load as load_profiles
 from .scenarios import (
+    PACKET_DENOM_KPIS,
     MUTATORS,
     PLAN_MUTATORS,
     SUPPRESSORS,
@@ -945,7 +955,75 @@ def _weight(enb_id: str, cellnum: int) -> float:
     """
     h = int(hashlib.sha256(f"{enb_id}:{cellnum}".encode()).hexdigest()[:8], 16)
     # 0.25 ~ 4.0 의 로그 균등 — 상위 셀이 하위 셀의 16배
-    return 0.25 * (16.0 ** ((h % 10_000) / 10_000))
+    w = 0.25 * (16.0 ** ((h % 10_000) / 10_000))
+    # `topo` 가 놓은 커버리지용 셀은 **낮은 가중**을 받는다. 그쪽은
+    # `_pick_enbs` 가 한도 밖에서 항상 포함하므로, 같은 가중을 주면 분당 호
+    # 수가 나뉘어 **기존 eNB 의 1분 창 표본이 깨진다**(근거는 `topo.TOPO_WEIGHT`).
+    return w * TOPO_WEIGHT if _in_topo_band(enb_id) else w
+
+
+#: 시나리오 대상 셀의 `traffic_weight` 하한.
+#:
+#: ## 왜 필요한가
+#:
+#: `ground_truth.json` 의 정답 셀 40개 중 **4개가 어떤 창에서도 분모를 못
+#: 채웠다**(실측 2026-10-26). SC-21 의 트리거는 `U-12`(down 재전송률)이고
+#: 그 분모는 호가 아니라 **패킷**이다(`paypkt_dn` · `min_denom=800` —
+#: graphio `detect/detector.py:832` · `metrics/kpi.py:178`). 그 4개는 분당
+#: 5~18패킷이라 30분 창(`ESCALATION_WINDOWS` 의 상한)에서도 미달이다.
+#: **관측 불가한 셀에 장애를 넣는 시나리오는 성립하지 않는다** — 채점이
+#: RCA 품질이 아니라 "그 셀이 보였는가"를 재게 된다.
+#:
+#: ## 왜 분모를 보장하지 않고 **고르는가**
+#:
+#: 반대 방향(미달 셀의 분모를 `min_denom` 까지 끌어올리기)은 쓰지 않는다.
+#: `detector._significant` 의 통계량이 **분모의 √에 비례**하므로
+#: `4 → 800` 으로 보장하면 `√200 = 14.1배` 민감한 탐지기가 되고, 채점이
+#: RCA 품질이 아니라 "보장된 분모"를 재게 된다. 이쪽은 **원래 분모가 큰
+#: 셀을 고르는 것**이라 생성 규칙이 그대로다 — 그 셀의 분모는 같은 weight
+#: 대의 다른 셀과 같다.
+#:
+#: ## 왜 창고 조회도, 사전 모의도 아닌가
+#:
+#: `패킷/세션` 은 **셀의 속성이 아니라 "단일 스트림에서 몇 번째로 뽑았나"**
+#: 다 — `generator.py:197` 이 계열당 `Sampler` 하나를 두고
+#: `profile.py:337` 의 `self.rng.random()` 에 **셀 키가 들어가지 않는다.**
+#: 그래서 둘 다 안 된다 —
+#:
+#:   * **창고 조회** — 그 시드에만 맞는다. 시드 4개 모의에서 미달 집합이
+#:     `0 / 4 / 3 / 0` 개로 바뀌고 같은 셀이 **5,100배** 흔들렸다.
+#:   * **사전 모의** — 순환이다. 모의가 실제와 같은 값을 받으려면 전 셀의
+#:     전 세션을 같은 순서로 뽑아야 하고(= 전체 재실행), 게다가
+#:     `_bind_scenario_targets` 가 같은 `rng` 를 소비하므로 **선택을 바꾸면
+#:     그 모의가 무효가 된다.**
+#:
+#: 반면 **`_weight(enb_id, cellnum)` 는 sha256 이라 생성 전에 계산되고
+#: 시드·실행과 무관하다.** 그리고 보장해야 하는 것은 `패킷/세션` 이 아니라
+#: **세션 수**이고, 그쪽은 weight 가 결정론적으로 정한다
+#: (`corr(weight, 세션/분) = 0.987` · 세션합 ≈ 132 × weight — 실측 선형).
+#:
+#: ## 왜 1.56 인가
+#:
+#: 세션 **110 이상에서 30분 창 미달 확률 0.0%**(시도 2,000회)이고, 하한
+#: 1.56 에서 **풀 766개**(필요 40의 19배) · **미달 0/766** · 1분 창
+#: 97.9% 다. 실측 미달 4개의 weight 는 `0.26 · 0.30 · 0.31 · 0.86` 으로
+#: 전부 이 아래다.
+#:
+#: **`1.20` 은 쓰지 않는다** — 미달 0.1% 라 40셀을 뽑으면 **4% 확률로
+#: 미달이 끼고** 테스트가 간헐 실패한다. 간헐 실패는 "가끔 빨간 것"이 되어
+#: 결국 아무도 보지 않는다.
+WEIGHT_FLOOR = 1.56
+
+
+def scenario_pool(cells: list[Cell]) -> list[Cell]:
+    """셀 축 시나리오가 **대상으로 삼을 수 있는** 셀. 순서를 바꾸지 않는다.
+
+    `_weight` 를 그대로 부른다 — 하한을 여기서 다시 계산하면 가중 산식의
+    사본이 생기고, 한쪽만 고쳐질 때 "고른 셀의 분모가 작다"가 조용히
+    돌아온다. 순서를 유지하는 이유는 호출부의 교체분이 목록 순서에
+    의존하기 때문이다(`scenarios._cells_in_one_sgg`).
+    """
+    return [c for c in cells if _weight(c.enb_id, c.cell_id) >= WEIGHT_FLOOR]
 
 
 def load_drawable_dongs(path: Path) -> set[str]:
@@ -1008,6 +1086,9 @@ def _pick_enbs(uniq: dict, enb_limit: int | None) -> set[str] | None:
     좌표가 있는 eNB 를 셀 수 많은 순으로 채우고, 마지막 5% 는 **좌표 없는
     eNB** 로 남긴다 — 미매핑 셀이 0이면 `H-07`(미매핑 감시)과 UNMAPPED 패널이
     한 번도 검증되지 않는다(불변규칙 12).
+
+    `topo` 대역(`topo.NEW_BAND`)은 **한도와 무관하게 전부 포함한다** — 아래
+    include 절의 주석에 근거가 있다.
     """
     if not enb_limit or enb_limit <= 0:
         return None
@@ -1016,16 +1097,35 @@ def _pick_enbs(uniq: dict, enb_limit: int | None) -> set[str] | None:
     for (enb, _cn), r in uniq.items():
         cnt[enb] = cnt.get(enb, 0) + 1
         geo[enb] = geo.get(enb, False) or (r[5] is not None)
-    mapped = sorted((e for e in cnt if geo[e]), key=lambda e: (-cnt[e], e))
-    unmapped = sorted((e for e in cnt if not geo[e]), key=lambda e: (-cnt[e], e))
+
+    # **`topo` 대역은 한도 밖에서 항상 포함한다** (2026-10-26).
+    #
+    # `enb_limit` 은 **규모 한도**이고 커버리지는 다른 축이다. 두 목적을 한
+    # 숫자에 섞으면 규모를 조절할 때마다 커버리지가 따라 움직인다. 실측:
+    # `topo seed-enb` 가 놓는 3셀 eNB 는 셀 수 내림차순에서 **22,557등**이고,
+    # 한도로 끌어올리려면 **23,586** 이 필요하다 — 그것은 한도가 아니라
+    # **해제**다(후보 mapped eNB 가 22,722개다). 그 사이의 어떤 값도
+    # "시군구마다 장비 하나"를 주지 못하고 기존 eNB 의 분당 호 수만 깎는다
+    # (330.6 → 61.5 건/분, 한도 333 실측).
+    #
+    # **정렬 목록에서 아예 빼고 나중에 합친다.** 대역 eNB 를 `mapped` 에
+    # 남겨 두면 그것이 한도 칸을 먹어 기존 선택 집합이 바뀐다 —
+    # `ground_truth.json` 의 정답 셀 키가 어긋나고, 그 어긋남은 에러가
+    # 아니라 채점 점수 하락으로만 보인다.
+    band = {e for e in cnt if _in_topo_band(e)}
+    mapped = sorted((e for e in cnt if geo[e] and e not in band),
+                    key=lambda e: (-cnt[e], e))
+    unmapped = sorted((e for e in cnt if not geo[e] and e not in band),
+                      key=lambda e: (-cnt[e], e))
     n_un = min(len(unmapped), max(1, enb_limit // 20))
     out = set(unmapped[:n_un])
     out.update(mapped[: max(0, enb_limit - len(out))])
-    return out
+    return out | band
 
 
 def load_cells(conn, enb_limit: int | None = None,
-               drawable: set[str] | None = None) -> list[Cell]:
+               drawable: set[str] | None = None,
+               ensure_coords: bool = False) -> list[Cell]:
     """`CL_CELL_MAP` + `CM_CELL_REP_RU_LOC` → `Cell` 목록.
 
     조인 키는 실측으로 확인된 것을 쓴다. `CM_CELL_REP_RU_LOC.ENB_ID` 는
@@ -1089,6 +1189,34 @@ def load_cells(conn, enb_limit: int | None = None,
     # 셀이 대부분 탈락해 생성 규모가 무너진다.
     uniq = _filter_drawable(uniq, drawable)
     keep = _pick_enbs(uniq, enb_limit)
+
+    # **좌표 결손을 생성기가 채운다** (2026-10-26 · `ensure_coords`).
+    #
+    # 전에는 `topo fill-coords` 라는 **수동 커맨드**였다. 사람이 기억해서
+    # 쳐야 했고 현장에 반출하면 아무도 치지 않는다 — 그러면 그 셀의 집계는
+    # 영구히 미매핑이고 지도에 안 나온다. 지금은 셀 목록을 만드는 자리에서
+    # 매번 확인한다.
+    #
+    # **읽기 함수가 쓰기를 하는 모양이므로 플래그로 명시한다.** 기본은
+    # `False` 다 — `cmd_capacity` docstring 이 *"셀 마스터는 DB 에서
+    # 읽는다. 읽기뿐이다"* 를 보증하고, UI(`ui._cells`)와
+    # `topo.pick_report` 도 조회 경로다. 켜는 것은 `cmd_run`·`cmd_pemfill`
+    # 둘뿐이다.
+    #
+    # **메모리 부여가 아니라 DB INSERT 인 이유**와 **의도된 미매핑 108셀을
+    # 건드리지 않는 이유**는 `topo.ensure_sector_coords` ·
+    # `topo.coord_gaps` 머리말에 있다.
+    if ensure_coords:
+        gaps = topo.coord_gaps(uniq, keep)
+        if gaps:
+            made = topo.ensure_sector_coords(conn, gaps)["rows"]
+            # **이 틱의 셀 목록에 바로 반영한다.** 갱신하지 않으면 지금
+            # 만든 좌표가 다음 틱부터만 쓰이고, 그 한 분의 집계는 미매핑으로
+            # 남는다 — 에러가 아니라 지도에 한 칸이 비는 모양이다.
+            for key, (city, gu, dong, lat, lon) in made.items():
+                r = uniq.get(key)
+                if r is not None:
+                    uniq[key] = r[:5] + (city, gu, dong, lat, lon)
     cells: list[Cell] = []
     for (enb, cellnum), (_e, _c, c_uid, grp, ems,
                          city, gu, dong, lat, lon) in sorted(uniq.items()):
@@ -1294,11 +1422,15 @@ class PemdbGen:
                  subscriber_pool: int = 20_000, success_only: bool = True,
                  enb_limit: int | None = None,
                  drawable: set[str] | None = None,
+                 #: 셀 좌표 결손을 생성 시점에 채운다. **`cmd_run`·`cmd_pemfill`
+                 #: 만 켠다** — `cmd_capacity` 는 읽기뿐이다(그 docstring 의 보증).
+                 ensure_coords: bool = False,
                  call_type_floor: float | None = None,
                  uplane_session: dict | None = None,
                  baseline: dict | None = None,
                  fault: dict | None = None):
-        self.cells = load_cells(conn, enb_limit=enb_limit, drawable=drawable)
+        self.cells = load_cells(conn, enb_limit=enb_limit, drawable=drawable,
+                                ensure_coords=ensure_coords)
         if not self.cells:
             raise RuntimeError("CL_CELL_MAP 이 비어 있다 — 마스터를 먼저 적재하라")
         #: 평시 배경 모수(`pemdb1.baseline`). **장애 mutator 와 무관하다** —
@@ -2810,11 +2942,46 @@ def build_scenarios(gen: "PemdbGen", minutes: int, selected: str = "all",
     if not wanted:
         return [], skipped
 
-    rng = random.Random((seed if seed is not None else gen.seed) + 777)
+    base_seed = (seed if seed is not None else gen.seed) + 777
     scs = build_sim_scenarios(
-        gen.cells, minutes, rng,
+        gen.cells, minutes, random.Random(base_seed),
         selected=sorted(wanted), lead_minutes=lead_minutes,
     )
+
+    # ── 관측 불가한 셀을 뺀다 ───────────────────────────────────────────
+    #
+    # 셀 축 시나리오의 대상은 **`WEIGHT_FLOOR` 를 넘는 셀**만 쓴다. 근거는
+    # 그 상수의 주석에 있다(창고 조회도 사전 모의도 쓰지 않는 이유 포함).
+    #
+    # **추첨 자체는 건드리지 않는다** — `_cells_in_one_sgg` 가 고른 뒤
+    # 미달 셀만 교체한다. 후보 풀을 좁히면 시군구별 셀 수가 달라져
+    # `rng.choice` 가 다른 시군구를 고르고, 정답 셀이 통째로 바뀐다
+    # (실측으로 40개 중 유지 0개였다).
+    pool = {c.cell_key for c in scenario_pool(gen.cells)}
+    if pool and len(pool) < len(gen.cells):
+        scs = build_sim_scenarios(
+            gen.cells, minutes, random.Random(base_seed),
+            selected=sorted(wanted), lead_minutes=lead_minutes,
+            eligible=pool,
+        )
+    # **빠진 것을 정답 파일에 적는다.** 하한을 걸면 "분모가 얇은 셀에서
+    # 탐지가 서는가"가 측정 대상에서 사라지고, 그러면 탐지율 100% 는
+    # *"분모가 충분할 때의 100%"* 를 뜻한다. 재지 못한 것을 수치처럼
+    # 읽히게 두지 않는다(불변규칙 17). graphio `score` 가 이 값을 읽어
+    # 표 앞 경고로 낸다 — **문구에 숫자를 박지 않으려고 값을 넘긴다.**
+    floored = sorted({sc.expect_kpi for sc in scs
+                      if sc.scope_kind == "CELL"
+                      and sc.expect_kpi in PACKET_DENOM_KPIS})
+    gen.cell_selection = {
+        "weight_floor": WEIGHT_FLOOR,
+        "applies_to_kpi": floored,
+        "cells_total": len(gen.cells),
+        "cells_eligible": len(pool),
+    }
+    skipped.append(f"셀 축 대상 후보 — 셀 {len(gen.cells)} 중 {len(pool)}개 "
+                   f"(traffic_weight >= {WEIGHT_FLOOR}) · 적용 지표 "
+                   f"{', '.join(floored) or '없음'}")
+
     placed = {sc.id for sc in scs}
     skipped += [f"{sid}: 구간이 짧아 배치되지 않았다 (minutes={minutes})"
                 for sid in sorted(wanted - placed)]
@@ -2823,7 +2990,8 @@ def build_scenarios(gen: "PemdbGen", minutes: int, selected: str = "all",
 
 
 def write_truth(path: Path, start: datetime, minutes: int,
-                scenarios: list[Scenario]) -> dict:
+                scenarios: list[Scenario],
+                cell_selection: dict | None = None) -> dict:
     """`ground_truth.json` — graphio `pipeline.score_against_truth` 가 읽는다.
 
     포맷을 바꾸지 않는다. 바뀐 것은 **셀 키의 내용**이다 — 구 파일은 자체
@@ -2843,6 +3011,12 @@ def write_truth(path: Path, start: datetime, minutes: int,
         # 못한 것이 아니라 **원천이 없는 것**까지 실패로 세게 된다.
         "unsupported": UNSUPPORTED,
     }
+    # **대상 셀을 어떻게 골랐는지 함께 적는다.** 없으면 채점이 "탐지율
+    # 100%" 를 무조건으로 읽는다 — 하한을 걸었으면 그것은 *"분모가 충분할
+    # 때의 100%"* 다. graphio `pipeline._truth_diagnostics` 가 이 블록을
+    # 읽어 경고 한 줄로 낸다. **값을 넘기므로 그쪽 문구에 숫자가 없다.**
+    if cell_selection:
+        doc["cell_selection"] = dict(cell_selection)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
     return doc
