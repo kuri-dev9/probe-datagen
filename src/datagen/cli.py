@@ -95,7 +95,7 @@ def load_cfg(path: str | None) -> dict:
 #: 한쪽만 고쳐질 때 **에러 없이** gen 과 corr 이 다른 창고를 본다.
 #:
 #: 접속 정보가 전에는 `datagen.yaml`(추적본)과 `prod.yaml` 두 벌에 평문으로
-#: 있었고, graphio 쪽까지 합치면 환경마다 네 자리였다. 이제 `.gp.env` 하나에
+#: 있었고, graphio 쪽까지 합치면 환경마다 네 자리였다. 이제 `.env` 하나에
 #: 적으면 compose 가 네 컨테이너에 같은 값을 넣는다.
 #:
 #: **`GP_MYSQL_DB` 는 `pemdb1.database` 로 간다.** 실제 쓰기 경로가 그쪽이고
@@ -119,7 +119,7 @@ def _apply_env(cfg: dict) -> dict:
     멀쩡한 값을 덮으면 접속이 거부되고 원인이 설정 파일처럼 보인다.
 
     **환경변수가 없으면 아무것도 하지 않는다** — 현장이 `prod.yaml` 에 실값을
-    갖고 돌고 있으므로 그쪽이 `.gp.env` 를 고치기 전에 받아도 멈추지 않는다.
+    갖고 돌고 있으므로 그쪽이 `.env` 를 고치기 전에 받아도 멈추지 않는다.
     """
     for var, (sec, key) in _ENV_KEYS:
         raw = os.environ.get(var)
