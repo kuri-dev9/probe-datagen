@@ -67,6 +67,9 @@ class FakeCursor:
     def fetchall(self):
         return self.rows
 
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
+
 
 class FakeConn:
     """`topo` 가 실제로 던지는 질의 다섯 가지에만 답한다.
@@ -102,13 +105,17 @@ class FakeConn:
     def answer(self, sql, params):
         if "information_schema.columns" in sql:
             return [(c,) for c in sorted(self.ddl)]
+        if "information_schema.tables" in sql:
+            # `table_exists()` 선검사(2026-10-26 도입) — 기본은 "있다".
+            # 없음을 확인하는 테스트는 하위 클래스가 이 분기 앞에서 가로챈다.
+            return [(1,)]
         if "PM_COR_LTE_CALL_1M" in sql:
             return list(self.unmapped)
-        if "FROM CM_GU" in sql:
+        if "FROM `CM_GU`" in sql:
             return list(self.gus)
-        if "SELECT SECTOR FROM CM_CELL_REP_RU_LOC" in sql:
+        if "SELECT SECTOR FROM `CM_CELL_REP_RU_LOC`" in sql:
             return [(x,) for x in self.sectors.get(str(params[0]), [])]
-        if "SELECT LATITUDE, LONGITUDE FROM CM_CELL_REP_RU_LOC" in sql:
+        if "SELECT LATITUDE, LONGITUDE FROM `CM_CELL_REP_RU_LOC`" in sql:
             return list(self.coords.get(str(params[0]), []))
         if "SELECT CITY_ID, GU_ID, DONG_ID" in sql:
             b = self.base.get(str(params[0]))
@@ -359,7 +366,7 @@ class _LoadConn(FakeConn):
         self.join_rows = list(join_rows)
 
     def answer(self, sql, params):
-        if "FROM CL_CELL_MAP" in sql:
+        if "FROM `CL_CELL_MAP`" in sql:
             return list(self.join_rows)
         if "FROM CL_MME" in sql:
             return [("0001", "1")]
@@ -576,14 +583,26 @@ def test_dump_exists_needs_all_four_files(tmp_path, monkeypatch):
 
 
 def test_dump_covers_every_table_topo_can_destroy():
-    """`rm --all` 로 지울 수 있는 테이블이 `DUMP_TABLES` 에 다 있는가.
+    """`rm --all` 로 지울 수 있는 KR 테이블이 `DUMP_TABLES` 에 다 있는가.
 
     `cellmap`(167MB)은 **일부러 빠져 있다** — 좌표가 없어 전환 대상이 아니고
-    떠내면 사본이 쓸 수 없는 크기가 된다. 그래서 `rm --all cellmap` 은
-    "사본이 있다"는 보장 없이 돌 수 있다. 그 예외를 테스트가 알고 있어야
-    나중에 조용히 다른 테이블이 같은 구멍으로 들어가지 않는다.
+    떠내면 사본이 쓸 수 없는 크기가 된다. **`enb_org`도 빠져 있다** — KR
+    `CL_ENB_ORG` 는 이 저장소가 만드는 조직 마스터가 아니라 전량 교체할
+    이유가 없다(`relocate_cells` 가 비(非)kr 에서 그쪽을 건드리지 않는
+    근거와 같다). 이 둘을 테스트가 알고 있어야 나중에 조용히 다른 테이블이
+    같은 구멍으로 들어가지 않는다.
+
+    **`rm --all` 의 실제 판정은 `wipeable()` 이다** — `DUMP_TABLES` 와의
+    등식이 아니다. 비(非)kr 로케일 벌은 사본 없이도 다섯 단계로 다시
+    만들 수 있어 `wipeable` 하지만(`cellmap` 제외), `DUMP_TABLES` 에는
+    그 축이 없다. 그래서 둘을 각각 확인한다.
     """
-    assert set(topo.DUMP_TABLES) == set(topo.TABLES) - {"cellmap"}
+    assert set(topo.DUMP_TABLES) == set(topo.TABLES) - {"cellmap", "enb_org"}
+    for key in topo.TABLES:
+        # KR 은 사본이 있는 넷만 — `enb_org`·`cellmap` 은 KR 원본이라 거부
+        assert topo.wipeable(key, "kr") == (key in topo.DUMP_TABLES), key
+        # 비(非)kr 은 `cellmap` 만 거부 — 나머지 다섯은 다시 만들 수 있다
+        assert topo.wipeable(key, "jp") == (key != "cellmap"), key
 
 
 # --------------------------------------------------------------------------
@@ -792,6 +811,10 @@ DONG_DDL = ("CITY_ID", "GU_ID", "DONG_ID", "DONG_NAME", "USE_YN")
 
 #: 왕복이 지켜야 하는 세 성질을 한 행에 담았다 — `None`(모름) · 한글(`_ci`
 #: 충돌 실측이 있던 `RU_NAME` 계열) · DMS 좌표 문자열.
+#:
+#: **값은 전부 합성이다.** 이름·좌표에 실측값을 쓰면 PUBLIC 저장소에 기지국
+#: 자산 대장의 표본이 남는다 — 지켜야 하는 성질(한글이 들어간다 · 좌표가
+#: 문자열이다)은 모양만으로 그대로 지켜진다.
 ROUNDTRIP = {
     "city": [{"CITY_ID": 41, "CITY_NAME": "경기", "LATITUDE": "37:30.0/000",
               "LONGITUDE": None}],
@@ -800,8 +823,8 @@ ROUNDTRIP = {
     "dong": [{"CITY_ID": 41, "GU_ID": 41110, "DONG_ID": 1101053,
               "DONG_NAME": "누리동", "USE_YN": None}],
     "cell": [{"ENB_ID": "811110", "SECTOR": 0, "CITY_ID": 41, "GU_ID": 41110,
-              "DONG_ID": 1101053, "LATITUDE": "36:37.15/60",
-              "LONGITUDE": "127:16.44/420",
+              "DONG_ID": 1101053, "LATITUDE": "37:00.00/000",
+              "LONGITUDE": "127:00.00/000",
               "RU_NAME": "[L9]○○빌딩-MT", "RU_CUID": None,
               "FLAG": None, "DECODE": "811110"}],
 }
@@ -824,6 +847,9 @@ class _RestoreConn(FakeConn):
             return [(c,) for c in sorted(self.required & self.ddls.get(table, set()))]
         if "information_schema.columns" in sql:
             return [(c,) for c in sorted(self.ddls.get(str(params[0]), set()))]
+        if "information_schema.tables" in sql:
+            # `table_exists()` 선검사 — 사본이 있는 벌은 이미 있다고 본다.
+            return [(1,)]
         if "DELETE FROM" in sql:
             self.deleted.append(sql)
             return []
@@ -980,3 +1006,24 @@ def test_restore_says_what_it_does_not_restore(tmp_path, monkeypatch):
     assert "CL_CELL_MAP" in joined
     # 범위에 그 둘이 **들어가 있으면** 안 된다 — 그러면 두 말이 모순이다
     assert topo.TABLES["cellmap"][0] not in rep["scope"]
+
+
+def test_every_topo_call_resolves_to_a_definition():
+    """호출부가 부르는 `topo.*` 가 실제로 있는가.
+
+    `ensure_locale_tables` 가 블록 치환에 함께 지워졌을 때(2026-10-27),
+    **UI 버튼은 누를 때까지 죽지 않아** 발견 수단이 이 대조뿐이었다.
+    `cli.py`·`ui.py`·`pemdb1.py` 전부가 부르는 이름을 모듈 attribute 와
+    맞춰 본다 — 상수·함수를 가리지 않고, 이름을 이 테스트에 베껴 두지
+    않아 호출부가 새 이름을 쓰기 시작해도 자동으로 따라온다.
+
+    `topo\\.(\\w+)\\s*\\(` 로 **호출 형태만** 본다 — 그냥 `topo\\.(\\w+)` 면
+    `topo.py` 를 산문으로 언급하는 주석(`` `ensure_locale_tables` 가... ``)
+    까지 걸려 `py` 라는 가짜 이름이 나온다.
+    """
+    import re
+
+    for mod in ("cli", "ui", "pemdb1"):
+        src = (HERE / "src" / "datagen" / f"{mod}.py").read_text(encoding="utf-8")
+        for name in sorted(set(re.findall(r"\btopo\.(\w+)\s*\(", src))):
+            assert hasattr(topo, name), f"{mod}.py → topo.{name}() 가 없다"

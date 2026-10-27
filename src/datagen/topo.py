@@ -4,6 +4,26 @@
 사람이 의도적으로 고치거나 생성기가 채우는 자리다. UI(`ui.py`)가 같은 함수를
 부른다 — 화면과 커맨드가 각자 SQL 을 쓰면 한쪽만 고쳐질 때 조용히 갈라진다.
 
+## 로케일 축은 **테이블 이름**이다 (2026-10-26)
+
+나라를 바꾸는 축이 DB 이름이 아니라 테이블 접미사다 — `CM_GU` / `CM_GU_JP`
+가 **같은 `pemdb6` 안에** 공존한다. 정본은 `table_name(key, locale)` 하나이고
+그 함수를 거치지 않는 테이블 이름이 이 파일에 남아 있으면 안 된다
+(`TABLES` 정의 한 곳이 예외다).
+
+**로케일 축이 있는 것은 다섯이다**(`LOCALE_TABLE_KEYS`) — 지역 셋 ·
+셀 벌 · `CL_ENB_ORG`(eNB 이름). `CL_CELL_MAP` · `PM_*` · `AI_*` · 권역
+테이블(`CM_BRANCH`·`CM_LAREA`·`CM_REGION`)은 **한 벌을 공유한다** — 사용자
+방침이 *"나머진 다 그대로 쓴다. 원본 데이터도 그냥 쓴다"* 이기 때문이고,
+공유 테이블을 일본 이름으로 덮으면 **KR 화면이 함께 일본어가 된다.** 그
+자리에는 가드가 있다(`org_names(allow_shared=…)`).
+
+**축을 늘리는 판정 기준은 "되돌릴 수 있는가" 가 아니라 "화면에 그 나라
+이름으로 뜨는가" 다.** `CL_ENB_ORG` 는 `DUMP_TABLES` 밖이어서 한 벌을
+덮으면 KR 이 돌아오지 않는데, 지도 라벨이 `RU_NAME` → `BTS_NAME` 순으로
+떨어져 셀 27.6% 가 한국 이름으로 보였다 — 그래서 **덮지 않고 벌을 늘렸다**
+(2026-10-26 사용자 결정).
+
 ## 왜 `pemfill` 이 아니라 별도 커맨드인가
 
 `pemfill` · `run` 은 **1분마다 도는 상주 경로**이고 마스터를 **읽기만** 한다
@@ -86,16 +106,27 @@ ENB_BASE = 800_000
 #: 테이블별 키 컬럼 — `rm` 과 중복 판정이 이것을 쓴다. `CM_CELL_REP_RU_LOC`
 #: 에는 **PK 가 없고** `ix_local_ru_loc_enb_sector` 인덱스만 있으므로,
 #: 키를 코드가 알고 있어야 한다(DDL 에서 읽어낼 수 없다).
+#:
+#: `CL_ENB_ORG` 에도 **PK 가 없고 원본에 `ENB_ID` 중복이 1건 있다**(실측
+#: 45,955행 / distinct 45,954 · 2026-10-26). 키를 하나로 적는 것은 `rm`·
+#: `update` 의 `WHERE` 를 위한 것이고, **유일성을 뜻하지 않는다** — 그래서
+#: 복사 경로가 중복을 자기 책임으로 막는다(`copy_locale_rows`).
 TABLES: dict[str, tuple[str, tuple[str, ...]]] = {
     "city": ("CM_CITY", ("CITY_ID",)),
     "gu": ("CM_GU", ("CITY_ID", "GU_ID")),
     "dong": ("CM_DONG", ("CITY_ID", "GU_ID", "DONG_ID")),
     "cell": ("CM_CELL_REP_RU_LOC", ("ENB_ID", "SECTOR")),
+    "enb_org": ("CL_ENB_ORG", ("ENB_ID",)),
     "cellmap": ("CL_CELL_MAP", ("ENB_ID", "CELLNUM")),
 }
 
 #: `dump` 가 떠내는 집합. `cellmap` 은 167MB 라 제외한다 — 전환 대상이
 #: 아니고(좌표가 없다) 떠내면 복귀 사본이 쓸 수 없는 크기가 된다.
+#:
+#: **`enb_org` 도 없다.** `CL_ENB_ORG`(45,955행)는 조직 마스터이고 이 저장소가
+#: 만드는 것이 아니다 — 전량 교체할 이유가 없다. 다만 그래서 **KR 쪽
+#: `BTS_NAME` 을 덮으면 되돌릴 사본이 없다**: `relocate_cells` 가 비(非)kr
+#: 에서 그쪽을 건드리지 않는 근거가 이 한 줄이다.
 DUMP_TABLES = ("city", "gu", "dong", "cell")
 
 #: `rm --all` 이 받는 테이블. **`cellmap` 이 없다** — `topo` 는 위치 마스터를
@@ -105,11 +136,91 @@ DUMP_TABLES = ("city", "gu", "dong", "cell")
 #: 봤다). 단건(`add`·`rm --key`)은 `TABLES` 로 계속 받는다.
 WIPEABLE = DUMP_TABLES
 
+
+def wipeable(key: str, locale: str = "kr") -> bool:
+    """`rm --all` 을 받아도 되는가. **되돌릴 수단이 있는지로 판정한다.**
+
+    둘 중 하나면 된다 —
+
+    * `WIPEABLE` — KR 원본이고 `dump`/`restore` 사본이 있다
+    * **비(非)kr 로케일 벌** — 다섯 단계로 다시 만들 수 있다
+      (`ensure-tables` → `copy-cells` → `copy-enb-org` → `seed-geo` →
+      `relocate-cells`). JP 벌을 비울 수 없으면 **다시 만들 길이 없다** —
+      복사 경로가 "행이 있으면 넣지 않는다"로 서 있기 때문이다.
+
+    `cellmap` 은 **어느 쪽도 아니다.** 로케일 축이 없어 비울 때 지워지는
+    것은 언제나 KR 셀 대장이고, 사본이 없다.
+    """
+    if key == "cellmap":
+        return False
+    return key in WIPEABLE or (locale != "kr" and key in LOCALE_TABLE_KEYS)
+
 #: 사본 확장자. **지금 정하는 이유:** 복원 함수를 넣는 시점이 포맷을 정할
 #: 유일한 자리다 — 나중에 바꾸면 이미 뜬 사본이 **복원 불가**가 된다
 #: (`restore` 가 다른 이름을 찾는다). 비압축 159MB 가 `fill-coords` 전마다
 #: 뜨라고 하기엔 무겁고, 느리면 사람이 게이트를 우회할 길을 찾는다.
 DUMP_SUFFIX = ".json.gz"
+
+#: **로케일 축이 있는 테이블.** 이 다섯만 나라별 벌을 갖는다 —
+#: `CM_CITY_JP` · `CM_GU_JP` · `CM_DONG_JP` · `CM_CELL_REP_RU_LOC_JP` ·
+#: `CL_ENB_ORG_JP`.
+#:
+#: **`enb_org` 는 2026-10-26 에 늘렸다** (사용자 결정). 없으면 JP 지도에서
+#: 셀 이름은 일본어인데 eNB 이름은 한국어로 뜬다 — 화면 라벨이
+#: `RU_NAME` → `BTS_NAME` → 원시 키 순으로 떨어지므로 실측 비율로 27.6% 가
+#: 한국 이름이 된다. 공유 한 벌을 덮어 해결할 수는 없다: `DUMP_TABLES` 에
+#: 없어서 **KR 이 되돌아오지 않는다.**
+#:
+#: `cellmap`(`CL_CELL_MAP` 574,404행)이 **빠진 것이 의도다.** 사용자 방침
+#: (2026-10-26): *"지역구에 대응하는 테이블만 JP로 만들라는거야. 나머진 다
+#: 그대로 쓸꺼야. 원본 데이터도 그냥 쓸꺼고."* 셀 대장은 `(ENB_ID, CELLNUM)`
+#: 키 자체이고 나라와 무관하다 — 벌을 뜨면 **키 집합이 둘**이 되고, 1분
+#: 집계·원시 Parquet·`ground_truth.json` 이 참조하는 그 키가 어느 벌의
+#: 것인지 알 수 없게 된다.
+LOCALE_TABLE_KEYS = ("city", "gu", "dong", "cell", "enb_org")
+
+#: 좌표 컬럼(`LATITUDE`·`LONGITUDE`)이 **있는** 테이블. `survey` 의 결손
+#: 집계가 이것으로 좁힌다 — `enb_org` 에는 그 컬럼이 없어서 `LOCALE_TABLE_KEYS`
+#: 를 그대로 쓰면 `1054 Unknown column` 으로 조회가 통째로 깨진다.
+COORD_TABLE_KEYS = ("city", "gu", "dong", "cell")
+
+
+def table_name(key: str, locale: str = "kr") -> str:
+    """그 로케일의 실제 테이블 이름 — **로케일 축의 정본이 이 함수 하나다.**
+
+    ## 왜 별도 스키마가 아니라 접미사인가 (2026-10-26 방식 변경)
+
+    전에는 `pemdb6_jp` 스키마를 통째로 복제하는 설계였다(`clone_schema` ·
+    `locale_database`). 사용자가 범위를 줄였다 — **지역 테이블만 JP 벌을
+    만들고 나머지는 원본을 그대로 쓴다.** 그래서 로케일 축이 **DB 이름이
+    아니라 테이블 이름**으로 내려온다.
+
+        kr   CM_GU        CM_CELL_REP_RU_LOC
+        jp   CM_GU_JP     CM_CELL_REP_RU_LOC_JP        ← 같은 `pemdb6` 안
+
+    `CL_CELL_MAP` · `PM_*` · `AI_*` · 조직 테이블은 **한 벌뿐이다.**
+
+    ## `cellmap` 을 비(非)kr 로 부르면 **멈춘다**
+
+    조용히 `CL_CELL_MAP_JP` 를 만들면 "원본 공유" 전제가 깨진다. 그 테이블은
+    셀 키의 정본이고 트래픽·채점이 그 키를 참조하므로, 벌이 둘이면 어느
+    쪽 키로 생성했는지 알 수 없다 — 에러가 아니라 **값이 어긋나는** 종류다.
+    """
+    if key not in TABLES:
+        raise RuntimeError(
+            f"모르는 테이블 키: {key} (있는 것: {', '.join(TABLES)})")
+    base = TABLES[key][0]
+    if locale == "kr":
+        return base
+    if key not in LOCALE_TABLE_KEYS:
+        raise RuntimeError(
+            f"`{key}`({base}) 에는 로케일 축이 없다 — locale '{locale}' 로 "
+            "부를 수 없다.\n"
+            "  지역 테이블만 나라별 벌을 갖는다 "
+            f"({' · '.join(TABLES[k][0] for k in LOCALE_TABLE_KEYS)}).\n"
+            f"  {base} 는 셀 키의 정본이고 트래픽·채점이 그 키를 참조한다 — "
+            "벌이 둘이면 어느 쪽으로 생성했는지 알 수 없다")
+    return f"{base}_{locale.upper()}"
 
 
 # --------------------------------------------------------------------------
@@ -134,6 +245,19 @@ def ddl_columns(conn, table: str) -> set[str]:
         cur.execute("SELECT column_name FROM information_schema.columns "
                     "WHERE table_schema = DATABASE() AND table_name = %s", [table])
         return {r[0] for r in cur.fetchall()}
+
+
+def table_exists(conn, table: str) -> bool:
+    """그 테이블이 **현 스키마에** 있는가.
+
+    JP 벌은 `ensure_locale_tables` 가 만들기 전에는 **없다.** 없는 것을
+    `SELECT COUNT(*)` 로 세면 `1146 Table doesn't exist` 가 나고, 그 예외는
+    화면에서 "조회 실패" 로 보여 **무엇을 먼저 해야 하는지**를 말하지 못한다.
+    """
+    return bool(_rows(conn,
+                      "SELECT 1 FROM information_schema.tables "
+                      "WHERE table_schema = DATABASE() AND table_name = %s",
+                      [table]))
 
 
 def insert_rows(conn, table: str, rows: list[dict]) -> int:
@@ -274,8 +398,12 @@ def _rows(conn, sql: str, params: list | None = None) -> list[tuple]:
         return list(cur.fetchall())
 
 
-def survey(conn) -> dict[str, dict]:
+def survey(conn, locale: str = "kr") -> dict[str, dict]:
     """테이블별 행수와 **좌표 결손 수**. 0 과 NULL 을 가른다.
+
+    `locale` 은 **어느 벌을 세는가**다(`table_name`). `cellmap` 은 로케일
+    축이 없어 어느 벌에서도 같은 테이블을 센다 — 그 사실을 `shared` 로
+    적는다. 안 적으면 "JP 에도 셀 대장이 55만행 있다"로 읽힌다.
 
     좌표 없는 행을 "0개"로 세면 미매핑이 보이지 않는다 (graphio 불변규칙
     12·17). 활성 셀 쪽은 1분 집계에 실제로 나타나는 셀만 센다 — 마스터
@@ -283,10 +411,19 @@ def survey(conn) -> dict[str, dict]:
     그쪽뿐이다.
     """
     out: dict[str, dict] = {}
-    for key, (table, _) in TABLES.items():
+    for key in TABLES:
+        shared = key not in LOCALE_TABLE_KEYS
+        table = TABLES[key][0] if shared else table_name(key, locale)
+        if not table_exists(conn, table):
+            # **"없다"를 0 행으로 적지 않는다**(불변규칙 17). JP 벌을 만들기
+            # 전에는 테이블 자체가 없고, 그것과 "만들었는데 비었다"는 다른
+            # 상태다 — 화면이 둘을 섞으면 `ensure-tables` 를 또 누른다.
+            out[key] = {"table": table, "rows": None, "no_coord": None,
+                        "exists": False, "shared": shared}
+            continue
         total = _rows(conn, f"SELECT COUNT(*) FROM `{table}`")[0][0]
-        info = {"table": table, "rows": total}
-        if key in ("city", "gu", "dong", "cell"):
+        info = {"table": table, "rows": total, "exists": True, "shared": shared}
+        if key in COORD_TABLE_KEYS:
             info["no_coord"] = _rows(
                 conn,
                 f"SELECT COUNT(*) FROM `{table}` "
@@ -294,22 +431,26 @@ def survey(conn) -> dict[str, dict]:
                 "OR LATITUDE = '' OR LONGITUDE = ''")[0][0]
         out[key] = info
 
+    # 1분 집계(`PM_*`)는 **한 벌뿐이다** — 로케일 축이 없다. 조인 대상만
+    # 그 로케일의 셀 벌로 바꾼다.
+    cell = table_name("cell", locale)
     active = _rows(conn, "SELECT COUNT(*) FROM (SELECT DISTINCT ENB_ID, CELLNUM "
                          "FROM PM_COR_LTE_CALL_1M) t")[0][0]
-    missing = _rows(conn, """
+    missing = _rows(conn, f"""
         SELECT COUNT(*) FROM (
           SELECT DISTINCT a.ENB_ID, a.CELLNUM
             FROM PM_COR_LTE_CALL_1M a
-            LEFT JOIN CM_CELL_REP_RU_LOC l
+            LEFT JOIN `{cell}` l
                    ON l.ENB_ID = a.ENB_ID AND l.SECTOR = a.CELLNUM
-           WHERE l.ENB_ID IS NULL) t""")[0][0]
+           WHERE l.ENB_ID IS NULL) t""")[0][0] if table_exists(conn, cell) else None
     out["_active"] = {"cells": active, "unmapped": missing,
+                      "locale": locale, "cell_table": cell,
                       "enbs": _rows(conn, "SELECT COUNT(DISTINCT ENB_ID) "
                                           "FROM PM_COR_LTE_CALL_1M")[0][0]}
     return out
 
 
-def unmapped_active_cells(conn) -> list[tuple[str, int]]:
+def unmapped_active_cells(conn, locale: str = "kr") -> list[tuple[str, int]]:
     """1분 집계에 나타나는데 `CM_CELL_REP_RU_LOC` 에 **행이 없는** 셀.
 
     **실측(2026-10-26): 804건 전부가 "행 자체가 없음"이고, "행은 있고 좌표가
@@ -317,16 +458,16 @@ def unmapped_active_cells(conn) -> list[tuple[str, int]]:
     이 구분을 잘못 잡으면 0행 UPDATE 가 "성공"으로 돌아와 아무것도 안 고친
     채 끝난다.
     """
-    return [(str(e), int(c)) for e, c in _rows(conn, """
+    return [(str(e), int(c)) for e, c in _rows(conn, f"""
         SELECT DISTINCT a.ENB_ID, a.CELLNUM
           FROM PM_COR_LTE_CALL_1M a
-          LEFT JOIN CM_CELL_REP_RU_LOC l
+          LEFT JOIN `{table_name("cell", locale)}` l
                  ON l.ENB_ID = a.ENB_ID AND l.SECTOR = a.CELLNUM
          WHERE l.ENB_ID IS NULL
          ORDER BY a.ENB_ID, a.CELLNUM""")]
 
 
-def enb_anchor(conn, enb: str) -> tuple[float, float] | None:
+def enb_anchor(conn, enb: str, locale: str = "kr") -> tuple[float, float] | None:
     """그 eNB 의 **이미 매핑된 섹터들의 중심**. 없으면 `None`.
 
     `CM_GU` 대표좌표보다 이쪽을 먼저 쓴다. eNB 가 시군구 중심에서 수 km
@@ -336,7 +477,8 @@ def enb_anchor(conn, enb: str) -> tuple[float, float] | None:
     이미 갖고 있다.
     """
     pts: list[tuple[float, float]] = []
-    for la, lo in _rows(conn, "SELECT LATITUDE, LONGITUDE FROM CM_CELL_REP_RU_LOC "
+    for la, lo in _rows(conn, f"SELECT LATITUDE, LONGITUDE "
+                              f"FROM `{table_name('cell', locale)}` "
                               "WHERE ENB_ID = %s", [enb]):
         lat, lon = dms_to_decimal(la), dms_to_decimal(lo)
         if lat is not None and lon is not None:
@@ -346,7 +488,36 @@ def enb_anchor(conn, enb: str) -> tuple[float, float] | None:
     return (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts))
 
 
-def gu_points(conn) -> list[tuple[int, int, str, float, float]]:
+def gu_keys(conn, locale: str = "kr") -> set[tuple[int, int]]:
+    """그 벌의 `(CITY_ID, GU_ID)` **전수** — 좌표 유무와 무관하다.
+
+    ## `gu_points` 와 쓰임이 다르다 — 섞으면 조용히 틀린다
+
+    `gu_points` 는 **좌표 있는 구만** 준다. 그것이 그 함수의 올바른 동작
+    이다(기준점 없이 셀을 놓을 수 없고 `0,0` 으로 채우면 기니만 바다에
+    장애가 생긴다). 그런데 **"그 구가 존재하는가"** 를 그 함수로 물으면
+    좌표 결손이 곧 "구가 없다"로 읽힌다 —
+
+        실측 2026-10-26: KR `CM_GU` 273구 중 좌표 없음 2구
+        (`41283` 고양 일산구 · `12000` 세종). `seed_enb_jp` 가 KR 대응
+        판정에 `gu_points` 를 써서 그 둘을 **"KR 에 없는 신규 구역"** 으로
+        분류했고, 이미 셀 278개가 좌표를 받은 세종 자리에 JP 전용 eNB 를
+        또 놓으려 했다. 수가 676 이 아니라 678 로 나온 것이 유일한 신호였다.
+
+    그래서 **존재 판정은 이 함수, 좌표는 `gu_points`** 로 나눈다.
+
+    ## 키는 `(CITY_ID, GU_ID)` 쌍이다
+
+    `GU_ID` 단독으로 비교하지 않는다. 지금 데이터에서는 우연히 유일하지만
+    그 가정이 깨지면 다른 시도의 구가 같은 구로 접힌다 — CLAUDE.md 의
+    "지리 롤업은 원시 재집계" 전제가 그 쌍을 키로 본다.
+    """
+    return {(int(c), int(g)) for c, g in _rows(
+        conn, f"SELECT CITY_ID, GU_ID FROM `{table_name('gu', locale)}` "
+              f"WHERE CITY_ID IS NOT NULL AND GU_ID IS NOT NULL")}
+
+
+def gu_points(conn, locale: str = "kr") -> list[tuple[int, int, str, float, float]]:
     """좌표가 있는 시군구. `(CITY_ID, GU_ID, GU_NAME, lat, lon)`.
 
     좌표 없는 시군구는 **빼고 돌려준다** — 기준점이 없으면 셀을 놓을 수
@@ -354,9 +525,9 @@ def gu_points(conn) -> list[tuple[int, int, str, float, float]]:
     호출부가 몇 곳이 빠졌는지 말해야 한다.
     """
     return [(int(c), int(g), str(n), float(la), float(lo))
-            for c, g, n, la, lo in _rows(conn, """
+            for c, g, n, la, lo in _rows(conn, f"""
         SELECT CITY_ID, GU_ID, GU_NAME, LATITUDE, LONGITUDE
-          FROM CM_GU
+          FROM `{table_name("gu", locale)}`
          WHERE LATITUDE IS NOT NULL AND LONGITUDE IS NOT NULL
          ORDER BY GU_ID""")]
 
@@ -373,6 +544,12 @@ def dump_path(locale: str, key: str) -> Path:
     바꿀 때 한 곳이 남고, 그 한 곳은 **파일을 못 찾았다**가 아니라 "사본이
     없다"로 보인다. 그러면 게이트가 멈추고 사람은 사본을 또 뜬다.
     """
+    # **파일 이름은 접미사 없는 원본 이름이다.** 디렉터리가 이미 로케일
+    # 축이므로(`locale/jp/`) 파일까지 `_JP` 를 붙이면 `locale/jp/CM_GU_JP…`
+    # 가 되어 축이 두 번 적힌다. 더 중요한 이유는 **이미 뜬 KR 사본이
+    # 복귀의 유일한 보장**이라는 것이다 — 이름 규칙을 바꾸면 `restore` 가
+    # 그 파일을 못 찾고, 그것은 "파일을 못 찾았다"가 아니라 **"사본이
+    # 없다"** 로 보여 게이트가 멈춘다.
     return LOCALE_DIR / locale / f"{TABLES[key][0]}{DUMP_SUFFIX}"
 
 
@@ -386,12 +563,13 @@ def dump(conn, locale: str = "kr") -> dict[str, int]:
     `json.dumps(..., default=str)` 를 유지한다 — 실측으로 네 테이블에
     `Decimal`·`datetime`·`bytes` 가 없어 **한 번도 발동하지 않지만**,
     컬럼이 추가됐을 때 조용히 `TypeError` 로 죽는 것보다 문자열로라도
-    남기는 쪽이 낫다. 좌표는 DMS 문자열(`36:37.15/60`)이다.
+    남기는 쪽이 낫다. 좌표는 DMS 문자열(`37:00.00/000`)이다 — 예시는
+    **명백한 더미**다(실측값을 적으면 다음 사람이 그것을 측정값으로 믿는다).
     """
     (LOCALE_DIR / locale).mkdir(parents=True, exist_ok=True)
     counts: dict[str, int] = {}
     for key in DUMP_TABLES:
-        table, _ = TABLES[key]
+        table = table_name(key, locale)
         with conn.cursor(pymysql.cursors.DictCursor) as cur:
             cur.execute(f"SELECT * FROM `{table}`")
             rows = cur.fetchall()
@@ -461,8 +639,18 @@ def restore(conn, locale: str = "kr", dry_run: bool = True) -> dict:
     tables: dict[str, dict] = {}
     ok = True
     for key in DUMP_TABLES:
-        table, _ = TABLES[key]
+        table = table_name(key, locale)
         path = dump_path(locale, key)
+        if not table_exists(conn, table):
+            # 벌이 아직 없다. **"사본이 없다"와 다른 말을 한다** — 전자는
+            # 사본을 뜨라는 뜻이고 이쪽은 `ensure-tables` 를 먼저 돌리라는
+            # 뜻이다. 같은 문구로 뭉치면 사람이 엉뚱한 버튼을 누른다.
+            info = {"table": table, "path": str(path),
+                    "error": f"테이블이 없다 — 먼저 벌을 만든다 "
+                             f"(topo ensure-tables --locale {locale})"}
+            ok = False
+            tables[key] = info
+            continue
         info: dict = {"table": table, "path": str(path)}
         if not path.exists():
             info["error"] = "사본이 없다"
@@ -492,7 +680,7 @@ def restore(conn, locale: str = "kr", dry_run: bool = True) -> dict:
         "ok": ok, "dry_run": dry_run, "locale": locale, "tables": tables,
         # **되돌렸다고 읽히면 안 된다.** 호출부(CLI·UI)가 이 두 줄을 그대로
         # 사람에게 내린다.
-        "scope": [TABLES[k][0] for k in DUMP_TABLES],
+        "scope": [table_name(k, locale) for k in DUMP_TABLES],
         "not_restored": [
             f"{XW_FILE} (행정코드 crosswalk) — `data/geo/` 는 이 경로 밖이다. "
             "나라를 바꿨다면 그쪽 crosswalk 는 그대로 남아 있다",
@@ -504,7 +692,7 @@ def restore(conn, locale: str = "kr", dry_run: bool = True) -> dict:
         # 하나라도 틀렸을 때 진행하면 "지웠는데 못 넣는" 상태가 된다.
         return out
     for key in DUMP_TABLES:
-        table, _ = TABLES[key]
+        table = table_name(key, locale)
         with gzip.open(dump_path(locale, key), "rt", encoding="utf-8") as fh:
             rows = json.load(fh)
         tables[key]["deleted"] = wipe(conn, table)
@@ -537,6 +725,14 @@ def seed_enb(conn, xw_path: Path, per_gu: int = 1, cells_per_enb: int = 3,
 
     `CM_CELL_REP_RU_LOC.DONG_ID` 는 `NOT NULL` 이므로 `CITY_ID` 까지 함께
     비운다. 셋 중 하나만 비우면 DDL 이 거부한다.
+
+    ## **KR 전용이다** — 로케일 인자를 받지 않는다
+
+    이 함수는 `CL_CELL_MAP` 에도 넣는다(셀 대장). 그 테이블은 로케일 축이
+    없으므로(`LOCALE_TABLE_KEYS`) JP 벌에만 장비를 놓을 방법이 없다 —
+    넣으면 KR 쪽 키 집합이 함께 늘어난다. JP 셀은 **KR 벌의 복사**로
+    만들고(`copy_cells`) 좌표만 다시 쓴다(`relocate_cells`), 그래서 여기서
+    놓은 eNB 는 그 복사에 **자동으로 따라간다.**
     """
     drawable = drawable_dongs(xw_path)
     gus = gu_points(conn)
@@ -589,8 +785,8 @@ def seed_enb(conn, xw_path: Path, per_gu: int = 1, cells_per_enb: int = 3,
     ok = [r for r in loc_rows if r["DONG_ID"] is not None]
     keys = {(r["ENB_ID"], r["SECTOR"]) for r in ok}
     if not dry_run:
-        insert_rows(conn, "CM_CELL_REP_RU_LOC", ok)
-        insert_rows(conn, "CL_CELL_MAP",
+        insert_rows(conn, table_name("cell", "kr"), ok)
+        insert_rows(conn, table_name("cellmap", "kr"),
                     [r for r in map_rows if (r["ENB_ID"], r["CELLNUM"]) in keys])
 
     # `keys` 를 돌려주는 것은 `pick_report(extra_cells=…)` 때문이다 —
@@ -769,7 +965,7 @@ def coord_gaps(uniq: dict, keep: set[str] | None) -> list[tuple[str, int]]:
 
 def ensure_sector_coords(conn, gaps: list[tuple[str, int]],
                          spread_km: float = 0.35, seed: int = 20260903,
-                         dry_run: bool = False) -> dict:
+                         dry_run: bool = False, locale: str = "kr") -> dict:
     """`coord_gaps` 가 준 셀에 좌표를 만든다 — **생성기 경로의 백필 대체다.**
 
     ## 왜 메모리 부여가 아니라 DB INSERT 인가
@@ -812,19 +1008,20 @@ def ensure_sector_coords(conn, gaps: list[tuple[str, int]],
     stats = {"targets": len(gaps), "enbs": 0, "skipped_no_anchor": 0,
              "skipped_no_dong": 0, "skipped_exists": 0, "patterns": {}}
 
+    cell_tbl = table_name("cell", locale)
     for enb in sorted(by_enb):
         have = {int(s) for (s,) in _rows(
-            conn, "SELECT SECTOR FROM CM_CELL_REP_RU_LOC WHERE ENB_ID = %s", [enb])}
+            conn, f"SELECT SECTOR FROM `{cell_tbl}` WHERE ENB_ID = %s", [enb])}
         sectors = sorted(s for s in set(by_enb[enb]) if s not in have)
         stats["skipped_exists"] += len(set(by_enb[enb])) - len(sectors)
         if not sectors:
             continue
-        anchor = enb_anchor(conn, enb)
+        anchor = enb_anchor(conn, enb, locale)
         if anchor is None:
             # 좌표 없는 eNB — **의도된 미매핑이다**(`coord_gaps` 머리말)
             stats["skipped_no_anchor"] += len(sectors)
             continue
-        base = _rows(conn, "SELECT CITY_ID, GU_ID, DONG_ID FROM CM_CELL_REP_RU_LOC "
+        base = _rows(conn, f"SELECT CITY_ID, GU_ID, DONG_ID FROM `{cell_tbl}` "
                            "WHERE ENB_ID = %s AND LATITUDE IS NOT NULL LIMIT 1", [enb])
         city, gu, dong = base[0] if base else (None, None, None)
         if dong is None:
@@ -847,7 +1044,7 @@ def ensure_sector_coords(conn, gaps: list[tuple[str, int]],
             })
 
     if not dry_run and rows:
-        insert_rows(conn, "CM_CELL_REP_RU_LOC", rows)
+        insert_rows(conn, cell_tbl, rows)
     stats["inserted"] = len(rows)
     # 호출부(`load_cells`)가 메모리의 `uniq` 를 같은 값으로 갱신해야 한다 —
     # 안 하면 이 틱의 셀 목록은 여전히 미매핑이고, 다음 틱부터만 반영된다.
@@ -1038,6 +1235,23 @@ XW_FILE = "code_crosswalk.json"
 #: 이다(`12000` 구의 동이 `12000035`). 자리수를 바꾸면 `int` 컬럼은 받지만
 #: 화면·조인이 상용과 다른 폭을 보게 된다.
 DONG_CODE_STEP = 1000
+
+#: 읍면동 폴리곤이 없는 locale 에서 **생성하는 동 이름의 꼴**.
+#:
+#: `"{gu} {i}동"` 을 전 locale 에 쓰면 일본 시구정촌에 **한국어 접미사**가
+#: 붙는다(`大阪市中央区 1동`). 사용자 요구가 *"실제 지명처럼"* 이라
+#: 그 한 글자가 화면에서 바로 보인다.
+#:
+#: **없는 locale 은 접미사를 붙이지 않는다** — 그 나라의 행정 단위 이름을
+#: 모르는 채 지어내면 "실제처럼"의 반대가 된다.
+DONG_NAME_FMT: dict[str, str] = {
+    "kr": "{gu} {i}동",
+    "jp": "{gu}{i}丁目",        # 町丁 단위의 실제 표기
+}
+
+
+def dong_name(locale: str, gu: str, i: int) -> str:
+    return DONG_NAME_FMT.get(locale, "{gu} {i}").format(gu=gu, i=i)
 
 
 def _ring_centroid(ring: list) -> tuple[float, float, float]:
@@ -1235,6 +1449,81 @@ EMD_FROM_POLYGON = "polygon"
 EMD_GENERATED = "generated"
 
 
+def kr_dong_ids(conn) -> dict[int, list[int]]:
+    """KR `CM_DONG` 의 `{GU_ID: [DONG_ID, …]}` — **생성 동의 설계도다.**
+
+    ## 왜 균일값으로 만들면 안 되는가 (실측 2026-10-26)
+
+    셀의 `DONG_ID` 는 KR 체계(`GU_ID*1000 + 순번`)로 박혀 있고 순번이
+    **구마다 다르다**(1~136 · 구당 최대 134 · 평균 34.5). `--dongs 8` 로
+    균일하게 만들면 순번 9 이상을 가진 **셀 54.3% 가 동 미매핑**이 되고,
+    불변규칙 12 가 그것을 숨기지 않으므로 JP 화면이 거대한 미매핑 패널이
+    된다 — 그러면서 **에러는 나지 않는다.** 반대로 136 으로 올리면 셀이
+    하나도 없는 추가 구역에까지 동 136개가 생긴다(949×136 = 129,064행).
+
+    그래서 **KR 의 `DONG_ID` 값을 그대로 재사용한다.** 순번을 다시 계산하지
+    않는 이유는 KR 쪽에 빈 번호가 있어도(1·2·5 …) 그 모양까지 따라가야
+    조인이 전수로 맞기 때문이다.
+    """
+    out: dict[int, list[int]] = {}
+    for g, d in _rows(conn, f"SELECT GU_ID, DONG_ID FROM "
+                            f"`{table_name('dong', 'kr')}` "
+                            f"WHERE GU_ID IS NOT NULL AND DONG_ID IS NOT NULL "
+                            f"ORDER BY GU_ID, DONG_ID"):
+        out.setdefault(int(g), []).append(int(d))
+    return out
+
+
+def dong_join_check(conn, locale: str,
+                    planned: set[tuple[int, int, int]] | None = None) -> dict | None:
+    """셀 벌의 `DONG_ID` 가 동 벌에 **있는가** — 적재 판정 숫자다.
+
+    `planned` 를 주면 **쓰기 전에** 그것으로 답한다(dry-run). 주지 않으면
+    실제 두 테이블을 `LEFT JOIN` 한다. 둘을 같은 키로 보고하는 이유는,
+    "넣으면 몇 개가 빌 것인가"와 "넣고 나니 몇 개가 비었나"가 같아야
+    하기 때문이다 — 다르면 생성과 적재 사이에서 무언가 어긋난 것이다.
+
+    셀 벌이 없으면 **`None`** 이다 — 0 이 아니다(불변규칙 17). 벌을 만들기
+    전에는 셀 수를 모르는 것이고, 0 으로 적으면 "전수 조인된다"로 읽힌다.
+    """
+    cell, dong = table_name("cell", locale), table_name("dong", locale)
+    if not table_exists(conn, cell):
+        return None
+    total = _rows(conn, f"SELECT COUNT(*) FROM `{cell}`")[0][0]
+    if planned is None:
+        if not table_exists(conn, dong):
+            return {"method": "join", "cells": total, "unmatched": total,
+                    "unmatched_keys": None,
+                    "note": f"{dong} 가 없다 — 전량 미매핑이다"}
+        n = _rows(conn, f"""
+            SELECT COUNT(*) FROM `{cell}` l
+              LEFT JOIN `{dong}` d
+                     ON d.CITY_ID = l.CITY_ID AND d.GU_ID = l.GU_ID
+                    AND d.DONG_ID = l.DONG_ID
+             WHERE d.DONG_ID IS NULL""")[0][0]
+        k = _rows(conn, f"""
+            SELECT COUNT(*) FROM (
+              SELECT l.CITY_ID, l.GU_ID, l.DONG_ID
+                FROM `{cell}` l
+                LEFT JOIN `{dong}` d
+                       ON d.CITY_ID = l.CITY_ID AND d.GU_ID = l.GU_ID
+                      AND d.DONG_ID = l.DONG_ID
+               WHERE d.DONG_ID IS NULL
+               GROUP BY 1, 2, 3) AS t""")[0][0]
+        return {"method": "join", "cells": total, "unmatched": int(n),
+                "unmatched_keys": int(k)}
+    # dry-run — 셀 쪽 조합은 수천 개뿐이라 묶어서 받아 Python 에서 맞춘다
+    miss = missk = 0
+    for cid, gid, did, n in _rows(
+            conn, f"SELECT CITY_ID, GU_ID, DONG_ID, COUNT(*) FROM `{cell}` "
+                  f"GROUP BY 1, 2, 3"):
+        if (int(cid), int(gid), int(did)) not in planned:
+            miss += int(n)
+            missk += 1
+    return {"method": "planned", "cells": total, "unmatched": miss,
+            "unmatched_keys": missk}
+
+
 def seed_geo(conn, geo_dir: Path, locale: str = "kr",
              dongs_per_gu: int = 8, spread_km: float = 3.0,
              seed: int = 20260903, replace: bool = False,
@@ -1254,7 +1543,22 @@ def seed_geo(conn, geo_dir: Path, locale: str = "kr",
 
     DMS 가 아니다 — `CM_CELL_REP_RU_LOC` 만 DMS 문자열이다. 섞으면
     `gu_points()` 의 `float(la)` 가 깨지거나 좌표가 0 이 된다.
+
+    ## `dongs_per_gu` 는 **추가 구역용 기본값**이다 (2026-10-26)
+
+    읍면동 폴리곤이 없는 locale 에서 동을 생성할 때, **KR 에 같은 `GU_ID`
+    가 있으면 그 구의 `DONG_ID` 를 그대로 재사용한다**(`kr_dong_ids`).
+    셀의 `DONG_ID` 가 KR 체계로 박혀 있어서, 구마다 다른 순번 범위를
+    균일값으로 덮으면 조인이 깨진다 — 실측으로 `8` 이면 셀 54.3% 가 동
+    미매핑이다. 이 인자가 걸리는 곳은 **KR 에 없는 구역**뿐이다(그쪽에는
+    셀이 없다).
+
+    결과의 `dong_join` 이 그 조인 상태를 숫자로 말한다 — 쓰기 전에는
+    예측(`method: planned`), 쓴 뒤에는 실제 `LEFT JOIN`(`method: join`).
     """
+    # **대상은 그 로케일의 벌이다** — `kr` 이면 원본, 그 외는 접미사
+    # 테이블(`CM_GU_JP`). 벌이 없으면 멈춘다: 없는 테이블에 `INSERT` 하면
+    # `1146` 이 나고 그 메시지는 "깨졌다"로 읽힌다.
     cmap = load_code_map(locale, geo_dir)
     sido = read_boundaries(geo_dir, locale, "sido")
     sgg = read_boundaries(geo_dir, locale, "sgg")
@@ -1301,6 +1605,9 @@ def seed_geo(conn, geo_dir: Path, locale: str = "kr",
     dong_rows: list[dict] = []
     emd_map: dict[str, str] = {}
     emd_src = EMD_GENERATED
+    # 동을 KR 에서 가져온 구역 수 / 기본값으로 만든 구역 수. 섞어서 한 수로
+    # 보고하면 "KR 대응이 빠졌다"를 알 수 없다
+    stats_kr_gu = stats_new_gu = 0
     # **`in` 으로 본다.** `.get("emd", "")` 로 경로를 만들면 `geo_dir / ""`
     # 가 `geo_dir` 자신이 되고 `.exists()` 가 참이라, 일본처럼 emd 가 없는
     # locale 이 폴리곤 분기로 들어가 "emd 레벨 경계가 없다"로 죽는다.
@@ -1332,15 +1639,39 @@ def seed_geo(conn, geo_dir: Path, locale: str = "kr",
             })
             emd_map[a["code"]] = f"{cid}-{gid}-{did}"
     else:
+        # **구마다 동 수가 다르다 — KR 에서 가져온다**(`kr_dong_ids` 머리말).
+        #
+        # 균일값은 양쪽으로 틀린다: `--dongs 8` 이면 순번 9 이상을 가진 셀
+        # 54.3% 가 동 미매핑이 되고(에러 없음), 136 으로 올리면 셀이 없는
+        # 추가 구역에까지 동 136개가 생긴다. KR 대응 구역은 **KR 의
+        # `DONG_ID` 값을 그대로** 쓰고, KR 에 없는 추가 구역만
+        # `dongs_per_gu` 를 쓴다.
+        #
+        # **`locale == "kr"` 에서는 KR 을 보지 않는다.** 자기 자신을 읽어
+        # 자기 자신을 다시 만드는 모양이 되고(순환), 한국은 읍면동 폴리곤이
+        # 있어 이 분기로 오지 않는다 — 올 때는 번들이 없는 비정상이므로
+        # 종전 동작(균일 생성)을 유지해 변화를 만들지 않는다.
+        from_kr = kr_dong_ids(conn) if locale != "kr" else {}
         for gid, (cid, lat, lon, _code) in sorted(gu_at.items()):
-            pts = scatter(lat, lon, dongs_per_gu, spread_km, rng)
+            ids = from_kr.get(gid)
+            if ids:
+                stats_kr_gu += 1
+            else:
+                # KR 에 없는 구역 — 셀도 없다. 기본값으로 둔다
+                ids = [gid * DONG_CODE_STEP + i
+                       for i in range(1, dongs_per_gu + 1)]
+                stats_new_gu += 1
+            pts = scatter(lat, lon, len(ids), spread_km, rng)
             gname = next(r["GU_NAME"] for r in gu_rows if r["GU_ID"] == gid)
-            for i, (dlat, dlon) in enumerate(pts, start=1):
-                did = gid * DONG_CODE_STEP + i
+            for did, (dlat, dlon) in zip(ids, pts):
+                # 이름의 순번은 **코드에서 되돌린다** — `DONG_ID` 가 KR
+                # 것이면 이름도 그 번호여야 사람이 둘을 맞출 수 있다
+                seq_no = did - gid * DONG_CODE_STEP
                 dong_rows.append({
                     "CITY_ID": cid, "GU_ID": gid, "DONG_ID": did,
                     "CITY_NAME": city_name.get(cid), "GU_NAME": gname,
-                    "DONG_NAME": f"{gname} {i}동", "P_DONG_ID": did,
+                    "DONG_NAME": dong_name(locale, gname, seq_no),
+                    "P_DONG_ID": did,
                     "MAP_X": None, "MAP_Y": None, "USE_YN": "Y",
                     "MAP_CODE": None, "LONGITUDE": dlon, "LATITUDE": dlat,
                     "LATITUDE_IMSI": None,
@@ -1369,29 +1700,62 @@ def seed_geo(conn, geo_dir: Path, locale: str = "kr",
         ],
     }
 
+    # **셀의 `DONG_ID` 가 동 벌에 있는가** — 적재 판정 숫자다. 쓰기 전에
+    # 답한다(`planned`): 넣고 나서 세면 되돌릴 자리가 없다.
+    #
+    # **진단이 생성을 죽이지 못하게 한다.** 이 질의는 셀 벌을 읽을 뿐이고
+    # 행정구역 생성과 무관하다 — 그쪽이 실패했다고 13,768행 생성을 버리면
+    # 손해가 더 크다. 대신 **조용히 넘기지 않고** 사유를 결과에 싣는다:
+    # 호출부가 그것을 사람에게 그대로 내린다(`cmd_topo` · `/topo`).
+    planned = {(int(r["CITY_ID"]), int(r["GU_ID"]), int(r["DONG_ID"]))
+               for r in dong_rows}
+    try:
+        join = dong_join_check(conn, locale, planned)
+    except Exception as e:                        # noqa: BLE001 — 진단이다
+        join = {"method": "error", "cells": None, "unmatched": None,
+                "unmatched_keys": None, "error": str(e)[:200]}
+
     stats = {"locale": locale, "city": len(city_rows), "gu": len(gu_rows),
              "dong": len(dong_rows), "emd_source": emd_src,
+             "dong_from_kr_gus": stats_kr_gu, "dong_new_gus": stats_new_gu,
+             "dong_join": join,
+             "tables": [table_name(k, locale) for k in ("city", "gu", "dong")],
              "skipped_sido": len(skipped["sido"]), "skipped_sgg": len(skipped["sgg"]),
              "crosswalk": str(crosswalk_path(geo_dir, locale)),
              "no_coord": sum(1 for r in gu_rows if r["LATITUDE"] is None)}
     if dry_run:
         return stats
 
-    have = {k: _rows(conn, f"SELECT COUNT(*) FROM `{TABLES[k][0]}`")[0][0]
+    missing = [table_name(k, locale) for k in ("city", "gu", "dong")
+               if not table_exists(conn, table_name(k, locale))]
+    if missing:
+        raise RuntimeError(
+            f"대상 테이블이 없다: {', '.join(missing)}\n"
+            f"  먼저 벌을 만든다 — topo ensure-tables --locale {locale} --write")
+    have = {k: _rows(conn, f"SELECT COUNT(*) FROM `{table_name(k, locale)}`")[0][0]
             for k in ("city", "gu", "dong")}
     if any(have.values()) and not replace:
         raise RuntimeError(
             f"행이 이미 있다 — {have}. 덮어쓰려면 replace 를 켠다.\n"
             "  44만 셀이 참조하는 코드를 바꾸는 일이다 — 사본을 먼저 뜬다")
     for k in ("dong", "gu", "city"):      # 자식부터 비운다
-        wipe(conn, TABLES[k][0])
-    insert_rows(conn, "CM_CITY", city_rows)
-    insert_rows(conn, "CM_GU", gu_rows)
-    insert_rows(conn, "CM_DONG", dong_rows)
+        wipe(conn, table_name(k, locale))
+    insert_rows(conn, table_name("city", locale), city_rows)
+    insert_rows(conn, table_name("gu", locale), gu_rows)
+    insert_rows(conn, table_name("dong", locale), dong_rows)
     out_xw = crosswalk_path(geo_dir, locale)
     out_xw.parent.mkdir(parents=True, exist_ok=True)
     out_xw.write_text(json.dumps(xw_doc, ensure_ascii=False, indent=1),
                       encoding="utf-8")
+    # **적재 뒤에 실제 조인으로 다시 센다.** dry-run 의 예측과 달라지면
+    # 생성과 적재 사이에서 무언가 어긋난 것이고, 그 어긋남은 "동 드릴다운이
+    # 빈다"로만 보인다.
+    try:
+        stats["dong_join"] = dong_join_check(conn, locale)
+    except Exception as e:                        # noqa: BLE001 — 진단이다
+        stats["dong_join"] = {"method": "error", "cells": None,
+                              "unmatched": None, "unmatched_keys": None,
+                              "error": str(e)[:200]}
     return stats
 
 
@@ -1456,7 +1820,46 @@ def _jp_rank(name: str, props_had_ward: bool) -> int:
     return 1 if name.endswith("市") else 2
 
 
-def build_jp_code_map(geo_dir: Path, kr_gu: list[tuple[int, int]]) -> dict:
+#: 추가 시군구에 발급하는 `GU_ID` 간격. KR 실측이 `11110`·`11140` 처럼
+#: 10 단위로 띄워져 있어 같은 결을 쓴다 — 사람이 보고 "같은 체계의 뒷번호"
+#: 로 읽을 수 있어야 한다.
+GU_ID_STEP = 10
+
+
+def next_gu_ids(city: int, existing: set[int], want: int,
+                step: int = GU_ID_STEP) -> list[int]:
+    """그 시도에서 **아직 쓰지 않은** `GU_ID` 를 `want` 개 발급한다.
+
+    ## 번호를 코드에 박지 않는다 — **실측에서 이어 붙인다**
+
+    그 시도의 현재 최대값에서 `step` 씩 올린다. 규칙을 상수로 적어 두면
+    (`CITY_ID * 1000 + 900` 같은 것) 다음 판본에서 KR 쪽이 그 자리를 쓰기
+    시작할 때 **조용히 충돌한다** — 충돌하면 같은 `GU_ID` 가 두 지역을
+    가리키고, 지리 롤업이 원시 재집계라 `geo_pattern` 반경이 거짓으로 커진다.
+
+    ## 접두 2자리가 바뀌면 **멈춘다**
+
+    `seed_geo` 가 `CITY_ID` 를 **`GU_ID` 앞 2자리에서 유도한다**(상용 실측:
+    `41195` → `41`). `41990` 다음이 `42000` 이면 그 구역이 **다른 시도**로
+    들어가고 에러가 나지 않는다. 그래서 자리수·접두가 바뀌는 순간 발급을
+    끊고, 호출부가 "몇 개를 못 넣었다"를 말한다.
+    """
+    pre = str(city)
+    mine = [g for g in existing if str(g).startswith(pre)]
+    cur = max(mine) if mine else int(pre + "0" * (5 - len(pre)))
+    out: list[int] = []
+    while len(out) < want:
+        cur += step
+        if str(cur)[:len(pre)] != pre or len(str(cur)) != 5:
+            break           # 접두·자리수가 바뀌었다 — 그 시도에 자리가 없다
+        if cur in existing:
+            continue
+        out.append(cur)
+    return out
+
+
+def build_jp_code_map(geo_dir: Path, kr_gu: list[tuple[int, int]],
+                      include_extra: bool = True) -> dict:
     """JP 경계 코드 → KR 코드 맵. `locale/jp/code_map.json` 의 내용이다.
 
     `kr_gu` 는 **지금 DB 에 있는** `(CITY_ID, GU_ID)` 목록이다 — 번들에서
@@ -1468,6 +1871,24 @@ def build_jp_code_map(geo_dir: Path, kr_gu: list[tuple[int, int]]) -> dict:
     수만큼 채운다. **공급이 모자라면 멈춘다** — 부족분을 다른 도도부현에서
     끌어오면 한 시도 코드에 떨어진 두 지역이 들어가고, 지리 롤업이 원시
     재집계라 `geo_pattern` 반경이 거짓으로 커진다(`WIDE` 가 상시로 난다).
+
+    ## `include_extra` — **1:1 상한을 푼다** (2026-10-26 사용자 지시)
+
+    *"진짜 1:1 매핑 아니어도 돼. 없는 장비 추가해도 좋아. 행정구역이 일본이
+    더 클테니까 말야."* 그래서 KR 273 에 맞춰 자르지 않고, 대응 도도부현에
+    **남아 있는 시구정촌을 실제 지명으로 더 담는다.**
+
+    지켜야 하는 것 둘 —
+
+    * **KR 273 과 겹치는 `GU_ID` 의 대응은 그대로 둔다.** 셀 44만행의
+      `GU_ID` 가 그 273 안에만 있으므로, 거기를 흔들면 이미 만든 대응이
+      깨진다. 추가분은 `next_gu_ids` 가 주는 **KR 에 없는 새 번호**를 받고
+      `CM_GU_JP` 에만 존재한다.
+    * **이름은 경계 파일의 실제 지명이다.** 생성한 가짜 이름을 쓰지 않는다 —
+      "실제 지명처럼" 이 사용자 요구다.
+
+    새 `GU_ID` 구역에는 **장비가 없다**(`CL_CELL_MAP` 은 KR 셀 대장이다).
+    `seed_enb_jp` 가 JP 전용 대역으로 놓는다.
     """
     sgg_path = geo_level_path(geo_dir, "jp", "sgg")
     doc = json.loads(sgg_path.read_text(encoding="utf-8"))
@@ -1490,6 +1911,11 @@ def build_jp_code_map(geo_dir: Path, kr_gu: list[tuple[int, int]]) -> dict:
     sido: dict[str, str] = {}
     sgg: dict[str, str] = {}
     picked: dict[int, list[dict]] = {}
+    no_room: dict[int, dict] = {}
+    dense: dict[int, int] = {}      # 1 단위 발급으로 메운 시도
+    # 발급 충돌 판정의 기준 집합 — **DB 의 전 시도 `GU_ID`** 다. 시도별로
+    # 보면 `11180` 이 서울에서 비어도 다른 시도가 쓰고 있을 수 있다.
+    all_gu = {int(g) for _c, g in kr_gu}
     for city, gus in sorted(need.items()):
         pref = SIDO_MAP_JP.get(f"{city}")
         if pref is None:
@@ -1507,9 +1933,41 @@ def build_jp_code_map(geo_dir: Path, kr_gu: list[tuple[int, int]]) -> dict:
         rows = []
         for gu, (_rank, code, name) in zip(gus, pool):
             sgg[code] = str(gu)
-            rows.append({"jis": code, "name": name, "gu_id": gu})
+            # `new` 는 **KR 에 그 `GU_ID` 가 있는가**다. 트래픽이 붙는 쪽과
+            # `CM_GU_JP` 에만 있는 쪽을 화면·보고가 갈라 보여야 한다.
+            rows.append({"jis": code, "name": name, "gu_id": gu, "new": False})
+
+        # ── 1:1 상한 밖 — **남은 시구정촌을 실제 지명으로 더 담는다**
+        rest = pool[len(gus):]
+        if include_extra and rest:
+            ids = next_gu_ids(city, all_gu, len(rest))
+            if len(ids) < len(rest):
+                # **10 단위로 모자라면 그 시도는 1 단위로 다시 뽑는다.**
+                # 北海道 는 시구정촌 179개인데 `41840~41990` 의 10 단위
+                # 자리가 16개뿐이다 — 거기서 끊으면 실제 지명 126개를 버리고
+                # 생성 이름을 쓰게 되는데, 사용자 요구가 *"실제 지명처럼"*
+                # 이다. 1 단위면 `41831~41999` 169칸이라 다 들어간다.
+                #
+                # **섞지 않고 통째로 다시 뽑는다** — 한 시도 안에서 10 단위와
+                # 1 단위가 섞이면 번호만 보고 체계를 읽을 수 없다. 간격이
+                # 좁다는 사실은 `dense_gu_ids` 가 말한다.
+                ids = next_gu_ids(city, all_gu, len(rest), step=1)
+                dense[city] = len(ids)
+            for (_rank, code, name), gid in zip(rest, ids):
+                sgg[code] = str(gid)
+                all_gu.add(gid)         # 다음 시도 발급과 겹치지 않게
+                rows.append({"jis": code, "name": name, "gu_id": gid,
+                             "new": True})
+            if len(ids) < len(rest):
+                # **자리가 없어 못 담은 수를 말한다.** 접두 2자리가 바뀌는
+                # 순간 발급이 끊긴다(`next_gu_ids`) — 조용히 자르면 "일본
+                # 행정구역이 이만큼뿐"으로 읽힌다.
+                no_room[city] = {"pref": pref, "left": len(rest) - len(ids),
+                                 "names": [n for _r, _c, n in
+                                           rest[len(ids):]][:5]}
         picked[city] = rows
 
+    extra_n = sum(1 for rows in picked.values() for r in rows if r["new"])
     return {
         "source": "topo code-map --locale jp",
         "note": [
@@ -1521,10 +1979,20 @@ def build_jp_code_map(geo_dir: Path, kr_gu: list[tuple[int, int]]) -> dict:
             "대응은 그 둘을 깬다.",
             "쓰지 않는 도도부현 30개는 **묶지 않는다** — 회색 배경으로 "
             "그릴 자리다(불변규칙 12 의 결).",
+            "`new: true` 인 구역은 **KR 에 없는 새 `GU_ID`** 다 — "
+            "`CM_GU_JP` 에만 있고 트래픽이 참조하지 않는다. 장비는 "
+            "`seed_enb_jp` 가 JP 전용 대역으로 놓는다.",
         ],
         "sido": sido,
         "sgg": sgg,
         "picked": picked,
+        # 상한을 푼 결과를 **수로 말한다** — 1:1 이었을 때와 비교할 자리다
+        "counts": {"kr_gu": len(all_gu) - extra_n, "extra": extra_n,
+                   "total": len(sgg)},
+        "no_room": no_room,
+        # **간격을 좁혀 메운 시도.** 번호가 10 단위가 아니라는 사실이
+        # 보여야 한다 — 다음 사람이 "체계가 깨졌다"고 읽지 않게.
+        "dense_gu_ids": dense,
         "unused_prefectures": sorted(set(by_pref) - set(SIDO_MAP_JP.values())),
     }
 
@@ -1578,7 +2046,7 @@ def fetch_boundaries(geo_dir: Path, locale: str, force: bool = False) -> dict:
 def relocate_cells(conn, locale: str = "kr", spread_km: float = 0.35,
                    seed: int = 20260903, only_active: bool = True,
                    dry_run: bool = True) -> dict:
-    """셀 좌표를 그 `GU_ID` 의 **현 `CM_GU` 중심** 주변으로 다시 쓴다.
+    """셀 좌표와 **이름**을 그 `GU_ID` 의 현 `CM_GU` 기준으로 다시 쓴다.
 
     ## 키 집합을 바꾸지 않는다
 
@@ -1588,7 +2056,34 @@ def relocate_cells(conn, locale: str = "kr", spread_km: float = 0.35,
     함수는 `fill_coords` 계열과 **역할이 갈린다** —
 
         ensure_sector_coords   행이 없는 셀에 **INSERT**  (결손 채우기)
-        relocate_cells         있는 행의 좌표만 **UPDATE** (나라 전환)
+        relocate_cells         있는 행의 좌표·이름만 **UPDATE** (나라 전환)
+
+    ## 이름도 함께 바꾼다 — 안 바꾸면 **지도는 오사카인데 이름은 한국**이다
+
+    `RU_NAME`(438,156행 `"[L9]○○빌딩-MT"`)과
+    `CL_ENB_ORG.BTS_NAME`(45,483행 `"<장비번호10자리>_○○시_○○동H_L18"`)이
+    — **이름 예시는 모양만 적는다.** 실측값은 그 자체가 기지국 자산
+    대장이고 이 저장소는 PUBLIC 이다(`.gitignore` 가 같은 이유로 170MB
+    마스터를 막는다). 전하려는 것은 "이런 꼴의 한국어 이름이 그만큼
+    있다"이므로 모양만으로 충분하다 —
+    화면에 그대로 나온다(`graphio store/tables.py:243` 이 후자를 eNB 이름
+    마스터로 쓴다). 좌표만 바꾸면 **에러 없이** 그 상태가 된다. 사용자가
+    *"DB 째로 이식"* 이라 했으므로 이 DB 가 현장에 간다.
+
+    **번역이 아니라 생성이다.** 사용자 방침이 *"이름 길게 갈 필요 없다.
+    짧게 간결하게"* 이고 `CM_GU` 가 이미 그 나라 이름을 들고 있다 —
+
+        BTS_NAME  <시군구명>_<eNB 연번>          大阪市中央区_3
+        RU_NAME   <시군구명>_<eNB 연번>-<섹터>   大阪市中央区_3-12
+
+    둘이 같은 접두를 공유하므로 **화면에서 셀과 eNB 가 묶여 보인다.**
+    연번은 그 시군구 안에서 `ENB_ID` 정렬 순이라 **결정론적**이다 — 난수면
+    돌릴 때마다 이름이 바뀌어 회귀를 비교할 수 없다.
+
+    **`CL_ENB_ORG_MAP`(2,904행)은 건드리지 않는다.** `CL_ENB_ORG`(45,483) 의
+    6.4% 뿐이라 전수 미달이고(`tables.py:249` 가 그것을 경고한다) 관례상
+    이름·권역은 `CL_ENB_ORG` 를 본다. `LATITUDE_NORM` 은 전 행 NULL 이라
+    좌표 소비처도 아니다 — **그 사실을 출력에 적기만 한다.**
 
     ## eNB 단위로 묶는다
 
@@ -1603,17 +2098,58 @@ def relocate_cells(conn, locale: str = "kr", spread_km: float = 0.35,
 
     올리면 같은 eNB 가 `CLUSTER`·`SCATTER` 로 보여 `geo_hit` 채점이 흔들린다.
 
-    `only_active=True` 면 **1분 집계에 나타나는 셀만** 고친다(실측 2,161).
-    44만행 전부를 고치는 것은 전환에 필요하지 않고, 되돌릴 범위만 넓힌다.
+    `only_active=True` 면 **1분 집계에 나타나는 셀만** 좌표를 고친다(실측
+    2,161). 좁힌 만큼 **이름이 한국으로 남는 셀 수를 보고한다.**
+
+    ## eNB 이름은 **그 로케일의 `enb_org` 벌**에만 쓴다 (2026-10-26)
+
+    `CL_ENB_ORG` 는 처음에 로케일 축이 없는 한 벌이었다. 그 한 벌의
+    `BTS_NAME` 을 일본 이름으로 덮으면 **KR 화면의 eNB 이름까지 일본어가
+    되고**, `DUMP_TABLES` 밖이라 **되돌아오지 않는다.** 그래서 한동안
+    비(非)kr 에서는 아예 건드리지 않고 "한국 이름이 남는다"고 보고만 했다.
+
+    그 상태가 화면에서 어떻게 보이는지가 결정을 바꿨다 — 라벨이
+    `RU_NAME` → `BTS_NAME` → 원시 키 순으로 떨어져 **셀 27.6% 가 한국
+    이름**으로 뜬다. 사용자가 다섯째 벌(`CL_ENB_ORG_JP`)을 승인했고
+    (2026-10-26), 이제 대상이 `table_name("enb_org", locale)` 이다 —
+    **KR 벌은 `locale == "kr"` 일 때만 대상이 된다.**
+
+    벌이 아직 없으면 **쓰지 않고 그 사실을 보고한다**
+    (`org_untouched_reason`) — 조용히 빼면 화면에 두 나라가 섞인 줄 모른다.
     """
-    gus = {g: (c, la, lo) for c, g, _n, la, lo in gu_points(conn)}
+    cell_tbl = table_name("cell", locale)
+    if not table_exists(conn, cell_tbl):
+        raise RuntimeError(
+            f"대상 테이블이 없다: {cell_tbl}\n"
+            f"  먼저 벌을 만들고 키를 복사한다 — topo ensure-tables "
+            f"--locale {locale} --write · topo copy-cells --locale {locale} --write")
+    gus = {g: (c, la, lo, name) for c, g, name, la, lo in gu_points(conn, locale)}
     if not gus:
         raise RuntimeError(
             f"CM_GU 에 좌표가 없다 — 먼저 지리 계층을 만든다 "
             f"(topo seed-geo --locale {locale})")
 
-    sql = """SELECT l.ENB_ID, l.SECTOR, l.GU_ID
-               FROM CM_CELL_REP_RU_LOC l"""
+    # eNB → 기준 시군구. **전수에서 만든다** — `CL_ENB_ORG` 이름이 전수라
+    # 활성 셀만 보면 나머지 eNB 의 시군구를 모른다.
+    enb_gu: dict[str, dict[int, int]] = {}
+    for enb, gu in _rows(conn, f"SELECT ENB_ID, GU_ID FROM `{cell_tbl}`"):
+        if gu is None or int(gu) not in gus:
+            continue
+        enb_gu.setdefault(str(enb), {})[int(gu)] = \
+            enb_gu.setdefault(str(enb), {}).get(int(gu), 0) + 1
+    # 섹터가 두 시군구에 걸친 경계 eNB 는 **다수결로 하나**를 고른다.
+    # 섹터마다 다른 중심을 쓰면 그 eNB 가 흩어진다.
+    enb_home: dict[str, int] = {
+        enb: max(sorted(v), key=lambda g: v[g]) for enb, v in enb_gu.items()}
+
+    # 시군구 안의 eNB 연번 — `ENB_ID` 정렬 순이라 결정론적이다
+    by_gu: dict[int, list[str]] = {}
+    for enb in sorted(enb_home):
+        by_gu.setdefault(enb_home[enb], []).append(enb)
+    enb_no = {enb: i + 1 for gu in by_gu for i, enb in enumerate(by_gu[gu])}
+
+    sql = f"""SELECT l.ENB_ID, l.SECTOR, l.GU_ID
+               FROM `{cell_tbl}` l"""
     if only_active:
         # **활성 셀로 좁힌다.** 1분 집계에 나타나는 키만 지도·탐지에
         # 올라간다 — 나머지를 고쳐도 보이는 것이 달라지지 않는다.
@@ -1622,47 +2158,1128 @@ def relocate_cells(conn, locale: str = "kr", spread_km: float = 0.35,
                        FROM PM_COR_LTE_CALL_1M) a
                  ON a.ENB_ID = l.ENB_ID AND a.CELLNUM = l.SECTOR"""
     rows = _rows(conn, sql + " ORDER BY l.ENB_ID, l.SECTOR")
+    total_cells = _rows(conn, f"SELECT COUNT(*) FROM `{cell_tbl}`")[0][0]
 
-    by_enb: dict[str, list[tuple[int, int | None]]] = {}
-    for enb, sector, gu in rows:
-        by_enb.setdefault(str(enb), []).append((int(sector), gu))
+    by_enb: dict[str, list[int]] = {}
+    for enb, sector, _gu in rows:
+        by_enb.setdefault(str(enb), []).append(int(sector))
 
     rng = random.Random(seed)
-    stats = {"locale": locale, "cells": len(rows), "enbs": len(by_enb),
-             "updated": 0, "skipped_no_gu": 0, "patterns": {}}
-    updates: list[tuple[str, str, str, int]] = []
+    stats = {"locale": locale, "table": cell_tbl,
+             "cells": len(rows), "enbs": len(by_enb),
+             "updated": 0, "skipped_no_gu": 0, "patterns": {},
+             "renamed_cells": 0, "renamed_enbs": 0,
+             "org_untouched_reason": None,
+             "cells_out_of_scope": total_cells - len(rows)}
+    updates: list[tuple[str, str, str, str, int]] = []
 
     for enb in sorted(by_enb):
         sectors = sorted(by_enb[enb])
-        # 기준 시군구는 **그 eNB 의 섹터 다수결**이다. 섹터가 두 시군구에
-        # 걸쳐 있을 때(경계 eNB) 섹터마다 다른 중심을 쓰면 그 eNB 가
-        # 흩어진다 — 하나로 묶는 것이 `POINT` 를 지키는 조건이다.
-        votes: dict[int, int] = {}
-        for _s, gu in sectors:
-            if gu is not None and int(gu) in gus:
-                votes[int(gu)] = votes.get(int(gu), 0) + 1
-        if not votes:
+        gu = enb_home.get(enb)
+        if gu is None:
             # `GU_ID` 를 모르거나 그 시군구에 좌표가 없다 — **건드리지
             # 않는다.** 아무 데나 놓으면 미매핑이 "매핑된 거짓 좌표"로
             # 바뀌어 `H-07` 이 그 셀을 놓친다(불변규칙 12).
             stats["skipped_no_gu"] += len(sectors)
             continue
-        gu = max(sorted(votes), key=lambda g: votes[g])
-        _city, lat, lon = gus[gu]
+        _city, lat, lon, gname = gus[gu]
         pts = scatter(lat, lon, len(sectors), spread_km, rng)
         pat, _r = pattern_of(pts)
         stats["patterns"][pat] = stats["patterns"].get(pat, 0) + 1
-        for (sector, _gu), (clat, clon) in zip(sectors, pts):
+        for sector, (clat, clon) in zip(sectors, pts):
             updates.append((decimal_to_dms(clat), decimal_to_dms(clon),
-                            enb, sector))
+                            f"{gname}_{enb_no[enb]}-{sector}", enb, sector))
+
+    # **그 로케일의 벌에만 쓴다** (위 docstring). `kr` 이면 원본이고 그때는
+    # 전수가 맞다 — 이름 마스터를 반만 고치면 두 규칙이 섞인다.
+    org_updates: list[tuple[str, str]] = []
+    org_tbl = table_name("enb_org", locale)
+    stats["org_table"] = org_tbl
+    have_org = table_exists(conn, org_tbl)
+    if not have_org:
+        stats["org_untouched_reason"] = (
+            f"{org_tbl} 가 없다 — eNB 이름(BTS_NAME)은 그대로 남는다. "
+            f"지도 라벨이 RU_NAME → BTS_NAME 순으로 떨어지므로 셀 일부가 "
+            f"한국 이름으로 보인다. 벌을 만들고 복사하면 바뀐다 "
+            f"(topo ensure-tables · copy-enb-org --locale {locale} --write)")
+    if have_org:
+        for enb, in _rows(conn, f"SELECT ENB_ID FROM `{org_tbl}` "
+                                f"ORDER BY ENB_ID"):
+            gu = enb_home.get(str(enb))
+            if gu is None:
+                continue
+            org_updates.append((f"{gus[gu][3]}_{enb_no[str(enb)]}", str(enb)))
 
     stats["updated"] = len(updates)
+    stats["renamed_cells"] = len(updates)
+    stats["renamed_enbs"] = len(org_updates)
     if dry_run:
         return stats
     with conn.cursor() as cur:
         for i in range(0, len(updates), 5000):
             cur.executemany(
-                "UPDATE CM_CELL_REP_RU_LOC SET LATITUDE = %s, LONGITUDE = %s "
+                f"UPDATE `{cell_tbl}` "
+                "SET LATITUDE = %s, LONGITUDE = %s, RU_NAME = %s "
                 "WHERE ENB_ID = %s AND SECTOR = %s", updates[i:i + 5000])
+        for i in range(0, len(org_updates), 5000):
+            cur.executemany(f"UPDATE `{org_tbl}` SET BTS_NAME = %s "
+                            "WHERE ENB_ID = %s", org_updates[i:i + 5000])
+    conn.commit()
+    return stats
+
+
+# --------------------------------------------------------------------------
+# locale 벌 — **지역 테이블만** 나라별로 만든다 (2026-10-26 방식 확정)
+# --------------------------------------------------------------------------
+#
+# 사용자 방침: *"db 자체를 jp셋으로 만들라는게 아냐. 지역구에 대응하는
+# 테이블만 JP로 만들라는거야. CM_GU, CM_DONG 같은 테이블만 말야. 나머진 다
+# 그대로 쓸꺼야. 원본 데이터도 그냥 쓸꺼고."*
+#
+#     CM_CITY_JP              17행    이름 · 중심좌표
+#     CM_GU_JP               273행    이름 · 중심좌표
+#     CM_DONG_JP           7,847행    이름 · 중심좌표
+#     CM_CELL_REP_RU_LOC_JP  442,689행  LATITUDE·LONGITUDE·RU_NAME 만
+#
+#     CL_ENB_ORG_JP       45,955행   BTS_NAME 만
+#
+# `ENB_ID`·`SECTOR`·`CITY_ID`·`GU_ID`·`DONG_ID`·각종 `_FLAG`·조직 ID 는
+# **KR 값을 그대로 복사한다** — ID 체계를 공유하기로 한 결정이 여기서
+# 지켜진다. `CL_CELL_MAP`(55만) · `PM_*` · `AI_*` · 권역 테이블
+# (`CM_BRANCH`·`CM_LAREA`·`CM_REGION`)은 **한 벌 공유**다.
+#
+# ## 셀 벌을 왜 셋이 아니라 **넷**으로 만드는가
+#
+# 지역 셋(`CM_CITY`·`CM_GU`·`CM_DONG`)만 JP 로 만들면 조인은 성립하고 에러도
+# 나지 않는다. 그런데 **좌표는 셀 쪽에 있다** — 지도·탐지가 읽는 자리가
+# `CM_CELL_REP_RU_LOC.LATITUDE` 다(graphio `kpi.py:373` · `evidence.py:2099` ·
+# `api/app.py` 3곳 · `pipeline.py:571`). 셋만 바꾸면 **일본 지명에 한국
+# 좌표**가 붙어 일본 폴리곤이 비어 보이고 `geo_pattern` 반경이 한국
+# 좌표에서 계산된다. 조용히 틀리는 종류다.
+#
+# ## DDL 은 손으로 적지 않는다 — `CREATE TABLE … LIKE`
+#
+# collation(`utf8mb3_general_ci`)·인덱스·컬럼 타입·기본값이 원본과 1:1 이어야
+# 한다. 손으로 적으면 **불변규칙 14** 의 collation 이 어긋나고, 그러면 이름
+# 컬럼이 조용히 합쳐지거나 조인이 `Illegal mix of collations` 로 깨진다.
+#
+# `LIKE` 가 **복제하지 않는 것은 외래키뿐**이다(실측 `pemdb6` 에 0건) —
+# `ensure_locale_tables` 가 그 수를 세어 보고한다.
+
+
+def ensure_locale_tables(conn, locale: str, write: bool = False) -> dict:
+    """그 로케일의 벌을 `CREATE TABLE IF NOT EXISTS … LIKE` 로 만든다.
+
+    대상은 `LOCALE_TABLE_KEYS` **전부**다 — 목록을 여기 다시 적지 않는다.
+    처음에는 넷이었고 `enb_org` 가 늘었는데(2026-10-26), 그때 이 함수가
+    자기 목록을 들고 있었으면 **벌 하나가 조용히 안 만들어진다.** 그
+    테이블만 없으면 `relocate_cells` 가 "이름은 그대로 남는다"고만 말하고
+    에러가 나지 않는다.
+
+    `write=False` 면 **무엇을 만들지만 말하고 아무것도 하지 않는다** —
+    기존 `--write` 게이트와 같은 모양이다.
+
+    **`locale == "kr"` 은 거부한다.** KR 은 원본이고 `LIKE` 를 돌릴 대상이
+    아니다. 받아 주면 `wipe` 계열과 엮였을 때 운영 테이블이 위험해지고,
+    "아무 일도 안 하는 성공"은 사람이 JP 를 만든 줄로 읽는다.
+
+    행 수를 **없을 때 `None` 으로** 돌려준다 — "테이블이 없다"와 "만들었는데
+    0행"은 다른 상태다(불변규칙 17).
+    """
+    if locale == "kr":
+        raise RuntimeError(
+            "locale 'kr' 은 원본이다 — 벌을 만들 대상이 아니다.\n"
+            "  이 함수는 접미사 벌(`CM_GU_JP` 등)을 만든다. KR 이름을 "
+            "대상으로 받으면 `LIKE` 가 돌 자리가 없고, 실수로 `wipe` 경로와 "
+            "엮이면 운영 테이블이 위험하다")
+
+    out: dict = {"locale": locale, "write": write, "tables": [],
+                 "created": 0, "exists": 0}
+    for key in LOCALE_TABLE_KEYS:
+        src = TABLES[key][0]
+        dst = table_name(key, locale)
+        if not table_exists(conn, src):
+            raise RuntimeError(f"원본 테이블이 없다: {src}")
+        # 원본의 collation 과 외래키 수를 함께 보고한다. 전자는 `LIKE` 가
+        # 복제하는 것이고 후자는 **유일하게 복제하지 않는 것**이다.
+        coll = _rows(conn, "SELECT TABLE_COLLATION FROM information_schema.TABLES "
+                           "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
+                     [src])
+        fks = _rows(conn, "SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS "
+                          "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s "
+                          "AND CONSTRAINT_TYPE = 'FOREIGN KEY'", [src])[0][0]
+        had = table_exists(conn, dst)
+        if write and not had:
+            with conn.cursor() as cur:
+                cur.execute(f"CREATE TABLE IF NOT EXISTS `{dst}` LIKE `{src}`")
+            conn.commit()
+        now = table_exists(conn, dst)
+        info = {
+            "key": key, "source": src, "table": dst,
+            "existed": had, "created": bool(write and not had),
+            "source_rows": _rows(conn, f"SELECT COUNT(*) FROM `{src}`")[0][0],
+            # **없으면 `None`** — "만들었는데 0행"과 다른 상태다
+            "rows": (_rows(conn, f"SELECT COUNT(*) FROM `{dst}`")[0][0]
+                     if now else None),
+            "collation": coll[0][0] if coll else None,
+            "foreign_keys": int(fks),
+        }
+        out["tables"].append(info)
+        out["created" if info["created"] else "exists"] += 1
+    # 외래키가 있으면 `LIKE` 가 그것만 빼놓는다 — 수를 말한다
+    out["foreign_keys"] = sum(t["foreign_keys"] for t in out["tables"])
+    return out
+
+
+#: 로케일 벌을 복사할 때 **비워 두는** 컬럼. 그 나라에서 새로 만드는 값이다.
+#:
+#: **0 이나 빈 문자열로 채우지 않는다**(불변규칙 4·17). 좌표 `0,0` 은 기니만
+#: 바다이고 `''` 는 `dms_to_decimal` 이 `None` 으로 읽어 미매핑이 되는데,
+#: 그 둘은 "아직 안 만들었다"와 구분되지 않는다. `NULL` 이면 `survey` 의
+#: `no_coord` 가 그 수를 그대로 말한다.
+#:
+#: `enb_org` 는 **`BTS_NAME` 하나뿐**이다 — `REGION_ID`·`BRANCH_ID` 등 조직
+#: ID 는 graphio 가 그 숫자로 조인하므로(`kpi.py:532·587`) KR 값을 그대로
+#: 가져가야 한다. 이름만 그 나라 것이 된다.
+COPY_NULL_COLUMNS: dict[str, tuple[str, ...]] = {
+    "cell": ("LATITUDE", "LONGITUDE", "RU_NAME"),
+    "enb_org": ("BTS_NAME",),
+}
+
+#: 뒤호환 별칭 — `copy_cells` 시절의 이름을 참조하는 자리가 있다.
+CELL_COPY_NULL = COPY_NULL_COLUMNS["cell"]
+
+
+def copy_locale_rows(conn, key: str, locale: str, write: bool = False) -> dict:
+    """KR 벌의 행을 그 로케일 벌로 **DB 안에서** 복사한다 — 생성 컬럼은 비운다.
+
+    44만행을 Python 으로 왕복시키지 않는다. `INSERT … SELECT` 한 문장이고,
+    `COPY_NULL_COLUMNS[key]` 는 **컬럼 목록에서 빼서 `NULL` 로 남긴다.**
+    그 값들은 다음 단계가 만든다 —
+
+        ensure_locale_tables   벌을 만든다 (DDL)
+        copy_locale_rows       키·참조를 복사한다  ← 여기
+        relocate_cells         좌표·RU_NAME·BTS_NAME 을 그 나라로 쓴다
+
+    ## **이미 행이 있으면 넣지 않는다** — DB 가 막아 주지 않는다
+
+    실측(2026-10-26)으로 다섯 벌 전부 **PK·UNIQUE 가 없다.**
+    `CM_CELL_REP_RU_LOC` 의 `ix_local_ru_loc_enb_sector` 는 **비-UNIQUE**
+    이고 `CL_ENB_ORG` 에는 인덱스조차 없다. 그래서 두 번 돌리면 중복이
+    **에러 없이** 쌓이고, 그러면 한 셀이 좌표를 둘 갖는다. 이 가드가
+    그 구멍을 메우는 **유일한 자리**다.
+
+    원본 자체의 중복도 **세어서 말한다** — `CL_ENB_ORG` 는 45,955행 /
+    distinct `ENB_ID` 45,954 다. 걸러내지 않는 것이 의도다: 복사는 **거울**
+    이고, 원본에 있는 것을 조용히 하나로 접으면 두 환경을 대조할 수 없다.
+
+    비울 컬럼이 `NOT NULL` 이면 **멈춘다** — 0 이나 `''` 로 바꿔 넣으면
+    "계산하지 못한 값"이 "계산해서 0" 으로 보인다(불변규칙 17).
+    """
+    if locale == "kr":
+        raise RuntimeError("locale 'kr' 은 원본이다 — 자기 자신을 복사할 수 없다")
+    if key not in COPY_NULL_COLUMNS:
+        raise RuntimeError(
+            f"`{key}` 는 복사 대상이 아니다 "
+            f"(있는 것: {', '.join(COPY_NULL_COLUMNS)}).\n"
+            "  행정구역 셋(city·gu·dong)은 복사가 아니라 **생성**이다 — "
+            "경계 GeoJSON 에서 만든다(`seed_geo`)")
+    src = table_name(key, "kr")
+    dst = table_name(key, locale)
+    nulls = COPY_NULL_COLUMNS[key]
+    if not table_exists(conn, dst):
+        raise RuntimeError(
+            f"대상 테이블이 없다: {dst}\n"
+            f"  먼저 벌을 만든다 — topo ensure-tables --locale {locale} --write")
+
+    have_src, have_dst = ddl_columns(conn, src), ddl_columns(conn, dst)
+    only_src = sorted(have_src - have_dst)
+    cols = [c for c in sorted(have_src & have_dst) if c not in nulls]
+    required = ddl_required(conn, dst) & set(nulls)
+    if required:
+        raise RuntimeError(
+            f"{dst} 의 {', '.join(sorted(required))} 가 NOT NULL 이다 — "
+            "비워 둘 수 없다.\n"
+            "  0 이나 빈 문자열로 채우지 않는다 — '아직 안 만들었다'와 "
+            "'만들어서 0' 이 섞인다(불변규칙 17). DDL 을 먼저 본다")
+
+    keycols = TABLES[key][1]
+    grp = ",".join(f"`{c}`" for c in keycols)
+    n_src = _rows(conn, f"SELECT COUNT(*) FROM `{src}`")[0][0]
+    n_uniq = _rows(conn, f"SELECT COUNT(*) FROM "
+                         f"(SELECT {grp} FROM `{src}` GROUP BY {grp}) AS t")[0][0]
+    n_dst = _rows(conn, f"SELECT COUNT(*) FROM `{dst}`")[0][0]
+    stats = {"key": key, "locale": locale, "source": src, "table": dst,
+             "source_rows": n_src, "rows_before": n_dst,
+             # **원본의 중복을 걸러내지 않고 말한다** (docstring 참조)
+             "source_duplicate_keys": n_src - n_uniq,
+             "key_columns": list(keycols),
+             "columns": len(cols), "null_columns": list(nulls),
+             "source_only_columns": only_src, "inserted": 0, "skipped": None}
+    if n_dst:
+        stats["skipped"] = (
+            f"{dst} 에 이미 {n_dst:,}행이 있다 — PK 가 없어 중복 INSERT 가 "
+            f"에러 없이 쌓인다. 다시 만들려면 먼저 비운다 "
+            f"(topo rm {key} --locale {locale} --all)")
+        return stats
+    if not write:
+        stats["skipped"] = "읽기만 했다 — 적재는 --write 다"
+        return stats
+    collist = ",".join(f"`{c}`" for c in cols)
+    with conn.cursor() as cur:
+        n = cur.execute(f"INSERT INTO `{dst}` ({collist}) "
+                        f"SELECT {collist} FROM `{src}`")
+    conn.commit()
+    stats["inserted"] = int(n or 0)
+    stats["rows"] = _rows(conn, f"SELECT COUNT(*) FROM `{dst}`")[0][0]
+    return stats
+
+
+def copy_cells(conn, locale: str, write: bool = False) -> dict:
+    """셀 벌 복사 — `copy_locale_rows(key="cell")` 의 이름 있는 입구."""
+    return copy_locale_rows(conn, "cell", locale, write)
+
+
+def copy_enb_org(conn, locale: str, write: bool = False) -> dict:
+    """eNB 조직 벌 복사 — `BTS_NAME` 만 비운다.
+
+    **왜 이 벌이 필요한가:** 안 만들면 JP 지도에서 셀 이름은 일본어인데
+    (`CM_CELL_REP_RU_LOC_JP.RU_NAME`) eNB 이름은 한국어로 뜬다 — 화면
+    라벨이 `RU_NAME` → `BTS_NAME` → 원시 키 순으로 떨어지기 때문이다.
+    공유 한 벌(`CL_ENB_ORG`)을 덮어 해결할 수는 없다: `DUMP_TABLES` 에
+    없어서 **KR 이 되돌아오지 않는다.**
+    """
+    return copy_locale_rows(conn, "enb_org", locale, write)
+
+
+# --------------------------------------------------------------------------
+# JP 전용 eNB — **`CL_CELL_MAP` 이 공유라 여기만 되돌릴 수 없다**
+# --------------------------------------------------------------------------
+#
+# 사용자 지시(2026-10-26): *"없는 장비 추가해도 좋아. 행정구역이 일본이 더
+# 클테니까 말야."* 추가 구역(`new: true` · KR 에 없는 `GU_ID`)에는 장비가
+# 없다 — `CM_GU_JP` 에만 있는 구역이고 셀 대장은 KR 것을 복사했으므로.
+#
+# ## 어려운 자리는 하나다 — 셀 대장이 로케일 축을 갖지 않는다
+#
+# 생성기가 셀을 고르는 경로가 `CL_CELL_MAP` ⨝ 셀 벌이다(`load_cells`).
+# 그러니 "장비를 추가"하는 것은 **공유 테이블에 행을 넣는 일**이고, 그냥
+# 넣으면 KR 생성이 그 eNB 를 후보로 본다. 좌표가 KR 벌에 없으니 **미매핑
+# 셀**이 되어 `H-07`·UNMAPPED 패널에 상시로 뜬다(불변규칙 12 가 그것을
+# 숨기지 못하게 막아 둔 자리다).
+#
+# ## 그래서 **넣은 목록을 파일로 남기고, 그 목록으로 KR 선택에서 뺀다**
+#
+# `_pick_enbs` 가 `locale_only_enbs()` 를 빼고 고른다. **대역 숫자가 아니라
+# 실제로 넣은 ID 목록**이다 —
+#
+#   * 숫자를 코드에 박으면 그 대역이 비어 있다는 **가정**이 코드에 남는다.
+#     목록은 넣을 때 **실측**으로 확인한 결과다(`seed_enb_jp` 가 세 테이블의
+#     기존 `ENB_ID` 와 겹치는지 보고 겹치면 멈춘다).
+#   * 같은 파일이 **되돌림 수단**이다. `CL_CELL_MAP` 은 `DUMP_TABLES` 밖이라
+#     사본이 없다 — 지울 대상을 아는 유일한 방법이 이 목록이다.
+#
+# **이 파일이 없어지면 KR 이 그 eNB 를 후보로 본다.** 추적 밖(`data/`)이므로
+# 그 사실을 적어 둔다 — 지우려면 먼저 `topo rm-added` 로 DB 에서 빼야 한다.
+
+#: 넣은 JP 전용 eNB 목록. `dump` 사본과 **같은 디렉터리**에 둔다 — 그 둘이
+#: 한 벌이다(사본을 되넣으면 그 시점의 셀 집합으로 돌아간다).
+ADDED_FILE = "enb_added.json"
+
+
+def added_enbs_path(locale: str) -> Path:
+    return LOCALE_DIR / locale / ADDED_FILE
+
+
+def load_added_enbs(locale: str) -> dict:
+    """그 로케일에 넣은 eNB 원장. 없으면 `{}` — **0 개와 같은 뜻이다.**
+
+    여기서는 "없다"와 "0개"를 같게 두어도 된다. 파일이 없으면 넣은 적이
+    없다는 뜻이고, 파일이 있는데 비면 다 되돌렸다는 뜻이라 둘 다 "KR 에서
+    뺄 것이 없다"로 귀결된다.
+    """
+    p = added_enbs_path(locale)
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except ValueError:
+        # **깨진 원장을 조용히 빈 집합으로 읽지 않는다.** 그러면 KR 이 그
+        # eNB 를 후보로 보기 시작하고, 원인은 "미매핑이 늘었다"로만 보인다.
+        raise RuntimeError(
+            f"eNB 원장을 읽을 수 없다: {p}\n"
+            "  이 파일이 KR 선택에서 JP 전용 eNB 를 빼는 근거다 — "
+            "비면 KR 생성이 그 장비를 후보로 본다(미매핑으로 드러난다)")
+
+
+def locale_only_enbs() -> set[str]:
+    """**KR 생성에서 빼야 하는** eNB 전부 — 모든 비(非)kr 로케일의 합집합.
+
+    `pemdb1._pick_enbs` 가 이것을 부른다. 매 틱 읽는다 — 캐시하면 원장을
+    고친 뒤 프로세스를 재시작해야 반영되고, 그 사이의 생성물은 원장과
+    어긋난 셀 집합을 담는다.
+    """
+    out: set[str] = set()
+    if not LOCALE_DIR.exists():
+        return out
+    for d in sorted(LOCALE_DIR.iterdir()):
+        if not d.is_dir() or d.name == "kr":
+            continue
+        out.update(str(e) for e in (load_added_enbs(d.name).get("enbs") or []))
+    return out
+
+
+def _org_defaults(conn, locale: str) -> dict[int, tuple]:
+    """시도별 **대표 조직 속성** — 새 eNB 가 조직 축에서 빠지지 않게 한다.
+
+    새 eNB 에는 부모가 없다. `REGION_ID`·`BRANCH_ID` 를 `NULL` 로 두면
+    graphio 의 조직 축 조인(`kpi.py:532·587`)에서 그 장비가 통째로 빠지고,
+    화면에는 "그 지역에 장비가 없다"로 보인다. 지어내지 않고 **같은 시도에
+    가장 많은 조합**을 쓴다 — 유도 근거가 데이터 안에 있다.
+
+    `EMS_ID`·`MME_GRP_ID` 까지 함께 가져온다. 조합을 쪼개 각 컬럼의 최빈값을
+    따로 뽑으면 **실재하지 않는 조합**이 만들어진다(지사 A + 팀 B).
+    """
+    cell, org = table_name("cell", locale), table_name("enb_org", locale)
+    rows = _rows(conn, f"""
+        SELECT c.CITY_ID, o.COMPANY_ID, o.REGION_ID, o.BRANCH_ID,
+               o.OPTEAM_ID, o.PART_ID, o.EMS_ID, o.MME_GRP_ID, COUNT(*) AS n
+          FROM (SELECT DISTINCT ENB_ID, CITY_ID FROM `{cell}`) c
+          JOIN `{org}` o ON o.ENB_ID = c.ENB_ID
+         GROUP BY 1, 2, 3, 4, 5, 6, 7, 8
+         ORDER BY c.CITY_ID, n DESC""")
+    out: dict[int, tuple] = {}
+    for r in rows:
+        out.setdefault(int(r[0]), tuple(r[1:8]))     # 시도별 첫 행 = 최빈 조합
+    return out
+
+
+def seed_enb_jp(conn, locale: str, band_start: int, per_gu: int = 1,
+                cells_per_enb: int = 3, spread_km: float = 0.35,
+                seed: int = 20260903, write: bool = False) -> dict:
+    """추가 구역(KR 에 없는 `GU_ID`)에 장비를 놓는다.
+
+    **대역 시작 번호는 인자다.** 코드에 박지 않는다 — 어느 번호가 비어
+    있는지는 그 DB 의 사실이고, 이 함수는 받은 번호로 만든 ID 전부가 세
+    테이블에서 **실제로 비어 있는지 확인한 뒤**에 쓴다. 겹치면 멈춘다:
+    같은 `ENB_ID` 가 두 장비를 가리키면 1분 집계가 둘의 호를 합치고, 그것은
+    에러가 아니라 **표본이 늘어난 것처럼** 보인다.
+
+    쓰는 곳 셋 —
+
+        CL_CELL_MAP              셀 대장. **KR 과 공유다 · 사본이 없다**
+        CM_CELL_REP_RU_LOC_<L>   좌표 · RU_NAME
+        CL_ENB_ORG_<L>           BTS_NAME · 조직 참조
+
+    첫째가 되돌릴 수 없는 자리라, **쓰기 전에 원장을 먼저 남긴다**
+    (`added_enbs_path`). 중간에 끊겨도 무엇을 넣으려 했는지가 파일에 있고,
+    `remove_added_enbs` 가 그것으로 지운다.
+
+    좌표는 그 시군구 중심에서 `spread_km` 안에 뿌린다 — eNB 하나가
+    `POINT` 으로 보여야 `RAN_NODE_DOWN` 해석이 선다(`scatter` 머리말).
+    """
+    if locale == "kr":
+        raise RuntimeError(
+            "locale 'kr' 에는 이 함수를 쓰지 않는다 — KR 장비는 "
+            "`seed_enb`(topo 대역)가 놓는다. 이쪽은 **KR 선택에서 빠지는** "
+            "장비를 만든다")
+    cell, org = table_name("cell", locale), table_name("enb_org", locale)
+    cellmap = table_name("cellmap", "kr")
+    for t in (cell, org):
+        if not table_exists(conn, t):
+            raise RuntimeError(
+                f"대상 테이블이 없다: {t}\n"
+                f"  먼저 벌을 만들고 복사한다 — topo ensure-tables · "
+                f"copy-cells · copy-enb-org --locale {locale} --write")
+
+    # ── 대상 구역: `CM_GU_<L>` 에는 있고 KR `CM_GU` 에는 없는 구역
+    #
+    # **존재 판정은 `gu_keys`(전수) · 좌표는 `gu_points`(좌표 있는 것)** 다.
+    # 둘을 섞으면 **KR 의 좌표 결손이 "KR 에 없는 구역"으로 읽힌다** —
+    # `gu_keys` 머리말의 실측(세종 `12000` 이 그렇게 분류됐다) 참조.
+    # 키는 `(CITY_ID, GU_ID)` 쌍이다: `GU_ID` 단독은 유일성을 보장하지 않는다.
+    kr_keys = gu_keys(conn, "kr")
+    jp_only = {k for k in gu_keys(conn, locale) if k not in kr_keys}
+    # 순서는 `gu_points` 의 `ORDER BY GU_ID` 를 그대로 쓴다 — `ENB_ID` 발급이
+    # 이 순서를 따르므로 바뀌면 같은 구역이 다른 번호를 받는다
+    new_gu = [(c, g, n, la, lo) for c, g, n, la, lo in gu_points(conn, locale)
+              if (c, g) in jp_only]
+    # **좌표가 없어 장비를 놓을 수 없는 JP 구역.** 조용히 빠지면 그 구역이
+    # 왜 빈지 알 수 없다 — 수를 보고한다(불변규칙 12 의 결).
+    no_coord = sorted(jp_only - {(c, g) for c, g, _n, _a, _o in new_gu})
+    if not new_gu:
+        raise RuntimeError(
+            f"{table_name('gu', locale)} 에 KR 에 없는 구역이 없다 — "
+            "먼저 코드 맵과 행정구역을 1:1 상한 밖까지 만든다 "
+            "(topo code-map · seed-geo --write)"
+            + (f"\n  (KR 에 없는 구역은 {len(jp_only)}곳인데 전부 좌표가 "
+               f"없다 — seed-geo 가 중심좌표를 만들었는지 본다)"
+               if jp_only else ""))
+
+    # 그 구역의 동 — **`CM_DONG_<L>` 에서 직접 읽는다.** crosswalk 는 KR
+    # 생성의 그릴 수 있는 동 집합이고, 이 장비는 KR 선택에서 빠지므로
+    # 그쪽 필터와 무관하다. 동이 없으면 그 구역은 건너뛴다(`DONG_ID` 가
+    # `NOT NULL` 이고 0 으로 채우면 조용히 버려진다 · 불변규칙 17).
+    dongs: dict[int, list[int]] = {}
+    for g, d in _rows(conn, f"SELECT GU_ID, DONG_ID FROM "
+                            f"`{table_name('dong', locale)}` "
+                            f"ORDER BY GU_ID, DONG_ID"):
+        dongs.setdefault(int(g), []).append(int(d))
+
+    # ── ID 발급 — 받은 번호에서 순차. 자리수·대역 밖은 멈춘다
+    want = len(new_gu) * per_gu
+    ids = [str(band_start + i) for i in range(want)]
+
+    # **세 테이블에서 실제로 비어 있는지 본다.** 대역이 비어 있다는 가정을
+    # 코드에 남기지 않는다 — 넣는 시점의 사실로 확인한다.
+    taken: set[str] = set()
+    for t, col in ((cellmap, "ENB_ID"), (cell, "ENB_ID"), (org, "ENB_ID")):
+        taken |= {str(e) for (e,) in _rows(
+            conn, f"SELECT DISTINCT `{col}` FROM `{t}`") if e is not None}
+    # ── 겹침은 **두 가지**다 — 구분해서 말한다 (2026-10-26 결함 E)
+    #
+    #   ⓐ 우리가 이미 놓았다   원장에 그 ID 가 있다. **정상 완료 상태**다 —
+    #                          멱등이므로 다시 넣지 않고 그렇게 말한다.
+    #   ⓑ 남의 번호와 겹친다   원장 밖의 ID 가 쓰이고 있다. **멈춘다** —
+    #                          같은 `ENB_ID` 가 두 장비를 가리키면 1분 집계가
+    #                          둘의 호를 합치고 에러가 나지 않는다.
+    #
+    # 전에는 둘을 한 에러로 뭉쳤다. 7단계가 **정상 완료**된 뒤 세어 보기를
+    # 누르면 붉은 실패가 떠서, 운영자가 되돌리려 든다.
+    ledger = {str(e) for e in (load_added_enbs(locale).get("enbs") or [])}
+    clash = sorted(set(ids) & taken)
+    foreign = [e for e in clash if e not in ledger]
+    if foreign:
+        raise RuntimeError(
+            f"발급할 ENB_ID {len(foreign)}개가 **원장 밖에서** 이미 쓰이고 "
+            f"있다 (예: {', '.join(foreign[:5])}).\n"
+            f"  빈 대역을 실측해서 --band-start 로 준다 — 같은 ENB_ID 가 두 "
+            f"장비를 가리키면 1분 집계가 둘의 호를 합치고 에러가 나지 않는다"
+            + (f"\n  (그중 {len(clash) - len(foreign)}개는 원장에 있는 "
+               f"우리 장비다)" if len(clash) > len(foreign) else ""))
+    already = sorted(set(ids) & ledger)
+
+    rng = random.Random(seed)
+    cell_rows: list[dict] = []
+    map_rows: list[dict] = []
+    org_rows: list[dict] = []
+    defaults = _org_defaults(conn, locale)
+    stats = {"locale": locale, "band_start": band_start,
+             "gus": len(new_gu), "gus_jp_only": len(jp_only),
+             "gus_no_coord": len(no_coord),
+             "gus_no_coord_sample": no_coord[:5],
+             "enbs": 0, "cells": 0, "already": 0,
+             "skipped_no_dong": [], "no_org_default": [],
+             "patterns": {}, "tables": {"cellmap": cellmap, "cell": cell,
+                                        "org": org},
+             "enbs_list": [], "written": False}
+    k = 0
+    for city, gu, gname, lat, lon in new_gu:
+        dl = dongs.get(gu) or []
+        if not dl:
+            stats["skipped_no_dong"].append(gu)
+            k += per_gu            # ID 를 건너뛴다 — 번호가 구역에 묶이지
+            continue               # 않게 두면 재실행 때 다른 구역에 붙는다
+        for i in range(per_gu):
+            enb = ids[k]
+            k += 1
+            pts = scatter(lat, lon, cells_per_enb, spread_km, rng)
+            pat, _r = pattern_of(pts)
+            stats["patterns"][pat] = stats["patterns"].get(pat, 0) + 1
+            stats["enbs"] += 1
+            stats["enbs_list"].append(enb)
+            for sector, (clat, clon) in enumerate(pts):
+                cell_rows.append({
+                    "ENB_ID": enb, "SECTOR": sector,
+                    "CITY_ID": city, "GU_ID": gu,
+                    "DONG_ID": dl[(sector + i) % len(dl)],
+                    "LATITUDE": decimal_to_dms(clat),
+                    "LONGITUDE": decimal_to_dms(clon),
+                    # 이름 규칙은 `relocate_cells` 와 같다 — 그쪽이 나중에
+                    # 다시 돌아도 같은 모양이 나와야 한다
+                    "RU_NAME": f"{gname}_{i + 1}-{sector}",
+                    "RU_CUID": None, "FLAG": None, "DECODE": enb,
+                })
+                map_rows.append({
+                    "ENB_ID": enb, "CELLNUM": sector, "SECTOR": sector,
+                    "CELL_ID": sector, "C_UID": None, "MME_GRP_ID": None,
+                    "FA": 1, "PCI": (int(enb) + sector) % 504, "ADM_STATE": 1,
+                })
+            dft = defaults.get(int(city))
+            if dft is None:
+                stats["no_org_default"].append(city)
+            org_rows.append({
+                "ENB_ID": enb, "C_UID": None,
+                "COMPANY_ID": dft[0] if dft else None,
+                "REGION_ID": dft[1] if dft else None,
+                "BRANCH_ID": dft[2] if dft else None,
+                "OPTEAM_ID": dft[3] if dft else None,
+                "PART_ID": dft[4] if dft else None,
+                "EMS_ID": dft[5] if dft else None,
+                "MME_GRP_ID": dft[6] if dft else None,
+                "BTS_NAME": f"{gname}_{i + 1}",
+            })
+    stats["cells"] = len(cell_rows)
+    if already:
+        # **이미 놓여 있다.** 에러가 아니라 완료 상태다 — 멱등이므로 다시
+        # 넣지 않는다. 다시 만들려면 원장으로 먼저 지운다(`rm-added`).
+        stats["already"] = len(already)
+        stats["note"] = (
+            f"이미 놓여 있다 — 원장의 {len(already)}대가 그 번호를 쓰고 "
+            f"있다(대역 시작 {band_start}). 멱등이므로 다시 넣지 않는다.\n"
+            f"  다시 만들려면 먼저 지운다 — topo rm-added --locale {locale}")
+        return stats
+    if not write:
+        stats["note"] = "읽기만 했다 — 적재는 --write 다"
+        return stats
+
+    # **원장을 먼저 쓴다** (docstring). 중간에 끊겨도 지울 대상을 안다.
+    path = added_enbs_path(locale)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    prev = load_added_enbs(locale)
+    doc = {
+        "source": f"topo seed-enb-jp --locale {locale}",
+        "note": [
+            "**KR 생성에서 이 eNB 를 뺀다** — `pemdb1._pick_enbs` 가 "
+            "`topo.locale_only_enbs()` 로 이 목록을 읽는다. 이 파일이 "
+            "없어지면 KR 이 후보로 보고 미매핑 셀이 늘어난다.",
+            "**되돌림 수단이다.** `CL_CELL_MAP` 은 공유 테이블이고 "
+            "`DUMP_TABLES` 밖이라 사본이 없다 — 지울 대상을 아는 유일한 "
+            "방법이 이 목록이다 (`topo rm-added`).",
+        ],
+        "band_start": band_start,
+        "enbs": sorted(set((prev.get("enbs") or [])) | set(stats["enbs_list"]),
+                       key=lambda e: int(e)),
+        "cells_per_enb": cells_per_enb,
+    }
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=1),
+                    encoding="utf-8")
+
+    insert_rows(conn, cell, cell_rows)
+    insert_rows(conn, cellmap, map_rows)
+    insert_rows(conn, org, org_rows)
+    stats["written"] = True
+    stats["ledger"] = str(path)
+    stats["ledger_total"] = len(doc["enbs"])
+    return stats
+
+
+def remove_added_enbs(conn, locale: str, write: bool = False) -> dict:
+    """원장에 적힌 eNB 를 세 테이블에서 지운다 — **`CL_CELL_MAP` 의 되돌림.**
+
+    그 테이블은 공유이고 사본이 없다(`DUMP_TABLES` 밖). 그래서 "되돌린다"가
+    사본 복원이 아니라 **넣은 것만 지운다**는 뜻이고, 그 대상을 아는 유일한
+    근거가 원장이다. 원장이 없으면 **아무것도 하지 않고 멈춘다** — 대역으로
+    추측해 지우면 그 번호를 쓰는 다른 장비가 함께 사라진다.
+    """
+    led = load_added_enbs(locale)
+    enbs = [str(e) for e in (led.get("enbs") or [])]
+    if not enbs:
+        raise RuntimeError(
+            f"원장이 비어 있다: {added_enbs_path(locale)}\n"
+            "  지울 대상을 모른다 — 대역으로 추측해 지우면 그 번호를 쓰는 "
+            "다른 장비가 함께 사라진다")
+    targets = [(table_name("cellmap", "kr"), "ENB_ID"),
+               (table_name("cell", locale), "ENB_ID"),
+               (table_name("enb_org", locale), "ENB_ID")]
+    marks = ",".join(["%s"] * len(enbs))
+    out = {"locale": locale, "enbs": len(enbs), "tables": {}, "written": write}
+    for t, col in targets:
+        if not table_exists(conn, t):
+            out["tables"][t] = None        # 없는 벌 — 지울 것이 없다
+            continue
+        n = _rows(conn, f"SELECT COUNT(*) FROM `{t}` "
+                        f"WHERE `{col}` IN ({marks})", enbs)[0][0]
+        out["tables"][t] = n
+        if write and n:
+            with conn.cursor() as cur:
+                cur.execute(f"DELETE FROM `{t}` WHERE `{col}` IN ({marks})", enbs)
+    if write:
+        conn.commit()
+        # **원장을 비운다.** 남겨 두면 KR 선택에서 계속 빠지고, 그 eNB 는
+        # 이제 DB 에 없으므로 "왜 빼는지" 알 수 없는 목록이 된다.
+        added_enbs_path(locale).write_text(
+            json.dumps({**led, "enbs": [],
+                        "removed_note": "topo rm-added 로 지웠다"},
+                       ensure_ascii=False, indent=1), encoding="utf-8")
+    return out
+
+
+# --------------------------------------------------------------------------
+# 행 조회 · 수정 — **화면의 CRUD 그리드가 이 셋을 부른다**
+# --------------------------------------------------------------------------
+#
+# `ui.py` 가 자기 SQL 을 쓰지 않게 하려고 여기 둔다(모듈 머리말의 규율).
+# 화면과 커맨드가 각자 조립하면 한쪽만 고쳐질 때 두 경로가 다른 행을 보고,
+# 그것은 에러가 아니라 **값이 어긋나는** 종류다.
+
+#: 한 번에 내려주는 행 수의 상한. `CM_DONG` 7,847 · 셀 44만을 통째로 내리면
+#: 화면이 멈춘다 — 검색과 페이지로 좁힌다.
+BROWSE_MAX = 500
+
+
+def browse(conn, key: str, locale: str = "kr", q: str = "",
+           limit: int = 50, offset: int = 0) -> dict:
+    """행 목록 + 전체 수 + 컬럼 · 키 컬럼. **검색은 이름·키 컬럼만** 본다.
+
+    `q` 를 전 컬럼에 `LIKE` 로 걸면 44만행에서 풀스캔이 여러 번 돈다. 이름
+    컬럼(`*_NAME`)과 키 컬럼만 보는 것으로 좁히고, **어느 컬럼을 봤는지
+    응답에 적는다** — 안 적으면 "검색했는데 안 나온다"가 버그처럼 보인다.
+
+    `total` 은 **그 조건의 전체 수**다. 페이지 수를 화면이 추측하지 않게 한다.
+    """
+    table = (TABLES[key][0] if key not in LOCALE_TABLE_KEYS
+             else table_name(key, locale))
+    keys = list(TABLES[key][1])
+    if not table_exists(conn, table):
+        return {"table": table, "exists": False, "columns": [], "keys": keys,
+                "rows": [], "total": None, "searched": [],
+                "locale": locale, "shared": key not in LOCALE_TABLE_KEYS}
+    cols = [r[0] for r in _rows(
+        conn, "SELECT column_name FROM information_schema.columns "
+              "WHERE table_schema = DATABASE() AND table_name = %s "
+              "ORDER BY ordinal_position", [table])]
+    searched = [c for c in cols if c.endswith("_NAME") or c in keys]
+    where, params = "", []
+    if q:
+        where = " WHERE " + " OR ".join(f"`{c}` LIKE %s" for c in searched)
+        params = [f"%{q}%"] * len(searched)
+    total = _rows(conn, f"SELECT COUNT(*) FROM `{table}`{where}", params)[0][0]
+    lim = max(1, min(int(limit or 50), BROWSE_MAX))
+    order = ", ".join(f"`{c}`" for c in keys)
+    with conn.cursor(pymysql.cursors.DictCursor) as cur:
+        cur.execute(f"SELECT * FROM `{table}`{where} ORDER BY {order} "
+                    f"LIMIT {lim} OFFSET {max(0, int(offset or 0))}", params)
+        rows = cur.fetchall()
+    return {"table": table, "exists": True, "columns": cols, "keys": keys,
+            "rows": rows, "total": total, "searched": searched,
+            "limit": lim, "offset": max(0, int(offset or 0)),
+            "locale": locale, "shared": key not in LOCALE_TABLE_KEYS}
+
+
+def update_row(conn, key: str, locale: str, keyvals: dict, values: dict) -> dict:
+    """한 행의 **키가 아닌 컬럼**을 고친다.
+
+    ## 키 컬럼은 받지 않는다
+
+    `(ENB_ID, SECTOR)`·`GU_ID`·`DONG_ID` 는 1분 집계·원시 Parquet·
+    `ground_truth.json`·`CL_CELL_MAP` 이 참조하는 **조인 키**다. 화면에서
+    그것을 고치면 그 행만 바뀌고 나머지는 옛 키를 그대로 가리켜 **에러 없이**
+    끊어진다. 키를 바꾸는 일은 삭제 + 추가이고, 그때는 사람이 두 조작을
+    각각 의도해야 한다.
+
+    `WHERE` 가 **키 컬럼 전부**를 요구한다 — 일부만 주면 같은 `GU_ID` 의
+    수천 행이 한 번에 바뀐다.
+    """
+    table = (TABLES[key][0] if key not in LOCALE_TABLE_KEYS
+             else table_name(key, locale))
+    keycols = list(TABLES[key][1])
+    missing = [c for c in keycols if c not in (keyvals or {})]
+    if missing:
+        raise RuntimeError(
+            f"키 컬럼이 빠졌다: {', '.join(missing)} "
+            f"(필요한 것: {', '.join(keycols)}) — 일부만 주면 같은 값의 "
+            "여러 행이 한 번에 바뀐다")
+    have = ddl_columns(conn, table)
+    bad_key = [c for c in (values or {}) if c in keycols]
+    if bad_key:
+        raise RuntimeError(
+            f"키 컬럼은 고칠 수 없다: {', '.join(bad_key)}\n"
+            "  1분 집계·원시 Parquet·ground_truth 가 그 키를 참조한다 — "
+            "바꾸면 그 행만 옮겨지고 나머지는 에러 없이 끊어진다.\n"
+            "  키를 바꾸는 것은 삭제 + 추가다")
+    sets = [c for c in (values or {}) if c in have]
+    dropped = [c for c in (values or {}) if c not in have]
+    if not sets:
+        raise RuntimeError(
+            f"고칠 컬럼이 없다 (DDL 에 없는 것 제외: {', '.join(dropped) or '-'})")
+    sql = (f"UPDATE `{table}` SET " + ", ".join(f"`{c}` = %s" for c in sets)
+           + " WHERE " + " AND ".join(f"`{c}` = %s" for c in keycols))
+    params = [values[c] for c in sets] + [keyvals[c] for c in keycols]
+    with conn.cursor() as cur:
+        n = cur.execute(sql, params)
+    conn.commit()
+    return {"table": table, "updated": int(n), "columns": sets,
+            "dropped": dropped}
+
+
+# --------------------------------------------------------------------------
+# locale 별 **스키마** — ※ 폐기 대기. 아래는 DB 째 복제 경로의 잔존부다
+# --------------------------------------------------------------------------
+#
+# **2026-10-26 에 방식이 바뀌었다** — 위 "locale 벌" 절이 지금 경로다.
+# 아래 `locale_database` · `clone_schema` 는 **별도 스키마(`pemdb6_jp`)로
+# DB 를 통째 복제**하던 설계이고, 사용자가 범위를 "지역 테이블만" 으로
+# 줄이면서 쓰이지 않는다. 지우지 않고 두는 이유는 `clone` 커맨드가 아직
+# 그것을 부르고, "DB 째 이식" 이 다시 필요해질 수 있기 때문이다.
+#
+# **둘을 섞지 않는다.** 접미사 벌을 `pemdb6_jp` 안에 또 만들면 로케일 축이
+# 두 번 적히고(`pemdb6_jp.CM_GU_JP`), 그러면 어느 축이 유효한지 알 수 없다.
+# 그래서 `cmd_topo` 는 **`clone` 말고는 locale 로 스키마를 가르지 않는다.**
+#
+# 사용자 방침(2026-10-26): *"일본 적재는 별도의 테이블로 처리할꺼야. db에만
+# 넣어둘꺼고, 이걸 나중에 db채로 이식할꺼야."*
+#
+# **테이블 이름을 그대로 두고 스키마를 가른다.**
+#
+#     pemdb6      CM_CITY · CM_GU · CM_DONG · CM_CELL_REP_RU_LOC …   ← KR
+#     pemdb6_jp   CM_CITY · CM_GU · CM_DONG · CM_CELL_REP_RU_LOC …   ← JP (같은 이름)
+#
+# **이 설계가 선택되지 않은 이유**(2026-10-26 사용자 결정): 사용자는
+# 지역 테이블만 JP 로 만들고 **나머지와 원본 데이터는 그대로 쓰기로** 했다.
+# 스키마를 가르면 `PM_*` 3.9GB 와 `CL_CELL_MAP` 55만행까지 축이 갈려,
+# "원본 데이터를 그대로 쓴다"가 성립하지 않는다.
+#
+# 그리고 *"접미사로 가면 모든 질의에 분기가 들어간다"* 는 당시 근거는
+# **graphio 에 대해 틀렸다** — 그쪽은 지역 테이블 이름을
+# `store/tables.py` 의 상수 넷(`CELL_LOC`·`CITY`·`GU`·`DONG`)으로만
+# 부르고 하드코딩이 0 이다. 이 저장소도 이제 `table_name()` 한 곳이다.
+#
+# **KR 을 건드리지 않으므로 복귀 사본(`dump kr`)이 이 경로에서는 선행 조건이
+# 아니다.** 되돌릴 것이 없다 — JP 스키마를 지우면 된다.
+
+#: locale → 대상 스키마를 설정에서 받는 키. 없으면 `pemdb1.database` 다
+#: (= 지금 동작). 이름을 코드에 박지 않는 이유는 현장마다 스키마 이름이
+#: 다를 수 있고, **그 이름이 운영으로 넘어가는 값**이기 때문이다.
+#:
+#:     pemdb1:
+#:       database: pemdb6
+#:       locale_database:
+#:         jp: pemdb6_jp
+LOCALE_DB_KEY = "locale_database"
+
+#: **데이터까지 복사하는** 테이블 접두. 나머지는 **구조만** 만든다.
+#:
+#: 가르는 기준은 "일본에서 새로 생성되는가"다 —
+#:
+#:   CM_ CL_   마스터(행정구역·셀·장비·조직). 셀 키를 그대로 가져가야
+#:             테이블 스위칭이 성립한다 → **복사한다** (실측 153MB)
+#:   CD_ CB_   코드 테이블(Cause·메시지·벤더). 나라와 무관하다 → 복사한다
+#:   CAUSE_    `CAUSE_DEF` 364행 — Taxonomy 다. 나라와 무관하다 → 복사한다
+#:   PM_       1분 집계 3.9GB. **일본 트래픽이 새로 만든다** → 구조만
+#:   AI_       탐지·RCA 산출물. 같은 이유로 → 구조만
+#:
+#: `CM_DATAGEN_HISTORY`(637행)는 **로그**라 구조만 만든다 — 한국에서 돌린
+#: 이력이 일본 DB 에 섞이면 "언제 무엇을 넣었나"가 거짓이 된다.
+CLONE_DATA_PREFIXES = ("CM_", "CL_", "CD_", "CB_", "CAUSE_")
+
+#: 접두가 맞아도 **구조만** 만드는 예외.
+CLONE_STRUCTURE_ONLY = ("CM_DATAGEN_HISTORY",)
+
+
+def locale_database(cfg: dict, locale: str, override: str | None = None) -> str:
+    """그 locale 의 대상 스키마. **기본은 `pemdb1.database` 그대로다.**
+
+    `--database` override 가 가장 세다. 그다음이 설정의
+    `pemdb1.locale_database.<locale>` 이고, 없으면 현 DB 다 — 그래서
+    `--locale jp` 를 설정 없이 주면 **KR 스키마를 건드린다.** 그 상태를
+    막으려고 호출부가 "어느 스키마인가"를 항상 출력한다.
+    """
+    if override:
+        return override
+    pem = cfg.get("pemdb1") or {}
+    return str((pem.get(LOCALE_DB_KEY) or {}).get(locale)
+               or pem.get("database", "pemdb6"))
+
+
+def clone_schema(conn, source: str, target: str,
+                 dry_run: bool = True) -> dict:
+    """`source` 스키마의 테이블을 `target` 으로 복제한다.
+
+    **마스터는 데이터까지, 집계·산출물은 구조만**이다(`CLONE_DATA_PREFIXES`).
+    `CREATE TABLE … LIKE` 를 쓰므로 **인덱스·기본값·collation 이 그대로**
+    간다 — DDL 을 다시 적으면 상용과 다른 구조가 되고 두 환경을 대조할 수
+    없다(`docker/mysql/load_master.py` 와 같은 규율).
+
+    **스키마의 collation 을 source 에서 받아온다.** `utf8mb3_general_ci` 가
+    아닌 기본값으로 만들면 조인 키가 `Illegal mix of collations` 로 깨지거나
+    (`_cs` 쪽) 이름이 조용히 합쳐진다(불변규칙 14).
+
+    `CREATE TABLE IF NOT EXISTS` · 행이 있으면 건너뛰므로 **다시 돌려도
+    안전하다** — 중간에 멈췄을 때 이어서 돌리는 것이 정상 경로다.
+    """
+    if source == target:
+        raise RuntimeError(
+            f"원본과 대상이 같다: {target}\n"
+            "  설정에 pemdb1.locale_database.<locale> 을 넣거나 --database 로 "
+            "다른 스키마를 준다 — 같으면 KR 을 덮는다")
+    coll = _rows(conn, "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME "
+                       "FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = %s",
+                 [source])
+    if not coll:
+        raise RuntimeError(f"원본 스키마가 없다: {source}")
+    charset, collation = coll[0]
+
+    rows = _rows(conn, """
+        SELECT TABLE_NAME, TABLE_ROWS,
+               ROUND((DATA_LENGTH + INDEX_LENGTH) / 1048576, 1)
+          FROM information_schema.TABLES
+         WHERE TABLE_SCHEMA = %s AND TABLE_TYPE = 'BASE TABLE'
+         ORDER BY TABLE_NAME""", [source])
+    plan: list[dict] = []
+    for name, nrows, mb in rows:
+        with_data = (name.startswith(CLONE_DATA_PREFIXES)
+                     and name not in CLONE_STRUCTURE_ONLY)
+        plan.append({"table": name, "rows": int(nrows or 0),
+                     "mb": float(mb or 0), "data": with_data})
+
+    # **대상 스키마를 만들 권한이 있는가.** `CREATE DATABASE` 는 전역
+    # 권한이고, 이 계정은 `GRANT ALL ON pemdb6.*` 만 받는다(실측: 전역은
+    # `PROCESS` 뿐) — 그래서 **사람이 root 로 한 번 만들어 주어야 한다.**
+    # 그 사실을 dry-run 이 미리 말하지 않으면 실행 때 `1044 Access denied`
+    # 로 멈추고, 그 메시지는 "계정이 틀렸다"처럼 읽힌다.
+    exists = bool(_rows(conn, "SELECT 1 FROM information_schema.SCHEMATA "
+                              "WHERE SCHEMA_NAME = %s", [target]))
+    grants = [g[0] for g in _rows(conn, "SHOW GRANTS FOR CURRENT_USER()")]
+    can_create = any("ON *.*" in g and ("ALL PRIVILEGES" in g or "CREATE" in g)
+                     for g in grants)
+    has_target = exists and any(
+        f"`{target}`" in g or "ON *.*" in g for g in grants)
+
+    stats = {
+        "source": source, "target": target,
+        "charset": charset, "collation": collation,
+        "target_exists": exists,
+        "can_create_schema": can_create,
+        "has_target_grant": has_target,
+        "prepare_sql": [
+            f"CREATE DATABASE `{target}` CHARACTER SET {charset} "
+            f"COLLATE {collation};",
+            # 계정 이름은 `CURRENT_USER()` 에서 `@` 앞을 자른다. SQL 쪽
+            # 문자열 함수를 쓰지 않는다 — `chr(64)` 는 MySQL 함수가 아니다
+            # (실측 `1305 FUNCTION … does not exist`).
+            f"GRANT ALL PRIVILEGES ON `{target}`.* TO "
+            f"'{str(_rows(conn, 'SELECT CURRENT_USER()')[0][0]).split('@')[0]}'@'%';",
+        ],
+        "tables": len(plan),
+        "with_data": sum(1 for p in plan if p["data"]),
+        "structure_only": sum(1 for p in plan if not p["data"]),
+        "copy_rows": sum(p["rows"] for p in plan if p["data"]),
+        "copy_mb": round(sum(p["mb"] for p in plan if p["data"]), 1),
+        "skip_mb": round(sum(p["mb"] for p in plan if not p["data"]), 1),
+        "created": 0, "copied": 0, "already": 0,
+    }
+    if dry_run:
+        stats["plan"] = plan
+        return stats
+
+    with conn.cursor() as cur:
+        cur.execute(f"CREATE DATABASE IF NOT EXISTS `{target}` "
+                    f"CHARACTER SET {charset} COLLATE {collation}")
+        for p in plan:
+            t = p["table"]
+            cur.execute(f"CREATE TABLE IF NOT EXISTS `{target}`.`{t}` "
+                        f"LIKE `{source}`.`{t}`")
+            stats["created"] += 1
+            if not p["data"]:
+                continue
+            cur.execute(f"SELECT COUNT(*) FROM `{target}`.`{t}`")
+            if cur.fetchone()[0]:
+                # **이미 있으면 건너뛴다.** 다시 넣으면 PK 없는 테이블
+                # (`CM_CELL_REP_RU_LOC`)에 중복이 에러 없이 쌓인다.
+                stats["already"] += 1
+                continue
+            cur.execute(f"INSERT INTO `{target}`.`{t}` "
+                        f"SELECT * FROM `{source}`.`{t}`")
+            stats["copied"] += 1
+    conn.commit()
+    return stats
+
+
+# --------------------------------------------------------------------------
+# 조직 이름 — **지리가 아니다.** 별 커맨드로 둔다
+# --------------------------------------------------------------------------
+#
+# `seed-geo` 는 행정구역을 만들고 `relocate-cells` 는 셀을 다룬다. 조직
+# (`CM_BRANCH`·`CM_LAREA`·`CM_REGION`)은 **지리와 독립**이라 그 둘 중
+# 어디에 붙여도 거짓이 된다 — 실측으로 `CM_REGION` 의 `영동2` 가 **15개
+# 시도**에 걸쳐 있고 `CM_REGION` 에는 `CITY_ID` 가 없다.
+#
+# **ID·부모 연결은 유지한다.** `CL_ENB_ORG.REGION_ID`·`BRANCH_ID` 와
+# `CM_EPC_INFO` 쪽이 그 숫자를 참조하고, graphio `kpi.py:532·587` 이
+# 그것으로 조인한다 — 바꾸면 조직 축이 통째로 끊어진다. **이름만** 쓴다.
+
+#: `CM_BRANCH` 6줄 — **사람이 정할 표다.** 지금 값은 아키 제안(2026-10-26)
+#: 이고, 광역 묶음이라 유도할 근거가 없다(지리와 독립이다).
+#:
+#: **키는 `BRANCH_ID` 다.** 이름으로 키를 잡으면 한 번 바꾼 뒤 다시 돌릴 때
+#: 못 찾는다 — 이 함수는 멱등이어야 한다.
+#:
+#: 고치려면 이 표만 고친다. `Core Infra` 는 중립이라 그대로, `기타` 만
+#: 영문·일본어로 옮긴다.
+BRANCH_MAP_JP: dict[int, str] = {
+    1000: "関東Infra",      # 수도권Infra
+    1100: "東日本Infra",    # 동부Infra
+    1300: "西日本Infra",    # 서부Infra
+    1400: "中部Infra",      # 중부Infra
+    1500: "Core Infra",     # 그대로 — 영문이라 중립이다
+    9999: "その他",         # 기타
+}
+
+#: `CM_LAREA` 중 **시도가 아닌 이름**. 나머지 8줄은 `CM_CITY` 이름으로
+#: `SIDO_MAP_JP` 를 찾아 유도한다 — **별도 표를 만들지 않는다**(두 표가
+#: 어긋나면 코어 장비 권역과 지리가 갈린다).
+#:
+#: `수도권` 은 서울·경기·인천 **셋의 묶음**이라 대응 시도가 없다. 그래서
+#: 이 한 줄만 사람이 정한다.
+LAREA_EXTRA_JP: dict[str, str] = {"수도권": "関東"}
+
+#: **건드리지 않는 자리.** 적어 두지 않으면 다음 사람이 "한국어가 남았다"고
+#: 고친다.
+#:
+#:   `CL_MME.NET_NAME`    56행 전부 `SKTelecom` — graphio 소비처 **0건**
+#:                        (`CL_SGW`·`CL_PGW` 에는 컬럼 자체가 없다)
+#:   `CM_EMS.EMS_NAME`    181행 18종(`DUNSAN`·`SUNGSU` 등) — graphio 는
+#:                        `CL_ENB_ORG.EMS_ID`(숫자)만 쓰고 이름을 조인하지 않는다
+#:   `CM_COMPANY`         21행(`인천Access`·`망운용센터`) — 소비처 0건
+#:   `CB_VENDOR`          25행 중 한국어 12종(`삼성`·`SK텔레시스`·`네이블` …)
+#:
+#: 앞 셋은 **이름이 어디서도 읽히지 않는다** — 바꾸면 반출본과 대조할 수
+#: 없어지는 것만 남는다. `CB_VENDOR` 는 읽히지만(SCR-10 표) **제조사 축은
+#: 지리 전환과 다른 축**이다 — 일본에서도 삼성 장비를 쓰고, 바꾸는 것은
+#: "일본에 없는 벤더를 지우고 있는 벤더를 만드는" 별개 작업이다.
+ORG_UNTOUCHED = ("CL_MME.NET_NAME", "CM_EMS.EMS_NAME", "CM_COMPANY",
+                 "CB_VENDOR.VENDOR_NAME")
+
+
+def org_names(conn, locale: str = "jp", dry_run: bool = True,
+              allow_shared: bool = False) -> dict:
+    """`CM_BRANCH`·`CM_LAREA`·`CM_REGION` 의 **이름만** 다시 쓴다.
+
+    ## 세 테이블에 **로케일 축이 없다** — 그래서 기본이 거부다 (2026-10-26)
+
+    범위가 줄었다: *"지역구에 대응하는 테이블만 JP로 만들고 나머진 다 그대로
+    쓴다."* `CM_BRANCH`·`CM_LAREA`·`CM_REGION` 은 `LOCALE_TABLE_KEYS` 밖의
+    **한 벌**이고 `DUMP_TABLES` 에도 없다(복귀 사본이 아예 없다). 그 한 벌을
+    일본 이름으로 덮으면 **KR 화면의 조직 축이 함께 일본어가 된다.**
+
+    전에는 별도 스키마(`pemdb6_jp`)를 복제하는 설계여서 그쪽을 덮어도 KR 이
+    안전했다. 접미사 방식에서는 그 전제가 깨지므로 `allow_shared=True` 를
+    **명시적으로** 받아야 돈다 — 조직 이름까지 일본어로 가는 것이 사람의
+    결정일 때만 그렇게 된다.
+
+    셋이 다른 규칙이다 — `kpi.py:574` 가 *"`CM_LAREA`(코어 9종)와
+    `CM_REGION`(eNB 34종)을 섞지 않는다"* 고 못 박으므로 **같은 규칙으로
+    만들지 않는다.**
+
+        CM_BRANCH   6줄   상수 표(`BRANCH_MAP_JP`) — 사람이 정한다
+        CM_LAREA    9줄   `CM_CITY` 이름 → `SIDO_MAP_JP` 로 **유도**
+                          (`수도권` 만 `LAREA_EXTRA_JP`)
+        CM_REGION  34줄   `<부모 BRANCH 이름><연번>` 으로 **생성**
+
+    `CM_REGION` 을 생성하는 이유: 지리와 독립이라 유도할 근거가 없고
+    (`영동2` 가 15개 시도에 걸친다) 어차피 자유 명명이다. 34줄을 사람이
+    짓는 것은 낭비다.
+
+    **`locale` 이 `kr` 이면 아무것도 하지 않는다** — 한국 이름이 원본이고
+    그것을 "생성"으로 덮으면 반출본과 대조할 수 없다.
+
+    부모를 못 찾은 `CM_REGION` 은 **건드리지 않고 수를 보고한다**. 실측으로
+    `BRANCH_ID = 1200`(대구) 이 `CM_BRANCH` 에 **없고** 그 밑에 2줄이 있다 —
+    이름을 지어내면 그 둘이 "있는 지사"처럼 보인다.
+    """
+    if locale == "kr":
+        return {"locale": locale, "skipped": "kr 은 원본이다 — 덮지 않는다",
+                "branch": 0, "larea": 0, "region": 0,
+                "region_no_parent": 0, "larea_no_sido": [],
+                "untouched": list(ORG_UNTOUCHED)}
+    if not allow_shared:
+        raise RuntimeError(
+            "CM_BRANCH · CM_LAREA · CM_REGION 에는 로케일 축이 없다 — "
+            "한 벌을 공유한다.\n"
+            f"  locale '{locale}' 이름으로 덮으면 **KR 화면의 조직 축도 함께** "
+            "바뀌고, 그 세 테이블은 복귀 사본(`DUMP_TABLES`)에도 없다.\n"
+            "  지역 테이블만 나라별 벌을 만드는 것이 지금 범위다 "
+            "(CM_CITY_JP · CM_GU_JP · CM_DONG_JP · CM_CELL_REP_RU_LOC_JP).\n"
+            "  그래도 바꿔야 한다면 그것이 사람의 결정이다 — allow_shared 를 켠다")
+
+    # ── CM_BRANCH — 상수 표
+    branch: list[tuple[str, int]] = []
+    names: dict[int, str] = {}
+    for bid, bname in _rows(conn, "SELECT BRANCH_ID, BRANCH_NAME "
+                                  "FROM CM_BRANCH ORDER BY BRANCH_ID"):
+        new = BRANCH_MAP_JP.get(int(bid))
+        if new is None:
+            # 표에 없는 지사는 **건드리지 않는다** — 이름을 지어내면
+            # 사람이 정한 표와 코드가 만든 이름이 섞인다
+            names[int(bid)] = str(bname)
+            continue
+        names[int(bid)] = new
+        branch.append((new, int(bid)))
+
+    # ── CM_LAREA — `SIDO_MAP_JP` 에서 유도
+    #
+    # **`seed-geo` 보다 먼저 돌아야 한다.** 유도가 `CM_CITY` 의 **한국
+    # 이름**을 읽어 `SIDO_MAP_JP` 를 찾으므로, `seed-geo` 가 그 이름을
+    # 일본으로 바꾼 뒤에 돌리면 **전량 무매칭**이 되어 9줄이 조용히
+    # 제외된다. 그 상태는 "권역 이름만 한국어로 남은" 모양이고 에러가
+    # 아니다 — 그래서 **멈춘다.**
+    # **KR 벌을 읽는다.** 유도가 한국 시도 이름 → `SIDO_MAP_JP` 이므로
+    # 원본이 입력이다. 접미사 방식에서는 `seed-geo --locale jp` 가 KR
+    # `CM_CITY` 를 건드리지 않으므로, 전에 있던 **순서 제약(org-names 가
+    # seed-geo 앞)이 사라졌다** — 아래 가드는 KR 벌 자체가 다른 나라로
+    # 덮인 경우(`seed-geo --locale kr`)를 위해 남긴다.
+    sido = {str(n): int(c) for c, n in
+            _rows(conn, f"SELECT CITY_ID, CITY_NAME "
+                        f"FROM `{table_name('city', 'kr')}`")}
+    known = sum(1 for n in sido if n in {"서울", "부산", "대구", "인천", "광주",
+                                         "대전", "울산", "세종", "경기", "강원",
+                                         "충북", "충남", "전북", "전남", "경북",
+                                         "경남", "제주"})
+    if sido and known == 0:
+        raise RuntimeError(
+            "KR CM_CITY 의 이름이 한국 것이 아니다 — CM_LAREA 9줄을 그 "
+            "이름으로 `SIDO_MAP_JP` 에서 유도하므로 전량 무매칭이 된다.\n"
+            "  그 상태는 '권역 이름만 한국어로 남은' 모양이고 에러가 아니다.\n"
+            f"  지금 CM_CITY: {', '.join(sorted(sido)[:5])} …\n"
+            "  접미사 방식에서는 KR 벌이 덮이지 않는다 — 덮였다면 "
+            "`seed-geo --locale kr` 이 돌았다는 뜻이다 (restore 로 되돌린다)")
+    larea: list[tuple[str, int]] = []
+    no_sido: list[str] = []
+    for lid, lname in _rows(conn, "SELECT LAREA_ID, LAREA_NAME "
+                                  "FROM CM_LAREA ORDER BY LAREA_ID"):
+        key = str(lname)
+        new = LAREA_EXTRA_JP.get(key)
+        if new is None:
+            city = sido.get(key)
+            new = SIDO_MAP_JP.get(str(city)) if city is not None else None
+        if new is None:
+            no_sido.append(key)
+            continue
+        larea.append((new, int(lid)))
+
+    # ── CM_REGION — `<부모 이름><연번>`
+    region: list[tuple[str, int]] = []
+    no_parent = 0
+    seq: dict[int, int] = {}
+    for rid, bid in _rows(conn, "SELECT REGION_ID, BRANCH_ID "
+                                "FROM CM_REGION ORDER BY REGION_ID"):
+        parent = names.get(int(bid))
+        if parent is None:
+            no_parent += 1          # 부모가 `CM_BRANCH` 에 없다 (실측 2줄)
+            continue
+        seq[int(bid)] = seq.get(int(bid), 0) + 1
+        region.append((f"{parent}{seq[int(bid)]}", int(rid)))
+
+    stats = {"locale": locale, "branch": len(branch), "larea": len(larea),
+             "region": len(region), "region_no_parent": no_parent,
+             "shared_tables": ["CM_BRANCH", "CM_LAREA", "CM_REGION"],
+             "larea_no_sido": no_sido, "untouched": list(ORG_UNTOUCHED),
+             "sample": {"branch": branch[:2], "larea": larea[:2],
+                        "region": region[:2]}}
+    if dry_run:
+        return stats
+    with conn.cursor() as cur:
+        # **이름만 쓴다.** `BRANCH_ID`·`LAREA_ID`·`REGION_ID`·`TEAM_ID`·
+        # `REGION_TYPE` 은 손대지 않는다 — graphio 가 그 숫자로 조인한다.
+        if branch:
+            cur.executemany("UPDATE CM_BRANCH SET BRANCH_NAME = %s "
+                            "WHERE BRANCH_ID = %s", branch)
+        if larea:
+            cur.executemany("UPDATE CM_LAREA SET LAREA_NAME = %s "
+                            "WHERE LAREA_ID = %s", larea)
+        if region:
+            cur.executemany("UPDATE CM_REGION SET REGION_NAME = %s "
+                            "WHERE REGION_ID = %s", region)
     conn.commit()
     return stats

@@ -54,6 +54,17 @@ data/pemdb1/*
 !data/pemdb1/locale/
 data/pemdb1/locale/*
 !data/pemdb1/locale/jp/
+# **파일 단위로 좁힌다** (2026-10-26). 디렉터리 예외(`!…/jp/`)만 두면
+# **나중에 들어오는 파일이 자동으로 추적된다** — `topo dump jp` 가 그
+# 디렉터리에 `CM_CELL_REP_RU_LOC.json.gz`(16MB · 44만행 좌표·RU_NAME)를
+# 쓰고, 클론 직후라 그 내용은 **한국 실제 자산 대장**이다. PUBLIC
+# 저장소이고 **git 히스토리에서 지워지지 않는다.**
+#
+# 그래서 디렉터리를 다시 막고 **추적할 파일만 하나씩** 되살린다. 새 파일을
+# 추적하려면 이 목록에 한 줄을 더해야 하고, 그 한 줄이 "이건 공개해도
+# 되는가"를 묻는 자리다.
+data/pemdb1/locale/jp/*
+!data/pemdb1/locale/jp/code_map.json
 
 docker/mysql/pemdb1_local.sql
 docker/mysql/pemdb1_masters.sql

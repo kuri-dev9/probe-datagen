@@ -672,6 +672,21 @@ def api_cancel_fault(fault_id: int):
 # `locale/<나라>` 사본을 선행 조건으로 요구하고, 여기서는 **실적재 전부**
 # (`seed-enb`·`fill-coords`)에도 같은 조건을 건다 — 화면은 눌리기 쉽고
 # `pemdb6` 가 그대로 운영이라 되돌릴 원본이 없다. 더 엄한 쪽으로만 다르다.
+#
+# ## 사본 게이트는 **KR 에만** 걸린다 (2026-10-26 접미사 벌 도입)
+#
+# JP 벌(`CM_GU_JP` …)은 네 단계로 **재생성된다** — 벌 만들기 → 셀 키 복사 →
+# 행정구역 생성 → 좌표 재배치. 되돌릴 원본이 없는 쪽은 KR 이고, JP 에 KR
+# 사본을 요구하면 **JP 를 만들기 전에는 아무 버튼도 눌리지 않는다.** 그렇게
+# 선 게이트는 사람이 우회할 길을 찾게 만든다(`cli._topo_gate` 와 같은 판단).
+#
+# ## 관리는 **이 화면이 정본이다** (사용자 지시 2026-10-26)
+#
+# *"gen 스크립트로 명령 수행할 생각 없어. ui에다 새로운 화면 만들어서
+# 거기서 추가 수정 삭제 관리 가능하도록 만들어줘."* 그래서 CRUD 그리드와
+# JP 벌 생성 4단계가 전부 여기 있다. CLI(`python -m datagen topo`)는 같은
+# 함수를 부르는 **두 번째 입구**로 남는다 — 화면이 자기 SQL 을 쓰지 않는
+# 한 둘이 갈라지지 않는다.
 
 
 def _topo_xw():
@@ -700,6 +715,9 @@ def _require_dump(conn, locale: str) -> None:
     버튼이 안 먹는 것처럼 보인다. 실패한 테이블을 함께 실어, 넷 중 어느
     사본이 반쪽인지 사람이 알 수 있게 한다.
     """
+    if locale != "kr":
+        # JP 벌은 재생성 경로가 있다 (위 머리말) — KR 사본을 요구하지 않는다
+        return
     rep = topo.restore(conn, locale, dry_run=True)
     if rep["ok"]:
         return
@@ -710,8 +728,13 @@ def _require_dump(conn, locale: str) -> None:
 
 
 @app.get("/api/topo")
-def api_topo():
+def api_topo(locale: str = "kr"):
     """마스터 현황 + **시뮬레이션 선택 통과 여부**.
+
+    `locale` 은 **어느 벌을 보는가**다(`topo.table_name`). 선택 통과
+    (`pick`)는 **항상 KR 기준**이다 — 생성기가 KR 벌을 읽기 때문이고
+    (`pemdb1.load_cells` 의 `locale="kr"` 기본), 창고를 다시 굽지 않는
+    것이 사용자 방침이다. 그 사실을 `pick_locale` 로 적는다.
 
     둘을 한 응답에 담는 이유: "마스터에 행이 있다"와 "그 eNB 가 트래픽을
     받는다"는 **다른 사실**이고, 화면에서 떨어뜨려 두면 사람이 전자만 보고
@@ -721,27 +744,84 @@ def api_topo():
     """
     conn = _connect()
     try:
-        info = topo.survey(conn)
+        info = topo.survey(conn, locale)
         active = info.pop("_active")
         xw = _topo_xw()
         limit = int(_pem_cfg().get("enb_limit", 0))
+        # **선택 통과는 KR 기준이므로 KR crosswalk 가 맞다** — 생성기가
+        # 그것을 본다(`pemfill` 과 같은 키). 아래 `no_dong` 과 다른 파일을
+        # 쓰는 것이 의도다.
         pick = topo.pick_report(conn, xw, limit)
-        drawable = topo.drawable_dongs(xw) if xw else {}
-        gus = topo.gu_points(conn)
-        no_dong = [g for _c, g, _n, _a, _o in gus
-                   if not drawable.get((_c, g))]
+        # ── **그 로케일의 crosswalk 를 본다** (2026-10-26 결함 A)
+        #
+        # 전에는 설정의 단일 crosswalk(= KR 것)로 JP 구역을 판정해서, jp
+        # 뷰가 *"949 구역 중 731곳에 그릴 수 있는 동이 없다"* 는 **거짓
+        # 숫자**를 띄웠다. 실제로는 `CM_DONG_JP` 가 949 구역 전부에 동을
+        # 갖고 있다. `_topo_xw()` 자체는 `pemfill` 과 같은 키를 봐야 하는
+        # 올바른 함수이고 섞인 것은 이 호출 쪽이었다 —
+        # `gu_points`/`gu_keys` 때와 같은 모양의 실수다.
+        #
+        # **파일이 없으면 `None`(산출 불가)이다.** 0 으로 적으면 "전부
+        # 그릴 수 있다", 전수로 적으면 "전부 못 그린다"로 읽힌다 — 둘 다
+        # 재지 못한 것과 다른 말이다(불변규칙 17).
+        lc_xw = topo.crosswalk_path(_geo_dir(), locale) if xw else None
+        drawable = (topo.drawable_dongs(lc_xw)
+                    if lc_xw and lc_xw.exists() else None)
+        # 벌이 아직 없으면 조회할 것이 없다 — **0 으로 적지 않는다**
+        gus = (topo.gu_points(conn, locale)
+               if topo.table_exists(conn, topo.table_name("gu", locale)) else [])
+        no_dong = (None if drawable is None else
+                   [g for _c, g, _n, _a, _o in gus if not drawable.get((_c, g))])
         gate = topo.restore(conn, "kr", dry_run=True)
+        added = topo.load_added_enbs(locale)
+        # ── **벌마다 행 수를 함께 내린다** (결함 B)
+        #
+        # 전에는 존재 여부만 실어서, kr 뷰에서 jp 다섯 줄이 `— / 있다` 로
+        # 나와 **"없다"처럼 읽혔다.** 벌이 없으면 `None` 이고 0 이 아니다.
+        locales = {}
+        for lc in topo.GEO_SOURCES:
+            arr = []
+            for k in topo.LOCALE_TABLE_KEYS:
+                t = topo.table_name(k, lc)
+                ex = topo.table_exists(conn, t)
+                arr.append({
+                    "key": k, "table": t, "exists": ex,
+                    "rows": (topo._rows(conn, f"SELECT COUNT(*) FROM `{t}`")[0][0]
+                             if ex else None),
+                })
+            locales[lc] = arr
     finally:
         conn.close()
     return {
         "tables": info, "active": active, "pick": pick,
+        "locale": locale, "locales": locales,
+        # **원장 상태를 화면에 올린다.** 이 파일이 KR 선택에서 JP 전용
+        # 장비를 빼는 근거이자 되돌림 수단인데 추적 밖(`data/`)이다 —
+        # 안 보이면 지워진 것을 아무도 모른다(`topo.seed_enb_jp` 머리말).
+        "added": {"enbs": len(added.get("enbs") or []),
+                  "path": str(topo.added_enbs_path(locale)),
+                  "band_start": added.get("band_start")},
+        "locale_keys": list(topo.LOCALE_TABLE_KEYS),
+        # ── **좌표 컬럼이 있는 테이블** (결함 C)
+        #
+        # `CL_ENB_ORG`·`CL_CELL_MAP` 에는 그 컬럼이 아예 없다. 화면이
+        # `no_coord == null` 을 "산출 불가"로 찍고 있었는데, 그것은
+        # **"모름"** 이고 여기 필요한 말은 **"해당 없음"** 이다. 둘을 한
+        # 문자열로 뭉개면 불변규칙 17 이 지키려던 구분 자체가 무의미해진다.
+        "coord_keys": list(topo.COORD_TABLE_KEYS),
+        # **선택 통과는 KR 기준이다** — 생성기가 KR 벌을 읽는다
+        "pick_locale": "kr",
         "enb_limit": limit, "topo_weight": topo.TOPO_WEIGHT,
         "band": list(topo.NEW_BAND),
         "crosswalk": str(xw) if xw else None,
         # 좌표가 있어 seed 대상이 되는 시군구와, 그중 **그릴 수 있는 동이
         # 없어 `DONG_ID` 를 비울 수밖에 없는** 곳. 0 으로 채우면
         # `_filter_drawable` 이 조용히 버린다(불변규칙 12·17).
-        "seed_gus": len(gus), "gus_without_drawable_dong": len(no_dong),
+        "seed_gus": len(gus),
+        # `None` = 그 로케일 crosswalk 가 없어 재지 못했다 (0 과 다르다)
+        "gus_without_drawable_dong": (None if no_dong is None else len(no_dong)),
+        "drawable_crosswalk": str(lc_xw) if lc_xw else None,
+        "drawable_crosswalk_exists": bool(lc_xw and lc_xw.exists()),
         # **`exists` 는 표시용이고 `restorable` 이 관문이다.** 둘을 함께
         # 내리는 이유: 파일은 있는데 못 읽는 상태(중간에 끊긴 gzip)를
         # 화면이 "사본 없음"으로만 말하면 사람이 또 뜬다.
@@ -774,6 +854,17 @@ class TopoReq(BaseModel):
     #: `rm --all` 확인 문구. CLI 의 타이핑 확인과 같은 자리다.
     confirm: str | None = None
     target: str = "cell"
+    #: `seed-geo` — 읍면동 폴리곤이 없을 때 시군구당 생성할 동 수
+    dongs: int = 8
+    #: `seed-geo` 는 세 테이블을 **비우고** 다시 넣는다. `geo-fetch` 는
+    #: 이미 받은 파일을 다시 받는다. 둘 다 사람이 의도를 말해야 한다.
+    replace: bool = False
+    #: `relocate-cells` — 활성 셀이 아니라 전수. `update` 용 값
+    row_only: bool = False
+    #: `seed-enb-jp` — JP 전용 `ENB_ID` 대역의 시작. **기본값이 없다**:
+    #: 어느 번호가 비어 있는지는 그 DB 의 사실이고, 코드에 숫자를 두면
+    #: "비어 있다"는 가정이 남아 다른 DB 에서 조용히 겹친다.
+    band_start: int | None = None
 
 
 @app.post("/api/topo/dump")
@@ -845,13 +936,291 @@ def api_topo_fill(req: TopoReq):
     return {"ok": True, "check_only": True, "result": r}
 
 
+# ── locale 벌 — **4단계**. 순서가 전제다 ────────────────────────────────────
+#
+#   1  ensure-tables   CREATE TABLE … LIKE 로 벌 넷을 만든다 (DDL)
+#   2  copy-cells      셀 키·지역 참조를 DB 안에서 복사 (좌표는 NULL)
+#   3  code-map        JP 경계 코드 → KR 코드 맵 (DB 의 CM_GU 가 입력)
+#   4  seed-geo        행정구역 셋을 경계 GeoJSON 에서 만든다
+#   5  relocate-cells  좌표·RU_NAME 을 그 나라로 쓴다
+#
+# **순서를 바꾸면 조용히 빈다.** `seed-geo` 가 `code-map` 없이 돌면 코드
+# 대응이 없어 전량 제외되고, `relocate-cells` 가 `seed-geo` 전에 돌면
+# `CM_GU_JP` 에 좌표가 없어 멈춘다(그쪽은 에러가 나므로 안전한 편이다).
+
+
+def _geo_dir():
+    """경계 GeoJSON 디렉터리 — **CLI 와 같은 함수를 부른다.**
+
+    `cli._topo_geo_dir` 가 `pemdb1.geo_crosswalk` 의 디렉터리를 쓴다. 여기서
+    따로 조립하면 화면이 받은 파일과 커맨드가 읽는 파일이 갈라진다.
+    """
+    from .cli import _topo_geo_dir
+
+    return _topo_geo_dir(_cfg())
+
+
+@app.post("/api/topo/ensure-tables")
+def api_topo_ensure(req: TopoReq):
+    """지역 테이블 넷을 `CREATE TABLE … LIKE` 로 만든다 — **1단계**.
+
+    `dry_run` 기본이 `True` 라 무엇을 만들지만 말한다. collation·인덱스·
+    타입이 원본에서 그대로 오는 것이 `LIKE` 를 쓰는 이유다(불변규칙 14).
+    """
+    conn = _connect()
+    try:
+        return {"ok": True, "dry_run": req.dry_run,
+                "result": topo.ensure_locale_tables(
+                    conn, req.locale, write=not req.dry_run)}
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        conn.close()
+
+
+@app.post("/api/topo/copy-cells")
+def api_topo_copy_cells(req: TopoReq):
+    """셀 키·지역 참조를 DB 안에서 복사한다 — **2단계**. 좌표·이름은 NULL."""
+    conn = _connect()
+    try:
+        return {"ok": True, "dry_run": req.dry_run,
+                "result": topo.copy_cells(conn, req.locale,
+                                          write=not req.dry_run)}
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        conn.close()
+
+
+@app.post("/api/topo/copy-enb-org")
+def api_topo_copy_enb_org(req: TopoReq):
+    """eNB 조직 벌 복사 — **2b 단계**. `BTS_NAME` 만 NULL 로 남긴다.
+
+    안 만들면 JP 지도에서 셀 이름은 일본어인데 eNB 이름은 한국어로 뜬다 —
+    라벨이 `RU_NAME` → `BTS_NAME` 순으로 떨어지기 때문이다.
+    """
+    conn = _connect()
+    try:
+        return {"ok": True, "dry_run": req.dry_run,
+                "result": topo.copy_enb_org(conn, req.locale,
+                                            write=not req.dry_run)}
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        conn.close()
+
+
+@app.post("/api/topo/seed-enb-jp")
+def api_topo_seed_enb_jp(req: TopoReq):
+    """추가 구역에 장비를 놓는다 — **6단계**. KR 선택에서 빠지는 장비다.
+
+    `CL_CELL_MAP` 에 행이 들어간다 — **KR 과 공유이고 `DUMP_TABLES` 밖**
+    이라 사본이 없다. 그래서 원장(`topo.ADDED_FILE`)을 먼저 쓰고, 그 파일이
+    KR 선택에서 빼는 근거이자 되돌림 수단이 된다(`rm-added`).
+    """
+    if req.band_start is None:
+        raise HTTPException(400,
+                            "ENB_ID 대역 시작 번호가 필요하다 — 빈 대역을 "
+                            "실측해서 넣는다. 기본값을 두지 않는 이유: 어느 "
+                            "번호가 비어 있는지는 그 DB 의 사실이고, 가정을 "
+                            "코드에 남기면 다른 DB 에서 조용히 겹친다")
+    conn = _connect()
+    try:
+        return {"ok": True, "dry_run": req.dry_run,
+                "result": topo.seed_enb_jp(
+                    conn, req.locale, int(req.band_start),
+                    per_gu=req.per_gu, cells_per_enb=req.cells,
+                    spread_km=req.spread_km,
+                    seed=int(_cfg()["generate"].get("seed", 20260903)),
+                    write=not req.dry_run)}
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        conn.close()
+
+
+@app.post("/api/topo/rm-added")
+def api_topo_rm_added(req: TopoReq):
+    """원장에 적힌 JP 전용 eNB 를 세 테이블에서 지운다 — `CL_CELL_MAP` 되돌림."""
+    conn = _connect()
+    try:
+        return {"ok": True, "dry_run": req.dry_run,
+                "result": topo.remove_added_enbs(conn, req.locale,
+                                                 write=not req.dry_run)}
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        conn.close()
+
+
+@app.post("/api/topo/geo-fetch")
+def api_topo_geo_fetch(req: TopoReq):
+    """경계 GeoJSON 을 받는다. **없으면 무엇이 없는지 말하며 멈춘다.**
+
+    빈 테이블을 만들어 두면 화면이 조용히 빈다 — 그래서 `seed-geo` 전에
+    이것이 서야 한다. 크레딧(`SOURCE.txt`)을 파일과 함께 쓴다(번들
+    디렉터리가 추적 밖이라 저장소에 적어 두면 반출본에서 사라진다).
+    """
+    try:
+        if req.dry_run:
+            # **세어 보기는 내려받지 않는다.** 무엇이 없는지만 말한다 —
+            # 폐쇄망에서 버튼 하나가 수십 MB 를 끌어오면 안 된다.
+            gd = _geo_dir()
+            have = []
+            for lv in [k for k in topo.GEO_SOURCES[req.locale]
+                       if not k.startswith("_")]:
+                dest = topo.geo_level_path(gd, req.locale, lv)
+                have.append({"level": lv, "file": dest.name,
+                             "exists": dest.exists(),
+                             "bytes": dest.stat().st_size if dest.exists() else None})
+            return {"ok": True, "dry_run": True, "files": have,
+                    "dir": str(topo.geo_level_path(gd, req.locale, "sgg").parent),
+                    "note": "받지 않았다 — 실행을 누르면 없는 것만 받는다"}
+        got = topo.fetch_boundaries(_geo_dir(), req.locale, force=req.replace)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    except OSError as e:      # 폐쇄망·DNS — "받을 수 없다"를 그대로 말한다
+        raise HTTPException(502, f"경계 파일을 받을 수 없다: {e}")
+    return {"ok": True, "files": got,
+            "dir": str(topo.geo_level_path(_geo_dir(), req.locale, "sgg").parent)}
+
+
+@app.post("/api/topo/code-map")
+def api_topo_code_map(req: TopoReq):
+    """JP 경계 코드 → **KR 코드** 맵 — 3단계.
+
+    입력은 **DB 의 `(CITY_ID, GU_ID)`** 다. 번들에서 유도하지 않는다 —
+    트래픽이 참조하는 것은 DB 의 코드이고, 번들과 DB 가 다르면 전환 후
+    그 차이만큼 조용히 미매핑이 된다.
+    """
+    if req.locale == "kr":
+        raise HTTPException(400, "코드 맵은 KR 코드를 **받는** 쪽이 만든다 —"
+                                 " locale kr 은 대상이 아니다")
+    conn = _connect()
+    try:
+        kr_gu = [(int(c), int(g)) for c, g in topo._rows(
+            conn, f"SELECT CITY_ID, GU_ID "
+                  f"FROM `{topo.table_name('gu', 'kr')}` ORDER BY GU_ID")]
+        doc = topo.build_jp_code_map(_geo_dir(), kr_gu)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        conn.close()
+    out = {"ok": True, "dry_run": req.dry_run, "kr_gu": len(kr_gu),
+           "sido": len(doc["sido"]), "sgg": len(doc["sgg"]),
+           "unused_prefectures": doc["unused_prefectures"],
+           "sample": {str(c): rows[:2] for c, rows in
+                      sorted(doc["picked"].items())[:3]}}
+    if not req.dry_run:
+        out["path"] = str(topo.save_code_map(doc, req.locale))
+    return out
+
+
+@app.post("/api/topo/seed-geo")
+def api_topo_seed_geo(req: TopoReq):
+    """행정구역 셋을 경계 GeoJSON 에서 만든다 — **4단계**.
+
+    `replace` 는 세 테이블을 **비우고** 다시 넣는다. KR 대상이면 사본
+    게이트가 걸린다(`_require_dump`) — 44만 셀이 참조하는 코드를 덮는 일이다.
+    """
+    conn = _connect()
+    try:
+        if not req.dry_run and req.replace:
+            _require_dump(conn, req.locale)
+        r = topo.seed_geo(conn, _geo_dir(), locale=req.locale,
+                          dongs_per_gu=req.dongs, spread_km=3.0,
+                          seed=int(_cfg()["generate"].get("seed", 20260903)),
+                          replace=req.replace, dry_run=req.dry_run)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        conn.close()
+    return {"ok": True, "dry_run": req.dry_run, "result": r}
+
+
+@app.post("/api/topo/relocate-cells")
+def api_topo_relocate(req: TopoReq):
+    """셀 좌표와 `RU_NAME` 을 그 나라로 다시 쓴다 — **5단계**.
+
+    **키를 바꾸지 않는다** — `UPDATE` 만 한다. `all=False`(기본)이면 1분
+    집계에 나타나는 활성 셀만이고, `all=True` 면 44만행 전부다. 비(非)KR 에서
+    `CL_ENB_ORG.BTS_NAME` 은 **건드리지 않는다**(한 벌 공유 — 응답의
+    `org_untouched_reason` 이 그 사실을 말한다).
+    """
+    conn = _connect()
+    try:
+        if not req.dry_run:
+            _require_dump(conn, req.locale)
+        r = topo.relocate_cells(conn, locale=req.locale,
+                                spread_km=req.spread_km,
+                                seed=int(_cfg()["generate"].get("seed", 20260903)),
+                                only_active=not req.all, dry_run=req.dry_run)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        conn.close()
+    return {"ok": True, "dry_run": req.dry_run, "result": r}
+
+
+# ── 행 CRUD 그리드 ─────────────────────────────────────────────────────────
+
+
+@app.get("/api/topo/rows")
+def api_topo_rows(table: str = "gu", locale: str = "kr", q: str = "",
+                  limit: int = 50, offset: int = 0):
+    """행 조회 — 검색·페이지. **전체 수를 함께 내린다.**
+
+    `CM_DONG` 7,847 · 셀 44만을 통째로 내리면 화면이 멈춘다. `total` 을
+    주어 화면이 페이지 수를 추측하지 않게 한다 — 추측하면 마지막 페이지가
+    비어 "데이터가 없다"로 보인다.
+    """
+    if table not in topo.TABLES:
+        raise HTTPException(400, f"대상은 {', '.join(topo.TABLES)} 다")
+    conn = _connect()
+    try:
+        return topo.browse(conn, table, locale, q, limit, offset)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        conn.close()
+
+
+@app.post("/api/topo/update")
+def api_topo_update(req: TopoReq):
+    """한 행의 **키가 아닌 컬럼**을 고친다.
+
+    키 컬럼은 받지 않는다 — 1분 집계·원시 Parquet·`ground_truth.json`·
+    `CL_CELL_MAP` 이 그 키를 참조하고, 화면에서 바꾸면 그 행만 옮겨지고
+    나머지는 **에러 없이** 끊어진다(`topo.update_row` 머리말).
+    """
+    if req.target not in topo.TABLES:
+        raise HTTPException(400, f"대상은 {', '.join(topo.TABLES)} 다")
+    if not req.key:
+        raise HTTPException(400, "고칠 행의 키가 필요하다")
+    if not req.row:
+        raise HTTPException(400, "고칠 컬럼이 비어 있다")
+    conn = _connect()
+    try:
+        _require_dump(conn, req.locale)
+        return {"ok": True, **topo.update_row(conn, req.target, req.locale,
+                                              req.key, req.row)}
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    finally:
+        conn.close()
+
+
 @app.post("/api/topo/add")
 def api_topo_add(req: TopoReq):
     if req.target not in topo.TABLES:
         raise HTTPException(400, f"대상은 {', '.join(topo.TABLES)} 다")
     if not req.row:
         raise HTTPException(400, "넣을 컬럼이 비어 있다")
-    table, _ = topo.TABLES[req.target]
+    # **대상 테이블은 로케일이 정한다** — `gu` + `jp` = `CM_GU_JP`
+    try:
+        table = topo.table_name(req.target, req.locale)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
     conn = _connect()
     try:
         _require_dump(conn, req.locale)
@@ -865,8 +1234,12 @@ def api_topo_add(req: TopoReq):
 def api_topo_rm(req: TopoReq):
     if req.target not in topo.TABLES:
         raise HTTPException(400, f"대상은 {', '.join(topo.TABLES)} 다")
-    table, keys = topo.TABLES[req.target]
-    if req.all and req.target not in topo.WIPEABLE:
+    try:
+        table = topo.table_name(req.target, req.locale)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    keys = topo.TABLES[req.target][1]
+    if req.all and not topo.wipeable(req.target, req.locale):
         # **`cellmap` 은 받지 않는다** — `topo` 는 위치 마스터를 다루고
         # `CL_CELL_MAP` 574,404행은 **셀 대장**이다. 전량 삭제할 이유가 없고
         # `DUMP_TABLES` 에도 없어서 지우면 되돌릴 원본이 아예 없다. 전에는
@@ -1095,11 +1468,15 @@ _HTML = """<!doctype html>
     <div style="margin-top:14px">
       <label class="dim" style="font-size:12px">생성량
         <b id="pct-label" style="color:var(--fg)">—</b> %
+        <span id="pct-msg" class="dim" style="margin-left:8px"></span>
       </label>
+      <!-- `value` 는 **로드 전에 잠깐 보이는 자리**다. 정본은 서버의
+           `volume_pct` 이고 `renderSettings` 가 덮는다. -->
       <input id="pct" type="range" min="0" max="100" step="5" value="70"
              style="width:100%; margin:6px 0"
              oninput="document.getElementById('pct-label').textContent=this.value;
-                      renderApplied(Number(this.value))">
+                      renderApplied(Number(this.value))"
+             onchange="savePct(Number(this.value))">
       <div class="rates" id="rates"></div>
     </div>
     <!-- ── 시간대 곡선 ─────────────────────────────────────────────────
@@ -1894,6 +2271,34 @@ async function saveReassign() {
   setTimeout(() => { $("ra-msg").textContent = "다음 틱부터 반영된다"; }, 4000);
 }
 
+// **슬라이더가 스스로 저장한다**(2026-10-27). 전에는 `oninput` 이 라벨과
+// 미리보기만 바꾸고 실제 저장은 **보존 섹션의 `설정 저장`** 버튼이 했다.
+// 그 버튼이 보존 전용으로 보이는 자리에 있어서, 생성량을 조절하고 누르지
+// 않으면 **화면만 바뀌고 서버 값은 그대로**였다 — 다음 기동에 원래 값으로
+// 돌아와 "바꾼 적이 없는" 것처럼 보인다. 실제로 그 혼란을 겪었다.
+//
+// **`volume_pct` 하나만 보낸다.** `POST /api/settings` 는 `is not None` 으로
+// 부분 갱신하므로, 조절 중에 다른 창에서 바꾼 보존·재배정을 이 화면의 낡은
+// 값으로 되돌리지 않는다(`saveReassign` 과 같은 이유).
+//
+// `onchange` 다 — 드래그 중(`oninput`)마다 보내면 한 번 조절에 수십 번
+// 쓴다. 놓는 순간 한 번이면 된다.
+async function savePct(v) {
+  const el = $("pct-msg");
+  try {
+    const r = await fetch("/api/settings", { method:"POST",
+      headers:{"content-type":"application/json"},
+      body: JSON.stringify({ volume_pct: v }) });
+    const j = await r.json().catch(() => ({}));
+    el.textContent = r.ok ? "저장됨 — 다음 틱부터" : ("실패 — " + (j.detail || r.status));
+    el.style.color = r.ok ? "" : "var(--red)";
+  } catch (e) {
+    el.textContent = "실패 — " + e;
+    el.style.color = "var(--red)";
+  }
+  setTimeout(() => { el.textContent = ""; el.style.color = ""; }, 4000);
+}
+
 async function saveSettings() {
   // **`enabled` 를 보내지 않는다.** 스위치가 이미 반영했고, 여기서 또 보내면
   // 그 사이 다른 창에서 켠 것을 이 화면의 낡은 값으로 되돌린다.
@@ -2024,7 +2429,16 @@ _HTML_TOPO = """<!doctype html>
 </style>
 </head>
 <body>
-<h1>마스터 토폴로지 <small>행정구역 · 장비 · 셀 — <a href="/">장애 주입 화면</a></small></h1>
+<h1>마스터 토폴로지
+  <small>행정구역 · 장비 · 셀 — <a href="/">장애 주입 화면</a></small>
+  <!-- **로케일은 테이블 이름이다.** 어느 벌을 보고 있는지가 모든 조작의
+       대상이므로 화면 맨 위에 둔다 — 아래에 묻어 두면 KR 을 보면서 JP 를
+       고친다고 믿는 상태가 생긴다. -->
+  <span style="float:right; font-size:13px; font-weight:400">
+    보는 벌 <select id="locale" onchange="switchLocale()"></select>
+    <span id="locale-tag" class="dim"></span>
+  </span>
+</h1>
 
 <!-- **경고를 화면 맨 위에 둔다.** 여기서 넣는 행은 데몬이 되돌리지 않는다 —
      장애 주입과 가장 다른 점이고, 아래 버튼을 누르기 전에 읽혀야 한다. -->
@@ -2037,7 +2451,8 @@ _HTML_TOPO = """<!doctype html>
 
 <div class="grid2">
   <div class="panel">
-    <h2>마스터 현황 <small>좌표 없음은 0 이 아니라 모름이다</small></h2>
+    <h2>마스터 현황 <small>좌표 없음은 0 이 아니라 모름이다 ·
+      <span id="tbl-locale" class="dim"></span></small></h2>
     <table>
       <thead><tr><th>테이블</th><th class="n">행</th><th class="n">좌표 없음</th></tr></thead>
       <tbody id="tbl"><tr><td colspan="3" class="dim">불러오는 중…</td></tr></tbody>
@@ -2114,28 +2529,114 @@ _HTML_TOPO = """<!doctype html>
     </div>
 
     <div class="sect">
-      <h3>행 직접 추가 · 삭제 <small>— 사람이 판단하는 자리</small></h3>
-      <div class="row">
-        <select id="t-target" onchange="syncTarget()">
-          <option value="city">CM_CITY</option>
-          <option value="gu">CM_GU</option>
-          <option value="dong">CM_DONG</option>
-          <option value="cell" selected>CM_CELL_REP_RU_LOC</option>
-          <option value="cellmap">CL_CELL_MAP</option>
-        </select>
-        <input id="t-row" placeholder='추가: CITY_ID=41, GU_ID=41110, …'
-               style="flex:1; min-width:220px">
-        <button class="ghost" id="t-add" disabled onclick="rows('add')">추가</button>
+      <h3>행 관리 <small>— 아래 <b>행 관리</b> 패널에서 한다</small></h3>
+      <div class="dim" style="font-size:12px">
+        추가 · 수정 · 삭제는 조회 그리드와 **같은 자리**에 둔다. 떨어뜨려
+        두면 어느 행을 고치는지 보지 않고 키를 손으로 적게 되고, 그렇게
+        틀린 키는 <b>0행 수정이 "성공"으로</b> 돌아온다.
       </div>
-      <div class="row" style="margin-top:8px">
-        <input id="t-key" placeholder='삭제 키: ENB_ID=811110, SECTOR=0'
-               style="flex:1; min-width:220px">
-        <button class="danger" id="t-rm" disabled onclick="rows('rm')">삭제</button>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <input id="t-confirm" placeholder='전체 삭제 확인 문구' style="flex:1; min-width:220px">
-        <button class="danger" id="t-rmall" disabled onclick="rows('rmall')">전체 삭제</button>
-      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── 로케일 벌 ─────────────────────────────────────────────────────────
+     **순서가 전제다.** 1→5 를 건너뛰면 조용히 빈다 — `seed-geo` 가 코드
+     맵 없이 돌면 전량 제외되고, 그 상태는 "일본 폴리곤이 비었다"로만
+     보인다. 그래서 단계를 번호와 함께 한 줄씩 세워 둔다. -->
+<div class="panel">
+  <h2>로케일 벌 <small>— 지역 테이블만 나라별로 만든다. 나머지는 한 벌 공유다</small></h2>
+  <div class="dim" style="font-size:12px; margin-bottom:10px">
+    <code>CM_CITY_JP</code> · <code>CM_GU_JP</code> · <code>CM_DONG_JP</code> ·
+    <code>CM_CELL_REP_RU_LOC_JP</code> · <code>CL_ENB_ORG_JP</code> 다섯을 만든다.
+    <code>ENB_ID</code>·<code>SECTOR</code>·<code>CITY_ID</code>·
+    <code>GU_ID</code>·<code>DONG_ID</code>·조직 ID 는 <b>KR 값을 그대로
+    복사</b>한다 — ID 체계를 공유하기로 한 결정이 여기서 지켜진다.
+    <code>PM_*</code>·<code>AI_*</code>·권역 테이블(<code>CM_BRANCH</code>·
+    <code>CM_LAREA</code>·<code>CM_REGION</code>)은 <b>한 벌 공유</b>라
+    <b>건드리지 않는다</b>.
+    <br><b>셀 벌을 함께 만드는 이유:</b> 지역 셋만 바꾸면 조인은 되고 에러도
+    없지만 <b>좌표가 셀 쪽에 있다</b> — 일본 지명에 한국 좌표가 붙어
+    폴리곤이 비어 보이고 <code>geo_pattern</code> 반경이 한국에서 계산된다.
+    <br><b><code>CL_ENB_ORG</code> 를 벌로 뜨는 이유:</b> 지도 라벨이
+    <code>RU_NAME</code> → <code>BTS_NAME</code> 순으로 떨어져, 없으면 셀
+    27.6% 가 한국 eNB 이름으로 뜬다. 공유 한 벌을 덮어 해결할 수는 없다 —
+    <code>dump</code> 대상이 아니라 <b>KR 이 되돌아오지 않는다</b>.
+    <br><b><code>CL_CELL_MAP</code> 은 벌을 뜨지 않는다</b> — 셀 키의 정본이고
+    나라와 무관하다. 다만 8번(없는 장비 추가)은 <b>그 공유 테이블에 행을
+    넣는다</b>: 유일하게 사본으로 되돌릴 수 없는 자리이고, 그래서 원장
+    파일이 되돌림을 맡는다.
+  </div>
+  <table>
+    <thead><tr><th>벌</th><th>테이블</th><th class="n">행</th><th>상태</th></tr></thead>
+    <tbody id="sets"><tr><td colspan="4" class="dim">불러오는 중…</td></tr></tbody>
+  </table>
+  <div id="added" class="dim" style="font-size:12px; margin-top:8px"></div>
+  <div class="sect">
+    <h3>단계 <small>— 번호 순서를 건너뛰면 조용히 빈다</small></h3>
+    <div id="steps"></div>
+    <div class="row" style="margin-top:10px">
+      <span class="dim" style="font-size:12px">되돌림 —</span>
+      <button class="ghost" onclick="step('rm-added', true)">추가 장비 세어 보기</button>
+      <button class="danger" onclick="step('rm-added', false)">추가 장비 지우기</button>
+    </div>
+    <div class="dim" style="font-size:12px; margin-top:8px">
+      <b>세어 보기</b>는 아무것도 쓰지 않는다(<code>dry_run</code>).
+      KR 벌을 대상으로 한 실적재·삭제는 <b>복귀 사본</b>이 있어야 눌린다 —
+      JP 벌은 위 단계로 다시 만들 수 있어 그 조건을 걸지 않는다.
+      <br><b>8번만 되돌릴 수 없다.</b> <code>CL_CELL_MAP</code> 은 로케일
+      축이 없는 공유 테이블이고 <code>dump</code> 대상도 아니다 — 그래서
+      넣은 <code>ENB_ID</code> 목록을 <b>원장 파일</b>로 남기고, 그 목록이
+      ⓐ KR 생성에서 그 장비를 빼는 근거이자 ⓑ 되돌림 수단이다.
+      <b>원장을 지우면 KR 이 그 장비를 후보로 본다</b>(미매핑 셀로 드러난다).
+    </div>
+  </div>
+</div>
+
+<!-- ── 행 관리 (CRUD) ───────────────────────────────────────────────────
+     사용자 지시(2026-10-26): *"ui에다 새로운 화면 만들어서 거기서 추가 수정
+     삭제 관리 가능하도록 만들어줘."* 그리드가 **같은 함수**(`topo.browse` ·
+     `topo.update_row` · `insert_rows` · `rm`)를 부른다 — 화면이 자기 SQL 을
+     쓰면 커맨드와 다른 행을 보게 된다. -->
+<div class="panel">
+  <h2>행 관리 <small>— 조회 · 추가 · 수정 · 삭제</small></h2>
+  <div class="row">
+    <select id="g-table" onchange="gridReset()">
+      <option value="city">CM_CITY</option>
+      <option value="gu" selected>CM_GU</option>
+      <option value="dong">CM_DONG</option>
+      <option value="cell">CM_CELL_REP_RU_LOC</option>
+      <option value="enb_org">CL_ENB_ORG</option>
+      <option value="cellmap">CL_CELL_MAP (한 벌 공유)</option>
+    </select>
+    <input id="g-q" placeholder="이름·키 검색" style="width:200px"
+           onkeydown="if(event.key==='Enter')gridReset()">
+    <button class="ghost" onclick="gridReset()">조회</button>
+    <button class="ghost" onclick="gridPage(-1)">◀</button>
+    <span id="g-page" class="dim"></span>
+    <button class="ghost" onclick="gridPage(1)">▶</button>
+    <span id="g-tag" class="dim" style="font-size:12px"></span>
+  </div>
+  <div style="overflow:auto; margin-top:10px">
+    <table id="g-tbl"><tbody><tr><td class="dim">조회를 누른다.</td></tr></tbody></table>
+  </div>
+  <div class="dim" style="font-size:12px; margin-top:8px">
+    <b>키 컬럼은 회색이고 고칠 수 없다.</b> 1분 집계 · 원시 Parquet ·
+    <code>ground_truth.json</code> · <code>CL_CELL_MAP</code> 이 그 키를
+    참조한다 — 화면에서 바꾸면 그 행만 옮겨지고 나머지는 <b>에러 없이</b>
+    끊어진다. 키를 바꾸는 것은 <b>삭제 + 추가</b>다.
+  </div>
+  <div class="sect">
+    <h3>행 추가 <small>— <code>COL=VAL, COL=VAL</code></small></h3>
+    <div class="row">
+      <input id="g-add" placeholder='CITY_ID=41, GU_ID=41110, GU_NAME=…'
+             style="flex:1; min-width:260px">
+      <button class="ghost" id="g-add-go" disabled onclick="gridAdd()">추가</button>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <input id="g-confirm" placeholder='전체 삭제 확인 문구 (아래 안내 그대로)'
+             style="flex:1; min-width:260px">
+      <button class="danger" id="g-wipe" disabled onclick="gridWipe()">전체 삭제</button>
+      <span id="g-wipe-tag" class="dim" style="font-size:12px"></span>
     </div>
   </div>
 </div>
@@ -2164,14 +2665,47 @@ function kv(text) {
   return out;
 }
 let STATE = null;
-// **`cellmap` 은 전체 삭제 대상이 아니다.** 서버가 400 으로 막지만, 누를 수
-// 있게 두면 "되는 조작"으로 읽힌다 — `CL_CELL_MAP` 은 사본이 없어서 지우면
-// 되돌릴 원본이 아예 없다.
-const WIPEABLE = ["city", "gu", "dong", "cell"];
-function syncTarget() {
-  const t = $("t-target").value, can = WIPEABLE.includes(t);
-  $("t-rmall").disabled = !can || !(STATE && STATE.dump.restorable);
-  $("t-rmall").title = can ? "" : "셀 대장은 전체 삭제 대상이 아니다 (사본이 없다)";
+let LOCALE = "kr";
+// 전체 삭제를 받아도 되는가 — **서버 `topo.wipeable` 과 같은 규칙**이다.
+// 되돌릴 수단이 있는 쪽만 받는다: KR 원본은 `dump` 사본이 있고, 비(非)kr
+// 벌은 단계판으로 다시 만들 수 있다. `cellmap` 은 어느 쪽도 아니다 —
+// 로케일 축이 없어 비울 때 지워지는 것은 언제나 KR 셀 대장이다.
+const DUMPED = ["city", "gu", "dong", "cell"];
+const LOCALE_KEYS = ["city", "gu", "dong", "cell", "enb_org"];
+function canWipe(t) {
+  if (t === "cellmap") return false;
+  return DUMPED.includes(t) || (LOCALE !== "kr" && LOCALE_KEYS.includes(t));
+}
+// **로케일 축이 없는 테이블.** `kr` 이 아닌 벌에서 고르면 한 벌 공유라고
+// 말한다 — 조용히 KR 을 고치면 "JP 를 고쳤다"고 믿는 상태가 된다.
+const SHARED = ["cellmap"];
+
+// 로케일 벌 생성 다섯 단계. **순서가 전제다** — 서버 주석과 같은 순서이고,
+// 건너뛰면 에러가 아니라 빈 화면이 된다.
+const STEPS = [
+  {api: "ensure-tables", note: "벌 <b>다섯</b>을 <code>CREATE TABLE … LIKE</code> 로 만든다 (collation·인덱스가 원본에서 온다)"},
+  {api: "copy-cells", note: "셀 44만행의 키·지역 참조를 DB 안에서 복사 — 좌표·<code>RU_NAME</code> 은 <b>NULL</b>"},
+  {api: "copy-enb-org", note: "eNB 조직 4.6만행 복사 — <code>BTS_NAME</code> 만 <b>NULL</b>. 없으면 지도에 한국 eNB 이름이 섞인다"},
+  {api: "geo-fetch", note: "경계 GeoJSON 을 받는다 (없으면 멈춘다 — 빈 테이블을 만들지 않는다)"},
+  {api: "code-map", note: "JP 경계 코드 → <b>KR 코드</b> 맵 + <b>추가 구역</b>(KR 에 없는 새 <code>GU_ID</code>)"},
+  {api: "seed-geo", note: "행정구역 셋을 경계에서 만든다 (<code>replace</code> 가 비우고 다시 넣는다). 동 수는 <b>KR 구별 범위를 그대로</b> 따른다 — 균일값이면 셀 54.3% 가 동 미매핑"},
+  {api: "relocate-cells", note: "좌표·<code>RU_NAME</code>·<code>BTS_NAME</code> 을 그 나라로 쓴다 — 키는 그대로"},
+  {api: "seed-enb-jp", note: "추가 구역에 <b>없는 장비</b>를 놓는다 — <code>CL_CELL_MAP</code>(KR 공유·사본 없음)에 행이 들어간다"},
+];
+
+// 쓰기 잠금은 **KR 에서만** 사본을 본다. JP 벌은 다섯 단계로 다시 만들 수
+// 있어 복귀 사본이 선행 조건이 아니다(서버 `_require_dump` 와 같은 판단).
+function canWrite() {
+  return LOCALE !== "kr" || !!(STATE && STATE.dump.restorable);
+}
+
+// **`await` 한다**(결함 D). 전에는 fire-and-forget 이라 두 갱신이 언제
+// 끝나는지 알 수 없고, 그 사이의 실패가 조용히 삼켜졌다. 벌을 바꾸는 것은
+// **모든 조작의 대상이 바뀌는 일**이라 그 경합을 남겨 둘 자리가 아니다.
+async function switchLocale() {
+  LOCALE = $("locale").value;
+  try { await Promise.all([gridLoad0(), load()]); }
+  catch (e) { show("벌 전환에 실패했다: " + (e.message || e), "bad"); }
 }
 
 function show(obj, cls) {
@@ -2182,11 +2716,26 @@ function show(obj, cls) {
 
 async function load() {
   try {
-    const d = await (await fetch("/api/topo")).json();
+    const d = await (await fetch("/api/topo?locale=" + encodeURIComponent(LOCALE))).json();
     STATE = d;
+    // 로케일 셀렉트는 **서버가 아는 목록**으로 채운다 (`GEO_SOURCES`) —
+    // 화면에 적어 두면 나라를 추가할 때 한 곳이 남는다.
+    if (!$("locale").options.length) {
+      $("locale").innerHTML = Object.keys(d.locales).map(lc =>
+        `<option value="${lc}"${lc === LOCALE ? " selected" : ""}>${lc}</option>`).join("");
+    }
+    $("locale-tag").textContent = LOCALE === "kr"
+      ? " 원본 (접미사 없음)" : " 접미사 _" + LOCALE.toUpperCase();
+    $("tbl-locale").textContent = "locale " + d.locale;
+    // **"모름"과 "해당 없음"은 다른 것이다**(결함 C). 좌표 컬럼이 아예
+    // 없는 테이블(`CL_ENB_ORG`·`CL_CELL_MAP`)에 "산출 불가"를 찍으면
+    // 불변규칙 17 이 지키려던 구분 자체가 무의미해진다.
+    const COORD = d.coord_keys || [];
     $("tbl").innerHTML = Object.entries(d.tables).map(([k, v]) =>
       `<tr><td>${esc(v.table)}</td><td class="n">${n(v.rows)}</td>` +
-      `<td class="n">${imp(v.no_coord)}</td></tr>`).join("");
+      `<td class="n">${COORD.includes(k) ? imp(v.no_coord)
+        : '<span class="dim" title="이 테이블에는 좌표 컬럼이 없다">—</span>'}` +
+      `</td></tr>`).join("");
     const a = d.active;
     $("active").innerHTML =
       `eNB <b>${n(a.enbs)}</b> · 셀 <b>${n(a.cells)}</b> · ` +
@@ -2209,8 +2758,16 @@ async function load() {
       `후보 셀 ${n(p.candidate_cells)} → 선택 셀 ${n(p.picked_cells)} · ` +
       `<code>enb_limit</code> ${n(d.enb_limit)} · 신규 셀 트래픽 가중 ` +
       `×${d.topo_weight}<br>seed 대상 시군구 ${n(d.seed_gus)} 중 ` +
-      `<b>${n(d.gus_without_drawable_dong)}곳은 그릴 수 있는 동이 없다</b> — ` +
-      `그 셀은 <code>DONG_ID</code> 를 비워야 하고 적재에서 빠진다 (0 으로 채우지 않는다)` +
+      // **그 로케일의 crosswalk 로 재고, 없으면 "산출 불가"다**(결함 A).
+      // 전에는 KR 대응표로 JP 구역을 판정해 "731곳에 동이 없다"는 거짓
+      // 숫자를 띄웠다. 0 으로도 전수로도 적지 않는다(불변규칙 17).
+      (d.gus_without_drawable_dong == null
+        ? `<b class="warn">그릴 수 있는 동은 산출 불가</b> — ` +
+          `${esc(d.drawable_crosswalk || "crosswalk 경로 미설정")} 가 없다 ` +
+          `(seed-geo 가 그 파일을 만든다)`
+        : `<b>${n(d.gus_without_drawable_dong)}곳은 그릴 수 있는 동이 없다</b> — ` +
+          `그 셀은 <code>DONG_ID</code> 를 비워야 하고 적재에서 빠진다 ` +
+          `(0 으로 채우지 않는다)`) +
       (p.band_missing.length ? `<br><b class="bad">대역 eNB ${p.band_missing.length}개가
          선택되지 않았다 — include 가 깨졌다는 뜻이다 (한도를 올려 해결하지 않는다)</b>` : "");
 
@@ -2229,16 +2786,51 @@ async function load() {
       `복구 범위 <b>${(dm.scope || []).map(esc).join(" · ")}</b>` +
       (dm.not_restored || []).map(t =>
         `<br><span class="bad">복구 대상 아님</span> — ${esc(t)}`).join("");
+    // 로케일 벌 — 테이블별 존재 여부. **"없다"와 "0행"을 가른다**
+    // **벌마다 행 수를 받는다**(결함 B). 전에는 보고 있는 벌만 수가 있어
+    // 다른 벌이 `— / 있다` 로 나왔고 그것이 "없다"처럼 읽혔다. 벌이 없을
+    // 때만 `—` 이고, 그때는 **상태 칸도 "없다"** 라 둘이 어긋나지 않는다.
+    $("sets").innerHTML = Object.entries(d.locales).map(([lc, arr]) =>
+      arr.map((t, i) =>
+        `<tr><td>${i ? "" : esc(lc) + (lc === d.locale ? " ◀" : "")}</td>` +
+        `<td><code>${esc(t.table)}</code></td>` +
+        `<td class="n">${t.exists ? n(t.rows) : '<span class="dim">—</span>'}</td>` +
+        `<td class="${t.exists ? "ok" : "dim"}">${t.exists ? "있다" : "없다"}</td></tr>`
+      ).join("")).join("");
+    const ad = d.added || {};
+    $("added").innerHTML = ad.enbs
+      ? `JP 전용 장비 <b>${n(ad.enbs)}</b>대 · 대역 시작 ` +
+        `<code>${esc(ad.band_start)}</code> <span class="dim">— 원장 ` +
+        `${esc(ad.path)}</span><br><span class="warn">이 파일이 KR 생성에서 ` +
+        `그 장비를 빼는 근거이자 되돌림 수단이다. 지우면 KR 이 후보로 본다.</span>`
+      : `<span class="dim">추가한 JP 전용 장비가 없다 (원장 ${esc(ad.path)})</span>`;
+    $("steps").innerHTML = STEPS.map((s, i) =>
+      `<div class="row" style="margin-bottom:6px">` +
+      `<b style="width:16px">${i + 1}</b><code style="width:140px">${esc(s.api)}</code>` +
+      `<span class="dim" style="flex:1; min-width:220px; font-size:12px">${s.note}</span>` +
+      `<button class="ghost" onclick="step('${s.api}', true)">세어 보기</button>` +
+      `<button class="danger" onclick="step('${s.api}', false)"` +
+      `${canWrite() ? "" : " disabled"}>실행</button></div>`).join("");
+
     // **쓰기 버튼은 "되돌릴 수 있는가"로 잠근다** — 파일 존재가 아니다.
     // 서버도 409 로 막지만(이쪽이 정본이다), 눌린 뒤 거부되면 "왜 안
     // 되는지"를 사람이 찾아야 한다.
-    for (const id of ["se-go", "t-add", "t-rm", "t-rmall", "rs-go"])
-      $(id).disabled = !dm.restorable;
-    syncTarget();
+    for (const id of ["se-go", "rs-go"]) $(id).disabled = !dm.restorable;
+    // `seed-enb` 는 **KR 전용이다** — `CL_CELL_MAP` 에도 넣고 그 테이블은
+    // 한 벌 공유라, JP 벌에만 장비를 놓을 방법이 없다(서버도 KR 에 넣는다).
+    if (LOCALE !== "kr") {
+      $("se-go").disabled = true;
+      $("se-go").title = "seed-enb 는 KR 전용 — 셀 대장(CL_CELL_MAP)이 한 벌 공유다";
+    }
+    $("g-add-go").disabled = !canWrite();
+    syncWipe();
   } catch (e) { show("불러오지 못했다: " + e, "bad"); }
 }
 
 async function post(path, body) {
+  // **로케일을 항상 실어 보낸다.** 빠뜨리면 서버 기본값(`kr`)이 들어가고,
+  // 화면은 JP 를 보여 주면서 KR 을 고치게 된다 — 에러가 나지 않는다.
+  body = Object.assign({locale: LOCALE}, body || {});
   const r = await fetch("/api/topo/" + path, {
     method: "POST", headers: {"Content-Type": "application/json"},
     body: JSON.stringify(body)});
@@ -2260,21 +2852,162 @@ async function run(what, opt) {
   catch (e) { show(String(e.message || e), "bad"); }
 }
 
-async function rows(kind) {
-  const base = {target: $("t-target").value};
+// ── 로케일 벌 단계 실행 ─────────────────────────────────────────────────
+//
+// `dry` 가 참이면 아무것도 쓰지 않는다. `seed-geo` 만 `replace` 를 함께
+// 묻는다 — 세 테이블을 **비우고** 다시 넣는 유일한 단계다.
+async function step(api, dry) {
+  const body = {dry_run: dry, dongs: 8, replace: false};
+  if (api === "seed-geo" && !dry) {
+    body.replace = confirm(
+      "행정구역 세 테이블을 **비우고** 다시 넣는다(replace). " +
+      "확인을 누르면 전량 교체, 취소를 누르면 빈 테이블에만 넣는다.");
+  }
+  if (api === "geo-fetch") body.replace = false;
+  if (api === "seed-enb-jp") {
+    // **번호를 화면에도 박지 않는다.** 빈 대역은 그 DB 의 사실이라 사람이
+    // 실측해서 넣는다 — 서버가 받은 번호로 만든 ID 전부가 세 테이블에서
+    // 비어 있는지 확인한 뒤에 쓴다(겹치면 멈춘다).
+    const v = prompt("JP 전용 ENB_ID 대역의 시작 번호 — 빈 대역을 실측해서 " +
+                     "넣는다 (기본값 없음)");
+    if (!v) return;
+    body.band_start = Number(v);
+  }
+  if (api === "relocate-cells") {
+    // **범위를 묻는다.** 활성 셀만 고치면 나머지 44만행의 좌표·이름은
+    // 한국으로 남는다 — "DB 째 이식" 이면 전수가 맞고, 지도·탐지만 보려면
+    // 활성 셀로 충분하다(실측 2,161). 조용히 하나를 고르지 않는다.
+    body.all = confirm(
+      "전수(44만행)로 돌릴까? 확인=전수 · 취소=활성 셀만(1분 집계에 " +
+      "나타나는 셀). 활성만 고치면 나머지 좌표·이름은 한국으로 남는다.");
+  }
+  if (!dry && !confirm(api + " 를 실제로 실행한다. 계속?")) return;
+  show("실행 중…", "dim");
+  try { show(await post(api, body)); await load(); }
+  catch (e) { show(String(e.message || e), "bad"); }
+}
+
+// ── 행 관리 그리드 ──────────────────────────────────────────────────────
+let GRID = null, OFFSET = 0;
+const LIMIT = 50;
+
+// `gridReset` 은 버튼이 부르는 자리(반환을 안 쓴다), `gridLoad0` 은
+// **기다려야 하는** 자리가 부르는 자리다 — 같은 일을 두 이름으로 두지 않고
+// 전자가 후자를 부른다.
+function gridLoad0() { OFFSET = 0; return gridLoad(); }
+function gridReset() { gridLoad0(); }
+function gridPage(d) {
+  if (!GRID) return;
+  const next = OFFSET + d * LIMIT;
+  if (next < 0 || (GRID.total != null && next >= GRID.total)) return;
+  OFFSET = next; gridLoad();
+}
+
+function syncWipe() {
+  const t = $("g-table").value, can = canWipe(t);
+  $("g-wipe").disabled = !can || !canWrite();
+  $("g-wipe-tag").textContent = can
+    ? (GRID && GRID.table ? "확인 문구: " + GRID.table + " 전체 삭제" : "")
+    : (t === "cellmap"
+       ? "셀 대장은 전체 삭제 대상이 아니다 (로케일 축이 없고 사본도 없다)"
+       : "KR 원본이고 복귀 사본 대상이 아니다 — 지우면 되돌릴 수 없다");
+}
+
+async function gridLoad() {
+  const t = $("g-table").value;
+  const u = `/api/topo/rows?table=${t}&locale=${encodeURIComponent(LOCALE)}` +
+            `&q=${encodeURIComponent($("g-q").value)}&limit=${LIMIT}&offset=${OFFSET}`;
   try {
-    let d;
-    if (kind === "add") d = await post("add", Object.assign(base, {row: kv($("t-row").value)}));
-    else if (kind === "rm") d = await post("rm", Object.assign(base, {key: kv($("t-key").value)}));
-    else {
-      if (!confirm("테이블을 통째로 지운다. 계속?")) return;
-      d = await post("rm", Object.assign(base, {all: true, confirm: $("t-confirm").value}));
+    const d = await (await fetch(u)).json();
+    if (d.detail) throw new Error(d.detail);
+    GRID = d;
+    // **"테이블이 없다"를 "0행"으로 적지 않는다**(불변규칙 17) — 전자는
+    // 벌을 먼저 만들라는 뜻이고 후자는 조건이 좁다는 뜻이다.
+    if (!d.exists) {
+      $("g-tbl").innerHTML = `<tbody><tr><td class="bad">${esc(d.table)} 가 없다` +
+        ` — 위 <b>로케일 벌</b>의 1단계를 먼저 돈다.</td></tr></tbody>`;
+      $("g-page").textContent = "—"; $("g-tag").textContent = ""; syncWipe();
+      return;
     }
-    show(d); await load();
+    const keys = d.keys;
+    $("g-tbl").innerHTML =
+      `<thead><tr><th></th>` + d.columns.map(c =>
+        `<th${keys.includes(c) ? ' class="dim"' : ""}>${esc(c)}` +
+        `${keys.includes(c) ? " 🔑" : ""}</th>`).join("") + `</tr></thead><tbody>` +
+      d.rows.map((r, i) =>
+        `<tr><td style="white-space:nowrap">` +
+        `<button class="ghost" onclick="gridSave(${i})"` +
+        `${canWrite() ? "" : " disabled"}>저장</button> ` +
+        `<button class="danger" onclick="gridDel(${i})"` +
+        `${canWrite() ? "" : " disabled"}>삭제</button></td>` +
+        d.columns.map(c => keys.includes(c)
+          ? `<td class="dim">${esc(r[c])}</td>`
+          : `<td><input id="g-${i}-${c}" value="${esc(r[c] == null ? "" : r[c])}"` +
+            ` style="width:${Math.min(240, Math.max(70, String(r[c] ?? "").length * 9 + 24))}px"` +
+            `${r[c] == null ? ' placeholder="NULL"' : ""}></td>`).join("") +
+        `</tr>`).join("") + `</tbody>`;
+    $("g-page").textContent =
+      `${n(OFFSET + 1)}–${n(OFFSET + d.rows.length)} / ${n(d.total)}`;
+    $("g-tag").innerHTML = `<code>${esc(d.table)}</code>` +
+      (d.shared ? ' <b class="warn">한 벌 공유 — 이 행은 KR 에도 그대로 나온다</b>' : "") +
+      ` · 검색 대상 ${d.searched.map(esc).join(", ")}`;
+    syncWipe();
+  } catch (e) { show("행을 불러오지 못했다: " + (e.message || e), "bad"); }
+}
+
+// **바뀐 컬럼만 보낸다.** 전 컬럼을 보내면 손대지 않은 값까지 UPDATE 에
+// 실려, 빈 입력이 `''` 로 들어가 NULL(모름)을 덮는다.
+function gridSave(i) {
+  const r = GRID.rows[i], row = {}, key = {};
+  for (const c of GRID.keys) key[c] = r[c];
+  for (const c of GRID.columns) {
+    if (GRID.keys.includes(c)) continue;
+    const el = $(`g-${i}-${c}`);
+    if (!el) continue;
+    const was = r[c] == null ? "" : String(r[c]);
+    if (el.value !== was) row[c] = el.value;
+  }
+  if (!Object.keys(row).length) { show("바뀐 컬럼이 없다.", "dim"); return; }
+  (async () => {
+    try {
+      show(await post("update", {target: $("g-table").value, key, row}));
+      await gridLoad();
+    } catch (e) { show(String(e.message || e), "bad"); }
+  })();
+}
+
+function gridDel(i) {
+  const r = GRID.rows[i], key = {};
+  for (const c of GRID.keys) key[c] = r[c];
+  if (!confirm("이 행을 지운다: " + JSON.stringify(key))) return;
+  (async () => {
+    try {
+      show(await post("rm", {target: $("g-table").value, key}));
+      await gridLoad(); await load();
+    } catch (e) { show(String(e.message || e), "bad"); }
+  })();
+}
+
+async function gridAdd() {
+  const row = kv($("g-add").value);
+  if (!Object.keys(row).length) { show("넣을 컬럼이 비어 있다.", "bad"); return; }
+  try {
+    show(await post("add", {target: $("g-table").value, row}));
+    $("g-add").value = ""; await gridLoad(); await load();
+  } catch (e) { show(String(e.message || e), "bad"); }
+}
+
+async function gridWipe() {
+  if (!confirm("테이블을 통째로 지운다. 계속?")) return;
+  try {
+    show(await post("rm", {target: $("g-table").value, all: true,
+                           confirm: $("g-confirm").value}));
+    await gridLoad(); await load();
   } catch (e) { show(String(e.message || e), "bad"); }
 }
 
 load();
+gridLoad();
 </script>
 </body>
 </html>

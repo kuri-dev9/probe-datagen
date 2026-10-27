@@ -52,6 +52,11 @@ mysql:
 # **읽는 쪽과 같은 값이어야 한다** — graphio `config/prod.yaml` 의
 # `paths.uplane_raw`·`cplane_raw`. 어긋나면 집계가 조용히 0행이 된다.
 pemdb1:
+  # 장애 주입 정답 파일. **반드시 컨테이너 절대경로다.** 베이스값은
+  # 호스트 기준 상대경로(`../graphio-probe-rca/...`)라 컨테이너에서
+  # `/graphio-probe-rca` 로 풀리고, 장애가 처음 주입되는 순간
+  # `PermissionError` 로 gen 이 죽는다(2026-10-27 dev 에서 실측).
+  truth_out: /app/data/truth/ground_truth.json
   # ── 행정코드 crosswalk — **컨테이너 안 경로다** ─────────────────────────
   #
   # 기본값은 `../graphio-probe-rca/data/geo/...` 로 호스트 상대경로이고,

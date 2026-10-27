@@ -5,7 +5,7 @@
 # 복사하면 설정이 두 벌이 되고, 한쪽만 고쳐질 때 조용히 어긋난다.
 #
 # 쓰는 쪽:
-#   docker compose -f ../graphio-probe-rca/docker-compose.dev.yml \
+#   docker compose -f ../graphio-probe-rca/docker-compose.yml \
 #     --profile pipe up -d --build
 #
 # compose 가 `run --config config/local.yaml` 로 부른다.
@@ -54,11 +54,17 @@ pemdb1:
   # (`RuntimeError: 행정코드 crosswalk 가 없다`).
   #
   # gen 이미지에는 이 파일이 없으므로 compose 가 호스트 것을 마운트한다
-  # (`docker-compose.dev.yml` 의 gen·gen-ui `volumes`).
+  # (`docker-compose.yml` 의 gen·gen-ui `volumes`).
   #
   # 없으면 **멈추는 것이 설계다** — 폴리곤 없는 동의 셀을 고르면 지도가 어긋나고
   # 그때는 어디서 어긋났는지 알 방법이 없다(`pemdb1.load_drawable_dongs`).
   geo_crosswalk: /app/data/geo/code_crosswalk.json
+  # 장애 주입 정답 파일. **베이스값은 호스트 기준 상대경로**
+  # (`../graphio-probe-rca/...`)라 컨테이너에서는 `/app/..` = `/` 로 풀려
+  # `/graphio-probe-rca` 를 만들려다 `PermissionError` 로 **gen 이 죽는다**.
+  # 장애가 처음 주입돼 `_live_truth` 가 불릴 때까지 드러나지 않았다
+  # (2026-10-27). compose 가 graphio 의 `data/truth` 를 여기에 `rw` 로 건다.
+  truth_out: /app/data/truth/ground_truth.json
   uplane_parquet:
     root: /app/data/uplane_raw
   cplane_parquet:

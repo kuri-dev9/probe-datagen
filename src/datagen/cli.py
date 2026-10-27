@@ -31,6 +31,7 @@ import os
 import random
 import sys
 import time
+import traceback
 import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -275,6 +276,45 @@ def _truth_path(pem: dict, data_dir: Path) -> Path:
     return q if q.is_absolute() else (HERE / q).resolve()
 
 
+#: `_aside` 가 마지막으로 말한 실패 사유. 같은 사유를 매 틱 도배하지 않기 위한
+#: 것이고, 사유가 바뀌거나 복구되면 다시 말한다.
+_ASIDE_FAILED: dict[str, str] = {}
+
+
+def _aside(label: str, fn, *args, **kw):
+    """**주 경로를 멈추지 않는 부수 작업.**
+
+    이 데몬의 산출물은 **원시 Parquet 생성·적재 하나**다. 정답 기록 ·
+    보존 정리 · 파티션 진단은 전부 "알면 좋은 것"이고, 실패해도 데이터는
+    멀쩡해야 한다.
+
+    그런데 `_live_truth` 가 생성보다 **먼저** 불리고 있었다. 정답 파일
+    경로가 컨테이너에서 `/graphio-probe-rca` 로 풀려 `PermissionError` 가
+    나자 **그 틱의 xDR 이 통째로 만들어지지 않았고** 데몬이 재시작을
+    반복했다 — 장애를 처음 주입한 순간이었다(2026-10-27 실측). 데이터에는
+    아무 문제가 없었는데 생성이 멈췄다.
+
+    **조용히 넘기지 않는다.** 처음 한 번은 트레이스백까지 찍고, 같은 사유가
+    이어지면 더 말하지 않는다 — 매 틱 도배하면 진짜 로그가 묻힌다. 사유가
+    바뀌거나 복구되면 다시 말한다. 상태를 남기는 이유는 "정답이 밀려 있다"를
+    알아야 채점 결과를 믿을지 판단할 수 있어서다.
+    """
+    try:
+        out = fn(*args, **kw)
+    except Exception as exc:                      # noqa: BLE001 — 주 경로 보호가 목적
+        sig = f"{type(exc).__name__}: {exc}"
+        if _ASIDE_FAILED.get(label) != sig:
+            _ASIDE_FAILED[label] = sig
+            print(f"  ⚠ {label} 실패 — {sig}", flush=True)
+            print("     **생성·적재는 계속한다.** 이 작업만 건너뛴다.",
+                  flush=True)
+            traceback.print_exc()
+        return None
+    if _ASIDE_FAILED.pop(label, None) is not None:
+        print(f"  ✓ {label} 복구", flush=True)
+    return out
+
+
 def _live_truth(P, gen, scs: list) -> None:
     """실시간 주입(UI·`CM_DATAGEN_FAULT`)의 정답을 남긴다.
 
@@ -296,10 +336,13 @@ def _live_truth(P, gen, scs: list) -> None:
                        for sc in scs))
     if key == getattr(gen, "_truth_key", None):
         return
-    gen._truth_key = key
     minutes = max(sc.start_minute + sc.duration for sc in scs) + 1
     P.write_truth(path, gen.anchor, minutes, scs,
                   getattr(gen, "cell_selection", None))
+    # **쓰기에 성공한 뒤에 키를 갱신한다.** 먼저 갱신하면 실패했을 때 같은
+    # 활성 집합이 이어지는 한 다시 시도하지 않아, 정답이 영영 비어 있는데도
+    # 조용하다. 뒤에 두면 다음 틱이 자동으로 재시도한다.
+    gen._truth_key = key
     print(f"  정답 기록 — {len(scs)}건 → {path}", flush=True)
 
 
@@ -762,14 +805,16 @@ def cmd_run(args) -> int:
                           flush=True)
                     ret_state = (ret_on, ret_h)
                 if ret_on:
-                    swept = _retention_sweep(conn, ret_h)
+                    swept = _aside("보존 정리", _retention_sweep,
+                                   conn, ret_h) or {}
                     if any(swept.values()):
                         print(f"  보존 정리({ret_h:g}시간) — 파티션 {swept} 드롭",
                               flush=True)
                 # **`pmax` 에 행이 쌓이면 파티션 관리가 멈춘 것이다.** 그 상태는
                 # 에러를 내지 않고 질의만 느려지므로, 여기서 말하지 않으면
                 # 아무도 모른다. 보존을 꺼도 이 진단은 계속한다 — 둘은 다른 일이다.
-                if stuck := P.pmax_rows(conn, database):
+                if stuck := _aside("pmax 진단", P.pmax_rows,
+                                   conn, database):
                     print(f"  ★ pmax 적적 — {stuck} · 파티션 범위를 확인하라",
                           flush=True)
                 last_retention = datetime.now()
@@ -787,7 +832,7 @@ def cmd_run(args) -> int:
             scs, bad = gen.set_fault_rows(active)
             if bad:
                 _cancel_faults(conn, bad, _CANCEL_NOTE)
-            _live_truth(P, gen, scs)
+            _aside("정답 기록", _live_truth, P, gen, scs)
 
             t0 = time.time()
             # **적재보다 먼저 파티션을 보장한다.** 생성기가 꺼져 있는 동안은
@@ -1095,7 +1140,7 @@ def _pem_follow(conn, P, gen, w, last_done, *, umaps: dict,
             scs, bad = gen.set_fault_rows(active)
             for fid in bad:
                 print(f"  ! fault {fid} 해석 실패 — 건너뛴다", flush=True)
-            _live_truth(P, gen, scs)
+            _aside("정답 기록", _live_truth, P, gen, scs)
 
             t0 = time.time()
             minute_idx = int((pending - gen.anchor).total_seconds() // 60)
@@ -1177,8 +1222,26 @@ def _pad(text: str, width: int) -> str:
     return text + " " * max(1, width - w)
 
 
-def _topo_gate(conn, locale: str) -> bool:
+#: **쓰는 명령.** 이 목록에 있으면 `--write` 없이는 아무것도 적재하지
+#: 않는다. `list`·`restore`(점검)·`dump`·`geo-fetch` 는 여기 없다 —
+#: 전자는 읽기이고 `dump` 는 사본을 뜨는 것이 목적이다.
+TOPO_WRITING = ("clone", "ensure-tables", "copy-cells", "copy-enb-org",
+                "code-map", "seed-geo", "seed-enb", "seed-enb-jp",
+                "rm-added", "relocate-cells", "org-names",
+                "fill-coords", "add", "rm", "update")
+
+
+def _topo_gate(conn, locale: str, schema: str | None = None) -> bool:
     """파괴적 경로의 선행 조건 — **`restore` 가 실제로 넣을 수 있는가.**
+
+    ## **KR 에만 건다** (2026-10-26 접미사 벌로 바뀐 뒤)
+
+    JP 벌은 **재생성 가능하다** — `ensure-tables` → `copy-cells` →
+    `seed-geo` → `relocate-cells` 네 단계가 전부 코드와 경계 GeoJSON 에서
+    나온다. 되돌릴 원본이 없는 쪽은 KR 이고(`pemdb6` 가 그대로 운영이다),
+    JP 에 KR 사본을 요구하면 **JP 를 만들기 전에는 아무 버튼도 눌리지
+    않는다**(JP 사본이 있을 수 없으므로). 게이트가 그렇게 서면 사람은
+    게이트를 우회할 길을 찾는다.
 
     **파일의 존재는 복귀를 뜻하지 않는다.** 전에는 `dump_exists()` 가
     게이트였는데, 그때 그 JSON 을 DB 로 되넣는 코드가 없었다 — 게이트가
@@ -1189,10 +1252,19 @@ def _topo_gate(conn, locale: str) -> bool:
     실패 사유를 테이블별로 찍는다 — "사본이 없다" 하나로는 넷 중 어느
     파일이 반쪽인지 알 수 없고, 그러면 사람은 전부 다시 뜬다.
     """
+    if locale != "kr":
+        print(f"  (복귀 사본 게이트는 KR 에만 건다 — locale {locale} 벌은 "
+              f"재생성 경로가 있다: ensure-tables → copy-cells → seed-geo "
+              f"→ relocate-cells)")
+        return True
     rep = topo.restore(conn, locale, dry_run=True)
     if rep["ok"]:
         return True
-    print(f"✗ 복귀 경로가 서 있지 않다: {topo.LOCALE_DIR / locale}", file=sys.stderr)
+    # **어느 스키마를 지우는가**를 함께 말한다. 전에는 KR 전제로 적혀
+    # 있어서, JP 스키마 작업인데 KR 사본을 뜨라는 경고가 나왔다 — 그러면
+    # 사람이 "내가 KR 을 건드리나" 하고 멈춘다.
+    print(f"✗ 복귀 경로가 서 있지 않다 — 대상 스키마 {schema or '?'} · "
+          f"사본 {topo.LOCALE_DIR / locale}", file=sys.stderr)
     for info in rep["tables"].values():
         if info.get("error"):
             print(f"    {info['table']:22} {info['error']}", file=sys.stderr)
@@ -1270,22 +1342,172 @@ def cmd_topo(args) -> int:
     집합을 보게 된다 — 에러가 아니라 값이 어긋난다.
     """
     cfg = load_cfg(args.config)
-    conn = topo.connect(cfg, args.database)
+    # **locale 은 스키마를 가르지 않는다** (2026-10-26 방식 확정). 로케일
+    # 축이 테이블 이름으로 내려왔으므로(`topo.table_name`), 같은 `pemdb6`
+    # 안에서 `CM_GU` 와 `CM_GU_JP` 가 공존한다. 둘을 함께 쓰면 축이 두 번
+    # 적혀(`pemdb6_jp.CM_GU_JP`) 어느 쪽이 유효한지 알 수 없다.
+    #
+    # **`clone` 만 예외다** — 그 커맨드 자체가 "다른 스키마를 만든다" 이고
+    # 폐기 대기 경로다(`topo.locale_database` 머리말).
+    # ── **쓰기는 `--write` 가 있을 때만 한다** (2026-10-26) ─────────────
+    #
+    # 전에는 `--dry-run` 이 `store_true` 라 **기본이 적재**였다. 함수
+    # 기본값(`dry_run=True`)만 보고 "기본이 dry-run" 이라 믿었는데 CLI 는
+    # 반대였고, 그래서 **`topo seed-geo --replace` 한 줄이 그대로 적재**였다.
+    # 오타 하나(`--locale` 누락)가 KR 세 테이블을 덮는 자리다.
+    #
+    # `--dry-run` 은 **계속 받는다** — 기존 호출이 조용히 적재로 바뀌면 안
+    # 된다. 지금은 그것이 기본이므로 "이미 기본"이라고 말해 준다.
+    write = bool(getattr(args, "write", False))
+    dry = not write
+    src = str((cfg.get("pemdb1") or {}).get("database", "pemdb6"))
+    db = (topo.locale_database(cfg, args.locale, args.database)
+          if args.action == "clone" else (args.database or src))
+    tag = f"locale {args.locale} · 스키마 {db}"
+    # **대상 테이블 이름을 함께 찍는다.** 로케일 축이 테이블 이름이라
+    # "어느 스키마인가" 만으로는 KR 을 건드리는지 알 수 없다 — 접미사가
+    # 붙었는지가 그 판단이다.
+    try:
+        tag += ("  대상 테이블 "
+                + " · ".join(topo.table_name(k, args.locale)
+                             for k in topo.LOCALE_TABLE_KEYS))
+    except RuntimeError:
+        pass
+    print(f"▶ 대상: {tag}")
+    if args.action in TOPO_WRITING and not write:
+        print("  (읽기만 한다 — 적재는 `--write` 를 붙여야 돈다)")
+    elif args.action in TOPO_WRITING and args.dry_run:
+        print("  (`--dry-run` 은 이제 기본이다 — `--write` 가 없으면 쓰지 않는다)")
+    # **`clone` 은 원본에 붙는다.** 대상 스키마는 아직 없고(그걸 만드는
+    # 명령이다) 없는 DB 로 접속하면 `1044 Access denied to database` 가
+    # 난다 — 권한 문제처럼 보이지만 실은 "아직 없다"다.
+    conn = topo.connect(cfg, src if args.action == "clone" else db)
+    if args.action in TOPO_WRITING and write:
+        # **적재 직전에 대상과 현재 행 수를 찍는다.** 오타 하나(`--locale`
+        # 누락)가 KR 을 덮는 자리다 — 사람이 스키마 이름과 행 수를 보고
+        # "내가 맞는 DB 를 보고 있나"를 판단할 수 있어야 한다.
+        try:
+            # **그 로케일 벌의 현재 행 수다.** 없으면 "없다" 로 적는다 —
+            # 0 으로 적으면 "만들었는데 비었다" 로 읽힌다(불변규칙 17).
+            def _cnt(key: str) -> str:
+                t = topo.table_name(key, args.locale)
+                if not topo.table_exists(conn, t):
+                    return f"{t} 없음"
+                n = topo._rows(conn, f"SELECT COUNT(*) FROM `{t}`")[0][0]
+                return f"{t} {n:,}"
+            print(f"  ✎ **쓴다** — {db} · 현재 "
+                  + " · ".join(_cnt(k) for k in topo.LOCALE_TABLE_KEYS))
+        except Exception as e:      # noqa: BLE001 — 못 세도 진행은 막지 않는다
+            print(f"  ✎ **쓴다** — {db} (행 수를 세지 못했다: {e})")
     try:
         act = args.action
 
+        if act == "clone":
+            # **KR 을 건드리지 않는다** — 읽어서 다른 스키마로 복제한다.
+            # 되돌리려면 그 스키마를 지우면 되므로 `dump kr` 이 선행
+            # 조건이 아니다(그쪽은 KR 을 덮는 경로의 게이트다).
+            r = topo.clone_schema(conn, src, db, dry_run=dry)
+            print(f"▶ clone{' (읽기만)' if dry else ''} — "
+                  f"{r['source']} → {r['target']} "
+                  f"({r['charset']}/{r['collation']})")
+            print(f"  테이블 {r['tables']} — 데이터까지 {r['with_data']} · "
+                  f"구조만 {r['structure_only']}")
+            print(f"  복사 {r['copy_rows']:,}행 {r['copy_mb']:,.1f} MB · "
+                  f"구조만 {r['skip_mb']:,.1f} MB (일본 트래픽이 새로 만든다)")
+            if dry:
+                for p_ in r["plan"]:
+                    if p_["data"] and p_["mb"] >= 1.0:
+                        print(f"    {p_['table']:30} {p_['rows']:>9,}행 "
+                              f"{p_['mb']:>7,.1f} MB")
+                print(f"  대상 스키마 존재 {'예' if r['target_exists'] else '아니오'}"
+                      f" · 만들 권한 {'있다' if r['can_create_schema'] else '없다'}"
+                      f" · 대상 GRANT {'있다' if r['has_target_grant'] else '없다'}")
+                if not (r["target_exists"] and r["has_target_grant"]):
+                    # **이 계정은 스키마를 만들 수 없다**(전역 권한이
+                    # `PROCESS` 뿐). 미리 말하지 않으면 실행 때
+                    # `1044 Access denied` 로 멈추고 그 메시지는 "계정이
+                    # 틀렸다"처럼 읽혀 엉뚱한 데를 찾게 만든다.
+                    print("  ⚠ 먼저 사람이 root 로 한 번 만들어 주어야 한다 —")
+                    for q in r["prepare_sql"]:
+                        print(f"      {q}")
+                print("  적재하지 않았다 — DDL 이라 승인 뒤다 "
+                      "(--dry-run 을 떼면 CREATE TABLE … LIKE 부터 돈다)")
+            else:
+                print(f"  테이블 생성 {r['created']} · 데이터 복사 {r['copied']} · "
+                      f"이미 있어 건너뜀 {r['already']}")
+            return 0
+
+        if act == "ensure-tables":
+            # **지역 테이블 넷만 만든다.** `CREATE TABLE … LIKE` 라
+            # collation·인덱스·타입이 원본과 1:1 이다 — 손으로 적으면
+            # 불변규칙 14 의 collation 이 어긋나고 조용히 틀린다.
+            r = topo.ensure_locale_tables(conn, args.locale, write=write)
+            print(f"▶ ensure-tables{' (읽기만)' if dry else ''} — "
+                  f"locale {r['locale']}")
+            for t in r["tables"]:
+                mark = ("만들었다" if t["created"]
+                        else "이미 있다" if t["existed"] else "없다 — 만들 대상")
+                rows = "—" if t["rows"] is None else f"{t['rows']:,}행"
+                print(f"  {t['table']:26} {mark:12} {rows:>10}  "
+                      f"(원본 {t['source']} {t['source_rows']:,}행 · "
+                      f"{t['collation']})")
+            print(f"  collation 은 원본에서 그대로 온다 — `CREATE TABLE … LIKE` "
+                  f"가 복제하지 않는 것은 **외래키뿐**이고 실측 "
+                  f"{r['foreign_keys']}건이다")
+            if dry:
+                print("  만들지 않았다 — DDL 이라 승인 뒤다 (--write)")
+            return 0
+
+        if act in ("copy-cells", "copy-enb-org"):
+            # 키·참조만 DB 안에서 복사하고 **좌표·이름은 비운다.**
+            # 44만행을 Python 으로 왕복시키지 않는다.
+            r = topo.copy_locale_rows(
+                conn, "cell" if act == "copy-cells" else "enb_org",
+                args.locale, write=write)
+            print(f"▶ {act}{' (읽기만)' if dry else ''} — "
+                  f"{r['source']} → {r['table']}")
+            print(f"  원본 {r['source_rows']:,}행 · 대상 현재 "
+                  f"{r['rows_before']:,}행 · 복사 컬럼 {r['columns']}개")
+            print(f"  비워 두는 컬럼: {', '.join(r['null_columns'])} — "
+                  f"0 이나 '' 로 채우지 않는다(불변규칙 4·17). 좌표는 "
+                  f"relocate-cells 가 만든다")
+            if r["source_duplicate_keys"]:
+                # **걸러내지 않는다** — 복사는 거울이다. 원본에 있는 중복을
+                # 조용히 접으면 두 환경을 대조할 수 없다(실측: CL_ENB_ORG
+                # 45,955행 / distinct ENB_ID 45,954).
+                print(f"  ⚠ 원본에 키 중복 {r['source_duplicate_keys']}건 "
+                      f"({', '.join(r['key_columns'])}) — 그대로 복사한다")
+            if r["source_only_columns"]:
+                print(f"  ⚠ 원본에만 있는 컬럼 제외: "
+                      f"{', '.join(r['source_only_columns'])} — 벌이 원본과 "
+                      f"다른 DDL 이다(LIKE 로 만들지 않았다는 뜻)")
+            if r["skipped"]:
+                print(f"  {r['skipped']}")
+            else:
+                print(f"  적재 {r['inserted']:,}행 → 현재 {r['rows']:,}행")
+            return 0
+
         if act == "list":
-            info = topo.survey(conn)
+            info = topo.survey(conn, args.locale)
             a = info.pop("_active")
-            print("▶ 마스터 현황")
+            print(f"▶ 마스터 현황 (locale {args.locale})")
             for key, v in info.items():
+                # **"테이블이 없다"를 0 행으로 적지 않는다**(불변규칙 17).
+                if not v.get("exists", True):
+                    print(f"  {key:8} {v['table']:26} "
+                          f"{'테이블 없음':>12}  → topo ensure-tables "
+                          f"--locale {args.locale} --write")
+                    continue
                 miss = v.get("no_coord")
                 tail = "" if miss is None else f"  좌표 없음 {miss:,}"
-                print(f"  {key:8} {v['table']:22} {v['rows']:>9,}{tail}")
+                shared = "  (한 벌 공유)" if v.get("shared") else ""
+                print(f"  {key:8} {v['table']:26} {v['rows']:>9,}{tail}{shared}")
             # **활성 셀을 따로 센다.** 마스터 44만 중 트래픽이 붙는 것만
             # 지도·탐지에 나타나고, 채울 가치가 있는 자리도 그쪽이다.
             print(f"\n▶ 활성 셀 (1분 집계에 나타나는 것) — eNB {a['enbs']:,}")
-            print(f"  셀 {a['cells']:,}  ·  위치 마스터에 행 없음 {a['unmapped']:,}")
+            print(f"  셀 {a['cells']:,}  ·  {a['cell_table']} 에 행 없음 "
+                  + ("산출 불가 (그 벌이 아직 없다)" if a["unmapped"] is None
+                     else f"{a['unmapped']:,}"))
             if a["unmapped"]:
                 # **생성기가 만든다** — `topo fill-coords` 는 세는 커맨드다
                 # (2026-10-26 이동). 그리고 804 를 전부 채우지 않는다:
@@ -1294,6 +1516,16 @@ def cmd_topo(args) -> int:
                       " load_cells(ensure_coords=True))")
                 print("     그중 몇 개가 대상이고 몇 개가 의도된 미매핑인지 —"
                       " `topo fill-coords`")
+
+            # **원장을 함께 찍는다.** JP 전용 장비를 KR 선택에서 빼는
+            # 근거이자 되돌림 수단이고, 추적 밖이라 지워져도 조용하다.
+            led = topo.load_added_enbs(args.locale)
+            if led.get("enbs"):
+                print(f"\n▶ JP 전용 장비 원장 — {len(led['enbs']):,}대 · "
+                      f"대역 시작 {led.get('band_start')}")
+                print(f"  {topo.added_enbs_path(args.locale)}")
+                print("  이 파일이 KR 생성에서 그 장비를 빼는 근거다 — "
+                      "지우면 KR 이 후보로 보고 미매핑이 늘어난다")
 
             # **마스터에 있는 것과 시뮬레이션이 쓰는 것은 다르다.**
             # `_pick_enbs` 가 셀 수 내림차순으로 `enb_limit` 칸만 고르므로,
@@ -1331,7 +1563,7 @@ def cmd_topo(args) -> int:
             # 경로는 `wipe` 를 먼저 하므로, 못 넣을 상태에서 진행하면
             # "지웠는데 못 넣는" 상태가 된다(`topo.restore` 가 그래서 ok 가
             # 아니면 쓰지 않는다).
-            rep = topo.restore(conn, args.locale, dry_run=not args.write)
+            rep = topo.restore(conn, args.locale, dry_run=dry)
             print(f"▶ restore{'' if args.write else ' (점검만)'} — "
                   f"{topo.LOCALE_DIR / args.locale}")
             for info in rep["tables"].values():
@@ -1364,21 +1596,47 @@ def cmd_topo(args) -> int:
             return 0
 
         if act == "add":
-            table, _ = topo.TABLES[args.target]
+            table = topo.table_name(args.target, args.locale)
             row = dict(kv.split("=", 1) for kv in args.set)
+            if not write:
+                print(f"▶ add (읽기만) — {db}.{table} 에 1행을 넣을 것이다\n"
+                      f"  {row}\n  적재는 --write 다")
+                return 0
+            if not _topo_gate(conn, args.locale, db):
+                return 1
             n = topo.insert_rows(conn, table, [row])
-            print(f"▶ {table} +{n}행  {row}")
+            print(f"▶ {db}.{table} +{n}행  {row}")
+            return 0
+
+        if act == "update":
+            # **키 컬럼은 고치지 않는다** — 1분 집계·원시 Parquet·
+            # ground_truth 가 그 키를 참조한다(`topo.update_row` 머리말).
+            table = topo.table_name(args.target, args.locale)
+            cond = dict(kv.split("=", 1) for kv in args.key)
+            row = dict(kv.split("=", 1) for kv in args.set)
+            if not write:
+                print(f"▶ update (읽기만) — {db}.{table}\n"
+                      f"  WHERE {cond}\n  SET {row}\n  적용은 --write 다")
+                return 0
+            if not _topo_gate(conn, args.locale, db):
+                return 1
+            r = topo.update_row(conn, args.target, args.locale, cond, row)
+            print(f"▶ {db}.{r['table']} {r['updated']}행 수정  "
+                  f"{', '.join(r['columns'])}")
+            if r["dropped"]:
+                print(f"  ⚠ DDL 에 없어 제외: {', '.join(r['dropped'])}")
             return 0
 
         if act == "rm":
-            table, keys = topo.TABLES[args.target]
+            table = topo.table_name(args.target, args.locale)
+            keys = topo.TABLES[args.target][1]
             if args.all:
                 # **`cellmap` 은 받지 않는다.** `topo` 는 위치 마스터를 다루고
                 # `CL_CELL_MAP` 574,404행은 **셀 대장**이다. 전량 삭제할 이유가
                 # 없고 `DUMP_TABLES` 에도 없어서 지우면 되돌릴 원본이 아예
                 # 없다. 전에는 게이트(`dump_exists`)가 `CM_*` 네 파일만 보고
                 # 이 삭제를 통과시켰다.
-                if args.target not in topo.WIPEABLE:
+                if not topo.wipeable(args.target, args.locale):
                     print(f"✗ {table} 는 전체 삭제 대상이 아니다.\n"
                           "  `topo` 는 위치 마스터를 다룬다 — 셀 대장을 통째로"
                           " 지울 이유가 없고 복귀 사본도 없다.\n"
@@ -1386,7 +1644,7 @@ def cmd_topo(args) -> int:
                           file=sys.stderr)
                     return 1
                 # 복귀 사본이 **실제로 넣을 수 있는 상태**여야 한다.
-                if not _topo_gate(conn, args.locale):
+                if not _topo_gate(conn, args.locale, db):
                     return 1
                 want = f"{table} 전체 삭제"
                 print(f"  {table} 를 통째로 지운다. 되돌리려면 "
@@ -1401,11 +1659,19 @@ def cmd_topo(args) -> int:
                 return 1
             cond = dict(kv.split("=", 1) for kv in args.key)
             where = " AND ".join(f"`{k}` = %s" for k in cond)
+            if not write:
+                hit = topo._rows(conn, f"SELECT COUNT(*) FROM `{table}` "
+                                       f"WHERE {where}", list(cond.values()))[0][0]
+                print(f"▶ rm (읽기만) — {db}.{table} 에서 {hit}행이 지워진다\n"
+                      f"  {cond}\n  삭제는 --write 다")
+                return 0
+            if not _topo_gate(conn, args.locale, db):
+                return 1
             with conn.cursor() as cur:
                 n = cur.execute(f"DELETE FROM `{table}` WHERE {where}",
                                 list(cond.values()))
             conn.commit()
-            print(f"▶ {table} -{n}행  {cond}")
+            print(f"▶ {db}.{table} -{n}행  {cond}")
             return 0
 
         xw = _topo_xw_path(cfg, args.geo_crosswalk)
@@ -1426,23 +1692,47 @@ def cmd_topo(args) -> int:
             # 않는다 — 트래픽이 참조하는 것은 DB 의 코드이고, 번들(250)과
             # DB(273)가 다르면 스위칭 후 그 차이만큼 조용히 미매핑이 된다.
             gd = Path(args.geo_dir) if args.geo_dir else _topo_geo_dir(cfg)
+            # **KR 벌을 읽는다.** JP 이름이 KR 코드 자리에 들어가는 것이
+            # 이 맵의 정의다 — 대상이 `CM_GU_JP` 라도 입력은 KR 코드다.
             kr_gu = [(int(c), int(g)) for c, g in topo._rows(
-                conn, "SELECT CITY_ID, GU_ID FROM CM_GU ORDER BY GU_ID")]
+                conn, f"SELECT CITY_ID, GU_ID "
+                      f"FROM `{topo.table_name('gu', 'kr')}` ORDER BY GU_ID")]
             doc = topo.build_jp_code_map(gd, kr_gu)
-            print(f"▶ code-map — locale {args.locale} · KR 시군구 {len(kr_gu)}개 기준")
+            c = doc["counts"]
+            print(f"▶ code-map — locale {args.locale} · KR 시군구 "
+                  f"{len(kr_gu)}개 기준")
+            print(f"  KR 대응 {c['kr_gu']} + **추가 구역 {c['extra']}** = "
+                  f"{c['total']}  (1:1 상한을 풀었다 — 사용자 지시 2026-10-26)")
             for city, rows in sorted(doc["picked"].items()):
+                new = sum(1 for r in rows if r["new"])
                 print(f"  {city:>3} ({topo.SIDO_MAP_JP[str(city)]:6}) "
-                      f"{len(rows):>3}개  예: {rows[0]['name']}"
-                      f"({rows[0]['jis']}) → GU_ID {rows[0]['gu_id']}")
+                      f"{len(rows) - new:>3} + {new:>3}개  예: "
+                      f"{rows[0]['name']}({rows[0]['jis']}) → "
+                      f"GU_ID {rows[0]['gu_id']}")
+            if doc["dense_gu_ids"]:
+                # 10 단위 자리가 모자라 1 단위로 발급한 시도 — 번호만 보고
+                # "체계가 깨졌다"고 읽지 않게 말한다
+                print(f"  GU_ID 간격을 1 로 좁힌 시도 "
+                      f"{len(doc['dense_gu_ids'])}곳: "
+                      f"{', '.join(str(k) for k in doc['dense_gu_ids'])}")
+            if doc["no_room"]:
+                print(f"  ⚠ 시도 접두 자리가 없어 못 담은 구역 — "
+                      + " · ".join(f"{k}({v['pref']}) {v['left']}개"
+                                   for k, v in doc["no_room"].items()))
             print(f"  쓰지 않는 도도부현 {len(doc['unused_prefectures'])}곳 — "
                   "**묶지 않는다**(회색 배경으로 그릴 자리다)")
-            if args.dry_run:
-                print("  저장하지 않았다 — --dry-run 을 떼면 쓴다")
+            if dry:
+                print("  저장하지 않았다 — 저장은 --write 다")
             else:
                 print(f"  → {topo.save_code_map(doc, args.locale)}")
             return 0
 
         if act == "seed-geo":
+            # **`--replace` 는 세 테이블을 비운다.** 복귀 사본을 요구하지
+            # 않고 있었고, `--locale` 을 빠뜨리면 KR 세 테이블이 사본 없이
+            # 날아간다 — `relocate-cells` 와 같은 게이트를 붙인다.
+            if write and args.replace and not _topo_gate(conn, args.locale, db):
+                return 1
             # **경계 GeoJSON 이 입력이다.** graphio 가 받아 둔 디렉터리를
             # 그대로 읽는다(`graphio/config` 의 `paths.geo`) — 두 저장소가
             # 같은 파일을 보게 하려고 경로를 인자로 받는다.
@@ -1452,11 +1742,13 @@ def cmd_topo(args) -> int:
                               spread_km=args.spread_km,
                               seed=int(cfg["generate"].get("seed", 20260903)),
                               replace=args.replace,
-                              dry_run=args.dry_run)
-            print(f"▶ seed-geo{' (dry-run)' if args.dry_run else ''} — "
+                              dry_run=dry)
+            print(f"▶ seed-geo{' (읽기만)' if dry else ''} — "
                   f"locale {r['locale']} · {gd}")
-            print(f"  CM_CITY {r['city']:,} · CM_GU {r['gu']:,} · "
-                  f"CM_DONG {r['dong']:,}  (읍면동 출처: {r['emd_source']})")
+            print("  " + " · ".join(
+                f"{t} {r[k]:,}" for k, t in zip(("city", "gu", "dong"),
+                                                r["tables"]))
+                  + f"  (읍면동 출처: {r['emd_source']})")
             if r["skipped_sido"] or r["skipped_sgg"]:
                 # **코드 맵에 없는 폴리곤은 넣지 않는다.** 코드를 지어내면
                 # 그 지역 셀이 영원히 조인되지 않는다 — 수를 말한다.
@@ -1465,11 +1757,81 @@ def cmd_topo(args) -> int:
             if r["emd_source"] == topo.EMD_GENERATED:
                 print("  읍면동은 폴리곤 없이 생성했다 — crosswalk 의 emd 는"
                       " **항등**이다 (비우면 셀의 DONG_ID 가 조용히 NULL 이 된다)")
-            if args.dry_run:
+                # **구마다 동 수가 다르다.** 균일값으로 덮으면 셀의 DONG_ID
+                # 와 어긋나고, 그 어긋남은 "동 드릴다운이 빈다"로만 보인다
+                print(f"    동 수는 KR 구별 범위를 그대로 따랐다 — "
+                      f"KR 대응 {r['dong_from_kr_gus']}구 · "
+                      f"추가 {r['dong_new_gus']}구는 --dongs {args.dongs}")
+            j = r["dong_join"]
+            if j is None:
+                # 셀 벌이 없으면 셀 수를 모른다 — 0 으로 적지 않는다
+                print("  셀↔동 조인: 산출 불가 (셀 벌이 아직 없다)")
+            elif j.get("error"):
+                # **진단만 실패했다** — 생성 결과는 위에 있다. 조용히
+                # 넘기지 않고 사유를 적는다
+                print(f"  ⚠ 셀↔동 조인 진단 실패 — {j['error']}")
+                print("    생성 결과(위 행 수)는 유효하다. 적재 전에 "
+                      "그 수를 확인할 수 없다는 뜻이다")
+            else:
+                # **기준은 KR 자체 미매핑이다 — 숫자를 박지 않는다.** 셀의
+                # `DONG_ID` 가 KR 체계이므로 JP 가 KR 보다 좋아질 수는 없고,
+                # 나빠지면 동 드릴다운이 그만큼 빈다. 상수 71 로 적어 두면
+                # KR 데이터가 바뀔 때 기준만 낡는다.
+                base = topo.dong_join_check(conn, "kr")
+                lim = base["unmatched"] if base else None
+                mark = ("?" if lim is None
+                        else "✓" if j["unmatched"] <= lim else "✗")
+                print(f"  {mark} 셀↔동 조인 ({j['method']}) — 셀 "
+                      f"{j['cells']:,} 중 동 벌에 없는 것 "
+                      f"{j['unmatched']:,}행 / 키 {j['unmatched_keys']}")
+                print(f"    KR 자체 미매핑 {lim:,}행 이하여야 한다 — 셀의 "
+                      f"DONG_ID 가 KR 체계라 JP 가 그보다 좋아질 수는 없다. "
+                      f"0 으로 만들려고 없는 동을 지어내지 않는다")
+                if mark == "✗":
+                    print(f"    → 이 구성으로 적재하면 KR 보다 "
+                          f"{j['unmatched'] - lim:,}행이 더 빈다")
+            if dry:
                 print("  적재하지 않았다. 넣으려면 --dry-run 을 떼고, 행이"
                       " 이미 있으면 --replace 를 함께 준다")
             else:
                 print(f"  crosswalk 를 다시 썼다 — {r['crosswalk']}")
+            return 0
+
+        if act == "org-names":
+            # **지리가 아니라 조직이다** — 별 커맨드로 뒀다. `CM_REGION` 의
+            # `영동2` 가 15개 시도에 걸치고 그 테이블에 `CITY_ID` 가 없다.
+            if write and not _topo_gate(conn, args.locale, db):
+                return 1
+            r = topo.org_names(conn, locale=args.locale, dry_run=dry,
+                               allow_shared=bool(args.allow_shared))
+            print(f"▶ org-names{' (읽기만)' if dry else ''} — "
+                  f"locale {r['locale']}")
+            if r.get("skipped"):
+                print(f"  {r['skipped']}")
+                return 0
+            print(f"  CM_BRANCH {r['branch']} (상수 표 · 사람이 정한다) · "
+                  f"CM_LAREA {r['larea']} (SIDO_MAP_JP 에서 유도) · "
+                  f"CM_REGION {r['region']} (<부모 이름><연번>)")
+            for k, label in (("branch", "지사"), ("larea", "권역"),
+                             ("region", "지역")):
+                if r["sample"][k]:
+                    ex = " · ".join(f"{i} → {n}" for n, i in r["sample"][k])
+                    print(f"    {label:4} {ex}")
+            if r["region_no_parent"]:
+                # 부모가 `CM_BRANCH` 에 없다(실측 `BRANCH_ID=1200` 아래 2줄).
+                # 이름을 지어내면 "있는 지사"처럼 보인다
+                print(f"  ⚠ 부모 지사를 못 찾아 제외 {r['region_no_parent']}줄 — "
+                      f"이름을 지어내지 않는다")
+            if r["larea_no_sido"]:
+                print(f"  ⚠ 대응 시도가 없어 제외: {', '.join(r['larea_no_sido'])}"
+                      f" — LAREA_EXTRA_JP 에 넣는다")
+            print(f"  ⚠ CM_BRANCH · CM_LAREA · CM_REGION 은 **한 벌 공유**다 — "
+                  f"이 이름은 KR 화면에도 그대로 나온다")
+            print(f"  건드리지 않는 자리: {' · '.join(r['untouched'])}")
+            print("    앞 셋은 graphio 가 **이름을 조인하지 않는다**(EMS 는"
+                  " ID 숫자만 쓴다) — 반출본과 대조할 수 있게 원본을 둔다")
+            print("    CB_VENDOR 는 읽히지만 **제조사 축은 지리 전환과 다른"
+                  " 축**이다 (일본에서도 삼성 장비를 쓴다)")
             return 0
 
         if act == "relocate-cells":
@@ -1477,19 +1839,36 @@ def cmd_topo(args) -> int:
             # 코드 맵이 KR 코드를 그대로 쓰므로 `(ENB_ID, SECTOR)`·`GU_ID`
             # 는 유효하고, 그 44만행에 들어 있는 **한국 좌표**만 바꾼다.
             # 안 바꾸면 시군구는 오사카인데 셀은 대전 앞산에 찍힌다.
-            if not args.dry_run and not _topo_gate(conn, args.locale):
+            if write and not _topo_gate(conn, args.locale, db):
                 return 1
             r = topo.relocate_cells(conn, locale=args.locale,
                                     spread_km=args.spread_km,
                                     seed=int(cfg["generate"].get("seed", 20260903)),
                                     only_active=not args.all,
-                                    dry_run=args.dry_run)
-            print(f"▶ relocate-cells{' (dry-run)' if args.dry_run else ''} — "
-                  f"locale {r['locale']} · "
+                                    dry_run=dry)
+            print(f"▶ relocate-cells{' (읽기만)' if dry else ''} — "
+                  f"locale {r['locale']} · {r['table']} · "
                   f"{'전체' if args.all else '활성'} 셀 {r['cells']:,} / "
                   f"eNB {r['enbs']:,}")
             print(f"  좌표 갱신 {r['updated']:,} · 분포 패턴 {r['patterns']}"
                   f"  (POINT 가 아니면 spread-km 를 의심한다)")
+            # **이름도 바꿨다는 것을 말한다.** 좌표만 바뀔 것으로 읽히면
+            # `RU_NAME`·`BTS_NAME` 이 한국으로 남은 줄 모르고, 그 상태는
+            # "지도는 오사카인데 기지국은 ○○빌딩"이다(에러 아님).
+            print(f"  이름 갱신 — 셀 RU_NAME {r['renamed_cells']:,} · "
+                  f"eNB BTS_NAME {r['renamed_enbs']:,}  "
+                  f"(<시군구명>_<연번>[-섹터] · CM_GU 이름을 쓴다)")
+            if r["cells_out_of_scope"]:
+                # 활성 셀만 고쳤으면 나머지 `RU_NAME` 은 그대로다 —
+                # DB 째 이식이면 `--all` 이 맞다
+                print(f"  ⚠ 범위 밖 {r['cells_out_of_scope']:,}셀의 좌표·이름은"
+                      f" 그대로다 — DB 째 이식이면 --all 로 전수를 돌린다")
+            if r["org_untouched_reason"]:
+                # **eNB 이름이 한국어로 남는다.** 조용히 빼면 화면에 두
+                # 나라가 섞인 줄 모른다 — 그 테이블은 한 벌 공유다.
+                print(f"  ⚠ {r['org_untouched_reason']}")
+            print("  CL_ENB_ORG_MAP(2,904행)은 건드리지 않았다 — CL_ENB_ORG"
+                  " 전수의 6.4% 뿐이고 이름·권역은 그쪽을 본다")
             if r["skipped_no_gu"]:
                 # 시군구를 모르는 셀은 **건드리지 않는다** — 아무 데나 놓으면
                 # 미매핑이 "매핑된 거짓 좌표"가 되어 H-07 이 놓친다
@@ -1501,8 +1880,8 @@ def cmd_topo(args) -> int:
             r = topo.seed_enb(conn, xw, per_gu=args.per_gu,
                               cells_per_enb=args.cells, spread_km=args.spread_km,
                               seed=int(cfg["generate"].get("seed", 20260903)),
-                              dry_run=args.dry_run)
-            print(f"▶ seed-enb{' (dry-run)' if args.dry_run else ''} — "
+                              dry_run=dry)
+            print(f"▶ seed-enb{' (읽기만)' if dry else ''} — "
                   f"시군구 {r['gus']} · eNB {r['enbs']} · 셀 {r['cells']}")
             print(f"  분포 패턴: {r['patterns']}  (POINT 가 아니면 spread-km 를 의심한다)")
             if r["gus_without_drawable_dong"]:
@@ -1535,6 +1914,70 @@ def cmd_topo(args) -> int:
                           f"커버리지는 받고 기존 eNB 의 1분 창 표본은 지킨다")
             return 0
 
+        if act == "seed-enb-jp":
+            # **추가 구역에 장비를 놓는다** — KR 선택에서 빠지는 장비다.
+            # 대역 시작 번호는 **인자**다: 코드에 박지 않고, 받은 번호로
+            # 만든 ID 가 세 테이블에서 실제로 비어 있는지 확인한 뒤 쓴다.
+            if args.band_start is None:
+                print("✗ --band-start 가 필요하다 — 빈 ENB_ID 대역을 "
+                      "실측해서 준다.\n"
+                      "  코드에 기본값을 두지 않는다: 어느 번호가 비어 "
+                      "있는지는 그 DB 의 사실이고, 가정을 코드에 남기면 "
+                      "다른 DB 에서 조용히 겹친다", file=sys.stderr)
+                return 1
+            r = topo.seed_enb_jp(conn, args.locale, args.band_start,
+                                 per_gu=args.per_gu, cells_per_enb=args.cells,
+                                 spread_km=args.spread_km,
+                                 seed=int(cfg["generate"].get("seed", 20260903)),
+                                 write=write)
+            print(f"▶ seed-enb-jp{' (읽기만)' if dry else ''} — "
+                  f"locale {r['locale']} · 추가 구역 {r['gus']} · "
+                  f"eNB {r['enbs']} · 셀 {r['cells']}")
+            print(f"  KR 에 없는 구역 {r['gus_jp_only']} = 대상 {r['gus']} + "
+                  f"좌표 없어 제외 {r['gus_no_coord']}")
+            if r["gus_no_coord"]:
+                # **조용히 빠지지 않게 한다.** 좌표 없는 구역은 기준점이
+                # 없어 장비를 놓을 수 없는데, 그 사실을 안 적으면 그 구역이
+                # 왜 빈지 알 수 없다
+                print(f"    예: {r['gus_no_coord_sample']} — seed-geo 가 그 "
+                      f"구역의 중심좌표를 만들었는지 본다")
+            print(f"  대역 시작 {r['band_start']} · 분포 패턴 {r['patterns']}"
+                  f"  (POINT 가 아니면 spread-km 를 의심한다)")
+            print(f"  쓰는 곳 — {r['tables']['cellmap']} (**KR 과 공유 · "
+                  f"사본 없음**) · {r['tables']['cell']} · {r['tables']['org']}")
+            if r["skipped_no_dong"]:
+                print(f"  ⚠ 동이 없어 건너뛴 구역 "
+                      f"{len(r['skipped_no_dong'])}곳 — DONG_ID 가 NOT NULL "
+                      f"이고 0 으로 채우면 조용히 버려진다")
+            if r["no_org_default"]:
+                print(f"  ⚠ 시도 대표 조직을 못 찾은 구역 "
+                      f"{len(set(r['no_org_default']))}곳 — 그 eNB 는 조직 "
+                      f"축에서 빠진다(지어내지 않는다)")
+            if r.get("already"):
+                # **에러가 아니라 완료 상태다.** 전에는 겹침을 한 에러로
+                # 뭉쳐서, 정상 완료 뒤 세어 보기가 붉은 실패로 보였다
+                print(f"  ✓ {r['note']}")
+            elif r["written"]:
+                print(f"  ✎ 원장 {r['ledger']} — 누적 {r['ledger_total']}대")
+                print(f"     이 파일이 **KR 선택에서 빼는 근거이자 되돌림 "
+                      f"수단**이다 (topo rm-added --locale {args.locale})")
+            else:
+                print("  적재하지 않았다 — 넣으려면 --write")
+            return 0
+
+        if act == "rm-added":
+            # `CL_CELL_MAP` 의 되돌림. 사본이 없으므로 **원장에 적힌 것만**
+            # 지운다 — 대역으로 추측하면 그 번호의 다른 장비가 함께 사라진다.
+            r = topo.remove_added_enbs(conn, args.locale, write=write)
+            print(f"▶ rm-added{' (읽기만)' if dry else ''} — "
+                  f"locale {r['locale']} · 원장 {r['enbs']}대")
+            for t, n in r["tables"].items():
+                print(f"  {t:26} "
+                      + ("벌이 없다" if n is None else f"{n:,}행"))
+            print("  삭제했다 · 원장을 비웠다" if r["written"]
+                  else "  지우지 않았다 — 삭제는 --write 다")
+            return 0
+
         if act == "fill-coords":
             # **점검 전용이다** (2026-10-26). 적재는 생성기가 한다 —
             # `cmd_run`·`cmd_pemfill` 이 `load_cells(ensure_coords=True)` 로
@@ -1559,6 +2002,12 @@ def cmd_topo(args) -> int:
             return 0
 
         print(f"✗ 모르는 action: {act}", file=sys.stderr)
+        return 1
+    except RuntimeError as e:
+        # **트레이스백을 내지 않는다.** 이 명령들의 `RuntimeError` 는
+        # "사람이 조건을 안 맞췄다"(원본=대상 · 사본 없음 · 순서 거꾸로)이고,
+        # 트레이스백은 "깨졌다"로 읽혀 엉뚱한 데를 찾게 만든다.
+        print(f"✗ {e}", file=sys.stderr)
         return 1
     finally:
         conn.close()
@@ -1658,39 +2107,64 @@ def main(argv=None) -> int:
     # 읽기만 하고, 쓰기를 그쪽에 넣으면 gen 이 둘 떴을 때 마스터가 흔들린다.
     t = sub.add_parser("topo", help="마스터 토폴로지 관리 — 행정구역·장비·셀 (1회성)")
     t.add_argument("action",
-                   choices=["list", "add", "rm", "dump", "restore", "geo-fetch",
-                            "code-map", "seed-geo", "seed-enb",
-                            "relocate-cells", "fill-coords"])
+                   choices=["list", "add", "update", "rm", "dump", "restore",
+                            "ensure-tables", "copy-cells", "copy-enb-org",
+                            "clone", "geo-fetch", "code-map", "seed-geo",
+                            "seed-enb", "seed-enb-jp", "rm-added",
+                            "relocate-cells", "org-names", "fill-coords"])
     t.add_argument("target", nargs="?", choices=list(topo.TABLES),
-                   help="add/rm 의 대상 테이블")
+                   help="add/update/rm 의 대상 테이블 (실제 이름은 --locale 이 "
+                        "정한다 — gu + jp = CM_GU_JP)")
     t.add_argument("--config")
-    t.add_argument("--database", help="대상 DB (기본 설정 pemdb1.database)")
+    t.add_argument("--database",
+                   help="대상 스키마 — 기본은 pemdb1.database. **locale 은 "
+                        "스키마를 가르지 않는다**(로케일 축은 테이블 이름이다). "
+                        "clone 만 pemdb1.locale_database.<locale> 을 본다")
     t.add_argument("--locale", default="kr",
-                   help="dump/restore/rm --all 이 쓰는 사본 이름")
-    t.add_argument("--write", action="store_true",
-                   help="restore: 실제로 넣는다 (기본은 점검만)")
+                   help="**대상 벌**. 지역 테이블 넷이 이 축을 갖는다 — "
+                        "kr 은 원본(CM_GU), 그 외는 접미사(CM_GU_JP). "
+                        "dump/restore 의 사본 디렉터리 이름도 이것이다")
     t.add_argument("--geo-dir", help="seed-geo: 경계 GeoJSON 디렉터리 "
                                      "(기본 pemdb1.geo_crosswalk 의 디렉터리)")
     t.add_argument("--dongs", type=int, default=8,
-                   help="seed-geo: 읍면동 폴리곤이 없을 때 시군구당 생성할 동 수")
+                   help="seed-geo: **KR 에 없는 추가 구역**의 동 수. KR 에 "
+                        "같은 GU_ID 가 있으면 그 구의 DONG_ID 를 그대로 "
+                        "재사용한다(셀의 DONG_ID 가 KR 체계로 박혀 있다)")
     t.add_argument("--replace", action="store_true",
                    help="seed-geo: 행이 있어도 세 테이블을 비우고 다시 넣는다")
     t.add_argument("--set", action="append", default=[], metavar="COL=VAL",
-                   help="add: 넣을 컬럼 (여러 번)")
+                   help="add: 넣을 컬럼 · update: 고칠 컬럼 (여러 번)")
     t.add_argument("--key", action="append", default=[], metavar="COL=VAL",
-                   help="rm: 지울 행의 키 (여러 번 · AND)")
+                   help="rm/update: 대상 행의 키 (여러 번 · AND). "
+                        "update 는 키 컬럼 전부를 요구한다")
+    t.add_argument("--allow-shared", action="store_true",
+                   help="org-names: CM_BRANCH·CM_LAREA·CM_REGION 은 **한 벌 "
+                        "공유**다 — 그 이름을 바꾸면 KR 화면도 함께 바뀐다. "
+                        "그것이 결정일 때만 켠다")
     t.add_argument("--all", action="store_true",
                    help="rm: 테이블 전체 (확인 입력 + 사본 요구) · "
                         "relocate-cells: 활성 셀이 아니라 44만행 전부")
     t.add_argument("--per-gu", type=int, default=1,
                    help="seed-enb: 시군구당 eNB 수 (최대 2 — ENB_ID 대역 제약)")
-    t.add_argument("--cells", type=int, default=3, help="seed-enb: eNB 당 셀 수")
+    t.add_argument("--cells", type=int, default=3,
+                   help="seed-enb · seed-enb-jp: eNB 당 셀 수")
+    # **기본값이 없다.** 어느 ENB_ID 대역이 비어 있는지는 그 DB 의 사실이고,
+    # 코드에 숫자를 두면 "비어 있다"는 가정이 남는다 — 다른 DB 에서 조용히
+    # 겹치고, 같은 ENB_ID 가 두 장비를 가리키면 1분 집계가 둘의 호를 합친다.
+    t.add_argument("--band-start", type=int,
+                   help="seed-enb-jp: JP 전용 ENB_ID 대역의 시작 번호 "
+                        "(**필수 · 기본값 없음** — 빈 대역을 실측해서 준다)")
     # 기본 0.35 는 graphio `detector.py:1512` 의 POINT 임계 0.9km 에서 나왔다.
     # 올리면 같은 eNB 가 CLUSTER·SCATTER 로 보이고 `geo_hit` 채점이 흔들린다.
     t.add_argument("--spread-km", type=float, default=0.35,
                    help="eNB 내부 좌표 분산 반경 (기본 0.35 — POINT 임계 0.9 의 안쪽)")
     t.add_argument("--geo-crosswalk", help="행정코드 crosswalk (기본 설정 pemdb1.geo_crosswalk)")
-    t.add_argument("--dry-run", action="store_true", help="적재하지 않고 결과만 센다")
+    t.add_argument("--write", action="store_true",
+                   help="**실제로 적재한다.** 없으면 읽기만 한다 — "
+                        "쓰는 명령(clone·seed-geo·seed-enb·relocate-cells·"
+                        "org-names·code-map·add·rm·restore) 전부에 걸린다")
+    t.add_argument("--dry-run", action="store_true",
+                   help="(이제 기본이다 — 받아 주기만 한다. 적재는 --write)")
     t.set_defaults(fn=cmd_topo)
     args = ap.parse_args(argv)
     return args.fn(args)

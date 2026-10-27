@@ -46,7 +46,7 @@ from pathlib import Path
 from . import topo
 # 별칭으로도 받는다 — `_weight` 는 셀마다 불리고(실측 37만 회),
 # 테스트가 `P._in_topo_band` 를 monkeypatch 해 대역 판정만 끈다.
-from .topo import TOPO_WEIGHT, in_new_band as _in_topo_band
+from .topo import TOPO_WEIGHT, in_new_band as _in_topo_band, table_name
 
 import polars as pl
 
@@ -1090,6 +1090,10 @@ def _pick_enbs(uniq: dict, enb_limit: int | None) -> set[str] | None:
 
     `topo` 대역(`topo.NEW_BAND`)은 **한도와 무관하게 전부 포함한다** — 아래
     include 절의 주석에 근거가 있다.
+
+    **다른 로케일 전용 eNB 는 여기까지 오지 않는다** — `load_cells` 가
+    `uniq` 를 만들 때 이미 뺀다(그쪽 주석). 한도가 0 이면 이 함수가
+    `None` 을 돌려주므로 여기서 거르면 전량 모드를 놓친다.
     """
     if not enb_limit or enb_limit <= 0:
         return None
@@ -1127,7 +1131,8 @@ def _pick_enbs(uniq: dict, enb_limit: int | None) -> set[str] | None:
 def load_cells(conn, enb_limit: int | None = None,
                drawable: set[str] | None = None,
                ensure_coords: bool = False,
-               plmn: Plmn | None = None) -> list[Cell]:
+               plmn: Plmn | None = None,
+               locale: str = "kr") -> list[Cell]:
     """`CL_CELL_MAP` + `CM_CELL_REP_RU_LOC` → `Cell` 목록.
 
     조인 키는 실측으로 확인된 것을 쓴다. `CM_CELL_REP_RU_LOC.ENB_ID` 는
@@ -1157,13 +1162,26 @@ def load_cells(conn, enb_limit: int | None = None,
     `drawable` 은 `load_drawable_dongs()` 가 준 **폴리곤 있는 동 코드** 집합이다.
     주면 그 동의 셀(+좌표 없는 셀)만 후보가 되어 읍면동 지도가 전부 칠해진다.
     `None` 이면 종전대로 전량이 후보다.
+
+    ## 생성기는 **KR 벌을 읽는다** (2026-10-26 로케일 축 도입 뒤)
+
+    `locale` 기본이 `"kr"` 이고 그것이 의도다. 사용자 방침은 *"원본 데이터도
+    그냥 쓴다"* 이고, 트래픽 키(`(ENB_ID, CELLNUM)`)는 **나라와 무관**하므로
+    창고를 다시 굽지 않는다. 나라가 갈리는 것은 graphio 가 그 키에 붙이는
+    **지역·좌표 쪽**이다(`store/tables.py` 의 테이블 상수).
+
+    이름을 `topo.table_name` 으로 받는 이유는 **접미사가 한 곳에서만
+    결정되게** 하려는 것이다 — 여기 문자열로 적어 두면 로케일 축이 두 벌이
+    되고, 한쪽만 고쳐질 때 생성기와 화면이 다른 벌을 본다(에러 없음).
     """
+    cellmap_tbl = table_name("cellmap", "kr")   # 로케일 축이 없다 — 한 벌
+    cell_tbl = table_name("cell", locale)
     with conn.cursor() as cur:
         cur.execute(
             "SELECT c.ENB_ID, c.CELLNUM, c.C_UID, c.MME_GRP_ID, c.EMS_ID, "
             "       r.CITY_ID, r.GU_ID, r.DONG_ID, r.LATITUDE, r.LONGITUDE "
-            f"FROM CL_CELL_MAP AS c "
-            "LEFT JOIN CM_CELL_REP_RU_LOC AS r "
+            f"FROM `{cellmap_tbl}` AS c "
+            f"LEFT JOIN `{cell_tbl}` AS r "
             "       ON r.ENB_ID = c.ENB_ID AND r.SECTOR = c.CELLNUM "
             "WHERE c.ENB_ID IS NOT NULL AND c.CELLNUM IS NOT NULL"
         )
@@ -1186,6 +1204,29 @@ def load_cells(conn, enb_limit: int | None = None,
         if r[0] is None or r[1] is None:
             continue
         uniq.setdefault((str(r[0]), int(r[1])), r)
+
+    # **다른 로케일 전용 장비를 이 로케일의 후보에서 뺀다** (2026-10-26).
+    #
+    # `CL_CELL_MAP` 은 로케일 축이 없는 **공유 테이블**이다. 그래서 JP 추가
+    # 구역에 놓은 장비가 거기 들어 있고, 그냥 두면 KR 생성이 그것을 후보로
+    # 본다 — KR 셀 벌에 좌표 행이 없으니 **미매핑 셀**이 되어 `H-07` ·
+    # UNMAPPED 패널에 상시로 뜬다(불변규칙 12 가 숨기지 못하게 막아 둔 자리).
+    #
+    # **대역 숫자가 아니라 실제로 넣은 ID 목록으로 뺀다**(`topo.ADDED_FILE`
+    # 원장). 숫자를 코드에 박으면 "그 대역이 비어 있다"는 가정이 남는데,
+    # 원장은 넣을 때 세 테이블을 실측해 확인한 결과다. 같은 파일이
+    # **되돌림 수단**이기도 하다 — `topo.seed_enb_jp` 머리말.
+    #
+    # **`enb_limit` 보다 앞에서 걸러야 한다.** 한도가 0(전량)이면
+    # `_pick_enbs` 가 `None` 을 돌려주고 선택 단계가 없다 — 거기에만 두면
+    # 전량 모드에서 조용히 섞인다.
+    skip = topo.locale_only_enbs() if locale == "kr" else set()
+    if skip:
+        before = len(uniq)
+        uniq = {k: v for k, v in uniq.items() if k[0] not in skip}
+        if before != len(uniq):
+            print(f"  · 다른 로케일 전용 eNB 제외 — 셀 {before - len(uniq):,} "
+                  f"(원장 {len(skip)}대 · topo.ADDED_FILE)")
 
     # 폴리곤 있는 동으로 좁힌 **뒤에** eNB 를 고른다. 순서를 바꾸면 고른 eNB 의
     # 셀이 대부분 탈락해 생성 규모가 무너진다.
@@ -1211,7 +1252,7 @@ def load_cells(conn, enb_limit: int | None = None,
     if ensure_coords:
         gaps = topo.coord_gaps(uniq, keep)
         if gaps:
-            made = topo.ensure_sector_coords(conn, gaps)["rows"]
+            made = topo.ensure_sector_coords(conn, gaps, locale=locale)["rows"]
             # **이 틱의 셀 목록에 바로 반영한다.** 갱신하지 않으면 지금
             # 만든 좌표가 다음 틱부터만 쓰이고, 그 한 분의 집계는 미매핑으로
             # 남는다 — 에러가 아니라 지도에 한 칸이 비는 모양이다.
@@ -2325,10 +2366,14 @@ class PemdbWriter:
 #: **여전히 MySQL 질의다.** 마스터는 원시가 아니라 다른 주체가 관리하는
 #: 테이블이고 파일로 나가지 않았다. 결과(약 3.2만 행)를 polars 로 받아
 #: 조인한다 — LEFT JOIN 의 의미를 그대로 보존한다.
+#: 테이블 이름은 `topo.table_name` 에서 받는다 — `CL_CELL_MAP` 은 로케일
+#: 축이 없는 한 벌이고, 그 사실을 여기서 문자열로 다시 적으면 축이 두 벌이
+#: 된다(한쪽만 고쳐질 때 조용히 갈라진다).
 _ENB_MASTER_SQL = (
     "SELECT ENB_ID, MIN(C_UID) AS C_UID, MIN(MME_GRP_ID) AS MME_GRP_ID, "
     "       MIN(EMS_ID) AS EMS_ID "
-    "  FROM CL_CELL_MAP WHERE ENB_ID IS NOT NULL GROUP BY ENB_ID"
+    f"  FROM `{table_name('cellmap', 'kr')}` "
+    "WHERE ENB_ID IS NOT NULL GROUP BY ENB_ID"
 )
 
 #: MySQL 에 한 번에 보낼 행 수. 너무 크면 `max_allowed_packet` 에 걸린다.
