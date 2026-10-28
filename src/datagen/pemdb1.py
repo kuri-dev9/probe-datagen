@@ -35,7 +35,7 @@ import hashlib
 import json
 import random
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -52,6 +52,7 @@ import polars as pl
 
 from . import raw_parquet
 from .cells import Cell
+from . import handover as HO
 from .faults import resolve_active as resolve_active_faults
 from .fields import SERIES_FIELDS
 from .generator import Generator, USER_FIELDS
@@ -90,6 +91,47 @@ IF_PROTO_NAME = {
 #: 상용 추출 조건 (상용 `XDR_LTE_CALL_KPI` 테이블 코멘트: ONGOING_FLAG='2').
 #: 2 = 호 종료 레코드 — 플래그가 실려 있는 유일한 레코드다.
 ONGOING_END = "2"
+
+#: TAU(Tracking Area Update) 의 `CALL_TYPE` — `CD_CALL_TYPE` 코드 5.
+#: `_CT_GROUP` 에서 `"tau"` 그룹이고, SA 에서는 Mobility/Periodic
+#: Registration Update 다(개발스펙 §3.4).
+TAU_CALL_TYPE = "5"
+
+#: TA 몇 개를 한 장비가 맡나 — **장비를 TAC 에서 유도할 때의 묶음 크기.**
+#:
+#: 실제 망은 MME pool 이 TA 목록을 맡는다. `1` 로 두면 TA 경계마다 MME 가
+#: 바뀌어 전환이 거의 다 `S1_MME` 가 되고, 크게 두면 MME 가 한두 대로 쏠려
+#: 노드 축 시나리오(SC-10 MME 과부하)가 무대를 못 찾는다.
+#:
+#: 묶음 크기는 `handover.build_ta_lists` 의 상위 묶음(4×4)과 **맞춰야 한다** —
+#: 그 함수가 `id // 16` 이 상위 묶음이 되도록 번호를 매긴다.
+#:
+#: ## 묶음이 **중첩돼야** 한다 — 서로 배수여야 한다
+#:
+#: `S1`(SGW 만 재배치)이 흔하고 `S1_MME`(MME 까지)가 드문 것이 실제다.
+#: 그러려면 **SGW 경계가 MME 영역 안에 들어가야** 한다 — 즉 SGW 묶음이
+#: MME 묶음의 약수여야 한다.
+#:
+#: 처음에 `MME=4 · SGW=3` 으로 두었더니 경계가 서로 엇갈려 뒤집혔다 —
+#: 실측 `S1` 6.6% · `S1_MME` 13.8%(기대는 26.7% · 6.7%). TA 경계를 넘을
+#: 때마다 MME 가 바뀐 셈이다.
+#:
+#: `1 | 4 | 12` 로 두면 한 MME 영역(4 목록) 안에 SGW 영역이 4개다 →
+#: 목록 경계에서 SGW 가 늘 바뀌고 MME 는 1/4 → `S1` : `S1_MME` ≈ 3:1
+#: (비중표는 4:1).
+#:
+#: ## **TAC 이 아니라 TAI List 가 기준이다**(2026-10-27)
+#:
+#: 전에는 `tac // N` 이었다. 실제 TAC 번호가 **지리를 느슨하게만** 반영해서
+#: (실측: 번호가 4 이내인 TAC 쌍의 거리 중앙 5.8km · 임의 쌍 12.6km) 그
+#: 산술이 지리와 안 맞았다. TAI List 는 좌표로 묶고 Z-order 로 번호를
+#: 매기므로 번호가 가까우면 지리적으로도 가깝다.
+_TA_PER_SGW = 1
+#: **`build_ta_lists` 의 상위 묶음 크기(4×4 = 16)와 같아야 한다.**
+#: 그 함수가 `id // 16` 이 상위 묶음이 되도록 번호를 매긴다 — 다른 값을 주면
+#: 묶음이 번호와 어긋나 MME 가 목록마다 바뀐다.
+_TA_PER_MME = 16
+_TA_PER_PGW = 48
 
 #: "없음" 센티널. 상용 Cause 컬럼은 NULL 이 아니라 **문자열 `'0'`** 으로
 #: "없음"을 적는다(`FIRST_ERROR_CAUSE` 의 99.6%). 집계가 이것을 거르지 않으면
@@ -609,6 +651,14 @@ class Baseline:
     pathswitch_attempt: dict = field(
         default_factory=lambda: {"service": 0.08, "handover": 1.00})
     pathswitch_fail: float = 0.02
+    #: 직전 호 기록(`old_call_*`)을 남기는 비율. **`OLD_FAIL_CNT` 의 분자가
+    #: 여기서 생긴다** — 비워 두면 `PM_COR_LTE_CALL_1M.OLD_FAIL_CNT` 와
+    #: `OLD_SAME_IFACE` 두 컬럼이 **구조적으로 늘 0** 이고, 0 은 "직전 호
+    #: 실패가 없다"로 읽힌다(불변규칙 17). 실패한 호에만 적용된다.
+    old_call_fail: float = 0.18
+    #: 그중 **직전 호와 같은 구간**에서 실패한 비율 — `OLD_SAME_IFACE`.
+    #: "같은 원인의 반복" 신호이고, 재시도가 같은 자리에서 또 막히는 모양이다.
+    old_call_same_iface: float = 0.55
 
     @classmethod
     def from_cfg(cls, cfg: dict | None) -> "Baseline":
@@ -1081,6 +1131,85 @@ def _filter_drawable(uniq: dict, drawable: set[str] | None) -> dict:
     return out
 
 
+def _scope_sql(scope: "Scope | None") -> str:
+    """`scope` 의 구·동을 SQL 조건으로. 둘 다 비면 빈 문자열.
+
+    **합집합이다** — "이 구 또는 이 동". 교집합으로 두면 동이 구 안에 있으니
+    늘 동만 남아 `gu` 가 무의미해진다.
+    """
+    if scope is None or (not scope.gu and not scope.dong):
+        return ""
+    # **노선이 함께 있으면 질의로 좁히지 않는다.** 합집합이어야 하는데
+    # 질의가 먼저 좁히면 노선 셀이 그 구 밖에서 잘려 **교집합**이 된다 —
+    # 실측에서 "노선 + 신주쿠구"가 10셀이었다(노선 88 · 구 1,114 인데).
+    # 그때는 전량을 끌어와 파이썬에서 합친다.
+    if scope.route:
+        return ""
+    parts = []
+    if scope.gu:
+        ids = ",".join(str(int(x)) for x in scope.gu)
+        parts.append(f"r.GU_ID IN ({ids})")
+    if scope.dong:
+        ids = ",".join(str(int(x)) for x in scope.dong)
+        parts.append(f"r.DONG_ID IN ({ids})")
+    return " AND (" + " OR ".join(parts) + ")"
+
+
+def _scope_route(cells: list[Cell], scope: "Scope") -> list[Cell]:
+    """노선이 쓰는 셀(+ 반경)만 남긴다. 노선이 없으면 그대로.
+
+    **노선 파일을 읽는다** — 그 파일이 셀 키의 목록이고, 같은 규칙을 여기서
+    다시 만들면 두 벌이 된다(한쪽만 고쳐지면 "정의한 구간에 트래픽이 없다"가
+    되는데 원인이 안 보인다).
+
+    **모르는 노선 id 는 멈춘다.** 조용히 전량으로 넘어가면 범위를 좁혔다고
+    믿는 채로 전 도쿄에 호가 흩어진다 — 그러면 셀당 표본이 0.12호/분이고
+    탐지가 서지 않는다(불변규칙 5).
+    """
+    import json
+
+    want = str(scope.route)
+    path = Path(scope.lines_dir)
+    found = None
+    for f in sorted(path.glob("*.json")) if path.exists() else ():
+        for spec in json.loads(f.read_text(encoding="utf-8")):
+            if str(spec.get("id")) == want:
+                found = spec
+                break
+        if found:
+            break
+    if found is None:
+        have = sorted(str(spec.get("id"))
+                      for f in (sorted(path.glob("*.json"))
+                                if path.exists() else ())
+                      for spec in json.loads(f.read_text(encoding="utf-8")))
+        raise RuntimeError(
+            f"scope.route 의 모르는 노선 {want!r} — {path} 에서 못 찾는다"
+            f" (아는 것: {have})")
+
+    keys = set(found["cells"])
+    on = [c for c in cells if c.cell_key in keys]
+    if not scope.route_radius_m:
+        return on
+    # 반경 — 노선 셀에서 그만큼 안의 셀을 더한다. 노선 셀만 쓰면 **이동
+    # 가입자밖에 없어** 역 주변 체류가 생기지 않는다
+    import math
+
+    pts = [(c.latitude, c.longitude) for c in on if c.latitude]
+    r = float(scope.route_radius_m)
+    out, seen = list(on), {c.cell_key for c in on}
+    for c in cells:
+        if c.cell_key in seen or not c.latitude:
+            continue
+        k = math.cos(math.radians(c.latitude)) or 1.0
+        if any(math.hypot((c.latitude - p[0]) * 111_320.0,
+                          (c.longitude - p[1]) * 111_320.0 * k) <= r
+               for p in pts):
+            out.append(c)
+            seen.add(c.cell_key)
+    return out
+
+
 def _pick_enbs(uniq: dict, enb_limit: int | None) -> set[str] | None:
     """생성 대상 eNB 를 결정론적으로 고른다.
 
@@ -1132,7 +1261,10 @@ def load_cells(conn, enb_limit: int | None = None,
                drawable: set[str] | None = None,
                ensure_coords: bool = False,
                plmn: Plmn | None = None,
-               locale: str = "kr") -> list[Cell]:
+               locale: str = "kr",
+               tac_only: bool = False,
+               sectors_per_enb: int | None = None,
+               scope: "Scope | None" = None) -> list[Cell]:
     """`CL_CELL_MAP` + `CM_CELL_REP_RU_LOC` → `Cell` 목록.
 
     조인 키는 실측으로 확인된 것을 쓴다. `CM_CELL_REP_RU_LOC.ENB_ID` 는
@@ -1163,6 +1295,15 @@ def load_cells(conn, enb_limit: int | None = None,
     주면 그 동의 셀(+좌표 없는 셀)만 후보가 되어 읍면동 지도가 전부 칠해진다.
     `None` 이면 종전대로 전량이 후보다.
 
+    **그 집합은 로케일 전용이다.** `code_crosswalk.json` 은
+    `southkorea-maps kostat 2018 → pemdb1 행정표준코드` 이고, 일본 동 코드와는
+    **우연히 겹치는 것만** 맞는다 — 도쿄 셀에 그대로 걸었더니 1,192셀 중
+    **434개만** 남았다(64% 탈락). 남은 것이 "폴리곤이 있는 동"이라는 보장도
+    없다. 그래서 `locale != "kr"` 이면 **적용하지 않는다**(2026-10-27).
+
+    일본 지도의 동 커버리지는 graphio 쪽 geo 데이터의 일이고, 그쪽 crosswalk
+    가 생기면 여기에 그 집합을 주면 된다.
+
     ## 생성기는 **KR 벌을 읽는다** (2026-10-26 로케일 축 도입 뒤)
 
     `locale` 기본이 `"kr"` 이고 그것이 의도다. 사용자 방침은 *"원본 데이터도
@@ -1176,14 +1317,28 @@ def load_cells(conn, enb_limit: int | None = None,
     """
     cellmap_tbl = table_name("cellmap", "kr")   # 로케일 축이 없다 — 한 벌
     cell_tbl = table_name("cell", locale)
+    if drawable is not None and locale != "kr":
+        # **KR crosswalk 를 JP 셀에 걸지 않는다** — 머리말의 실측
+        drawable = None
     with conn.cursor() as cur:
         cur.execute(
             "SELECT c.ENB_ID, c.CELLNUM, c.C_UID, c.MME_GRP_ID, c.EMS_ID, "
-            "       r.CITY_ID, r.GU_ID, r.DONG_ID, r.LATITUDE, r.LONGITUDE "
+            "       r.CITY_ID, r.GU_ID, r.DONG_ID, r.LATITUDE, r.LONGITUDE, "
+            "       r.TAC, r.SGW_ID, r.MME_ID "
             f"FROM `{cellmap_tbl}` AS c "
-            f"LEFT JOIN `{cell_tbl}` AS r "
-            "       ON r.ENB_ID = c.ENB_ID AND r.SECTOR = c.CELLNUM "
-            "WHERE c.ENB_ID IS NOT NULL AND c.CELLNUM IS NOT NULL"
+            # **`tac_only` 면 INNER JOIN 이다.** LEFT 로 두고 뒤에서 걸러도
+            # 되지만, 질의가 걸러 주는 쪽이 기동이 빠르다
+            + (f"JOIN `{cell_tbl}` AS r "
+               "       ON r.ENB_ID = c.ENB_ID AND r.SECTOR = c.CELLNUM "
+               "      AND r.TAC IS NOT NULL "
+               if tac_only else
+               f"LEFT JOIN `{cell_tbl}` AS r "
+               "       ON r.ENB_ID = c.ENB_ID AND r.SECTOR = c.CELLNUM ")
+            + "WHERE c.ENB_ID IS NOT NULL AND c.CELLNUM IS NOT NULL"
+            # **구·동은 질의가 거른다.** 파이썬에서 거르면 23,039행을 다
+            # 끌어와 버리고, 좁은 범위일수록 낭비가 크다. 노선은 좌표가
+            # 필요해 아래에서 거른다
+            + _scope_sql(scope)
         )
         rows = cur.fetchall()
         # MME/PGW 풀 — 노드 축(EV-*, 토폴로지 화면)이 실제 장비 ID 를 보게 한다
@@ -1204,6 +1359,26 @@ def load_cells(conn, enb_limit: int | None = None,
         if r[0] is None or r[1] is None:
             continue
         uniq.setdefault((str(r[0]), int(r[1])), r)
+
+    # **섹터 상한** — 시뮬레이션 규모 문제다(2026-10-27).
+    #
+    # 도쿄 JP 벌은 eNB 당 섹터가 **중앙 26개**다(다중 밴드 도심). 그대로 쓰면
+    # 200 eNB 가 5,012셀이고 분당 2,000호에서 셀당 **0.4호**다 — 최소 표본
+    # 20(불변규칙 5)을 30분 창에서도 못 채워 **셀 축 판정이 아예 서지 않는다.**
+    # 6개면 ≈1,200셀 · 셀당 1.67호/분 · 15분 창에 25호로 찬다.
+    #
+    # **TA 는 상한과 무관하다** — TAC 는 eNB 속성이고 그 eNB 의 전 섹터가 같은
+    # TA 다. 상한은 "그중 몇 개를 시뮬레이션에 쓰나"일 뿐이다.
+    #
+    # 번호가 작은 쪽을 남긴다 — 어느 섹터를 쓰는지가 실행마다 바뀌면 시계열이
+    # 조각난다.
+    if sectors_per_enb and sectors_per_enb > 0:
+        per: dict[str, list[int]] = {}
+        for enb, cellnum in uniq:
+            per.setdefault(enb, []).append(cellnum)
+        keep_sec = {(e, c) for e, cs in per.items()
+                    for c in sorted(cs)[:sectors_per_enb]}
+        uniq = {k: v for k, v in uniq.items() if k in keep_sec}
 
     # **다른 로케일 전용 장비를 이 로케일의 후보에서 뺀다** (2026-10-26).
     #
@@ -1259,28 +1434,68 @@ def load_cells(conn, enb_limit: int | None = None,
             for key, (city, gu, dong, lat, lon) in made.items():
                 r = uniq.get(key)
                 if r is not None:
-                    uniq[key] = r[:5] + (city, gu, dong, lat, lon)
+                    # **길이를 지킨다** — 행이 13-tuple(끝이 TAC·SGW_ID·
+                    # MME_ID)이고 아래 언패킹이 그 수를 센다. 줄이면
+                    # `ValueError` 로 죽는다
+                    uniq[key] = r[:5] + (city, gu, dong, lat, lon) + r[10:13]
     cells: list[Cell] = []
+    #: 마스터가 지정한 `(SGW_ID, MME_ID)` — 셀과 **같은 순서**로 쌓는다.
+    #: `Cell` 에 자리를 만들지 않는 이유: 그 값은 "마스터가 뭐라 했나"이고
+    #: 최종 배정(`Cell.sgw_id`)과 뜻이 다르다. 섞으면 어느 쪽이 적용됐는지
+    #: 알 수 없다.
+    equip: list[tuple[str | None, str | None]] = []
     for (enb, cellnum), (_e, _c, c_uid, grp, ems,
-                         city, gu, dong, lat, lon) in sorted(uniq.items()):
+                         city, gu, dong, lat, lon,
+                         tac_raw, sgw_raw, mme_raw) in sorted(uniq.items()):
+        # **`NULL` 은 0 이 된다 — "TA 모름"이다.** `int(None)` 이 터지지 않게
+        # 걸러 두는 것이 아니라, 아래 장비 유도가 `if tac` 로 갈리기 때문이다
+        tac = int(tac_raw) if tac_raw not in (None, "", 0, "0") else 0
         if keep is not None and enb not in keep:
             continue
         # 같은 eNB 의 셀은 같은 Core 노드를 타야 한다 — 노드 축 집계가 성립하려면
         # 셀마다 노드가 흔들려서는 안 된다. eNB 해시로 고정한다.
         h = int(hashlib.sha256(enb.encode()).hexdigest()[:12], 16)
         pool = by_grp.get(str(grp)) or all_mme
-        mme = pool[h % len(pool)]
+        # **장비를 TAC 에서 유도한다**(2026-10-27). 전에는 eNB 해시였고
+        # (`h % len(pool)`) 그래서 **인접 eNB 가 무관한 MME·SGW 를 받았다** —
+        # 실측으로 경로 구간 73개 중 55개가 MME 재배치로 나왔고, 전환 종류를
+        # 마스터에서 읽을 수 없어 `handover.kind_of` 가 쌍 해시를 쓰게 됐다.
+        #
+        # 실제 망은 **MME pool 이 TA 목록을 맡는다.** 그래서 TA 몇 개를 한
+        # MME 가 보도록 묶는다 — `1` 로 두면 TA 경계마다 MME 가 바뀌어 전환이
+        # 거의 다 `S1_MME` 가 된다. SGW·PGW 는 더 큰 단위다.
+        #
+        # **TAI List 가 기준이다**(`_TA_PER_*` 머리말). 목록이 없으면(좌표
+        # 없음) 옛 경로인 eNB 해시로 떨어진다 — 위치를 모르는 셀의 장비
+        # 배정을 지어낼 수 없다.
+        #
+        # `ta_list` 는 이 루프보다 **뒤에** 채워진다(`build_ta_lists` 가 셀을
+        # 다 만든 뒤 돈다). 그래서 여기서는 쓸 수 없고, 아래에서 다시 배정한다.
+        key = h
+        mme = pool[key % len(pool)]
         pgw = pgws[h % len(pgws)]
-        sgw = pgws[(h // 7) % len(pgws)]        # 상용은 SPGW 합본 — 같은 풀을 쓴다
+        # 상용은 SPGW 합본 — 같은 풀을 쓴다
+        sgw = pgws[(h // 7) % len(pgws)]
         ims = pgws[(h // 13) % len(pgws)]
         mapped = city is not None
+        equip.append((str(sgw_raw) if sgw_raw else None,
+                      str(mme_raw) if mme_raw else None))
         cells.append(Cell(
             cell_key=f"{enb}-{cellnum}",
             enb_id=enb,
             cell_id=cellnum,
             enb_seq=h % 1_000_000,
             c_uid=str(c_uid or ""),
-            tac=0,                      # CL_CELL_MAP 에 TAC 가 없다 — 모름
+            # **마스터가 들고 온 TA 다**(`CM_CELL_REP_RU_LOC*.TAC`).
+            # 값은 **OpenCellID 도쿄 실데이터**다 —
+            # `graphio-probe-rca/tools/load_opencellid_tokyo.py` 가 적재한다.
+            # 합성 TA 를 만들던 코드는 걷어냈다(2026-10-27): 실제 TAC 가
+            # 있으면 지어낼 이유가 없다.
+            #
+            # `0` 은 **"TA 모름"** 이다 — 컬럼이 비었거나 좌표가 없는 셀이다.
+            # 그 셀에서는 TA 경계가 없는 것으로 읽혀 TAU 가 나지 않는다 —
+            # 위치를 모르면 경계도 모르는 것이 맞다(불변규칙 12·17).
+            tac=tac,
             # 전 셀이 같은 홈 PLMN 이다 — `CL_CELL_MAP` 에 그 컬럼이 없다.
             # 리터럴이 아니라 설정에서 온다(`plmn.Plmn` 머리말): 셀 PLMN 과
             # 가입자 IMSI 접두가 어긋나면 **전 가입자가 외국 가입자**가 된다.
@@ -1299,6 +1514,76 @@ def load_cells(conn, enb_limit: int | None = None,
             traffic_weight=_weight(enb, cellnum),
             display_name=f"eNB{enb}-{cellnum}",
         ))
+    # ── TA 묶기 — **마스터에 TAC 가 없다** ──────────────────────────────
+    #
+    # 좌표가 없는 셀(`UNMAPPED`)은 묶을 수 없어 `tac=0` 으로 남는다. 그것도
+    # 사실이다 — 위치를 모르는 셀의 TA 를 지어내지 않는다(불변규칙 12·17).
+    # 그 셀에서는 TAU 판정이 서지 않고, `advance_routes` 가 `tac` 비교로
+    # 결정하므로 **같은 0 끼리는 TA 경계가 없는 것으로 읽힌다** — 좌표를
+    # 모르면 경계도 모르는 것이 맞다.
+    # ── TAI List — **TA 가 바뀐다고 TAU 가 나는 것이 아니다** ──────────
+    #
+    # MME 가 UE 에게 TA **목록**을 주고 목록 밖으로 나갈 때만 TAU 가 난다.
+    # 그 층이 없으면 도심에서 TAU 가 폭증한다 — 실측으로 신주쿠 2km 안에
+    # TAC 가 49개이고 이웃 셀 쌍의 77% 가 TA 경계를 넘는다
+    # (`handover.build_ta_lists` 머리말).
+    #
+    # **TA 는 마스터가 들고 온다**(`CM_CELL_REP_RU_LOC*.TAC`). 목록은 거기서
+    # 지리로 유도한다 — 실제 TAC 번호가 지리를 느슨하게만 반영해 산술로는
+    # 묶이지 않는다.
+    n_list = HO.build_ta_lists([c for c in cells if c.geo_status == "MAPPED"])
+
+    # ── 장비를 **TAI List 에서** 유도한다 ──────────────────────────────
+    #
+    # 셀을 만들 때는 할 수 없다 — 목록이 그때 아직 없다(위 `build_ta_lists`).
+    # 그래서 여기서 다시 배정한다. 목록이 없는 셀(좌표 없음)은 **그대로
+    # 둔다** — eNB 해시 배정이 남고, 위치를 모르는 셀의 장비를 지어내지
+    # 않는다.
+    #
+    # 왜 목록 단위인가: 실제 망은 MME pool 이 TA 목록을 맡는다. eNB 해시로
+    # 배정하면 **인접 eNB 가 무관한 MME 를 받아** 전환 종류를 마스터에서
+    # 읽을 수 없다(`handover.kind_of` · docs/jp §1.6 의 실측).
+    if n_list:
+        for c in cells:
+            if not c.ta_list:
+                continue
+            c.mme_id = all_mme[(c.ta_list // _TA_PER_MME) % len(all_mme)]
+            c.sgw_id = pgws[(c.ta_list // _TA_PER_SGW) % len(pgws)]
+            c.pgw_id = pgws[(c.ta_list // _TA_PER_PGW) % len(pgws)]
+            c.ims_pgw_id = pgws[((c.ta_list // _TA_PER_PGW) + 1) % len(pgws)]
+
+    # ── 마스터가 장비를 지정했으면 **그것이 이긴다** ────────────────────
+    #
+    # 위 유도는 마스터가 말하지 않을 때의 대안이다. `SGW_ID`·`MME_ID` 가
+    # 채워져 있으면 그건 **지리 계층으로 묶은 결과**이고
+    # (`graphio/tools/build_tokyo_core.py`: TAC n개 → SGW · SGW n개 → MME),
+    # 산술 유도보다 사실에 가깝다.
+    #
+    # **양쪽이 같은 규칙을 각자 구현하지 않으려고 컬럼에 적는다** — 묶는
+    # 쪽은 graphio, 읽는 쪽은 여기이고 서로 다른 저장소라 코드를 공유할 수
+    # 없다. 각자 구현하면 한쪽만 고쳐질 때 에러 없이 대응이 갈린다.
+    for c, (sg, mm) in zip(cells, equip):
+        if sg:
+            c.sgw_id = sg
+        if mm:
+            c.mme_id = mm
+
+    # ── 범위 — **맨 마지막이다** ──────────────────────────────────────
+    #
+    # 좌표가 있어야 반경을 잴 수 있고, 장비·TA 가 붙은 뒤여야 걸러낸 셀이
+    # 완성된 모양이다.
+    #
+    # 노선이 없으면 구·동은 질의가 이미 걸렀다(`_scope_sql`). 노선이 있으면
+    # 질의가 손대지 않았으므로 **여기서 합집합을 만든다.**
+    if scope is not None and scope.route:
+        keep = {c.cell_key for c in _scope_route(cells, scope)}
+        if scope.gu:
+            want = {str(int(x)) for x in scope.gu}
+            keep |= {c.cell_key for c in cells if c.adm_sgg_cd in want}
+        if scope.dong:
+            want = {str(int(x)) for x in scope.dong}
+            keep |= {c.cell_key for c in cells if c.adm_emd_cd in want}
+        cells = [c for c in cells if c.cell_key in keep]
     return cells
 
 
@@ -1461,6 +1746,119 @@ def series_stat(lte_rows: list, uplane_rows: dict[str, list]) -> dict:
     return out
 
 
+@dataclass
+class Scope:
+    """**생성 범위** — 분당 호를 어느 지역에 흘리나.
+
+    ## 왜 필요한가
+
+    마스터는 넓고(도쿄 셀 17,188) 분당 호는 적다(2,000). 그대로 흘리면
+    셀당 **0.12호/분**이고, 최소 표본 20(불변규칙 5)을 30분 창에서도 못
+    채워 **셀 축 탐지가 한 번도 서지 않는다** — 에러가 아니라 지도가 전부
+    "판정 불가" 회색이 된다.
+
+    호를 11배로 늘리면 전 셀이 판정되지만 원시 Parquet 도 11배다. 지금
+    장비에서는 그렇게 하지 않는다(사람 결정 2026-10-27) — 대신 **좁은
+    지역에만** 흘린다.
+
+        구 하나(신주쿠)      eNB 311 · 셀 1,666  →  1.2호/분 · 15분 창
+        동 하나(신주쿠 11)   eNB 133 · 셀   764  →  2.6호/분 ·  5분 창
+        노선 하나            eNB  88 · 셀   540  →  3.7호/분 ·  5분 창
+
+    ## 합집합이다
+
+    `gu` · `dong` · `route` 를 함께 주면 **합친다**. "이 구 + 이 노선"이
+    자연스러운 요구이고, 교집합은 빈 결과가 되기 쉽다.
+
+    **다 비면 제한이 없다** — 마스터 전량이다. 그게 기본이고, 좁히는 것이
+    사람의 결정이다.
+    """
+
+    #: `CM_GU_JP.GU_ID` 목록 (예: `11200` 신주쿠구).
+    gu: list = field(default_factory=list)
+    #: `CM_DONG_JP.DONG_ID` 목록 (예: `11200011`).
+    dong: list = field(default_factory=list)
+    #: 노선 id (`data/lines/*.json` 의 `id`). 그 노선이 **쓰는 셀**이 들어온다.
+    route: str = ""
+    #: 노선에서 이 반경(m) 안의 셀까지 넓힌다. `0` 이면 노선 셀만.
+    #:
+    #: 노선 셀만 쓰면 **이동 가입자밖에 없다** — 역 주변에 머무는 사람이
+    #: 없어 역세권 혼잡(`j-sc-14`)이 생기지 않는다. 반경을 주면 그 주변
+    #: 고정 가입자가 함께 들어온다.
+    route_radius_m: float = 0.0
+    #: 노선 파일이 있는 디렉터리.
+    lines_dir: str = "data/lines"
+
+    @classmethod
+    def from_cfg(cls, cfg: dict | None) -> "Scope":
+        if not cfg:
+            return cls()
+        known = {f.name for f in fields(cls)}
+        bad = sorted(set(cfg) - known)
+        if bad:
+            raise RuntimeError(
+                f"scope 설정에 모르는 키: {bad} (아는 키: {sorted(known)})")
+        return cls(**cfg)
+
+    def empty(self) -> bool:
+        return not (self.gu or self.dong or self.route)
+
+
+@dataclass
+class Mobility:
+    """이동 경로 설정 — **기본값이 "아무도 움직이지 않음"이다.**
+
+    `Shape`·`Baseline` 과 같은 모양이고 **모르는 키는 멈춘다**(`from_cfg`).
+    역호환을 끄기로 두는 이유: 경로를 깔면 전환 수와 셀 쌍 분포가 바뀌므로
+    기존 기준선과 전후 비교가 안 된다. **켜는 것이 사람의 결정**이어야 한다.
+    """
+
+    #: 경로 정의 파일(`routes.json`). 비우면 `build_routes` 로 자동 생성한다.
+    #: **실제 노선을 쓰려면 이 파일을 적는다** — 형식은 `handover.load_routes`.
+    routes_file: str = ""
+    #: 자동 생성할 경로 수와 칸 수. `routes_file` 이 있으면 무시된다
+    count: int = 0
+    length: int = 8
+    #: 칸당 체류시간 범위(초). 세션 평균 수명(3분)보다 짧아야 **한 세션이
+    #: 여러 칸을 겪는다** — 그게 "이동 중 전환"이다
+    dwell_min: int = 45
+    dwell_max: int = 150
+    #: 순환선 비율. 순환선은 끝에서 돌고, 아니면 방향을 뒤집는다(상·하행)
+    loop_share: float = 0.25
+    #: 경로에 **태울 가입자** 비율
+    sub_share: float = 0.0
+    #: 이동 가입자를 **고를** 비율. `sub_share` 와 다른 축이다 — 움직이는
+    #: 사람이 전체의 12% 라도 그들이 더 자주 통신하면 호 비중은 더 높다
+    call_share: float = 0.0
+    #: 여정 — `[{route, from, to, share}]`. 역 코드로 적는다.
+    #: 비면 모두 끝없이 순환한다(노선 전체를 도는 사람).
+    journeys: list = field(default_factory=list)
+    #: 하차 후 머무는 시간(초). 그 동안 셀이 고정이고 전환이 없다 —
+    #: 그게 역 주변 체류이고 역세권 혼잡이 거기서 생긴다
+    off_sec_min: int = 300
+    off_sec_max: int = 1800
+    #: **노선을 타지 않는 가입자**를 거주지 근처에서 뽑나. 기본 끄기.
+    #:
+    #: 경로와 **다른 축이다.** 경로는 "이 사람이 이 구간을 다닌다"이고 이쪽은
+    #: "이 사람이 여기 산다"다. 샘플 XDR 이 후자를 규정하지 않으므로
+    #: (`generator._lte_call` 주석의 실측) 기본은 끄기이고, 켜면 셀·분
+    #: `SUBS` 가 -22% 움직여 기존 기준선과 전후 비교가 끊긴다.
+    home_locality: bool = False
+    #: 거주지로 볼 주변 반경(m). `home_locality` 가 켜졌을 때만 쓴다
+    home_radius_m: float = 10_000.0
+
+    @classmethod
+    def from_cfg(cls, cfg: dict | None) -> "Mobility":
+        if not cfg:
+            return cls()
+        known = {f.name for f in fields(cls)}
+        bad = sorted(set(cfg) - known)
+        if bad:
+            raise RuntimeError(
+                f"mobility 설정에 모르는 키: {bad} (아는 키: {sorted(known)})")
+        return cls(**cfg)
+
+
 class PemdbGen:
     """상용 스키마용 생성기 — 셀 마스터는 DB, 분포는 실측 JSON."""
 
@@ -1476,10 +1874,30 @@ class PemdbGen:
                  call_type_floor: float | None = None,
                  uplane_session: dict | None = None,
                  baseline: dict | None = None,
-                 fault: dict | None = None):
+                 fault: dict | None = None,
+                 mobility: dict | None = None,
+                 #: 셀 **좌표·지역 벌**을 어느 나라로 읽나(`topo.table_name`).
+                 #: 기본 `kr` 이 의도다 — 바꾸는 것은 사람의 결정이고, 바꾸면
+                 #: 셀 세트가 통째로 갈려 기존 기준선과 비교가 끊긴다.
+                 locale: str = "kr",
+                 #: `TAC` 가 있는 셀만 후보로 쓴다.
+                 #:
+                 #: **더는 세트를 좁히는 수단이 아니다**(2026-10-27) — 실데이터
+                 #: 마스터는 전 행에 TAC 가 있다. 남는 쓸모는 "TA 를 모르는
+                 #: 셀을 뺀다"이고, 그건 좌표가 없는 셀을 빼는 것과 같다.
+                 tac_only: bool = False,
+                 #: eNB 당 쓸 섹터 수 상한. 도쿄 JP 벌은 eNB 당 섹터가 중앙
+                 #: 26개라 그대로 쓰면 셀당 호 수가 최소 표본을 못 채운다.
+                 sectors_per_enb: int | None = None,
+                 #: **생성 범위** — 분당 호를 어느 지역에 흘리나(`Scope`).
+                 #: 비면 마스터 전량이다.
+                 scope: dict | None = None):
         self.plmn = plmn or Plmn()
         self.cells = load_cells(conn, enb_limit=enb_limit, drawable=drawable,
-                                ensure_coords=ensure_coords, plmn=self.plmn)
+                                ensure_coords=ensure_coords, plmn=self.plmn,
+                                locale=locale, tac_only=tac_only,
+                                sectors_per_enb=sectors_per_enb,
+                                scope=Scope.from_cfg(scope))
         if not self.cells:
             raise RuntimeError("CL_CELL_MAP 이 비어 있다 — 마스터를 먼저 적재하라")
         #: 평시 배경 모수(`pemdb1.baseline`). **장애 mutator 와 무관하다** —
@@ -1523,6 +1941,23 @@ class PemdbGen:
         # 걸어 두는 이유는 구 경로(`generate_minute`)가 `_coerce` 를 타지 않아
         # **평시 배경이 없다**는 것을 코드에서 읽히게 하려는 것이다.
         self.gen.baseline = self.baseline
+        #: 전환 토폴로지 — `_baseline_handover` 가 쓴다. **U-Plane 과 같은
+        #: 모듈이다**(`handover.Topology`). 양쪽이 각자 이웃을 고르면 같은
+        #: 셀 쌍에서 C-Plane 은 전환했는데 U-Plane 은 안 한 호가 생기고,
+        #: 그러면 "핸드오버 직후 정체"를 대조할 자료가 안 된다.
+        #:
+        #: **`self.topo` 가 아니다.** `datagen.topo`(밴드·테이블 토폴로지)라는
+        #: 별 모듈이 이미 있고 `test_topo` 가 `topo.<이름>(` 호출을 스캔해
+        #: 정의 존재를 검사한다 — 같은 이름을 쓰면 그 검사가 **엉뚱한 모듈에서**
+        #: 함수를 찾는다 — 실제로 `test_topo` 가 "pick_kind 가 없다" 로
+        #: 걸렸다. 그 검사는 **주석까지 스캔**하므로 여기에도 그 이름을 점
+        #: 찍어 적지 않는다.
+        self.ho_topo = HO.Topology(self.cells)
+        # **생성기도 같은 토폴로지를 본다.** `_sub_for` 가 "이 셀 주변에 사는
+        # 사람"을 물으므로, 두 벌을 만들면 전환 상대와 거주 분포가 서로 다른
+        # 관계를 보게 된다 — "전환은 되는데 그 셀에 사는 사람이 없다".
+        self.gen.ho_topo = self.ho_topo
+        self._seat_mobility(Mobility.from_cfg(mobility), seed)
         # **시나리오의 APN 대상이 레코드에 실제로 있는 값이어야 한다.**
         # `_coerce` 가 `Distributions.apn()` 으로 APN 을 덮으므로 프로파일에서
         # 고르면 그 APN 이 한 건도 없을 수 있고, 그러면 SC-19·SC-11 이 주입돼도
@@ -1817,6 +2252,35 @@ class PemdbGen:
         """시간대 곡선이 켜져 있나."""
         return bool(self.gen.diurnal)
 
+    def _seat_mobility(self, mb: "Mobility", seed: int) -> None:
+        """경로를 깔고 가입자를 태운다. **끄기가 기본이다.**
+
+        `routes_file` 이 있으면 그것을 읽고, 없으면 `count` 개를 자동 생성한다.
+        둘 다 없으면 아무것도 하지 않는다 — 그때 전환은 `Topology.pick` 의
+        추첨이고, 경로가 없던 때와 같다.
+
+        **파일이 있는데 읽히지 않으면 멈춘다.** 조용히 자동 생성으로 넘어가면
+        "노선을 정의했는데 그 구간이 데이터에 없다"가 되고 원인이 경로 파일의
+        오타다.
+        """
+        rng = random.Random(seed + 7717)
+        # **경로와 독립이다.** 노선을 깔지 않아도 지역성만 켤 수 있다
+        self.gen.home_locality = bool(mb.home_locality)
+        self.gen.home_radius_m = float(mb.home_radius_m)
+        if mb.routes_file:
+            routes = HO.load_routes(mb.routes_file, self.cells)
+        elif mb.count > 0:
+            routes = HO.build_routes(
+                self.ho_topo, self.cells, mb.count, rng, length=mb.length,
+                dwell=(mb.dwell_min, mb.dwell_max), loop_share=mb.loop_share)
+        else:
+            return
+        # **여정을 `seat_routes` 전에 걸어야 한다** — 그 안에서 배정한다
+        self.gen.journeys = list(mb.journeys)
+        self.gen.off_sec = (mb.off_sec_min, mb.off_sec_max)
+        self.gen.seat_routes(routes, mb.sub_share, rng)
+        self.gen.mobility_share = mb.call_share
+
     def records(self, minute: int, ts: datetime) -> list[list[str]]:
         """한 분의 레코드(생성기 필드 순서의 값 리스트)를 만든다.
 
@@ -1830,6 +2294,9 @@ class PemdbGen:
         으로 이어져야 한다(설계 §3.2).
         """
         gen = self.gen
+        # **이동을 먼저 전진시킨다.** 호를 만든 뒤에 옮기면 그 분의 호가
+        # 한 칸 전 위치에서 생기고, 전환이 분 경계에 몰린다
+        gen.advance_routes(ts.timestamp())
         slot_start = ts.timestamp()
         active = self._active(minute)
         mutate = self._mutator(minute, active)
@@ -1895,6 +2362,31 @@ class PemdbGen:
                     cell=cell, user=tuple(vals[i] for i in i_user),
                     apn=vals[i_apn], t=t, outcome=outcome, rel=vals[i_rel],
                     call_type=(vals[i_ct] if i_ct >= 0 else "")))
+        # ── TAU — **TAC 가 바뀐 전환마다 한 건** ────────────────────────
+        #
+        # 핸드오버 레코드와 **별개 절차**다. 이것이 없으면 "TAC 가 바뀌었는데
+        # 아무 절차도 없다"가 되고, TAU 성공률·소요가 통째로 빈다 — 0 은
+        # "문제 없음"으로 읽힌다(불변규칙 17).
+        #
+        # **`_volume` 밖이다.** 분당 호 수를 TAU 로 깎으면 이동을 켜는 것만으로
+        # 다른 절차의 분모가 줄어 기존 기준선과 전후 비교가 안 된다. TAU 는
+        # 실제로 **추가 절차**이므로 더해지는 것이 맞다.
+        #
+        # **핸드오버가 TAU 를 다시 만들지 않게** `_baseline_handover` 를 타지
+        # 않는다 — TAU 레코드는 이미 전환의 결과이고, 거기에 또 셀을 바꾸면
+        # 떠난 TA 기록(`old_call_Last_TAC`)과 어긋난다.
+        tau = gen.tau_events
+        if tau and "lte_call" not in self._blocked:
+            for sub_i, src, dst in tau:
+                rec, cell = gen.tau_rec(ts, slot_start, gen.subs[sub_i],
+                                        src, dst)
+                self._coerce(rec, None, force_call_type=TAU_CALL_TYPE)
+                if mutate is not None:
+                    mutate("lte_call", rec, cell)
+                out.append(rec.values)
+        # **매 분 비운다.** 남겨 두면 같은 전환으로 TAU 가 계속 나온다
+        gen.tau_events = []
+
         self._calls, self._calls_at = calls, ts
         return out
 
@@ -1929,8 +2421,13 @@ class PemdbGen:
         return {s: rows for s, rows in got.items()
                 if s in self.series and s not in self._blocked}
 
-    def _coerce(self, rec, cell: Cell | None = None) -> None:
+    def _coerce(self, rec, cell: Cell | None = None,
+                force_call_type: str | None = None) -> None:
         """자체 프로파일에서 나온 값을 상용 실측값으로 바꾼다.
+
+        ``force_call_type`` 은 절차를 **고정**한다. 평소에는 실측 분포가
+        `call_type` 을 정하는데, TAU(`5`)처럼 "그 레코드가 왜 생겼는지"가
+        이미 정해진 경우가 있다 — TAC 가 바뀐 전환이 그렇다.
 
         ``cell`` 은 **평시 PathSwitch 가 Last 셀을 정하려고** 받는다. V3 §3.5 는
         그것을 `generator._lte_call` 에 두라고 적었는데(그 함수가 셀을 안다),
@@ -1944,7 +2441,10 @@ class PemdbGen:
         # 상용 추출은 ONGOING_FLAG='2'(호 종료)만 담는다. 1(진행 중) 레코드를
         # 섞으면 플래그가 비어 분모가 조용히 줄어든다.
         rec.set("OngoingFlag", ONGOING_END)
-        ct = d.call_type()
+        # **`force_call_type` 은 실측 분포를 이긴다.** TAU 레코드가 그것으로
+        # 온다 — 여기서 분포로 덮으면 TAC 가 바뀐 전환에 TAU 가 아닌 절차가
+        # 붙고, 그러면 그 레코드가 무엇인지 아무도 모른다.
+        ct = force_call_type or d.call_type()
         rec.set("call_type", ct)
         f = d.flags(ct)
         rec.set("attempt_flag", f["att"])
@@ -1995,9 +2495,13 @@ class PemdbGen:
         else:
             self._clear_error(rec)
 
-        # 평시 PathSwitch — `PSF` 의 분모. 셀 마스터를 봐야 하므로 마지막이다
+        # 평시 핸드오버 — `PSF` 의 분모 + 셀·장비·TAC 변경. 셀 마스터와
+        # **최종 해제 Cause** 를 둘 다 알아야 하므로 마지막이다
         if self.baseline is not None and cell is not None:
-            self._baseline_pathswitch(rec, ct, cell)
+            self._baseline_handover(rec, ct, cell, rel)
+            # 직전 호 — 핸드오버 **뒤**다. 핸드오버-In 호의 출발 셀을
+            # `_baseline_handover` 가 정한 이웃 관계에서 고르기 때문이다
+            self._baseline_old_call(rec, ct, cell, f)
 
     def _baseline_procedures(self, rec, f: dict) -> None:
         """인증·가입정보·단말식별·NPR 플래그와 그 실패 기록.
@@ -2034,38 +2538,243 @@ class PemdbGen:
                 rec.set(cause_col, cause)
         rec.set("npr_flag", f["npr"])
 
-    def _baseline_pathswitch(self, rec, call_type: str, cell: Cell) -> None:
-        """평시 PathSwitch — `PSF`(PathSwitch 실패율)의 분모를 만든다.
+    def _baseline_handover(self, rec, call_type: str, cell: Cell,
+                           rel: str) -> None:
+        """평시 핸드오버 — 셀·eNB·TAC·장비 ID 를 **함께** 바꾼다.
 
-        없으면 분모가 **장애 호뿐**이라 SC-09 의 실패율이 항상 100% 가 되고,
-        "평시 2% → 장애 25%" 라는 비교가 성립하지 않는다.
+        ## 전에 무엇이 모자랐나
 
-        Last 셀은 **같은 eNB 의 다른 셀**로 둔다 — 다른 eNB 로 보내면 한 호가
-        두 노드를 탄 것처럼 되어 노드 축 집계가 호 안에서 갈린다
-        (`session._neighbour` 와 같은 이유). 그리고 그 두 필드가 **절단 귀속
-        셀**을 정하므로(`cell_agg._cell_specs` 의 `DROP_CNT` Last 갈래) 셀
-        선택과 같은 자리에 있어야 한다.
+        이 함수는 `_baseline_pathswitch` 였고 하는 일이 둘이었다 —
+        `PathSwitch_count` 를 심어 `PSF`(PathSwitch 실패율)의 분모를 만들고,
+        70% 확률로 `Last_Cell_ID` 를 같은 eNB 의 다른 섹터로 바꾸는 것.
+        그래서 **전환이 일어나도 바뀌지 않는 것들**이 있었다 (근거와 실측은
+        `handover` 머리말) —
+
+        * `Last_eNB_ID` 를 쓰기는 했지만 풀이 같은 eNB 라 **값이 늘 같았다.**
+        * `Last_eNB_VLAN_ID`·`Last_eNB_PLMN` 은 아예 안 고쳤다 — 셀이 바뀌었는데
+          그 셀의 VLAN 이 아닌 값이 남는다.
+        * `interval_First_*` 가 늘 First 와 같았다. 스펙은 **Interim 구간의
+          셀**을 그 필드로 보라고 하는데(§3.1.3·§4.2) 그 값이 전환을 모른다.
+        * `SGW_ID`·`MME_ID`·TAC 가 영원히 그대로 → S10 재배치도 TAU 유발도
+          데이터에 없다.
+        * `UEContextRelease_Cause` 가 핸드오버인데 `First == Last` 인 호가
+          있었다 — 해제 사유는 실측 분포에서 **독립으로** 뽑혔다.
+
+        ## 지금
+
+        `PathSwitch_count` 의 **확률과 값은 건드리지 않았다.** SC-09 가
+        "평시 2% → 장애 25%" 로 비교하므로 그 분모가 움직이면 시나리오가
+        깨진다. 바뀐 것은 **그 사건에 딸린 변경을 제대로 적는 것**이다.
+
+        종류는 둘로 갈라 뽑는다 —
+
+        * PathSwitch 가 뽑힌 호 → `X2` (그 메시지가 있는 전환이 X2 다)
+        * 해제 Cause 가 핸드오버인 호 → 그 Cause 가 가리키는 종류
+          (`REL_BY_KIND` 의 역방향)
+
+        **이웃이 없으면 전환을 취소한다.** 종류를 적고도 셀이 그대로면 집계가
+        일어나지 않은 전환을 센다.
         """
         bl = self.baseline
         rng = self.dist.rng
         grp = _CT_GROUP.get(call_type, "service")
+
+        # ① **전환이 먼저고 `PathSwitch` 는 결과다** (2026-10-28 교정).
+        #
+        # 구 구현은 인과가 거꾸로였다 — `PathSwitch` 를 뽑고 그 호의 종류를
+        # **`X2` 로 고정**했다. `PathSwitch_count > 0 ⟺ X2` 는 맞지만
+        # **역이 아니다.** X2 가 아닌 전환(섹터 간·S1·S1_MME)도 일어나는데
+        # 그 경로가 없어서 —
+        #
+        #     실측 141,200호   셀 변경 9,465 · 그중 eNB 간 9,456(99.9%)
+        #                      PathSwitch 9,452 — **사실상 전부 X2**
+        #                      섹터 간 9건(0.01%)   `KIND_W` 선언은 55%
+        #
+        # `S1`·`S1_MME` 가 **구조적으로 나올 수 없었다.** 그래서 MME·SGW
+        # 재배치가 일어나지 않고 `s10_error_*` 구간이 데이터에 없다 —
+        # `handover` 머리말이 고치려던 문제가 그대로 남아 있었다.
+        #
+        # 지금은 **전환 여부를 먼저 정하고 종류를 `KIND_W` 로 뽑는다.**
+        # `pathswitch_attempt` 는 그대로 쓰되 의미가 "전환 시도"다 —
+        # 이름은 설정 호환을 위해 두고 뜻만 이 주석이 고정한다.
         p = bl.pathswitch_attempt.get(grp, 0.0)
-        if p <= 0.0 or rng.random() >= p:
+        kind = None
+        if p > 0.0 and rng.random() < p:
+            kind = self.ho_topo.pick_kind(cell, rng)
+
+        # ①-a **전환 상대를 먼저 확보한다.** 못 구하면 전환이 **일어나지
+        #      않은 것**이고, 그때 `PathSwitch` 만 적으면 "셀은 그대로인데
+        #      X2 가 있는" 레코드가 된다.
+        #
+        # 집계가 그것을 바로 잡아냈다(2026-10-28 · 15:40~15:45 재집계) —
+        #
+        #     HO_CNT 506 · HO_X2_CNT 741 · HO_INTER_CNT 0
+        #     → X2 가 전환보다 **많다**(146%). 파생 `S1 계열` 이 **음수**.
+        #
+        # 구 구현도 같은 순서였다. `PathSwitch` 가 전환의 **결과**인데
+        # 원인보다 먼저 적히던 자리다.
+        nb = self.ho_topo.target(cell, kind, rng) if kind else None
+        if kind is not None and nb is None:
+            kind = None
+
+        if kind == HO.HO_X2:
+            # **X2 에서만 `PathSwitchRequest` 가 있다.** 타겟 eNB 가 MME 로
+            # 직접 보내는 절차이고, S1 은 MME 가 중개하므로 그 메시지가
+            # 없다. 섹터 간은 eNB 안에서 끝난다(`handover` 머리말).
+            #
+            # 그 결과 `PathSwitch` 비율이 전환의 **30%**(`KIND_W[X2]`)로
+            # 줄어든다 — 실측 6.69% → 약 2% 이고, SC-09 가 기준으로 삼는
+            # *"평시 2%"* 와 맞는다(그 시나리오 주석).
+            ps = rng.randint(1, 3)
+            psf = 1 if rng.random() < bl.pathswitch_fail else 0
+            rec.set("PathSwitch_count", ps)
+            # 규칙 — `실패 ≤ 시도`. 넘으면 `PSF` 분모(`ps + psf`)와 분자가
+            # 어긋나 100% 넘는 실패율이 나온다
+            rec.set("PathSwitchFailure_count", min(psf, ps))
+
+        # ② 해제 Cause 가 핸드오버면 **셀이 반드시 바뀐다.** PathSwitch 쪽이
+        #    이미 종류를 정했으면 그것을 따른다 — Cause 를 다시 덮으면 ①의
+        #    분모가 흔들린다
+        if kind is None and rel in HO.HANDOVER_CAUSES:
+            # 한 Cause 가 여러 종류에 걸칠 수 있다(`102` 는 섹터 간도 eNB 간도
+            # 된다). 좁히지 않고 **그 후보들 사이에서 가중 추첨**한다
+            kind = self.ho_topo.pick_kind(
+                cell, rng, only=HO.KINDS_BY_REL.get(rel))
+            nb = self.ho_topo.target(cell, kind, rng) if kind else None
+
+        if kind is None or nb is None:
             return
-        ps = rng.randint(1, 3)
-        psf = 1 if rng.random() < bl.pathswitch_fail else 0
-        rec.set("PathSwitch_count", ps)
-        # 규칙 — `실패 ≤ 시도`. 넘으면 `PSF` 분모(`ps + psf`)와 분자가
-        # 어긋나 100% 넘는 실패율이 나온다
-        rec.set("PathSwitchFailure_count", min(psf, ps))
-        if rng.random() < 0.7:
-            pool = self.gen.cells_by_enb.get(cell.enb_id) or ()
-            if len(pool) > 1:
-                nb = pool[rng.randrange(len(pool))]
-                if nb is cell:
-                    nb = pool[0] if pool[0] is not cell else pool[1]
-                rec.set("Last_eNB_ID", nb.enb_id)
-                rec.set("Last_Cell_ID", nb.cell_id)
+
+        self._apply_handover(rec, cell, nb, kind, rel)
+
+    def _baseline_old_call(self, rec, call_type: str, cell: Cell,
+                           f: dict) -> None:
+        """직전 호 기록(`old_call_*`) — **지금까지 통째로 비어 있었다.**
+
+        ## 왜 채우나
+
+        둘이다.
+
+        ① **핸드오버-In 호는 어디서 왔는지가 있어야 한다.** `call_type 10`
+        (S1 Handover In)·`11` 은 이전 호가 이웃 셀에서 핸드오버 Cause 로 끝나고
+        그것을 이어받은 것이다. `old_call_Last_*` 가 비면 "넘어왔다"는 말만
+        있고 **어디서 넘어왔는지가 없다** — 셀 쌍 분석(`j-sc-15` 장표 9)이
+        U-Plane 쪽 자료만으로 서야 한다.
+
+        ② **`OLD_FAIL_CNT`·`OLD_SAME_IFACE` 의 분자가 여기서 생긴다.**
+        graphio `cell_agg` 가 `OLD_CALL_ERROR_CAUSE` 유무로 그 둘을 세는데
+        (`PM_COR_LTE_CALL_1M`), 생성기가 그 필드를 한 번도 쓰지 않아 **두
+        컬럼이 구조적으로 늘 0** 이었다. 0 은 "직전 호 실패가 없다"로 읽힌다 —
+        불변규칙 17 이 금지하는 형태이고, "같은 원인의 반복" 신호가 통째로
+        죽어 있었다.
+
+        ## 규칙
+
+        * 핸드오버 그룹(`_CT_GROUP == "handover"`) → 출발 셀은 **이웃**이다.
+          해제 사유는 핸드오버 Cause 이고 오류 기록은 없다(정상 전환).
+        * 그 밖에 **실패한 호** → `old_call_fail` 확률로 직전 호도 실패였다고
+          적는다. 그중 `old_call_same_iface` 는 **같은 구간**에서 실패한다.
+        * **성공한 호에는 오류 기록을 남기지 않는다.** 남기면 "직전 호가
+          실패인데 이 호는 성공"이 되고, 그건 재시도 성공이라 `OLD_FAIL_CNT`
+          의 뜻(실패 반복)과 어긋난다 — `cell_agg` 도 `SUCCESS_FLAG != 1` 을
+          조건에 달고 있다.
+        """
+        bl = self.baseline
+        rng = self.dist.rng
+        t0 = float(rec.get("call_start_time", "0.0") or 0.0)
+        grp = _CT_GROUP.get(call_type, "service")
+
+        if grp == "handover":
+            got = self.ho_topo.pick(cell, rng)
+            if got is None:
+                return
+            src, kind = got
+            rec.set("old_call_type", rng.choice(("3", "3", "3", "1", "5")))
+            rec.set("old_call_end_time", f"{t0 - rng.uniform(0.05, 0.6):.6f}")
+            rec.set("old_call_Last_eNB_ID", src.enb_id)
+            rec.set("old_call_Last_Cell_ID", src.cell_id)
+            rec.set("old_call_Last_TAC", src.tac)
+            rec.set("old_call_Last_eNB_PLMN", src.plmn)
+            rec.set("old_call_s1ap_release_cause",
+                    HO.REL_BY_KIND[kind][0])
+            # 정상 전환이다 — 오류가 아니다(불변규칙 6·7)
+            rec.set("old_call_error_interface_protocol", "0")
+            rec.set("old_call_error_cause", "0")
+            return
+
+        if not (f["att"] and not f["suc"]):
+            return
+        if rng.random() >= bl.old_call_fail:
+            return
+        iface, cause = self.dist.first_error()
+        if rng.random() < bl.old_call_same_iface:
+            # 같은 자리에서 또 막혔다 — `OLD_SAME_IFACE` 의 분자
+            iface = rec.get("first_error_interface_protocol") or iface
+        rec.set("old_call_type", call_type)
+        rec.set("old_call_end_time", f"{t0 - rng.uniform(0.2, 8.0):.6f}")
+        rec.set("old_call_Last_eNB_ID", cell.enb_id)
+        rec.set("old_call_Last_Cell_ID", cell.cell_id)
+        rec.set("old_call_Last_TAC", cell.tac)
+        rec.set("old_call_Last_eNB_PLMN", cell.plmn)
+        rec.set("old_call_error_interface_protocol", iface)
+        rec.set("old_call_error_cause", cause)
+
+    def _apply_handover(self, rec, src: Cell, dst: Cell, kind: str,
+                        rel: str) -> None:
+        """전환의 결과를 레코드에 적는다 — **한 자리에서 전부.**
+
+        흩어 두면 한쪽만 고쳐져 "셀은 바뀌었는데 VLAN 은 옛 셀" 같은 레코드가
+        남는다. 그건 에러가 아니라 조용히 틀린 값이다.
+
+        `Last_*` 가 전환 **후**다. 실 XDR 은 레코드에 장비 필드가 한 벌뿐이라
+        마지막 값이 남는다 — 그래서 `SGW_ID`·`MME_ID` 도 전환 후 값이다.
+        **셀 귀속이 First 냐 Last 냐는 집계가 정한다**(graphio
+        `cell_agg._cell_specs`) — 생성기는 둘을 다르게 적는 것까지가 일이다.
+        """
+        rng = self.dist.rng
+        rec.set("Last_eNB_ID", dst.enb_id)
+        rec.set("Last_Cell_ID", dst.cell_id)
+        rec.set("Last_eNB_VLAN_ID", dst.vlan_id)
+        rec.set("Last_eNB_PLMN", dst.plmn)
+
+        # `interval_First_*` — **그 Interim 구간이 시작된 셀**이다(§3.1.3).
+        # 이 레코드는 종료 레코드(`ONGOING_FLAG='2'`)이므로 마지막 구간이고,
+        # 전환이 그 구간 **안**에서 일어났으면 구간은 옛 셀에서 시작했다.
+        # 늘 First 로 두면 그 필드가 전환을 모르고, 늘 Last 로 두면
+        # Interim 셀 귀속을 검증할 자료가 안 된다.
+        t0 = float(rec.get("call_start_time", "0.0") or 0.0)
+        t1 = float(rec.get("call_end_time", "0.0") or 0.0)
+        iv_start = max(t0, t1 - 60.0)          # 마지막 1분 구간
+        t_ho = t0 + (t1 - t0) * rng.random()
+        iv = src if t_ho > iv_start else dst
+        rec.set("interval_First_eNB_ID", iv.enb_id)
+        rec.set("interval_First_Cell_ID", iv.cell_id)
+        rec.set("interval_First_eNB_C_UID", iv.c_uid)
+        rec.set("interval_First_TAC", iv.tac)
+        rec.set("interval_First_eNB_VLAN_ID", iv.vlan_id)
+        rec.set("interval_First_eNB_PLMN", iv.plmn)
+        rec.set("interval_call_start_time", f"{max(t0, iv_start):.6f}")
+
+        # 장비 재배치 — 종류가 정한다. `INTRA_ENB`·`X2` 는 코어가 그대로다
+        if kind in (HO.HO_S1, HO.HO_S1_MME):
+            rec.set("SGW_ID", dst.sgw_id)
+            rec.set("PGW_ID", dst.pgw_id)
+        if kind == HO.HO_S1_MME:
+            rec.set("MME_ID", dst.mme_id)
+            # MME 재배치는 S10 을 탄다. **오류가 아니라 절차다** — Cause 를
+            # 심지 않는다. 심으면 "성공인데 오류 기록 있음"이 되어 룰이
+            # 증상만 보고 발동한다(불변규칙 7)
+
+        # 해제 Cause 가 핸드오버가 아니면 손대지 않는다. **거꾸로 덮으면
+        # 안 된다** — 절단 호(`drop_flag=1`)의 Cause 를 정상 종료로 바꾸면
+        # 절단율이 조용히 내려간다
+        if rel not in HO.HANDOVER_CAUSES:
+            return
+        want = HO.REL_BY_KIND.get(kind)
+        if want and rel not in want:
+            # Cause 와 종류가 어긋났다 — Cause 를 종류에 맞춘다. 종류 쪽이
+            # 셀·장비 변경을 이미 레코드에 적었으므로 그쪽이 사실이다
+            rec.set("UEContextRelease_Cause", want[0])
 
     #: first_error_interface_protocol → 구간별 Cause 컬럼 접두어 (CD_IF_PROTO_CEI).
     _ERR_PREFIX = {"1": "s6a", "2": "s1ap", "3": "s11", "4": "s10",
@@ -2967,6 +3676,10 @@ SUPPORTED: tuple[str, ...] = (
     "SC-06", "SC-06b", "SC-07", "SC-08", "SC-09", "SC-10",
     "SC-11", "SC-12", "SC-13", "SC-13b", "SC-14", "SC-15",
     "SC-15b", "SC-16", "SC-17", "SC-18", "SC-19", "SC-20", "SC-21",
+    # 일본 시연 시나리오. **접두를 `J-` 로 가른다** — `g-sc` 25종은
+    # 기존 채점의 기준선이고(확정대장 §14.7) 번호를 이어 붙이면 둘이
+    # 섞여 "어느 쪽 회귀인지" 를 가를 수 없다.
+    "J-SC-16",
 )
 
 

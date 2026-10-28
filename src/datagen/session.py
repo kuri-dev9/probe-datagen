@@ -26,17 +26,34 @@
 데이터가 없다. **DNS 가 실패하면 그 세션의 TCP·HTTP 가 없다** — 이름을 못
 풀었으니 연결할 대상이 없다. 이 두 줄이 이 모델의 전부다.
 
-## 분 경계 — `ONGOINGFLAG`
+## 레코드를 끊는 자리 — `ONGOINGFLAG`
 
-세션은 분을 넘긴다. 분마다 한 줄씩 나오고 그 줄이 세션의 어느 지점인지를
-`ONGOINGFLAG` 가 말한다 (규격 / graphio `schema/codes.ONGOING_FLAG`).
+**한 줄이 세션 하나가 아니다.** 세션 안에서 "특정 메시지까지"를 한 줄로
+끊어 내고, 그 줄이 세션의 어디인지를 `ONGOINGFLAG` 가 말한다
+(규격 / graphio `schema/codes.ONGOING_FLAG`). 끊는 자리가 **넷**이다 —
 
-    5분 세션 (19:03 시작 → 19:07 종료)
-    19:03  0  Start      Traffic_Delta_* = 그 분의 증분
-    19:04  1  Interim           "
-    19:05  4  H/O Interim  ← 셀이 바뀌며 **이어진다** (불변규칙 6)
-    19:06  1  Interim           "
-    19:07  2  End        Traffic_Total_* = 세션 누적  ← 집계가 세는 레코드
+    세션이 열릴 때 1회 · 1분마다 1회 · 세션이 닫힐 때 1회
+    그리고 **셀이 바뀔 때 1회**  ← 핸드오버가 추가한 자리
+
+    5분 세션 (19:03 시작 → 19:07 종료 · 19:05:23 에 전환)
+    19:03     0  Start      SJK-041   Traffic_Delta_* = 그 구간의 증분
+    19:04     1  Interim    SJK-041          "
+    19:05:23  4  H/O        SJK-041   ← **떠난** 셀. 19:05:00~23 의 Delta
+    19:05:59  1  Interim    SJK-042   ← 새 셀. 19:05:23~59 의 Delta
+    19:06     1  Interim    SJK-042          "
+    19:07     2  End        SJK-042   Traffic_Total_* = 세션 누적 ← 집계가 센다
+
+**핸드오버 분만 두 줄이다.** 분 경계를 기다리면 안 된다 — 한 줄에는 셀이
+하나뿐이라, 전환 전후를 한 줄에 담으면 **한쪽 셀의 양이 다른 셀로 넘어간다.**
+이동이 잦은 구간에서 그 오차는 상쇄되지 않고 한쪽으로 쌓인다.
+
+세션은 끊지 않는다 — 두 줄 다 같은 `SessionID` 이고 `End` 는 한 번뿐이라
+**집계가 세는 수는 변하지 않는다**(불변규칙 6).
+
+**`4` 는 규격서에 없는 Graphio 확장이다.** 규격은 Transport·DNS 가
+`0·1·2·20`, HTTP 가 `3 : Http Interim` 까지다. 운영 프로브가 주지 않을
+가능성이 크므로 집계 쪽에 폴백(연속 Interim 의 셀 변화)을 함께 둔다 —
+근거와 요청서는 graphio `docs/jp/XDR규격-확장항목.md` §1.
 
 **집계는 `{2, 20}` 만 센다**(graphio `schema/codes.COUNTED_ONGOING_FLAGS`).
 그래서 `Total` 과 `Delta` 의 뜻이 갈린다 — 종료 레코드의 `Total` 이 세션 전체를
@@ -77,6 +94,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from .cells import Cell
+from .handover import HO_INTRA, HO_S1, HO_S1_MME, Topology, kind_of
 from .generator import USER_FIELDS, diurnal_factor
 from .scenarios import Plan, Rec
 
@@ -87,7 +105,25 @@ from .scenarios import Plan, Rec
 F_START = "0"
 F_INTERIM = "1"
 F_END = "2"
-F_HO = "4"              #: H/O Interim — 셀이 바뀌며 세션이 **이어진다**
+#: **내부 표시일 뿐 레코드에 나가지 않는다** (2026-10-28 · 사용자 결정).
+#:
+#: 셀이 바뀌는 순간 레코드를 끊는 것은 그대로다 — 한 줄에 셀이 하나라
+#: 전환 전후를 한 줄에 담으면 **떠나는 셀이 과소, 들어오는 셀이 과대**가
+#: 된다(§1.2). 바뀐 것은 **그 줄에 `4` 를 적지 않는다**는 것이다.
+#:
+#: > *"XDR 은 내용을 판단해서 정리하는 게 아냐. 그냥 있던 사실을 적는
+#: > 거야. 근데 ongoing=4 를 어떻게 알꺼야."*
+#:
+#: 프로브는 셀이 바뀐 **사실**은 안다(패킷의 eNB ID 가 바뀐다). 그러나
+#: *"이 Interim 은 핸드오버 때문이다"* 는 **판단**이고, 그 판단에 필요한
+#: 것(S1AP/X2AP 제어 메시지)이 U-Plane 관측점에 없다. `4` 는 관찰이
+#: 아니라 추정이다 — §1.4 가 *"추정으로 채우지 않는다"* 고 적은 원칙이
+#: 폴백보다 **그 값 자체에 먼저** 걸린다.
+#:
+#: 그래서 끊은 줄도 규격 안의 `1 Interim` 으로 나간다. 규격서가 아는
+#: 값만 쓰므로 **원본과 가장 유사해진다.** 핸드오버 관측은 C-Plane 이
+#: 한다(`PathSwitch_count` · 해제 Cause · `First != Last` 셀).
+_SPLIT_AT_HO = "\x00ho"
 F_SINGLE = "20"         #: Start/End — 1분 안에 끝난 세션(한 줄)
 
 #: 집계가 세는 값. graphio `codes.COUNTED_ONGOING_FLAGS` = {2, 20} 와 짝이고
@@ -314,6 +350,40 @@ class Session:
     ho_at: int                  #: 핸드오버가 일어나는 분 오프셋 (-1 없음)
     http_left: int              #: 남은 HTTP 트랜잭션 수
     domain: str                 #: HTTP Host — 세션 하나는 한 도메인을 본다
+    #: 핸드오버가 **실제로 일어난 시각**(epoch). 분 경계가 아니다 — 그래서
+    #: 그 분의 HTTP 레코드를 전후로 갈라 셀에 귀속할 수 있다. `-1.0` 은
+    #: "이 분에 핸드오버가 없다". **매 분 초기화한다** — 남겨 두면 다음 분의
+    #: HTTP 가 이미 떠난 셀로 들어간다.
+    ho_t: float = -1.0
+    #: 이번 분 전환의 종류(`handover.HO_*`). 빈 문자열은 전환 없음. 세션이
+    #: `S1` 을 겪었으면 그 뒤 레코드의 `SGW_ID` 가 바뀐다 — 어느 종류였는지
+    #: 모르면 그 변화가 버그처럼 보인다.
+    ho_kind: str = ""
+    #: 세션이 들고 다니는 코어 장비 `(MME, SGW, PGW)`. **셀에서 매번 읽지
+    #: 않는다** — 그러면 X2 핸드오버(코어 재배치 없음)에서도 장비가 바뀐다.
+    #: `S1`·`S1_MME` 전환에서만 갈린다.
+    core: tuple[int, int, int] = (0, 0, 0)
+    #: **현재 장비가 이 세션을 보기 시작한 지점**(세션 누적의 비율).
+    #:
+    #: XDR 은 SGW·MME 단위로 생성된다. 그래서 장비가 재배치되면 **그 장비는
+    #: 이 세션을 처음 본다** — 누적(`Traffic_Total_*`)이 거기서 0 부터 다시
+    #: 시작한다(사람 확인 2026-10-27).
+    #:
+    #: `0.0` 이면 세션 시작부터 같은 장비가 보고 있다. `S1`·`S1_MME` 전환에서
+    #: 그 분의 비율로 올라간다 — `INTRA_ENB`·`X2` 는 장비가 그대로라 올리지
+    #: 않는다.
+    base: float = 0.0
+    #: 현재 장비가 보기 시작한 **시각**(epoch). `Traffic_Total_*_FirstTime`
+    #: 이 이 값이다 — 세션 시작이 아니다.
+    base_t: float = 0.0
+    #: 가입자 인덱스. `-1` 은 **고정 가입자이거나 되찾지 못한 경우**다.
+    #: 이동 가입자면 전환이 추첨이 아니라 **그 사람의 위치**를 따른다.
+    sub_i: int = -1
+    #: 세션이 시작된 **여정 회차**. 가입자가 재승차하면 회차가 올라가고,
+    #: 그때부터 이 세션은 경로를 따르지 않는다 — 재승차는 하차 칸에서 승차
+    #: 칸으로 돌아가는 것이고 그 둘은 인접하지 않다. 따라가게 두면 **인접하지
+    #: 않은 셀로 순간이동한 핸드오버**가 나온다.
+    trip: int = 0
 
 
 # --------------------------------------------------------------------------
@@ -400,12 +470,12 @@ class SessionEngine:
         #: 수는 그대로라 **에러도 집계 차이도 없이 파일만 1.5배** 커진다.
         self._span_p = geom_p(self.shape.span_mean - 1.0,
                               self.shape.span_max - 1)
-        #: eNB 별 셀 목록 — 핸드오버가 **이웃 셀**로 가야 한다. 다른 eNB 로
-        #: 보내면 한 세션이 두 노드(MME/SGW)를 타게 되어 노드 축 집계가 세션
-        #: 안에서 갈린다.
-        self._by_enb: dict[str, list[Cell]] = {}
-        for c in gen.cells:
-            self._by_enb.setdefault(c.enb_id, []).append(c)
+        #: 전환 토폴로지 — 섹터 간 + **인접 eNB**. 전에는 같은 eNB 안에서만
+        #: 골랐고, 그러면 장비 ID 와 TAC 가 **구조적으로** 바뀔 수 없었다
+        #: (셀 마스터 실측: 같은 eNB 안 장비 갈림 0 · TAC 갈림 0). 노드 축이
+        #: 세션 안에서 갈리는 것은 `S1`·`S1_MME` 뿐이고, 실 XDR 도 레코드에
+        #: 장비 필드가 한 벌뿐이라 전환 후 값이 남는다 — `handover` 머리말.
+        self.ho_topo = Topology(gen.cells)
 
         #: 필드 인덱스 캐시. 분당 수만 레코드를 도는 자리에서 이름으로 쓰면
         #: 호출마다 dict 조회가 붙는다(설계 §5.1).
@@ -721,6 +791,13 @@ class SessionEngine:
         return Session(
             sid=sid, cell=call.cell, user=call.user, const=tuple(const),
             traffic=tuple(traffic), plain=plain, apn=call.apn,
+            core=(call.cell.mme_id, call.cell.sgw_id, call.cell.pgw_id),
+            base_t=t0,
+            # IMSI 로 되찾는다 — `Call` 은 가입자 객체를 들고 오지 않는다
+            # (메모리 이유, `Call` 머리말). 뮤테이터가 IMSI 를 바꿨으면
+            # 못 찾고 `-1` 이 되는데, 그때는 고정 가입자처럼 돈다
+            sub_i=(si := gen.sub_by_imsi.get(call.user[0], -1)),
+            trip=(gen.subs[si].trip if si >= 0 else 0),
             t0=t0, t_end=t0 + (span - 1) * 60.0 + rng.random() * 55.0,
             span=span, i=0, outcome=call.outcome, ho_at=ho, http_left=m,
             domain=smp.domain() if smp is not None else "",
@@ -728,7 +805,8 @@ class SessionEngine:
 
     # -- 레코드 ----------------------------------------------------------
 
-    def _slice(self, s: Session, flag: str, t: float) -> list[str]:
+    def _slice(self, s: Session, flag: str, t: float,
+               cell: Cell | None = None) -> list[str]:
         """세션의 한 분 transport 레코드 — **프로파일을 다시 뽑지 않는다.**
 
         같은 세션의 레코드는 앱·QCI·MSS·도메인이 같아야 하고(`TRANSPORT_CONST`),
@@ -745,69 +823,130 @@ class SessionEngine:
             vals[i] = v
         for i, v in zip(self._i_const, s.const):
             vals[i] = v
-        cell = s.cell
+        if cell is None:
+            cell = s.cell
         (i_time, i_flag, i_sid, i_created, i_sgw, i_pgw, i_mme,
          i_enb, i_cell) = self._i_head
         vals[i_time] = f"{t:.6f}"
         vals[i_flag] = flag
         vals[i_sid] = s.sid
         vals[i_created] = f"{s.t0:.6f}"
-        vals[i_sgw] = cell.sgw_id
-        vals[i_pgw] = cell.pgw_id
-        vals[i_mme] = cell.mme_id
+        # 코어는 세션 것이다 — `s.core` 머리말
+        vals[i_mme], vals[i_sgw], vals[i_pgw] = s.core
         vals[i_enb] = cell.enb_id
         vals[i_cell] = str(cell.cell_id)
         return vals
 
     def _emit(self, ts: datetime, slot: float, s: Session,
               out: dict, mutate) -> None:
-        """세션의 이번 분 레코드를 낸다 — transport 1줄 + HTTP 0~m줄."""
+        """세션의 이번 분 레코드를 낸다 — transport 1~2줄 + HTTP 0~m줄.
+
+        **핸드오버 분만 transport 가 두 줄이다.** 셀이 바뀌는 순간 거기까지를
+        한 줄로 닫고(이전 셀) 나머지를 새 셀로 잇는다. 세션은 끊지 않는다 —
+        같은 `SessionID` 이고 `End` 는 여전히 한 번이다. 근거는 그 분기의 주석.
+        """
         gen = self.gen
         rng = self.rng
         i = s.i
         s.i += 1
         last = s.i >= s.span
 
+        # **이동 가입자는 전환을 추첨하지 않는다.** 그 사람이 지금 있는 셀이
+        # 세션이 쓰던 셀과 다르면 **움직인 것이고, 그래서 전환이 일어난다.**
+        # 추첨으로 두면 같은 사람이 한 분에는 A→B, 다음 분에는 B→A 반대쪽
+        # 으로 가 궤적이 이어지지 않는다(`handover` 의 Route 머리말).
+        here, mobile = (self._route_cell(s) if 0 < i < s.span
+                        else (None, False))
+        moved = here if (here is not None and here is not s.cell) else None
+
         if s.span == 1:
             flag = F_SINGLE
         elif i == 0:
             flag = F_START
-        elif last:
+        elif last and moved is None:
             flag = F_END
-        elif i == s.ho_at:
-            flag = F_HO
+        elif moved is not None or (not mobile and i == s.ho_at):
+            # **이동 중이면 `ho_at` 을 보지 않는다.** `ho_at` 은 해제 Cause 가
+            # 핸드오버면 `Shape.handover` 와 무관하게 켜지는데, 그때 추첨으로
+            # 상대를 고르면 **경로 밖 셀로 간다** — 실측으로 26,452건 중 4건이
+            # 그렇게 궤적을 벗어났다. 움직이는 사람의 전환 근거는 경로 하나다.
+            flag = _SPLIT_AT_HO
         else:
             flag = F_INTERIM
 
-        # 핸드오버 — **세션을 끊지 않는다.** 셀만 바꿔 이어간다(불변규칙 6).
-        # 끊어 버리면 이동이 잦은 지역의 서비스품질이 상시 나쁘게 나오고,
-        # C-Plane 에서 막아 둔 함정을 U-Plane 에서 다시 만드는 꼴이 된다.
-        if flag == F_HO:
-            s.cell = self._neighbour(s.cell)
-
         t = s.t_end if last else min(slot + 59.0, s.t_end)
-        vals = self._slice(s, flag, t)
-
-        # 누적분을 분 단위로 쪼갠다. 끝 분에서 `now = 1.0` 이므로 **종료
-        # 레코드의 `Total` 은 세션 총량 그대로**다 — 집계가 세는 값이다.
         prev = i / s.span
         now = 1.0 if last else (i + 1) / s.span
-        for (i_tot, i_del), v in zip(self._i_traffic, s.traffic):
-            tot = int(v * now)
-            vals[i_tot] = str(tot)
-            vals[i_del] = str(tot - int(v * prev))
-        for j, v in zip(self._i_plain, s.plain):
-            vals[j] = str(int(v * now))
-        # 양(量)의 관측 구간. `Total` 은 세션 시작부터, `Delta` 는 이 분부터다.
-        t_s, t_now = f"{s.t0:.6f}", f"{t:.6f}"
-        d_s = f"{max(s.t0, slot):.6f}"
-        for k, (i_first, i_last) in enumerate(self._i_times):
-            vals[i_first] = t_s if k < 2 else d_s
-            vals[i_last] = t_now
+        # **매 분 초기화한다.** 남겨 두면 다음 분의 HTTP 가 이미 떠난 셀로
+        # 들어가고, 그것은 에러가 아니라 틀린 셀 귀속으로만 나타난다.
+        s.ho_t = -1.0
+        s.ho_kind = ""
+        before = s.cell
 
-        if mutate is not None:
-            mutate("transport", Rec(vals, gen.index["transport"], "transport"), s.cell)
-        out["transport"].append(vals)
+        if flag != _SPLIT_AT_HO:
+            self._put(out, mutate, s, flag, t, prev, now, slot, s.cell)
+        else:
+            # 핸드오버 — **분 경계가 아니라 사건 시각에 레코드를 끊는다.**
+            #
+            # XDR 은 "세션 안에서 특정 메시지까지"를 한 줄로 낸다. 그 끊는
+            # 자리가 지금까지 셋이었다(시작 · 분 경계 · 종료). 핸드오버가
+            # **넷째 끊는 자리**다 — 셀이 바뀌는 순간 거기까지를 한 줄로
+            # 닫아야 그 양이 **어느 셀에서 흘렀는지**가 정해진다.
+            #
+            # 분 경계로 미루면 전환 전후의 트래픽이 한 줄에 섞이고, 그 줄은
+            # 셀이 하나뿐이므로 **한쪽 셀의 양이 다른 셀로 넘어간다.** 이동이
+            # 잦은 구간에서 그 오차가 체계적으로 쌓인다.
+            #
+            # 세션은 **끊지 않는다.** 두 줄 다 같은 `SessionID` 이고 뒤 줄이
+            # 이어받는다(불변규칙 6). `End` 는 여전히 한 번뿐이다.
+            # **이웃이 없으면 핸드오버가 아니다.** 그걸 무시하고 같은 셀로
+            # `flag=4` 를 내면 집계가 **일어나지 않은 전환**을 센다 — Q-08 이
+            # 부푼다(옛 구현 실측: 4,754건 중 509건 = 10.7%).
+            # 경로가 말한 셀이 있으면 그것이 상대다. 종류는 **셀 마스터가
+            # 정한다**(`kind_of`) — 같은 쌍의 전환이 호마다 다른 종류로
+            # 나오면 셀 쌍 표가 "이 쌍은 이런 전환"이라고 말할 수 없다
+            got = ((moved, kind_of(before, moved)) if moved is not None
+                   else self._neighbour(before))
+            if got is None:
+                self._put(out, mutate, s, F_INTERIM, t, prev, now,
+                          slot, before)
+                return
+            after, s.ho_kind = got
+
+            t_ho = max(s.t0 + 0.1,
+                       min(slot + rng.uniform(5.0, 54.0), t))
+            mid = prev + (now - prev) * ((t_ho - max(s.t0, slot))
+                                         / max(1e-6, t - max(s.t0, slot)))
+            mid = min(max(mid, prev), now)
+
+            # ① 전환 **이전** 셀. 스펙 §4.2 가 그렇게 정했다 — 끊긴 자리는
+            #    떠난 셀이고, 새 셀에 적으면 원인이 한 칸 뒤로 밀린다.
+            # **`1 Interim` 으로 나간다** — `4` 는 적지 않는다(위 상수).
+            self._put(out, mutate, s, F_INTERIM, t_ho, prev, mid, slot, before)
+
+            # ② 새 셀로 이어진다. 마지막 분이면 `End` 지만 `ho_at` 이
+            #    `span-2` 이하라 실제로는 `Interim` 이다(방어적으로 둔다).
+            # **코어 재배치는 전환 뒤에 적는다.** 앞 줄(`flag=4`)은 떠난
+            # 셀의 호 이므로 옛 장비를 싣는다 — 여기서 갈면 두 줄이 같은
+            # 값을 갖고, 재배치가 **일어났는지 알 수 없어진다.**
+            #
+            # 종류가 정한다. 새 셀의 마스터 값을 무조건 쓰면 X2 에서도
+            # MME·SGW 가 바뀐다 — 그렇게 두었을 때 전환 4,773건 중 1,634건이
+            # MME 를 갈았다(틀린 쪽. X2 는 코어 재배치가 없다).
+            if s.ho_kind == HO_S1:
+                s.core = (s.core[0], after.sgw_id, after.pgw_id)
+            elif s.ho_kind == HO_S1_MME:
+                s.core = (after.mme_id, after.sgw_id, after.pgw_id)
+            if s.ho_kind in (HO_S1, HO_S1_MME):
+                # **새 장비는 이 세션을 처음 본다.** XDR 이 SGW·MME 단위로
+                # 생성되므로 누적이 거기서 0 부터 다시 시작한다(`Session.base`).
+                # `INTRA_ENB`·`X2` 는 장비가 그대로라 리셋하지 않는다 —
+                # 리셋하면 같은 프로브가 자기가 센 것을 잊는 셈이 된다.
+                s.base, s.base_t = mid, t_ho
+            s.cell = after
+            self._put(out, mutate, s, F_END if last else F_INTERIM,
+                      t, mid, now, t_ho, s.cell)
+            s.ho_t = t_ho
 
         # HTTP — 남은 트랜잭션을 남은 분에 나눠 흘린다
         if s.http_left:
@@ -820,8 +959,12 @@ class SessionEngine:
                 # TCP 가 선 **뒤**에 요청한다 — 순서가 뒤집히면 call flow 가
                 # 아니다. 분 안에서는 무작위로 흩뿌린다.
                 th = max(s.t0 + 0.25, min(slot + rng.random() * 59.0, t))
-                h = gen.uplane_rec("http", ts, 1.0, s.cell, th, s.user,
-                                   s.apn, F_SINGLE, s.sid, domain=s.domain)
+                # 핸드오버가 있던 분이면 **그 시각 전의 요청은 떠난 셀**이다.
+                # `s.cell` 하나로 다 적으면 전환 전 트래픽이 새 셀로 넘어간다.
+                hc = before if (s.ho_t > 0 and th < s.ho_t) else s.cell
+                h = gen.uplane_rec("http", ts, 1.0, hc, th, s.user,
+                                   s.apn, F_SINGLE, s.sid, domain=s.domain,
+                                   core=s.core)
                 if s.outcome == OUT_ABORT:
                     # U 에 의한 종료 — 요청은 갔는데 응답이 없다(§3).
                     # `U-26`(HTTP 무응답률)이 이것을 집는다. `U-23` 의 분모는
@@ -829,18 +972,105 @@ class SessionEngine:
                     h.set("ResponseTime", "0.0")
                     h.set("StatusCode", "0")
                 if mutate is not None:
-                    mutate("http", h, s.cell)
+                    mutate("http", h, hc)
                 out["http"].append(h.values)
 
-    def _neighbour(self, cell: Cell) -> Cell:
-        """같은 eNB 의 다른 셀. 없으면 그대로 둔다.
+    def _put(self, out: dict, mutate, s: Session, flag: str, t: float,
+             f_prev: float, f_now: float, d_start: float, cell: Cell) -> None:
+        """transport 한 줄을 낸다 — 누적 비율 `f_prev`→`f_now` 구간.
 
-        다른 eNB 로 보내지 않는 이유는 `_by_enb` 주석에 있다. 섹터 간
-        핸드오버만 만든다 — PoC 가 검증해야 하는 것은 "셀이 바뀌어도 세션이
-        이어진다"이고 거기에는 충분하다.
+        **`_emit` 에서 떼어낸 이유는 핸드오버 분에 두 번 불러야 하기
+        때문이다.** 전에는 "한 분 = 한 줄"이라 이 계산이 `_emit` 안에 있었다.
+
+        `f_prev`·`f_now` 는 세션 누적의 비율이다. 분 경계에서는
+        `i/span`→`(i+1)/span` 이고, 핸드오버로 쪼갠 분에서는 그 사이의
+        `mid` 가 들어온다. **두 줄의 Delta 합이 쪼개기 전의 한 줄과 같다.**
+
+        `Total` 은 **`s.base` 부터** 센다. XDR 은 SGW·MME 단위로 생성되므로
+        장비가 재배치되면 그 장비는 이 세션을 처음 보고, 누적이 0 부터 다시
+        시작한다(`Session.base`). 그래서 **장비가 바뀐 세션의 종료 레코드
+        `Total` 은 세션 전체가 아니다** — 재배치 뒤 구간만이다. 집계가 그
+        조각을 이어 붙이는 것은 통계 쪽 일이다(사람 결정 2026-10-27).
+
+        `d_start` 는 **Delta 관측 구간의 시작**이다. 분 경계 줄은 분 시작,
+        핸드오버 뒤 줄은 전환 시각이다. `Total` 쪽은 **현재 장비가 보기
+        시작한 시각**이다.
         """
-        pool = self._by_enb.get(cell.enb_id)
-        if not pool or len(pool) < 2:
-            return cell
-        other = pool[self.rng.randrange(len(pool))]
-        return other if other is not cell else pool[0]
+        vals = self._slice(s, flag, t, cell)
+        # **누적은 `base` 부터다** — 현재 장비가 보기 시작한 지점. Delta 는
+        # 구간 증분이라 `base` 와 무관하다(앞뒤 차이로 구한다)
+        b = s.base
+        for (i_tot, i_del), v in zip(self._i_traffic, s.traffic):
+            # **둘을 같은 절단 급수의 차이로 구한다.** `int(v*(f-b))` 와
+            # `int(v*f) - int(v*b)` 는 최대 1 씩 어긋나고, 그 오차가 레코드
+            # 수만큼 쌓여 `Σ Delta == Total` 이 깨진다(실측 0.96%).
+            cum = int(v * f_now)
+            vals[i_tot] = str(cum - int(v * b))
+            vals[i_del] = str(cum - int(v * f_prev))
+        for j, v in zip(self._i_plain, s.plain):
+            vals[j] = str(int(v * f_now) - int(v * b))
+        # 양(量)의 관측 구간. `Total` 은 **현재 장비가 보기 시작한 시각**부터,
+        # `Delta` 는 이 줄부터다.
+        t_s, t_now = f"{max(s.t0, s.base_t):.6f}", f"{t:.6f}"
+        d_s = f"{max(s.t0, d_start):.6f}"
+        for k, (i_first, i_last) in enumerate(self._i_times):
+            vals[i_first] = t_s if k < 2 else d_s
+            vals[i_last] = t_now
+        if mutate is not None:
+            mutate("transport",
+                   Rec(vals, self.gen.index["transport"], "transport"), cell)
+        out["transport"].append(vals)
+
+    def _route_cell(self, s: Session) -> tuple[Cell | None, bool]:
+        """`(따를 셀, 이동 가입자인가)`.
+
+        둘을 함께 돌려주는 이유: "따를 셀이 없다"에 **두 가지 뜻**이 있다.
+
+        | 셀 | 이동 | 뜻 | 전환 |
+        | --- | --- | --- | --- |
+        | 있음 | True | 경로 위에 있다 | 그 셀로 |
+        | None | False | 고정 가입자이거나 IMSI 미해결 | 추첨 허용 |
+        | None | **True** | **지난 회차의 세션** | **금지** |
+
+        셋째를 둘째와 같이 다루면 그 세션이 추첨 전환을 하고, 상대가 하필
+        경로 위의 먼 칸이면 **인접하지 않은 셀로 순간이동한 레코드**가 남는다
+        (실측 4만 전이 중 1건이 그렇게 새어 나갔다). 그 세션은 마지막 셀에
+        머문 채 끝나야 한다 — 소유자는 이미 다음 통행을 시작했다.
+        """
+        if s.sub_i < 0:
+            return None, False
+        sub = self.gen.subs[s.sub_i]
+        if sub.route < 0:
+            return None, False
+        if sub.trip != s.trip:
+            return None, True
+        return self.gen.cell_of(sub), True
+
+    def _neighbour(self, cell: Cell) -> tuple[Cell, str] | None:
+        """전환 상대와 종류. **없으면 `None` — 호출부가 전환을 취소한다.**
+
+        전에는 상대가 없으면 **같은 셀을 돌려줬다.** 그러면 셀이 그대로인
+        `flag=4` 레코드가 생기고(실측 10.7%) 집계가 그것을 일어나지 않은
+        전환으로 센다 — Q-08 이 부푼다. 그래서 "없음"을 값으로 말한다.
+
+        종류에 따라 `Cell` 이 들고 있는 `mme_id`·`sgw_id`·`pgw_id`·`tac` 가
+        함께 바뀌고, `_slice` 가 그것을 레코드에 싣는다. **장비 ID 변경이
+        따로 구현되는 것이 아니라 셀을 바꾸면 따라온다.**
+
+        ## 노선을 타지 않는 가입자는 **섹터 전환만** 한다
+
+        `INTRA_ENB` 로 제한한다 — 같은 사이트의 다른 섹터다. 그래서 eNB·TAC·
+        MME·SGW 가 **바뀌지 않는다**(셀 마스터 실측: 같은 eNB 안 장비 갈림 0 ·
+        TAC 갈림 0 · §1.6).
+
+        왜: 그 사람은 움직이고 있지 않다. 집·사무실에서 통신하는 중이고,
+        전환이 난다면 섹터 경계에 걸쳐 있기 때문이다. 거기에 eNB 간 전환을
+        주면 **장비가 옮겨 가고 TAU 까지 따라붙는다** — 이동하지 않는 사람에게
+        그건 사실이 아니고, 그 TAU 가 TAU 성공률의 분모를 채워 "이동이 많은
+        망"으로 보이게 한다(2026-10-27 사람 결정).
+
+        eNB 간 전환과 코어 재배치는 **경로를 타는 가입자**의 것이다
+        (`_route_cell` 쪽 갈래). 노선을 타지 않는 사람의 장거리 이동이
+        필요해지면 그때 별 기능으로 둔다 — 지금 섞으면 둘을 가를 수 없다.
+        """
+        return self.ho_topo.pick(cell, self.rng, only=(HO_INTRA,))

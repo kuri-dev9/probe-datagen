@@ -23,6 +23,7 @@ graphio-probe-rca `docs/XDR-FAULT-SCENARIOS-V3.md` 가 정본이고, 여기서�
 
 from __future__ import annotations
 
+import collections
 import random
 from datetime import datetime
 from pathlib import Path
@@ -1209,3 +1210,221 @@ def test_fault_dns_does_set_retry(gen):
             retried += 1
     assert hit >= 20
     assert retried == hit, f"{hit}건 중 {retried}건만 재시도가 섰다"
+
+
+def test_ramp_rise_follows_ramp_in_not_duration():
+    """`RAMP` — 상승 시간은 `ramp_in` 이 정한다. **`duration` 과 무관하다.**
+
+    2026-10-27 교정 전에는 `duration * 0.6` 이었다. 30분짜리를 주입하면
+    **18분 동안 거의 무증상**이라, 장애를 넣고도 화면에 아무것도 안 나왔다
+    (실측: 10분 경과 시점 누적 인증 실패 0.7%). 지속시간과 악화속도는
+    다른 축이다 — 장비가 죽는 사건은 오래 간다고 천천히 나빠지지 않는다.
+
+    `ramp_in` 필드는 그때도 있었고 STEP 계열만 쓰고 있었다.
+    """
+    for dur in (10, 20, 30):
+        sc = _sc("s6a_undetermined", duration=dur)
+        assert sc.ramp_in == 3, "RAMP 기본 상승은 3분이다"
+        # 길이가 달라도 같은 자리에서 피크에 닿는다
+        assert sc.intensity(2) == pytest.approx(sc.peak), f"duration={dur}"
+        assert sc.intensity(0) < sc.intensity(1) < sc.intensity(2)
+
+
+def test_ramp_reaches_peak_even_when_short():
+    """짧은 장애도 피크에 닿아야 한다 — `ramp_in` 이 `duration` 을 넘지 않는다.
+
+    `duration=5` 는 교정 전 곡선(`5*0.6=3`)과 **완전히 같다.** 배치 생성은
+    8~28분(`build_scenarios` 의 `dur`)을 쓰므로 그쪽만 빨라진다.
+    """
+    sc = _sc("s6a_undetermined", duration=5)
+    assert [sc.intensity(m) for m in range(5)] == [
+        pytest.approx(1 / 3), pytest.approx(2 / 3), pytest.approx(1.0),
+        pytest.approx(2 / 3), pytest.approx(1 / 3),
+    ]
+
+
+def test_ramp_recovery_stays_short_regardless_of_length():
+    """회복은 길이와 무관하게 마지막 2분이다 — 상승도 이제 비대칭이 아니다."""
+    for dur in (10, 30):
+        sc = _sc("s6a_undetermined", duration=dur)
+        assert sc.intensity(dur - 1) < sc.intensity(dur - 2) < sc.peak
+        assert sc.intensity(dur) == 0.0
+
+
+# --------------------------------------------------------------------------
+# `j-sc-16` 「アンテナは立つが遅い」 — anchor_saturation
+# --------------------------------------------------------------------------
+
+
+def _anchor_plan(payload=1_000_000.0, thr=2_000_000.0, retrans=50.0,
+                 paypkt=10_000.0, rtt=30_000.0):
+    """`anchor_saturation` 에 넘길 세션 총량."""
+    return SC.Plan(
+        {
+            "Traffic_Total_Dnlink_PayloadSize": payload,
+            "Traffic_Total_Dnlink_ThroughputTime": thr,
+            "Traffic_Total_Dnlink_RetransPacketCount": retrans,
+            "Traffic_Total_Dnlink_PayloadPacketCount": paypkt,
+            "Traffic_Total_Uplink_PayloadSize": payload / 4,
+            "Traffic_Total_Uplink_ThroughputTime": thr / 4,
+            "Traffic_Total_Uplink_RetransPacketCount": retrans,
+            "Traffic_Total_Uplink_PayloadPacketCount": paypkt / 4,
+            "DnlinkRTTTime": rtt,
+            "UplinkRTTTime": rtt,
+        },
+        {}, "normal", 3,
+    )
+
+
+class _Cell:
+    cell_key = "1234-5"
+
+
+class _Sc:
+    active_cells_cache = {"1234-5"}
+
+
+def test_anchor_saturation_drops_throughput_only():
+    """**처리율만 떨어뜨린다.**
+
+    `U-15 = PayloadSize / ThroughputTime` 이므로 분자만 줄인다. 분모를 함께
+    줄이면 비율이 그대로라 `g-sc-16` 의 docstring 이 적은 함정에 빠진다.
+    """
+    fn = SC.PLAN_MUTATORS["anchor_saturation"]
+    plan = _anchor_plan()
+    before = (plan.get("Traffic_Total_Dnlink_PayloadSize")
+              / plan.get("Traffic_Total_Dnlink_ThroughputTime"))
+    assert fn(plan, _Sc(), 1.0, random.Random(0), _Cell())
+    after = (plan.get("Traffic_Total_Dnlink_PayloadSize")
+             / plan.get("Traffic_Total_Dnlink_ThroughputTime"))
+    assert after < before * 0.7, f"{before} → {after}"
+    assert plan.get("Traffic_Total_Dnlink_ThroughputTime") == 2_000_000.0
+
+
+def test_anchor_saturation_leaves_the_signals_r39_requires_normal():
+    """**`R-39` 가 "정상" 을 요구하는 것들을 건드리지 않는다.**
+
+    그 룰은 재전송(`U-12`)·RTT(`U-09`)·up 축이 **정상일 때만** 발동한다.
+    하나라도 올리면 `R-09`(`TRANSPORT_LOSS`)와 경쟁하고, 경쟁에서 지든
+    이기든 §9.4 가 경계한 "같은 증거에서 두 원인" 이 된다.
+    """
+    fn = SC.PLAN_MUTATORS["anchor_saturation"]
+    plan = _anchor_plan()
+    keep = {k: plan.get(k) for k in plan.totals
+            if "Uplink" in k or "Retrans" in k or k.endswith("RTTTime")}
+    fn(plan, _Sc(), 1.0, random.Random(0), _Cell())
+    for k, v in keep.items():
+        assert plan.get(k) == v, f"{k} 가 움직였다: {v} → {plan.get(k)}"
+
+
+def test_anchor_saturation_never_touches_the_nr_leg():
+    """**`initial_nr_conn_time` 을 건드리지 않는다** — `R-33` 과의 배타성.
+
+    그 값이 `0` 이 되면 `N-02` 가 떨어져 `R-33` 이 깨어난다. 그리고 SA
+    관점에서 `= 0` 은 **다른 시나리오**(`j-sc-17` 폴백)의 것이다
+    (확정대장 §9.8.1).
+
+    `plan_mutator` 는 C-Plane 필드에 손이 닿지 않지만, 누가 `MUTATORS`
+    쪽에 짝을 추가하면 조용히 깨진다 — 소스에서 직접 막는다.
+    """
+    import inspect
+
+    # docstring 안에서는 그 이름을 **설명하므로** 본문만 본다.
+    body = inspect.getsource(SC._anchor_saturation).split('"""')[2]
+    assert "nr_conn" not in body, body
+    assert "anchor_saturation" not in SC.MUTATORS, (
+        "C-Plane mutator 가 생겼다 — NR 레그를 건드리는지 다시 본다"
+    )
+
+
+def test_anchor_saturation_skips_stalled_sessions():
+    """`OUT_STALL` 은 제외한다 (V3 §7.2).
+
+    그 세션은 이미 재전송이 8~20배라 `U-12` 가 움직이고, 그러면 `R-39` 의
+    "재전송 정상" 조건에 걸려 **자기 룰이 안 붙는다.**
+    """
+    fn = SC.PLAN_MUTATORS["anchor_saturation"]
+    plan = SC.Plan(_anchor_plan().totals, {}, "stall", 3)
+    assert not fn(plan, _Sc(), 1.0, random.Random(0), _Cell())
+
+
+def test_anchor_saturation_uses_its_own_cells():
+    """**`g-sc-13` 과 셀을 나눈다.**
+
+    같은 셀에 둘이 걸리면 같은 분의 `N-02` 가 섞여 `R-39` 의 "N-02 정상"
+    조건이 거짓이 된다 — 두 시나리오가 서로의 발동을 막는다.
+    """
+    rng = random.Random(1)
+    cells = load_cells(DATA / "cells.json")
+    scs = {sc.kind: sc for sc in SC.build_scenarios(cells, 2000, rng,
+                                                    selected="all")}
+    anchor = scs["anchor_saturation"].target.cell_keys
+    nsa = scs["nsa_nr_leg"].target.cell_keys
+    assert anchor and nsa
+    assert not (anchor & nsa), f"셀 {len(anchor & nsa)}개가 겹친다"
+
+
+# --------------------------------------------------------------------------
+# 셀 전환 — `PathSwitch` 는 전환의 **결과**다
+# --------------------------------------------------------------------------
+
+
+def test_pathswitch_never_appears_without_a_cell_change():
+    """**`PathSwitch` 가 있으면 셀이 바뀌어 있어야 한다.**
+
+    `PathSwitchRequest` 는 X2 핸드오버에서 타겟 eNB 가 MME 로 보내는
+    메시지다 — 전환이 일어나야 생긴다. 그런데 구 구현은 `PathSwitch` 를
+    먼저 적고 **그 뒤에** 전환 상대를 찾았고, 못 찾으면 그대로 돌아갔다.
+    "셀은 그대로인데 X2 가 있는" 레코드가 남는다.
+
+    집계가 그것을 잡아냈다 (2026-10-28 · `PM_COR_LTE_CALL_1M` 재집계) —
+
+        HO_CNT 506 · HO_X2_CNT 741 · HO_INTER_CNT 0
+        → X2 가 전환보다 **많다**(146%) · 파생 `S1 계열` 이 **음수**
+
+    `scenarios` 쪽 mutator 가 아니라 `pemdb1._baseline_handover` 의 일이라
+    소스를 직접 본다 — `PemdbGen` 은 DB 가 있어야 뜬다.
+    """
+    import inspect
+
+    from datagen import pemdb1
+
+    src = inspect.getsource(pemdb1.PemdbGen._baseline_handover)
+    i_target = src.index("ho_topo.target(")
+    i_ps = src.index('rec.set("PathSwitch_count"')
+    assert i_target < i_ps, (
+        "`PathSwitch_count` 를 전환 상대(`target`)보다 먼저 적는다 — "
+        "상대가 없으면 전환이 취소되는데 메시지만 남는다")
+
+
+def test_handover_kind_is_drawn_not_fixed_to_x2():
+    """전환 종류를 **`KIND_W` 로 뽑는다** — X2 로 고정하지 않는다.
+
+    `PathSwitch > 0 ⟹ X2` 는 맞지만 **역이 아니다.** 구 구현은
+    `pick_kind(only=(HO_X2,))` 로 고정해서 `S1`·`S1_MME` 가 구조적으로
+    나올 수 없었고, 그러면 **MME·SGW 재배치가 영원히 일어나지 않아**
+    `s10_error_*` 구간이 데이터에 없다(`handover` 머리말이 고치려던 문제).
+
+        실측 141,200호  셀 변경 9,465 · eNB 간 9,456(99.9%)
+                        섹터 간 9건(0.01%)   `KIND_W` 선언은 55%
+    """
+    import inspect
+
+    from datagen import handover as HO
+    from datagen import pemdb1
+
+    src = inspect.getsource(pemdb1.PemdbGen._baseline_handover)
+    assert "only=(HO.HO_X2,)" not in src, "종류가 X2 로 고정돼 있다"
+
+    # 비중이 실제로 네 종류를 다 낸다.
+    rng = random.Random(3)
+    cells = load_cells(DATA / "cells.json")
+    topo = HO.Topology(cells)
+    got = collections.Counter()
+    for _ in range(20000):
+        k = topo.pick_kind(cells[rng.randrange(len(cells))], rng)
+        if k:
+            got[k] += 1
+    for kind, want in HO.KIND_W.items():
+        share = got[kind] / sum(got.values())
+        assert abs(share - want) < 0.05, f"{kind} {share:.3f} vs 선언 {want}"

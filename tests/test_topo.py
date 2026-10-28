@@ -376,15 +376,23 @@ class _LoadConn(FakeConn):
 
 
 def _join_rows():
-    """`load_cells` 의 조인 결과 — `_gap_uniq` 와 같은 상황을 DB 모양으로."""
+    """`load_cells` 의 조인 결과 — `_gap_uniq` 와 같은 상황을 DB 모양으로.
+
+    **마지막 세 칸이 `TAC`·`SGW_ID`·`MME_ID` 다**(2026-10-27). 질의가 그
+    컬럼들을 더했고 언패킹이 수를 세므로, 빠지면 `not enough values to
+    unpack` 으로 죽는다 — 스텁이 실제 질의를 따라가야 한다는 것을 그렇게
+    확인한다. `None` 은 "모름"이고 그때 장비 배정이 옛 eNB 해시로 떨어진다.
+    """
     out = []
     for sector in range(2):
         out.append(("811110", sector, None, "1", None, 41, 41110, 1101053,
-                    "37:30.0/000", "127:00.0/000"))
+                    "37:30.0/000", "127:00.0/000", None, None, None))
     for sector in (2, 3):
-        out.append(("811110", sector, None, "1", None, None, None, None, None, None))
+        out.append(("811110", sector, None, "1", None,
+                    None, None, None, None, None, None, None, None))
     for sector in range(3):      # 좌표 없는 eNB — **의도된 미매핑**
-        out.append(("822222", sector, None, "1", None, None, None, None, None, None))
+        out.append(("822222", sector, None, "1", None,
+                    None, None, None, None, None, None, None, None))
     return out
 
 

@@ -48,6 +48,7 @@ KINDS = (
     "mobility", "change_suspected", "ims_pdn", "nsa_nr_leg",
     # 하위 변형 3
     "gw_pgw_restart", "external_path_latency", "nsa_policy_restrict",
+    "anchor_saturation",
     # 신규 8종
     "auc_no_response", "dra_route_failure", "s6a_undetermined",
     "pgw_uplane_degradation", "enb_s1_outage", "partial_recovery",

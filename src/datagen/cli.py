@@ -38,7 +38,7 @@ from pathlib import Path
 
 import yaml
 
-from . import control, raw_parquet, topo
+from . import control, raw_parquet, region, topo
 
 HERE = Path(__file__).resolve().parents[2]
 
@@ -87,7 +87,74 @@ def load_cfg(path: str | None) -> dict:
     if path:
         extra = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
         base = _deep_merge(base, extra)
-    return _apply_env(base)
+    # **지역축은 env 뒤다** (2026-10-28). `GP_MYSQL_DB` 가 `pemdb1` 절을
+    # 만들 수 있으므로 그 뒤에 `setdefault` 해야 `locale` 칸이 확실히 선다.
+    # 유도는 **빈 칸만** 채운다 — 적힌 값이 이긴다(`region` 규칙 ②).
+    cfg = region.derive(_apply_env(base))
+    _warn_region_once(cfg)
+    return cfg
+
+
+#: 지역축 경고를 **프로세스당 한 번만** 찍는다. `load_cfg` 는 커맨드마다
+#: 불리고 UI 는 요청마다 설정을 보므로, 매번 찍으면 로그가 그 경고로 덮인다 —
+#: 그러면 진짜 봐야 할 줄이 묻히고 사람이 경고 전체를 무시하게 된다.
+_REGION_WARNED = False
+
+
+def _warn_region_once(cfg: dict) -> None:
+    """지역축이 어긋나 있으면 **stderr 로** 알린다. 멈추지 않는다.
+
+    `region` 규칙 ③ — 그 조합이 유효한 경우가 있다(마스터만 먼저 옮기는
+    중, 로밍 테스트). 막으면 그 작업이 불가능해지고, **조용히 두면 아무도
+    모른다.** 중간을 택한다.
+
+    **stdout 이 아니다.** `topo survey` 처럼 출력을 파이프로 받는 커맨드가
+    있어 섞이면 파싱이 깨진다.
+    """
+    global _REGION_WARNED
+    if _REGION_WARNED:
+        return
+    _REGION_WARNED = True
+    text = region.conflict_text(cfg)
+    if text:
+        print(text, file=sys.stderr)
+
+
+def apply_region_override(cfg: dict, conn) -> str:
+    """UI 가 저장한 지역을 **기동 시 한 번** 반영한다. 틱마다가 아니다.
+
+    `volume_pct`·`blocked` 와 같은 자리(`CM_DATAGEN_CONFIG`)에 저장하지만
+    **읽는 시점이 다르다** — 저쪽은 데몬이 틱마다 다시 읽어 다음 분부터
+    반영되고, 지역축은 여기서 한 번이다.
+
+    **중간에 바뀌면 안 되기 때문이다**(사용자 확정 2026-10-28). 같은 분의
+    Parquet 에 한국 IMSI 와 일본 IMSI 가 섞이면 그 분은 **어느 쪽으로도
+    집계되지 않는다** — 가입자 축 분모가 두 지역으로 갈라지고 에러는 나지
+    않는다.
+
+    우선순위는 `datagen.yaml` 의 `locale:` < DB(UI) 다. UI 에서 바꾼 값이
+    재기동 후에도 남아야 하므로 DB 가 이긴다 — `volume_pct` 와 같은 근거다.
+    **단 사람이 yaml 에 적은 `plmn.*` 는 여전히 이긴다**(`region` 규칙 ②).
+    그래서 지역만 바뀌고 PLMN 이 안 따라올 수 있고, 그 어긋남을 아래
+    `conflict_text` 가 찍는다.
+    """
+    cur = region.resolve(cfg)
+    saved = (control.get_config(conn, "locale") or "").strip().lower()
+    if saved and saved != cur:
+        if saved not in region.LOCALES:
+            # **멈추지 않는다** — 데몬이 뜨지 않는 것보다 설정 파일 값으로
+            # 도는 쪽이 낫다. 다만 왜 무시했는지 말한다.
+            print(f"  ⚠ DB 에 저장된 locale 이 이상하다: {saved!r} — 무시하고 "
+                  f"설정 파일의 {cur} 로 돈다", file=sys.stderr, flush=True)
+        else:
+            region.reapply(cfg, saved)
+            print(f"  지역축 — UI 저장값 {saved} 적용 "
+                  f"(설정 파일은 {cur})", flush=True)
+            cur = saved
+    text = region.conflict_text(cfg)
+    if text:
+        print(text, file=sys.stderr, flush=True)
+    return cur
 
 
 #: 환경변수 → 설정 키. **graphio 쪽 `config._ENV_KEYS` 와 같은 변수 이름을
@@ -481,7 +548,9 @@ def cmd_capacity(args) -> int:
             success_only=bool(pem.get("success_only", True)),
             enb_limit=int(pem.get("enb_limit", 0)), drawable=drawable,
             call_type_floor=pem.get("call_type_floor"),
-            uplane_session=pem.get("uplane_session"),
+            uplane_session=pem.get("uplane_session"), mobility=pem.get("mobility"),
+            locale=pem.get("locale", "kr"), tac_only=bool(pem.get("tac_only", False)),
+            sectors_per_enb=pem.get("sectors_per_enb"), scope=pem.get("scope"),
             baseline=pem.get("baseline"), fault=pem.get("fault"))
         # **보관 정리를 끈다**(retain 0). 측정 중에 지우면 쓴 바이트를 셀 수
         # 없고, 임시 디렉터리라 어차피 통째로 버린다.
@@ -603,6 +672,12 @@ def cmd_run(args) -> int:
     )
     try:
         control.ensure_tables(conn)
+        # ── 지역축 — **기동 시 한 번만** (2026-10-28) ──────────────────
+        # 아래 `PemdbGen(plmn=…, locale=…)` 이 cfg 를 읽으므로 **그 전에**
+        # 반영해야 한다. 뒤로 가면 데몬은 옛 지역으로 돌면서 화면만 새 값을
+        # 보여 주고, 그 어긋남은 IMSI 를 들여다봐야 드러난다.
+        apply_region_override(cfg, conn)
+        pem = cfg.get("pemdb1") or {}
         mapping = P.xdr_mapping(conn, database)
 
         drawable = None
@@ -630,7 +705,9 @@ def cmd_run(args) -> int:
             # 기본값(0.3%)을 쓴다. 0 을 주면 실측 분포 그대로 돈다.
             call_type_floor=pem.get("call_type_floor"),
             # U-Plane 세션 분포 모수. 없으면 `session.Shape` 기본값이다.
-            uplane_session=pem.get("uplane_session"),
+            uplane_session=pem.get("uplane_session"), mobility=pem.get("mobility"),
+            locale=pem.get("locale", "kr"), tac_only=bool(pem.get("tac_only", False)),
+            sectors_per_enb=pem.get("sectors_per_enb"), scope=pem.get("scope"),
             # 평시 배경(절차 플래그·절단·PathSwitch)과 TIMEOUT 대기시간.
             # 없으면 `pemdb1.Baseline`·`scenarios.FaultCfg` 기본값이다.
             baseline=pem.get("baseline"), fault=pem.get("fault"),
@@ -919,6 +996,14 @@ def cmd_pemfill(args) -> int:
         charset="utf8mb3", autocommit=False,
     )
     try:
+        # ── 지역축 — `cmd_run` 과 같은 자리에서 같은 규칙으로 (2026-10-28) ──
+        # **여기도 반영해야 한다.** `pemfill` 이 과거 구간을 메우는데 데몬과
+        # 다른 지역으로 돌면 같은 창고에 한국·일본 IMSI 가 섞이고, 그것은
+        # 분 단위 섞임(`apply_region_override` 머리말)보다 더 찾기 어렵다 —
+        # 구간이 통째로 다른 나라가 된다.
+        control.ensure_tables(conn)
+        apply_region_override(cfg, conn)
+        pem = cfg.get("pemdb1") or {}
         mapping = P.xdr_mapping()
         print(f"▶ 컬럼 매핑 확인 — C-Plane Parquet {len(mapping.columns)}컬럼 "
               f"({P.CPLANE_SLOT} + 생성기 필드 {len(mapping.columns) - 1})")
@@ -971,7 +1056,9 @@ def cmd_pemfill(args) -> int:
             ensure_coords=True,
             drawable=drawable,
             call_type_floor=pem.get("call_type_floor"),
-            uplane_session=pem.get("uplane_session"),
+            uplane_session=pem.get("uplane_session"), mobility=pem.get("mobility"),
+            locale=pem.get("locale", "kr"), tac_only=bool(pem.get("tac_only", False)),
+            sectors_per_enb=pem.get("sectors_per_enb"), scope=pem.get("scope"),
             baseline=pem.get("baseline"), fault=pem.get("fault"),
         )
         gen.truth_path = _truth_path(pem, data_dir)
@@ -2023,6 +2110,94 @@ def cmd_ui(args) -> int:
     return ui_main(argv)
 
 
+def cmd_callflow(args) -> int:
+    """call flow 명세에서 **데이터셋을 미리 만든다.**
+
+    런타임 생성(`run`·`pemfill`)과 **별개 경로다.** 분 단위 생성은 지금처럼
+    실측 분포가 돌리고, 이것은 call flow 를 보여 주는 샘플을 깔아 둔다.
+    명세는 `config/callflow.yaml` 이고 그쪽이 정본이다.
+    """
+    from . import callflow
+
+    cfg = load_cfg(args.config)
+    data_dir = Path(args.data_dir) if args.data_dir else Path("data")
+    out = Path(args.out) if args.out else None
+    if args.verify_only:
+        spec = callflow.load_spec()
+        bad = callflow.verify_fields(spec)
+        print(f"명세 — 단계 {len(spec.steps)} · 절차 {len(spec.flows)} · "
+              f"장애 {len(spec.faults)}")
+        if bad:
+            print("✗ 없는 필드를 쓴다:", ", ".join(bad))
+            return 1
+        print("✓ 필드 전부 실재한다")
+        for n, f in sorted(spec.faults.items()):
+            cts = spec.call_types_for(f)
+            print(f"   {n:24s} {f.break_at:9s} → call_type {list(cts)}")
+        return 0
+
+    report = callflow.build_all(cfg, data_dir, out,
+                                n_normal=args.normal, n_fault=args.fault)
+    fail = 0
+    for name, (cnt, bad) in report.items():
+        mark = "✓" if not bad else "✗"
+        print(f" {mark} {name:34s} {cnt:6,d}건")
+        for b in bad:
+            fail += 1
+            print(f"     {b}")
+    print(f"\n→ {out or callflow.DEFAULT_OUT}")
+    return 1 if fail else 0
+
+
+def cmd_patterns(args) -> int:
+    """정답지 패턴에서 데이터셋을 찍어낸다.
+
+    `callflow`(명세 조립)와 **다른 경로다.** 이쪽은 실측 레코드를 틀로
+    쓰고 시각·식별자·셀만 갈아 끼운다 — 정답지 밖의 값이 섞이지 않는다.
+    """
+    from . import callflow, patterns
+
+    cfg = load_cfg(args.config)
+    data_dir = Path(args.data_dir) if args.data_dir else Path("data")
+    gen, _dist = callflow._fixtures(cfg, data_dir, args.seed)
+    bank = patterns.Bank(args.bank)
+    print(f"패턴 {len(bank):,} · 조합 {len(bank.keys)}종")
+
+    import random as _r
+
+    # **상용 컬럼명으로 내보낸다.** 자체 필드명(`call_type`·`First_eNB_ID`)
+    # 으로 쓰면 `cell_agg` 가 한 컬럼도 못 읽는다 — 그쪽은 원시 Parquet 의
+    # 상용 이름(`CALL_TYPE`·`FIRST_ENB_ID`)을 본다. 데이터셋이 파이프라인에
+    # 들어가려면 **원시와 같은 모양**이어야 한다.
+    names = None
+    out = Path(args.out) if args.out else patterns.DEFAULT_BANK.parent / "dataset"
+
+    der = patterns.Derive() if not args.no_derive else None
+    groups: list[tuple[str, list, int | None]] = []
+    if args.by_call_type:
+        have = {int(k[0]) for k in bank.keys if k[0]}
+        for ct in sorted(have):
+            groups.append((f"ct{ct:02d}", bank.match(call_type=ct), None))
+        # **정답지에 없는 절차는 파생한다.** 표본 204호에 여섯 종뿐이고
+        # 나머지는 있는 패턴에서 달라지는 부분만 바꿔 만든다.
+        if der:
+            for ct in sorted(set(der.rules) - have):
+                groups.append((f"ct{ct:02d}", [], ct))
+    else:
+        groups.append(("all", bank.keys, None))
+    for name, keys, ct in groups:
+        if not keys and ct is None:
+            continue
+        recs = patterns.build(gen, bank, keys=keys or None, n=args.count,
+                              rng=_r.Random(args.seed + len(name) + (ct or 0)),
+                              derive=der, call_type=ct)
+        n = patterns.write(recs, out / f"{name}.parquet")
+        tag = f"파생 ← {der.sources(ct)}" if ct else f"키 {len(keys)}종"
+        print(f" ✓ {name:8s} {n:7,d}건  ({tag})")
+    print(f"\n→ {out}")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="datagen")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -2039,6 +2214,34 @@ def main(argv=None) -> int:
     u.add_argument("--host", default="127.0.0.1")
     u.add_argument("--port", type=int, default=8009)
     u.set_defaults(fn=cmd_ui)
+
+    # 정답지 패턴 — `callflow` 와 **다른 경로다**(명세 조립이 아니라 치환)
+    pt = sub.add_parser("patterns",
+                        help="정답지 패턴으로 데이터셋 생성 (창고에 쓰지 않는다)")
+    pt.add_argument("--config")
+    pt.add_argument("--data-dir")
+    pt.add_argument("--bank", help="패턴 파일 (기본 data/callflow/patterns.jsonl)")
+    pt.add_argument("--out", help="나갈 곳 (기본 data/callflow/dataset)")
+    pt.add_argument("--count", type=int, default=5000, help="묶음당 레코드")
+    pt.add_argument("--seed", type=int, default=20261028)
+    pt.add_argument("--no-derive", action="store_true",
+                    help="정답지에 없는 call_type 을 만들지 않는다")
+    pt.add_argument("--by-call-type", action="store_true",
+                    help="call_type 별로 파일을 가른다")
+    pt.set_defaults(fn=cmd_patterns)
+
+    # call flow 데이터셋 — **런타임 생성과 별개다.** 창고에 쓰지 않고
+    # `data/callflow/` 로 나간다.
+    cf = sub.add_parser("callflow",
+                        help="call flow 명세로 데이터셋 생성·검증 (창고에 쓰지 않는다)")
+    cf.add_argument("--config")
+    cf.add_argument("--data-dir", help="cells.json·profile.json 이 있는 곳 (기본 data)")
+    cf.add_argument("--out", help="나갈 곳 (기본 data/callflow)")
+    cf.add_argument("--normal", type=int, default=2000, help="call_type 당 정상 호")
+    cf.add_argument("--fault", type=int, default=500, help="장애당 레코드")
+    cf.add_argument("--verify-only", action="store_true",
+                    help="명세만 점검하고 만들지 않는다")
+    cf.set_defaults(fn=cmd_callflow)
 
     # 상용 스키마 경로 — `run` 과 같은 쓰기 경로다 (`cmd_run` docstring 참조)
     p = sub.add_parser("pemfill", help="생성·적재 + 1분 집계 (pemdb6) — --follow 가 실시간 데몬")

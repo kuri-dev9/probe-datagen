@@ -1,0 +1,428 @@
+# LTE 절차(call flow) 명세 — **단계열의 정본**
+#
+# 이 파일이 "어떤 절차가 어떤 단계를 어떤 순서로 밟고, 장애가 나면 어디서
+# 끊기며 하류에 무엇이 남는가" 를 적는다. `src/datagen/callflow.py` 가
+# 이것을 읽어 **XDR 레코드 데이터셋**을 만들고 검증한다.
+#
+# ## 런타임 생성기가 읽지 않는다
+#
+# `pemdb1._coerce` 경로는 이 파일을 모른다. 여기서 만드는 것은 **미리 깔아
+# 두는 데이터셋**이고, 실제 분 생성은 지금처럼 실측 분포가 돌린다.
+# 둘을 섞으면 "어느 쪽이 만든 레코드인가" 를 알 수 없게 된다.
+#
+# ## 단계 순서는 3GPP TS 23.401 §5.3.2.1 이다
+#
+#   [paging]  Paging                      MT 호만 — 망이 UE 를 부른다
+#   [access]  RRC + InitialUEMessage      S1AP
+#   [core]    Authentication              S6a  AIR/AIA
+#   [core]    ME Identity Check           S13  ECR/ECA
+#   [core]    Update Location             S6a  ULR/ULA
+#   [core]    Create Session              S11  CSR/CSResp
+#   [access]  Initial Context Setup       S1AP
+#
+# **ME Identity Check 가 인증 뒤다.** IMEI 를 보안 수립 후 암호화해 받으므로
+# 그 순서가 아니면 절차가 성립하지 않는다.
+
+# ── 인터페이스 코드 ────────────────────────────────────────────────────────
+# `first_error_interface_protocol` 의 값이다 (기능정의서 §3.2.7).
+#
+#   0 None · 1 S6a_Diameter · 2 S1MME_S1AP · 3 S11_GTPv2C · 4 S10_GTPv2C
+#   5 S1MME_NAS-EMM · 6 S1MME_NAS-ESM · 7 S3_GTPv1C · 8 S13_Diameter
+#
+# **7(S3)은 여기 쓰지 않는다.** 통합 규격이 S3 를 Call Error 에 반영하지
+# 않으므로 `first_error_interface_protocol` 에 나타나면 안 된다(§3.2.6).
+
+steps:
+  paging:
+    phase: paging
+    iface: 2
+    gate: pg                 # flags()['pg_att'] 가 0 이면 이 단계는 없다
+    msgs: 2
+    weight: 1.0
+    error_prefix: s1ap
+    error_message: 10        # PAGING
+
+  rrc:
+    phase: access
+    iface: 2
+    msgs: 4
+    weight: 0.6
+    time_field: InitialUEMessage_Time
+    error_prefix: s1ap
+    error_message: 12        # INITIAL_UE_MESSAGE
+
+  auth:
+    phase: core
+    iface: 1
+    gate: auth
+    msgs: 2
+    weight: 0.30
+    time_field: AuthenticationInformation_Time
+    cause_field: AuthenticationInformation_Cause
+    error_prefix: s6a
+    error_message: 318       # Diameter AIR/AIA
+    # ── Cause (XDR 샘플 68건 실측) ──────────────────────────────────
+    # **성공해도 Cause 를 적는다** — `2001 DIAMETER_SUCCESS` 가 73.5% 다.
+    # 비우면 "절차는 있었는데 결과를 모른다" 가 되어 실패와 구분되지 않는다.
+    success_cause: 2001
+    fail_rate: 0.265
+    # `15001`·`15420`·`14181` 은 **3GPP Experimental-Result-Code** 다.
+    # 프로브가 `+10000` 으로 Result-Code 와 구분해 적는다 —
+    # `codes.cause_text` 가 `cause - 10000` 으로 되읽고(그 함수 말미),
+    # `pemdb6.CD_CAUSE` 에 `C_01015001` 로 공식 정의가 있다. SKT 자체 코드가
+    # 아니므로 쓴다. 다만 `DIAMETER_CAUSE` 표에는 개별 항목이 없어
+    # `is_known_cause` 가 거짓을 내므로 **`CD_CAUSE` 를 적재하기 전에는
+    # `H-17` 이 오른다**(`load_from_db()` 가 읽으면 들어온다).
+    fail_causes: {15001: 0.222, 5003: 0.222, 900: 0.167, 15420: 0.111,
+                  14181: 0.111, 5012: 0.111, 3002: 0.056}
+
+  mecheck:
+    phase: core
+    iface: 8                 # **S13.** 기존 생성 경로에 이 값이 한 번도
+    gate: mec                #   나오지 않았다 — `_maybe_baseline_error` 의
+    msgs: 2                  #   인터페이스 목록에 8 이 없다
+    weight: 0.20
+    time_field: MEIdentityCheck_Time
+    cause_field: MEIdentityCheck_Cause
+    error_prefix: s13
+    error_message: 324       # Diameter ECR/ECA
+    # 실측 68건 중 성공 67 — **거의 항상 통과한다.** EIR 조회는 블랙리스트
+    # 대조라 평시에 걸릴 일이 드물다.
+    success_cause: 2001
+    fail_rate: 0.015
+    fail_causes: {5012: 1.0}
+
+  ulr:
+    phase: core
+    iface: 1
+    gate: loc
+    msgs: 2
+    weight: 0.30
+    time_field: UpdateLocation_Time
+    cause_field: UpdateLocation_Cause
+    error_prefix: s6a
+    error_message: 316       # Diameter ULR/ULA
+    success_cause: 2001
+    fail_rate: 0.140
+    fail_causes: {15004: 0.25, 5012: 0.25, 15421: 0.25, 3002: 0.125,
+                  15420: 0.125}
+
+  session:
+    phase: core
+    iface: 3
+    msgs: 3
+    weight: 0.20
+    # **시각 필드가 없다.** `CreateSession_Time` 은 통합 규격에서 삭제됐고
+    # `s11_error_Cause` 로만 관측된다(§3.2.6 "삭제된 절차 필드").
+    # 없는 필드를 만들지 않는다.
+    error_prefix: s11
+    error_message: 33        # CREATE_SESSION_RESPONSE
+
+  ctxsetup:
+    phase: access
+    iface: 2
+    msgs: 3
+    weight: 0.4
+    error_prefix: s1ap
+    error_message: 9         # INITIAL_CONTEXT_SETUP_FAILURE
+
+  s10ctx:
+    phase: core
+    iface: 4
+    msgs: 2
+    weight: 0.5
+    error_prefix: s10
+    error_message: 130       # FORWARD_RELOCATION_RESPONSE
+
+  # ── 호를 닫는 단계 ──────────────────────────────────────────────────────
+  #
+  # **`release` 까지가 하나의 호다**(사용자 확정 2026-10-28). 실측 XDR 샘플
+  # 204호에서 —
+  #
+  #     UEContextRelease_Time == call_end_time     191/191 · 차이 **0**
+  #     UEContextRelease_Time/_Cause 기입률        93.6%
+  #
+  # Paging(call_type 6)만 예외인데 그 레코드는 접속 자체가 없다(아래 flows).
+  #
+  # **`phase: release` 는 `initial_*_duration` 에 들어가지 않는다.** 해제는
+  # 접속 절차가 아니다 — 세 카운터(paging·access·core)는 "접속에 걸린
+  # 시간" 이고 거기에 호 종료를 더하면 접속 지연이 호 길이만큼 부풀어
+  # 오른다. 실측에서 접속 절차는 호의 앞 **26%**(중앙값)에서 끝난다.
+  release_request:
+    phase: release
+    iface: 2
+    msgs: 1
+    weight: 0
+    time_field: UEContextReleaseRequest_Time
+    cause_field: UEContextReleaseRequest_Cause
+    error_prefix: s1ap
+    error_message: 18        # UEContextReleaseRequest
+
+  release:
+    phase: release
+    iface: 2
+    msgs: 2
+    weight: 0
+    time_field: UEContextRelease_Time
+    cause_field: UEContextRelease_Cause
+    error_prefix: s1ap
+    error_message: 23        # UEContextRelease
+
+  detach:
+    phase: access
+    iface: 5
+    msgs: 2
+    weight: 1.0
+    time_field: DetachRequest_Time
+    error_prefix: emm
+    error_message: 69        # DETACH_REQUEST
+
+# ── call_type 별 단계열 ────────────────────────────────────────────────────
+#
+# **`gate` 가 있는 단계는 "일어날 수 있다" 는 뜻이다.** 실제 발생 여부는
+# `PemdbDist.flags()` 가 정한다 — 거기가 call_type 별 결합분포를 들고 있고
+# 실측에서 Attach 는 인증 100% · Service 는 2% 다. 그 숫자를 여기 베끼면
+# 두 벌이 되고 한쪽만 고쳐진다.
+
+# **`release` 가 거의 모든 절차의 끝에 온다.** 실측 call_type 별 기입률 —
+#
+#     Attach MO  102/103    Service MO 49/49    Service MT 15/15
+#     TAU         25/25     Paging      0/12  ← 접속 자체가 없다
+#
+# `release_request`(eNB 가 먼저 해제를 요청)는 **절차마다 비율이 다르다** —
+# Service MO 39/49(80%) · Attach MO 8/103(8%) · TAU 7/25(28%). `gate` 로
+# 묶지 않고 `release.request_share` 가 정한다(아래).
+flows:
+  # **`share` 가 `gate` 를 이긴다.** `PemdbDist.flags()` 는 상용 실측
+  # `proc_ratio` 를 쓰는데 그것은 **1분 집계 테이블**에서 온 비율이고,
+  # 여기 `share` 는 **XDR 레코드 자체**(정답지)에서 센 것이다. 데이터셋은
+  # 후자를 따른다 — 사용자 확정 2026-10-28: *"xdr 샘플이 실제 정답지"*.
+  #
+  # **단계끼리 독립으로 추첨한다.** Attach MO 103호의 교차표가 거의 곱에
+  # 맞는다 — `auth`×`mecheck` 실측 39.8 / 24.3 / 26.2 / 9.7 에 대해
+  # 독립 기대값 42.2 / 21.8 / 23.8 / 12.2 다. **인증 없이 IMEI 체크만 하는
+  # 호가 26%** 라 `mecheck` 를 `auth` 뒤에 묶으면 그만큼이 사라진다.
+  1:
+    name: "Attach MO"
+    steps: [rrc, auth, mecheck, ulr, session, ctxsetup, release_request, release]
+    share: {auth: 0.64, mecheck: 0.66, ulr: 0.50}   # 실측 103호
+  2:
+    name: "Attach MT"
+    steps: [paging, rrc, auth, mecheck, ulr, session, ctxsetup, release_request, release]
+    # 샘플에 Attach MT 가 없다. **MO 와 같다고 둔다** — 페이징 선행만
+    # 다르고 그 뒤 절차는 같은 Attach 다. 표본이 생기면 고친다.
+    share: {auth: 0.64, mecheck: 0.66, ulr: 0.50}
+  3:
+    name: "Service MO"
+    steps: [rrc, auth, ulr, session, ctxsetup, release_request, release]
+    # 실측 49호 — **인증·IMEI 체크가 0 이다.** 이미 붙어 있는 컨텍스트를
+    # 재사용하므로 코어 절차를 다시 밟지 않는다. `ulr` 6% 만 드물게 있다.
+    share: {auth: 0.0, ulr: 0.06}
+  4:
+    name: "Service MT"
+    steps: [paging, rrc, auth, ulr, session, ctxsetup, release_request, release]
+    share: {auth: 0.0, ulr: 0.0}      # 실측 15호
+  5:
+    name: "TAU"
+    steps: [rrc, auth, ulr, release_request, release]
+    # 실측 25호 — **둘 다 8% 다.** TAU 는 위치만 갱신하고 인증·가입정보
+    # 조회는 드물게 한다. 앞 판본이 `ulr` 을 주력으로 뒀는데 틀렸다.
+    share: {auth: 0.08, ulr: 0.08}
+  # **Paging 은 접속 절차가 없다.** 실측 12호 전부 `InitialUEMessage_Time`
+  # 도 `UEContextRelease_Time` 도 비어 있고, `attempt=1 · success=0` 에
+  # `first_error_cause` 가 **12/12 전부** 있다 — 이 레코드는 "망이 UE 를
+  # 불렀는데 답이 없었다" 는 기록 자체다.
+  6:
+    name: "Paging"
+    steps: [paging]
+  7:
+    name: "Extended Service MO"
+    steps: [rrc, auth, ulr, session, ctxsetup, release_request, release]
+    share: {auth: 0.0, ulr: 0.06}     # Service MO 와 같다
+  8:
+    name: "Extended Service MT"
+    steps: [paging, rrc, auth, ulr, session, ctxsetup, release_request, release]
+    share: {auth: 0.0, ulr: 0.0}
+  9:
+    name: "Detach MO"
+    steps: [rrc, detach, release_request, release]
+  10:
+    name: "S1 Handover Inter MME"
+    steps: [rrc, s10ctx, session, release_request, release]
+  11:
+    name: "Reroute"
+    steps: [rrc, release_request, release]
+
+# ── 호를 닫는 규칙 ────────────────────────────────────────────────────────
+#
+# **`UEContextReleaseRequest_Cause` 가 있으면 그대로 `UEContextRelease_Cause`
+# 에 실린다.** 실측이 그 둘을 정확히 맞춰 준다 (204호 · 괄호는 RelReq) —
+#
+#     126(10) 121(9) 504(9) 106(9) 120(8) 101(6) 201(5) 100(4) 103(4) 200(3)
+#       ↓  Release 쪽도 같은 값 같은 건수 (126 만 11 로 하나 많다)
+#
+# RelReq 가 없는 124호의 Release Cause 는 **302(84) · 301(26) · 300(13)**
+# 이고 합이 123 이다 — **MME 가 주도한 해제**다. 그래서 둘을 가른다.
+release:
+  # eNB 가 먼저 해제를 요청하는 비율. 절차마다 다르다(실측).
+  request_share: {1: 0.08, 2: 0.08, 3: 0.80, 4: 0.80, 5: 0.28,
+                  7: 0.80, 8: 0.80, 9: 0.28, 10: 0.28, 11: 0.28}
+
+  # eNB 요청 Cause — 무선·전송·장비 사유다. 이 값이 Release 에 그대로 간다.
+  # 120(User inactivity)은 `S1AP_NORMAL_CAUSES` 라 절단으로 세지 않는다
+  # (불변규칙 6).
+  request_causes: {126: 0.15, 121: 0.13, 504: 0.13, 106: 0.13, 120: 0.12,
+                   101: 0.09, 201: 0.07, 100: 0.06, 103: 0.06, 200: 0.06}
+
+  # MME 주도 — 302 Detach · 300 Normal Release 는 정상 종료,
+  # 301 Authentication Failure 는 비정상이다.
+  mme_causes: {302: 0.68, 301: 0.21, 300: 0.11}
+
+# ── 하류 — 절차 Cause 가 **의미를 이어받는다** ────────────────────────────
+#
+# **First Error 구간이 원인, 하류 Cause 는 증상이다**(불변규칙 7). 그 "증상"
+# 이 무엇이 되는지를 정답지가 직접 보여 준다 — 절차 Cause 마다 EMM 거절
+# 사유가 다르고, **의미가 정확히 이어진다.**
+#
+#     15004 ROAMING_NOT_ALLOWED   → EMM 11  PLMN not allowed
+#     15421 RAT_NOT_ALLOWED       → EMM 15  No suitable cells in TA
+#     15001 USER_UNKNOWN          → EMM  8  EPS/non-EPS services not allowed
+#
+# 고정 하류 하나로 뭉뚱그리면 이 대응이 사라지고, 운영자는 "왜 거절당했나"
+# 를 절차 Cause 에서만 읽어야 한다.
+downstream_map:
+  15001: {iface: 5, cause:  8, prefix: emm}   # USER_UNKNOWN
+  15420: {iface: 5, cause: 15, prefix: emm}   # UNKNOWN_EPS_SUBSCRIPTION
+  15421: {iface: 5, cause: 15, prefix: emm}   # RAT_NOT_ALLOWED
+  15004: {iface: 5, cause: 11, prefix: emm}   # ROAMING_NOT_ALLOWED
+  14181: {iface: 5, cause: 17, prefix: emm}   # AUTH_DATA_UNAVAILABLE
+  5003: {iface: 5, cause: 15, prefix: emm}   # AUTHORIZATION_REJECTED
+  5004: {iface: 5, cause: 17, prefix: emm}
+  5012: {iface: 5, cause: 17, prefix: emm}   # UNABLE_TO_COMPLY
+  5030: {iface: 5, cause: 15, prefix: emm}   # ERROR_USER_UNKNOWN
+  3002: {iface: 5, cause: 17, prefix: emm}   # UNABLE_TO_DELIVER
+  3004: {iface: 5, cause: 17, prefix: emm}   # TOO_BUSY
+  3005: {iface: 5, cause: 17, prefix: emm}   # LOOP_DETECTED
+  900: {iface: 5, cause: 17, prefix: emm}   # TIMEOUT
+
+# ── 실패한 호는 어떻게 닫히나 ──────────────────────────────────────────────
+#
+# **인증이 깨지면 S1AP `301 Authentication Failure` 로 해제된다.** 실측
+# 18호에서 `301`(14) · `302`(4) 이고, 그 `301` 호의 `last_error` 가 전부
+# `2/301` 이다 — **해제 사유가 곧 마지막 오류**다. `302`(Detach)로 닫힌
+# 4호는 EMM 거절이 last 를 받는다.
+#
+# ULR 실패 8호는 전부 `302` 다 — 가입정보 거절은 정상 해제로 닫힌다.
+fail_release:
+  auth: {301: 0.78, 302: 0.22}
+  ulr:  {302: 1.0}
+  mecheck: {302: 1.0}
+
+# ── 직전 호 — **실패 호에서만 의미가 있다** ───────────────────────────────
+#
+# 사용자 확정 2026-10-28: *"old_call 은 보통 성공 호에서는 크게 의미가
+# 없어. 에러 상황에서 유용하게 쓰이기 때문이야. 과거 어떤 성공 또는 실패를
+# 한 단말이 이번에 실패했을 때 이걸 뭘로 보겠냐 를 확인해보기 위함이야."*
+#
+# 정답지 204호가 그대로 보여 준다 —
+#
+#     old_call_error_*      성공 1/63 (1.6%)   실패 81/141 (57.4%)
+#     old_call_Last_eNB_ID  성공 63/63         실패 141/141   ← 위치는 늘 안다
+#
+# **같은 구간 반복이 93%**(75/81). `cell_agg.OLD_SAME_IFACE` 주석의 가정
+# ―*"같은 원인의 반복이면 단발 오류가 아니다"*―을 정답지가 받쳐 준다.
+#
+# ⚠ **런타임 생성기의 기본값이 이것과 다르다** — `pemdb1.Baseline` 의
+# `old_call_fail = 0.18` · `old_call_same_iface = 0.55` 다. 그 둘에는
+# 실측 근거 주석이 없고 정답지는 `0.574` · `0.93` 을 말한다. 데이터셋은
+# 정답지를 따르고, **런타임을 고칠지는 사람이 판단한다**(`OLD_FAIL_CNT`·
+# `OLD_SAME_IFACE` 두 컬럼의 수준이 세 배로 움직인다).
+old_call:
+  fail_share: 0.574
+  same_iface: 0.93
+
+# ── 장애 — 어디서 끊기고 하류에 무엇이 남나 ────────────────────────────────
+#
+# **First Error 구간이 원인, 하류 Cause 는 증상이다**(불변규칙 7). 끊긴
+# 단계가 `first_error_*` 가 되고, `downstream` 이 있으면 그것이
+# `last_error_*` 가 된다. 둘이 같으면 하류 증상이 없다는 뜻이다(규칙 C-5).
+#
+# `timeout: true` 면 **구간 Cause 를 비운다**(규칙 D-2) — 응답이 없었으므로
+# Result-Code 를 적을 수 없다. `first_error_cause` 에는 900 이 들어간다
+# (통합 규격이 TIMEOUT 을 포함한다 · §3.2.7).
+
+faults:
+  auth_reject:
+    title: "S6a 인증 거절 (AIA 오류 Result-Code)"
+    break_at: auth
+    # 5012 UNABLE_TO_COMPLY · 5030 ERROR_USER_UNKNOWN · 3004 TOO_BUSY
+    causes: {5012: 0.5, 5030: 0.3, 3004: 0.2}
+    # `downstream` 을 적지 않는다 — `downstream_map` 이 Cause 마다 고른다.
+    source: "scenarios._auth_failure (SC-04)"
+
+  auth_timeout:
+    title: "S6a 무응답 — HSS/AuC 가 답하지 않는다"
+    break_at: auth
+    # 900 = `codes.TIMEOUT_CAUSE`. **`901`·`902` 와 다르다** — 저 둘은
+    # 적을 메시지가 없어 `first_error_interface_protocol = 0` 이고,
+    # `900` 은 보낸 요청이 있어 구간이 들어온다(codes.py 머리말).
+    causes: {900: 1.0}
+    timeout: true
+    source: "scenarios._auc_no_response (SC-14)"
+
+  dra_route_failure:
+    title: "S6a 라우팅 계층 이상 (Diameter 3xxx)"
+    break_at: auth
+    # 3002 UNABLE_TO_DELIVER · 3004 TOO_BUSY · 3005 LOOP_DETECTED
+    causes: {3002: 0.4, 3004: 0.35, 3005: 0.25}
+    source: "scenarios._dra_route_failure (SC-15)"
+
+  # **기존 시나리오에 없던 것.** `first_error_interface_protocol = 8` 이
+  # 생성 데이터에 한 번도 나오지 않았다 — EIR 장애를 재현할 수단이 없었다.
+  meidentity_reject:
+    title: "S13 단말식별 거부 (EIR 블랙리스트·무응답)"
+    break_at: mecheck
+    # 5003 AUTHORIZATION_REJECTED · 5004 INVALID_AVP_VALUE
+    #
+    # **`5422`(DIAMETER_ERROR_EQUIPMENT_UNKNOWN)를 쓰지 않는다.** 3GPP
+    # TS 29.272 에는 있지만 이 프로젝트의 코드 표(`XDR_Cause_v0.5.xlsx` →
+    # `schema/codes.DIAMETER_CAUSE`)에 없다. 규격서가 정본이고, 표 밖의
+    # 코드를 쓰면 `H-17`(미정의 코드 출현률)이 오르며 화면이 `UNKNOWN` 으로
+    # 적는다 — **의미가 더 정확한 코드를 쓰려다 그 호가 무엇인지 잃는다.**
+    causes: {5003: 0.6, 5004: 0.4}
+    downstream: {iface: 5, cause: 5, prefix: emm}   # EMM 5 IMEI not accepted
+
+  # 〃 — `UpdateLocation_Cause` 는 평시 배경만 쓰고 장애 주입이 없었다.
+  updatelocation_reject:
+    title: "S6a 가입정보 거절 (ULA 오류)"
+    break_at: ulr
+    # 5420 ERROR_UNKNOWN_EPS_SUBSCRIPTION · 5421 ERROR_RAT_NOT_ALLOWED
+    # · 5004 INVALID_AVP_VALUE
+    causes: {5420: 0.5, 5421: 0.3, 5004: 0.2}
+    # 하류는 `downstream_map` 이 Cause 마다 고른다.
+
+  session_resource:
+    title: "S11 세션 자원 부족 (GW)"
+    break_at: session
+    causes: {73: 1.0}                 # No resources available
+    downstream: {iface: 6, cause: 26, prefix: esm}   # ESM 26 Insufficient resources
+    source: "scenarios._gw_resource (SC-01)"
+
+  ctxsetup_failure:
+    title: "S1AP Initial Context Setup 실패 (무선)"
+    break_at: ctxsetup
+    # 125 Radio resources not available · 126 Failure in the Radio Interface Procedure
+    # **`scenarios._ran_radio` 와 같은 값을 쓴다** — 같은 현상을 call flow 로
+    # 표현한 것이므로 다른 Cause 를 쓰면 두 벌이 된다.
+    causes: {125: 0.5, 126: 0.5}
+    source: "scenarios._ran_radio (SC-02)"
+
+  paging_no_response:
+    title: "페이징 무응답 — UE 가 답하지 않는다"
+    break_at: paging
+    # Paging 메시지를 **보냈고** 응답이 없다 → `900` · 구간 S1AP(2).
+    # 메시지가 하나도 없는 쪽은 `902 NO_CAUSE_PAGING` 이고 그때는 구간이
+    # `0` 이다 — 다른 사건이라 여기 섞지 않는다(codes.py 머리말 · 실측
+    # 4 : 33 으로 902 가 더 드물다).
+    causes: {900: 1.0}
+    timeout: true

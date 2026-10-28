@@ -58,7 +58,14 @@ pemdb1:
   #
   # 없으면 **멈추는 것이 설계다** — 폴리곤 없는 동의 셀을 고르면 지도가 어긋나고
   # 그때는 어디서 어긋났는지 알 방법이 없다(`pemdb1.load_drawable_dongs`).
-  geo_crosswalk: /app/data/geo/code_crosswalk.json
+  # **JP 벌이다.** KR crosswalk 를 일본 셀에 걸면 우연히 겹치는 것만 맞아
+  # 1,192셀 중 434개만 남는다(실측 · 64% 탈락).
+  geo_crosswalk: /app/data/geo/jp/code_crosswalk.json
+  geo_boundary: /app/data/geo/jp/N03-21_210101.json
+  geo_rail: /app/data/geo/jp/rail.json          # 철도 N02 (배경)
+  geo_rivers: /app/data/geo/jp/rivers.json      # 하천 W05 (배경)
+  geo_roads: /app/data/geo/jp/roads.json        # 도로 OSM (배경)
+  geo_green: /app/data/geo/jp/green.json        # 공원·수역 OSM (배경)
   # 장애 주입 정답 파일. **베이스값은 호스트 기준 상대경로**
   # (`../graphio-probe-rca/...`)라 컨테이너에서는 `/app/..` = `/` 로 풀려
   # `/graphio-probe-rca` 를 만들려다 `PermissionError` 로 **gen 이 죽는다**.

@@ -14,8 +14,10 @@ CDN 참조도 없다.
 from __future__ import annotations
 
 import argparse
+import collections
 import json
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pymysql
@@ -25,6 +27,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from . import raw_parquet, topo
+from .geo_lite import dms_to_decimal
 from .generator import diurnal_factor
 from .pemdb1 import BLOCKABLE_SERIES, CPLANE_ROOT_DEFAULT, CPLANE_SERIES
 from .control import (FAULT_SELECT, KINDS, T_CONFIG, T_FAULT, T_HISTORY,
@@ -54,6 +57,7 @@ KIND_LABELS = {
     "gw_pgw_restart": "PGW 재기동 통보",
     "external_path_latency": "외부 경로 지연 (백본)",
     "nsa_policy_restrict": "DCNR 정책 제한",
+    "anchor_saturation": "5G 체감 품질 저하 (앵커 경합)",
     # ── 신규 8종 ─────────────────────────────────────────────────────────
     "auc_no_response": "S6a 무응답 (TIMEOUT)",
     "dra_route_failure": "S6a 라우팅 계층 이상",
@@ -149,9 +153,18 @@ def _cells(conn) -> list:
                 q = (HERE / q).resolve()
             if q.exists():
                 drawable = P.load_drawable_dongs(q)
-        # 생성기(`cli.cmd_run`)와 **같은 인자**여야 같은 집합이 나온다
+        # 생성기(`cli.cmd_run`)와 **같은 인자**여야 같은 집합이 나온다.
+        #
+        # **인자가 늘면 여기도 늘려야 한다.** 2026-10-27 에 `locale`·
+        # `tac_only`·`sectors_per_enb`·`scope` 가 생겼는데 여기만 안 넘겨서
+        # UI 가 **다른 셀 집합**을 봤다 — 도쿄로 돌린 뒤엔 KR 벌을 읽어
+        # 0행이었다. 에러가 아니라 화면이 비는 모양이다.
         _CELLS = P.load_cells(
-            conn, enb_limit=int(pem.get("enb_limit", 0)), drawable=drawable)
+            conn, enb_limit=int(pem.get("enb_limit", 0)), drawable=drawable,
+            locale=str(pem.get("locale", "kr")),
+            tac_only=bool(pem.get("tac_only", False)),
+            sectors_per_enb=pem.get("sectors_per_enb"),
+            scope=P.Scope.from_cfg(pem.get("scope")))
     return _CELLS
 
 
@@ -390,6 +403,78 @@ def api_series(hours: int = 3, date: str | None = None):
         points.append(point)
     return {"hours": hours, "date": date, "points": points,
             "series_names": sorted({s for v in by_slot.values() for s in v})}
+
+
+@app.get("/api/region")
+def api_region():
+    """지역축 — **설정 파일 값 · UI 저장값 · 어긋난 자리**를 함께 내린다.
+
+    셋을 다 보여 주는 이유: 저장값이 실제로 적용되는 것은 **재시작 뒤**라
+    "지금 무엇으로 돌고 있나" 와 "다음에 무엇이 될까" 가 다를 수 있다.
+    하나만 보여 주면 화면이 둘 중 하나에 대해 거짓말을 한다.
+    """
+    from . import region
+    cfg = _cfg()
+    file_loc = region.resolve(cfg)
+    conn = _connect()
+    try:
+        saved = (get_config(conn, "locale") or "").strip().lower()
+    finally:
+        conn.close()
+    # DB 에 이상한 값이 있으면 **없는 것으로 본다** — 데몬도 같은 판단을
+    # 한다(`cli.apply_region_override`). 화면과 데몬이 갈리면 안 된다.
+    if saved and saved not in region.LOCALES:
+        saved = ""
+    pending = saved or file_loc
+    # 저장값을 적용했을 때의 어긋남을 미리 계산한다 — 저장 **전에** 보여
+    # 주려는 것이다. 누른 뒤에 알려 주면 되돌리는 수밖에 없다.
+    probe = json.loads(json.dumps({k: v for k, v in cfg.items()
+                                   if k in ("locale", "plmn", "pemdb1")}))
+    region.reapply(probe, pending)
+    return {
+        "locales": region.names(),
+        # 설정 파일(`datagen.yaml`)의 값
+        "file": file_loc,
+        # UI 가 저장해 둔 값. 빈 문자열이면 저장된 적이 없다
+        "saved": saved,
+        # 재시작하면 이것이 된다
+        "pending": pending,
+        # **지금 이 프로세스가 들고 있는 값** — 데몬과 다를 수 있다
+        "plmn": dict(cfg.get("plmn") or {}),
+        "pemdb1_locale": str((cfg.get("pemdb1") or {}).get("locale", "")),
+        # `pending` 을 적용했을 때 남는 어긋남. 사람이 yaml 에 적은 칸은
+        # 지역을 바꿔도 따라오지 않는다(`region` 규칙 ②)
+        "conflicts": region.conflicts(probe),
+        "restart_required": True,
+    }
+
+
+class RegionReq(BaseModel):
+    #: `kr` | `jp`. 목록의 정본은 `region.LOCALES` 다
+    locale: str
+
+
+@app.post("/api/region")
+def api_set_region(req: RegionReq):
+    """지역을 저장한다. **지금 도는 생성에는 영향이 없다.**
+
+    `volume_pct` 처럼 다음 틱부터 반영되지 않는다 — 데몬이 기동 시 한 번만
+    읽는다(`cli.apply_region_override`). 운영 중에 바꾸지 않는다는 전제
+    (사용자 확정 2026-10-28)이고, 바꿔도 되게 만들면 같은 분 Parquet 에
+    두 나라 IMSI 가 섞인다.
+    """
+    from . import region
+    loc = str(req.locale or "").strip().lower()
+    if loc not in region.LOCALES:
+        raise HTTPException(
+            400, f"모르는 지역이다: {req.locale!r} "
+                 f"(가능: {', '.join(region.LOCALES)})")
+    conn = _connect()
+    try:
+        set_config(conn, "locale", loc)
+    finally:
+        conn.close()
+    return {"ok": True, "locale": loc, "restart_required": True}
 
 
 @app.get("/api/settings")
@@ -1456,6 +1541,25 @@ _HTML = """<!doctype html>
 <div class="grid2">
   <div class="panel">
     <h2>생성 설정 <small class="dim">스위치는 즉시 · 나머지는 다음 틱부터</small></h2>
+    <!-- ── 지역축 ──────────────────────────────────────────────────────
+         **다른 설정과 성격이 다르다.** 여기 나머지는 즉시이거나 다음
+         틱부터인데 지역은 **재시작 뒤**다 — 데몬이 기동 시 한 번만 읽는다
+         (`cli.apply_region_override`). 운영 중에 바꾸지 않는다는 전제이고,
+         바꿔도 되게 만들면 같은 분 Parquet 에 한국·일본 IMSI 가 섞여 그
+         분이 **어느 쪽으로도 집계되지 않는다.**
+
+         그래서 맨 위에 두고 저장 버튼을 따로 준다 — 아래 "설정 저장" 에
+         묶이면 생성량을 조절하다가 지역까지 함께 저장된다. -->
+    <div class="sect" style="margin-top:0">
+      <h3>지역 <small>— 재시작 후 반영</small></h3>
+      <div class="row">
+        <select id="region-sel" style="min-width:160px"></select>
+        <button type="button" onclick="saveRegion()">지역 저장</button>
+        <span class="dim" id="region-msg"></span>
+      </div>
+      <div class="dim" id="region-note" style="margin-top:8px; font-size:12px;
+           line-height:1.6"></div>
+    </div>
     <!-- 스위치는 **누르는 순간 반영된다.** 저장 버튼에 묶여 있으면 끄려다가
          조절 중인 생성량까지 함께 적용된다. -->
     <div class="row">
@@ -2022,6 +2126,71 @@ function chartHover(ev) {
   tip.style.top = Math.max(0, ev.clientY - wrap.top - tip.offsetHeight - 10) + "px";
 }
 
+// ── 지역축 ─────────────────────────────────────────────────────────────
+// **저장해도 지금 도는 생성은 안 바뀐다.** 다른 설정과 다른 자리이므로
+// 화면이 그 사실을 먼저 말한다 — "저장했습니다"만 띄우면 운영자는 반영된
+// 줄 알고, 그 오해는 IMSI 를 들여다봐야 풀린다.
+let REGION = null;
+async function loadRegion() {
+  try { REGION = await (await fetch("/api/region")).json(); }
+  catch (e) { return; }
+  const sel = $("region-sel");
+  // **목록은 서버가 준다**(`region.LOCALES`). 화면이 자기 목록을 들면
+  // 지역이 늘 때 한쪽만 고쳐지고, 그때 "선택지가 없다"가 아니라
+  // **선택해도 안 먹는다**가 된다.
+  sel.innerHTML = (REGION.locales || []).map(l =>
+    `<option value="${esc(l.value)}">${esc(l.label)}</option>`).join("");
+  sel.value = REGION.pending || REGION.file;
+  renderRegionNote();
+}
+function renderRegionNote() {
+  if (!REGION) return;
+  const sel = $("region-sel").value;
+  const file = REGION.file, saved = REGION.saved, pend = REGION.pending;
+  const L = {};
+  (REGION.locales || []).forEach(l => { L[l.value] = l.label; });
+  const out = [];
+  // ① 지금 이 프로세스가 들고 있는 값 — 데몬과 같을 수도 다를 수도 있다
+  out.push(`설정 파일 <b>${esc(L[file] || file)}</b>`
+         + (saved ? ` · UI 저장값 <b>${esc(L[saved] || saved)}</b>` : "")
+         + ` → 재시작하면 <b>${esc(L[pend] || pend)}</b>`);
+  out.push(`PLMN <code>${esc(REGION.plmn.home || "?")}</code>`
+         + ` · IMSI 접두 <code>${esc((REGION.plmn.home||"") + (REGION.plmn.imsi_msin_head||""))}</code>`
+         + ` · 마스터 <code>${esc(REGION.pemdb1_locale || "?")}</code>`);
+  // ② 고르기만 하고 아직 저장 안 한 상태를 구분해 적는다
+  if (sel !== pend)
+    out.push(`<span style="color:var(--warn,#e8a33d)">고른 값 <b>${esc(L[sel]||sel)}</b>`
+           + ` — 아직 저장하지 않았다</span>`);
+  // ③ **어긋남을 숨기지 않는다.** 사람이 yaml 에 적은 칸은 지역을 바꿔도
+  //    따라오지 않는다 — 그걸 모르면 "바꿨는데 왜 그대로냐"가 된다.
+  const cf = REGION.conflicts || [];
+  if (cf.length) {
+    out.push(`<span style="color:var(--warn,#e8a33d)">⚠ 설정 파일에 적힌 값이`
+           + ` 있어 지역을 바꿔도 따라오지 않는다 —</span>`);
+    cf.forEach(c => out.push(`&nbsp;&nbsp;<code>${esc(c.path)}</code> = `
+      + `<b>${esc(c.configured)}</b> (${esc(c.locale)} 이면 ${esc(c.expected)})`));
+    out.push(`&nbsp;&nbsp;<span class="dim">따라오게 하려면 datagen.yaml 의 그 칸을 지운다</span>`);
+  }
+  out.push(`<span class="dim">운영 중에는 바꾸지 않는다 — 같은 분에 두 나라`
+         + ` IMSI 가 섞이면 그 분은 어느 쪽으로도 집계되지 않는다</span>`);
+  $("region-note").innerHTML = out.join("<br>");
+}
+async function saveRegion() {
+  const loc = $("region-sel").value;
+  const msg = $("region-msg");
+  msg.textContent = "저장 중…";
+  try {
+    const r = await fetch("/api/region", { method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ locale: loc }) });
+    if (!r.ok) { msg.textContent = "실패 — " + (await r.text()).slice(0, 120); return; }
+    // **"저장됨" 으로 끝내지 않는다.** 반영 시점을 함께 적는다.
+    msg.innerHTML = `<span style="color:var(--warn,#e8a33d)">저장됨 —`
+                  + ` <b>재시작해야 반영된다</b></span>`;
+    await loadRegion();
+  } catch (e) { msg.textContent = "실패 — " + e; }
+}
+
 // ── 생성 설정 ───────────────────────────────────────────────────────────
 // **비율이 정본이다.** 계열별 절대값은 기준(100%) × 비율로 유도해 보여 주기만
 // 한다 — 입력으로 두면 두 경로가 생기고, 데몬이 읽는 것은 비율 하나다.
@@ -2330,8 +2499,13 @@ async function loadHeavy(force) {
 
 (async () => {
   try { renderSettings(await (await fetch("/api/settings")).json()); } catch (e) {}
+  // 지역축은 **주기 폴링에 넣지 않는다** — 재시작 전에는 바뀌지 않는 값이라
+  // 1초마다 물으면 질의만 늘고 화면은 그대로다. 저장할 때 다시 읽는다.
+  loadRegion();
   loadHeavy(true);
 })();
+
+$("region-sel").addEventListener("change", renderRegionNote);
 
 // 툴팁은 래퍼에 건다 — SVG 에 걸면 막대 사이 빈 공간에서 이벤트가 끊겨
 // 커서를 가로로 움직일 때 툴팁이 깜빡인다.
@@ -3012,6 +3186,1158 @@ gridLoad();
 </body>
 </html>
 """
+
+
+# ── 지도 — 셀과 **가입자가 실제로 나타난 자리** ──────────────────────────────
+
+
+def _map_cells(conn) -> list[dict]:
+    """생성 대상 셀의 좌표·장비. `_cells` 를 그대로 쓴다.
+
+    **좌표가 없는 셀은 담지 않는다.** 지도에 찍을 수 없고, `0,0` 으로 두면
+    기니만 바다에 점이 생긴다(불변규칙 17 · `tables.dms_to_decimal` 머리말).
+    그 셀이 몇 개인지는 응답의 `unmapped` 가 말한다 — 숨기지 않는다
+    (불변규칙 12).
+    """
+    out = []
+    for c in _cells(conn):
+        if not c.latitude or not c.longitude:
+            continue
+        out.append({
+            "key": c.cell_key, "enb": c.enb_id, "cid": c.cell_id,
+            "lat": round(c.latitude, 6), "lon": round(c.longitude, 6),
+            "tac": c.tac, "ta_list": c.ta_list,
+            "sgw": c.sgw_id, "mme": c.mme_id,
+            "gu": c.adm_sgg_cd, "name": c.display_name,
+        })
+    return out
+
+
+@app.get("/api/map")
+def api_map():
+    """**장비 위치** — 셀과 그것을 맡는 코어.
+
+    ## 가입자를 보여주지 않는다 (2026-10-27 사람 결정)
+
+    처음에는 가입자 자취를 함께 그렸는데 두 가지가 틀렸다 —
+
+    1. **자취에 시간 순서가 없었다.** 창 안에 나온 셀을 모아 이었더니 순서가
+       임의라 지도를 가로지르는 지그재그가 됐다. 원시 레코드에 시각이 있으니
+       정렬할 수는 있지만, 그 전에 **보여줄 이유**가 먼저다.
+    2. **같은 모양에 다른 뜻을 담았다.** 셀 점은 TA 색, 가입자 점은
+       초록/노랑 — 둘 다 "점"이라 무엇을 보는지 섞였다.
+
+    지금 알고 싶은 것은 **장비가 어디 있고 어떻게 묶였나**다. 가입자 이동은
+    필요해지면 **별 화면**으로 둔다 — 한 화면에 두 축을 겹치지 않는다.
+
+    ## 무엇을 내리나
+
+    셀마다 좌표와 **네 가지 묶음 키**를 함께 내린다(`tac`·`ta_list`·`sgw`·
+    `mme`). 화면이 그중 하나를 골라 색을 칠한다 — 축을 고를 수 있어야
+    "이 점이 무슨 색인가"가 헷갈리지 않는다.
+
+    코어 장비는 **자기가 맡은 셀의 중심**에 찍는다. 장비에 좌표가 따로 없고
+    (레지스트리는 ID·이름만 들고 있다), 실제로 중요한 것도 "어디 놓였나"가
+    아니라 **"어디를 덮나"** 다.
+    """
+    conn = _connect()
+    try:
+        cells = _map_cells(conn)
+    finally:
+        conn.close()
+
+    def centers(key: str) -> list[dict]:
+        acc: dict[str, list[dict]] = collections.defaultdict(list)
+        for c in cells:
+            if c[key]:
+                acc[str(c[key])].append(c)
+        out = []
+        for k, v in sorted(acc.items()):
+            out.append({
+                "id": k, "kind": key.upper(), "cells": len(v),
+                "enb": len({x["enb"] for x in v}),
+                "lat": round(sum(x["lat"] for x in v) / len(v), 6),
+                "lon": round(sum(x["lon"] for x in v) / len(v), 6),
+            })
+        return out
+
+    sc = (_pem_cfg().get("scope") or {})
+    gu = [str(x) for x in (sc.get("gu") or [])]
+    names = {}
+    if gu:
+        conn = _connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT GU_ID, GU_NAME FROM CM_GU_JP WHERE GU_ID IN ("
+                            + ",".join(["%s"] * len(gu)) + ")", gu)
+                names = {str(a): b for a, b in cur.fetchall()}
+        finally:
+            conn.close()
+    # 구가 많으면 이름을 다 적지 않는다 — 12개면 머리말이 화면을 덮는다.
+    # **몇 곳인지는 적는다**(잘랐다는 사실을 숨기지 않는다 · 불변규칙 12)
+    gn = [names.get(g, g) for g in gu]
+    parts = gn if len(gn) <= 3 else [f"{gn[0]} 외 {len(gn) - 1}곳"]
+    if sc.get("dong"):
+        parts.append(f"동 {len(sc['dong'])}곳")
+    if sc.get("route"):
+        parts.append(str(sc["route"]))
+    stations, lines = _map_stations(cells)
+    return {
+        "scope": " + ".join(parts) or "전량",
+        "cells": cells,
+        "stations": stations,
+        "lines": lines,
+        "unmapped": max(0, len(_CELLS or ()) - len(cells)),
+        "nodes": {"sgw": centers("sgw"), "mme": centers("mme")},
+        "counts": {
+            "enb": len({c["enb"] for c in cells}),
+            "tac": len({c["tac"] for c in cells if c["tac"]}),
+            "ta_list": len({c["ta_list"] for c in cells if c["ta_list"]}),
+            "sgw": len({c["sgw"] for c in cells if c["sgw"]}),
+            "mme": len({c["mme"] for c in cells if c["mme"]}),
+        },
+    }
+
+
+#: 노선 색 — JR 공식 라인컬러. 화면은 `.rl-ymt` 가 같은 값을 들고 있다
+#: (실제 선로를 칠하는 쪽이라 CSS 에 있어야 한다). 여기 값은 다른 노선을
+#: 추가할 때의 자리표다.
+_LINE_COLOR = {"YMT": "#9acd32"}
+
+
+def _map_stations(cells: list[dict]) -> tuple[list[dict], list[dict]]:
+    """역 위치와 **노선 선** — 노선 파일이 이미 들고 있다.
+
+    `data/lines/*.json` 의 `station_of` 가 칸마다 역 id 를 적고 `cells` 가
+    같은 순서로 셀 키를 적으므로, 역에 딸린 셀들의 **좌표 평균**이 곧 역
+    자리다. 정확한 역사 좌표가 아니라 **그 역을 덮는 셀의 중심**이다 —
+    실측으로 실제 역사와 **중앙값 73m · 최대 238m** 떨어져 있다
+    (`tools/build_line_route.py` 의 `ST` 와 대조). 지도에서 "여기가
+    신주쿠쯤"을 읽는 용도고, 그 이상으로 쓰면 안 된다.
+
+    `lines` 는 역을 `station_pos` 순서로 이은 선이다. **이제 이것을 그리지
+    않는다**(2026-10-28) — 실제 선로 레이어(`/api/map/layer/rail`)가 들어온
+    뒤로 둘이 겹쳐 보이는데 직선 쪽이 틀린 그림이다. 지금 쓰임은 **실제
+    선로에서 야마노테 구간을 집는 자**다(화면의 `markYamanote`).
+
+    노선 파일이 없으면 빈 목록이다. 곁다리라 없어도 화면이 선다.
+    """
+    pos = {c["key"]: c for c in cells}
+    acc: dict[str, list[dict]] = collections.defaultdict(list)
+    routes = []
+    try:
+        d = Path(str(_pem_cfg().get("lines_dir") or "data/lines"))
+        if not d.is_absolute():
+            d = (HERE / d).resolve()
+        for f in sorted(d.glob("*.json")):
+            routes += json.loads(f.read_text(encoding="utf-8"))
+        for route in routes:
+            names = route.get("stations") or {}
+            keys = route.get("cells") or []
+            for key, sid in zip(keys, route.get("station_of") or []):
+                c = pos.get(key)
+                if c and names.get(sid):
+                    acc[names[sid]].append(c)
+    except Exception:
+        return [], []      # 지도의 곁다리다 — 실패해도 장비는 보여야 한다
+
+    st = {k: (round(sum(x["lat"] for x in v) / len(v), 6),
+              round(sum(x["lon"] for x in v) / len(v), 6), len(v))
+          for k, v in acc.items()}
+
+    lines, seen = [], set()
+    for route in routes:
+        names = route.get("stations") or {}
+        order = sorted((route.get("station_pos") or {}).items(),
+                       key=lambda kv: kv[1])
+        pts = [[st[names[sid]][1], st[names[sid]][0]]
+               for sid, _ in order if names.get(sid) in st]
+        if len(pts) < 2:
+            continue
+        # 외선·내선은 **같은 선로다.** 둘 다 그리면 두 겹이 된다
+        rid = str(route.get("id") or "").split("-")[0]
+        if rid in seen:
+            continue
+        seen.add(rid)
+        # 외선·내선 꼬리를 뗀다 — 선은 하나고 방향은 선의 성질이 아니다
+        nm = re.sub(r"\s*[가-힣]*순환\([^)]*\)", "",
+                    str(route.get("name") or rid).split(" — ")[0]).strip()
+        lines.append({"id": rid, "name": nm or rid,
+                      "color": _LINE_COLOR.get(rid, "#6b7684"),
+                      "loop": bool(route.get("loop")), "pts": pts})
+
+    return ([{"name": k, "lat": v[0], "lon": v[1], "cells": v[2]}
+             for k, v in sorted(st.items())], lines)
+
+
+#: 배경 레이어 — 설정 키 ↔ 파일. **경로는 각자 자기 키로 받는다.**
+#: 전에 `geo_crosswalk` 의 형제에서 찾다가 로케일별로 디렉터리가 달라
+#: 컨테이너에서 파일을 못 찾았다(§1.15). 같은 실수를 늘리지 않는다.
+#: 배경 레이어 — 설정 키와 **출처 문구**. 출처는 레이어마다 다르다
+#: (약관 의무라 화면이 받은 것만 표기한다). 도로·녹지는 OSM 이다 —
+#: 국토수치정보의 도로(`N01`)가 1995년판 0.12MB 라 쓸 수 없었다
+#: (`tools/build_jp_geo_layers.py` 머리말).
+_LAYER = {
+    "rail":   ("geo_rail",   "国土数値情報 (国土交通省) · 鉄道 N02"),
+    "rivers": ("geo_rivers", "国土数値情報 (国土交通省) · 河川 W05"),
+    "roads":  ("geo_roads",  "© OpenStreetMap contributors"),
+    "green":  ("geo_green",  "© OpenStreetMap contributors"),
+}
+
+
+@app.get("/api/map/layer/{name}")
+def api_map_layer(name: str):
+    """철도·하천 — **국토수치정보를 구워 둔 로컬 파일이다.**
+
+    행정경계 한 장만으로는 "지도 같지 않다"는 말을 들었다. 같은 출처가
+    같은 약관으로 철도(N02)·하천(W05)을 내므로 `tools/build_jp_geo_layers.py`
+    가 한 번 받아 굽고 여기서는 읽기만 한다 — 실행 시점에 외부를 부르지
+    않는 원칙은 그대로다(`/api/map/geo` 머리말).
+
+    **철도는 실제 선형이다.** 화면의 야마노테선 초록 선은 역을 직선으로
+    이은 **모사 경로**고, 이 레이어가 그 아래 깔리는 **실제 선로**다.
+    둘을 겹쳐 두면 모사가 어디서 눌렸는지 보인다.
+
+    **도로·녹지만 출처가 다르다**(2026-10-28). 국토수치정보의 도로는
+    `N01` 이 1995년판 0.12MB 라 간선 몇 줄뿐이고, 최신 `N13` 은 긴급수송
+    도로라 가로망이 아니다. 그래서 그 둘은 OSM 에서 굽는다 — ODbL 이라
+    화면이 `© OpenStreetMap contributors` 를 함께 적는다. 받는 것은 빌드
+    시점 한 번이고 **런타임이 외부를 부르지 않는 원칙은 그대로다.**
+    """
+    hit = _LAYER.get(name)
+    if not hit:
+        raise HTTPException(404, f"그런 레이어가 없다: {name}")
+    key, source = hit
+    raw = str(_pem_cfg().get(key) or "")
+    if not raw:
+        return {"error": f"`pemdb1.{key}` 가 비어 있다", "items": []}
+    src = Path(raw)
+    if not src.is_absolute():
+        src = (HERE / src).resolve()
+    if not src.exists():
+        # 빈 배열을 돌려주지 않는다 — "데이터가 없다"와 "파일이 없다"는
+        # 다른 사실이고, 전자로 보이면 왜 비었는지 알 수 없다
+        return {"error": f"레이어 파일이 없다: {src}", "items": []}
+    return {"items": json.loads(src.read_text(encoding="utf-8")),
+            "source": source}
+
+
+@app.get("/api/map/all")
+def api_map_all():
+    """**마스터 전량** — 생성 대상이 아닌 셀까지.
+
+    지도에 생성 대상만 그렸더니 "신주쿠에만 기지국이 있나?"로 읽혔다.
+    아니다 — `pemdb1.scope` 가 좁힌 것이고 마스터에는 도쿄 전역이 있다.
+    **좁힌 사실이 화면에 보여야 한다**(불변규칙 12 의 결).
+
+    좌표만 내린다. 2만 개가 넘어 장비 정보까지 실으면 응답이 커지고,
+    배경으로 깔 것이라 누를 일도 없다.
+    """
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT LATITUDE, LONGITUDE, ENB_ID "
+                        "FROM CM_CELL_REP_RU_LOC_JP")
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    # **좌표를 겹쳐 보내지 않는다.** 한 자리에 섹터가 6개씩 서 있어
+    # 23,039셀이 좌표로는 5,036자리다 — 그대로 보내면 4.5배를 헛보낸다.
+    # 화면의 점 하나는 **셀이 아니라 자리**다(그래서 수를 따로 내린다).
+    seen, pts, enb, n = set(), [], set(), 0
+    for la, lo, e in rows:
+        a, o = dms_to_decimal(la), dms_to_decimal(lo)
+        if not (a and o):
+            continue
+        n += 1
+        enb.add(e)
+        k = (round(o, 5), round(a, 5))
+        if k not in seen:
+            seen.add(k)
+            pts.append([k[0], k[1]])
+    return {"pts": pts, "cells": n, "enb": len(enb), "spots": len(pts)}
+
+
+@app.get("/api/map/geo")
+def api_map_geo(bbox: str = ""):
+    """행정경계 GeoJSON — **로컬 파일이다. 외부 타일을 쓰지 않는다.**
+
+    처음에 CARTO 타일 CDN 으로 배경을 깔았는데 셋이 걸렸다 —
+
+    1. **CARTO 는 API 키를 요구한다.** 키 없이 쓰면 언제 끊길지 모른다.
+    2. **현장 PoC 가 폐쇄망일 수 있다.** 외부 CDN 이면 지도가 통째로 안 뜬다.
+    3. **이 저장소의 다른 화면은 외부 의존이 없다.** 저 셋(Leaflet CSS·JS·
+       타일)이 `ui.py` 의 **유일한** 외부 URL 이었다.
+
+    그래서 graphio 가 이미 들고 있는 경계를 쓴다 — `data/geo/jp/` 의
+    국토수치정보 행정구역(1.87MB · CC BY 4.0 · 그쪽 `SOURCE.txt`).
+
+    `bbox` 는 `"lat0,lon0,lat1,lon1"` 이다. 전국 1,897개를 다 내리면 브라우저가
+    느려진다 — 보는 자리만 내린다.
+    """
+    # **자기 설정 키를 쓴다.** 처음엔 `geo_crosswalk` 의 형제에서 찾았는데,
+    # 그 키가 로케일별로 다른 디렉터리를 가리켜(`data/geo/` vs
+    # `data/geo/jp/`) 컨테이너에서 **파일을 못 찾았다** — 두 값이 늘 같은
+    # 디렉터리에 있으리라는 가정이 틀렸다. 경로는 경로대로 받는다.
+    raw = str(_pem_cfg().get("geo_boundary") or "")
+    if not raw:
+        return {"error": "`pemdb1.geo_boundary` 가 비어 있다 — 행정경계 파일 "
+                         "경로를 설정에 적어야 한다", "features": []}
+    src = Path(raw)
+    if not src.is_absolute():
+        src = (HERE / src).resolve()
+    if not src.exists():
+        # **빈 배열을 돌려주지 않는다** — "경계가 없다"와 "파일이 없다"는
+        # 다른 사실이고, 전자로 보이면 지도가 왜 비었는지 알 수 없다
+        return {"error": f"경계 파일이 없다: {src}", "features": []}
+
+    lo_la = lo_lo = -1e9
+    hi_la = hi_lo = 1e9
+    if bbox:
+        try:
+            lo_la, lo_lo, hi_la, hi_lo = (float(x) for x in bbox.split(","))
+        except ValueError:
+            lo_la = lo_lo = -1e9
+            hi_la = hi_lo = 1e9
+
+    doc = json.loads(src.read_text(encoding="utf-8"))
+    out = []
+    for f in doc.get("features", []):
+        g = f.get("geometry") or {}
+        rings = ([g.get("coordinates")] if g.get("type") == "Polygon"
+                 else g.get("coordinates") or [])
+        keep = []
+        for poly in rings:
+            if not poly:
+                continue
+            ring = poly[0]
+            xs = [c[0] for c in ring]
+            ys = [c[1] for c in ring]
+            if (max(ys) < lo_la or min(ys) > hi_la
+                    or max(xs) < lo_lo or min(xs) > hi_lo):
+                continue
+            keep.append(ring)
+        if keep:
+            pr = f.get("properties") or {}
+            # 이름을 놓을 자리 — **가장 큰 고리**의 가운데. 섬이 딸린 구는
+            # 작은 고리에 이름이 붙으면 엉뚱한 바다 위에 뜬다
+            big = max(keep, key=len)
+            xs = [c[0] for c in big]
+            ys = [c[1] for c in big]
+            out.append({
+                "name": pr.get("N03_004") or pr.get("N03_003") or "",
+                "city": pr.get("N03_003") or "",
+                "code": pr.get("N03_007") or "",
+                "at": [round((min(xs) + max(xs)) / 2, 6),
+                       round((min(ys) + max(ys)) / 2, 6)],
+                "rings": keep,
+            })
+    return {"features": out, "source": "国土数値情報 行政区域 · CC BY 4.0"}
+
+
+_HTML_MAP = """<!doctype html>
+<html lang="ko"><head><meta charset="utf-8">
+<title>지도 · 장비 위치</title>
+<style>
+ /* **외부 CSS·JS 를 쓰지 않는다.** 현장 PoC 가 폐쇄망일 수 있고, 이
+    저장소의 다른 화면도 외부 의존이 없다 — `/api/map/geo` 머리말 */
+ html,body{margin:0;height:100%;font:13px/1.5 -apple-system,BlinkMacSystemFont,
+   "Hiragino Sans","Noto Sans JP",sans-serif;background:#0f1216;color:#d8dee9}
+ /* **두 줄로 고정한다.** 한 줄에 몰아넣던 때는 창이 1200px 일 때
+    `.stat` 혼자 856px 를 먹어 라벨이 "철\n도·하천" 으로 접히고 숫자는
+    헤더 밖으로 삐져나갔다. 줄바꿈 자리를 브라우저에 맡기지 않는다 —
+    `.stat` 이 폭 전부를 차지해 **반드시 둘째 줄로 내려간다** */
+ header{height:70px;display:flex;flex-wrap:wrap;align-content:center;
+   align-items:center;gap:5px 14px;padding:0 14px;
+   background:#161b22;border-bottom:1px solid #2a313a}
+ header>*{flex:none;white-space:nowrap}
+ header b{font-size:14px} label{opacity:.85}
+ select,button{background:#222933;color:#d8dee9;border:1px solid #39414c;
+   border-radius:4px;padding:3px 7px;font:inherit}
+ /* 폭을 다 차지해 줄을 가른다. 넘치면 **자른다** — 줄을 늘리면 지도가
+    그만큼 줄어든다 */
+ .stat{flex-basis:100%;display:flex;gap:14px;overflow:hidden;
+   font-variant-numeric:tabular-nums}
+ .stat>span{flex:none}
+ .stat #scope,.stat #note{flex:1;min-width:0;overflow:hidden;
+   text-overflow:ellipsis}
+ .stat i{font-style:normal;opacity:.55;margin-right:4px}
+ .warn{color:#e0a458}
+ .dimtag{opacity:.55;font-size:12px}
+ /* 바다색 바탕 위에 육지를 얹는다 — 전에는 둘 다 거의 같은 검정이라
+    경계가 나와도 "지도가 안 나온다"로 보였다 */
+ #wrap{position:absolute;inset:70px 0 0 0;overflow:hidden;cursor:grab;
+   background:#0d1a26}
+ #wrap.drag{cursor:grabbing}
+ svg{width:100%;height:100%;display:block}
+ .adm{fill:#223040;stroke:#4a5c72;stroke-width:1px;
+   vector-effect:non-scaling-stroke}
+ /* TA 묶음 히트맵 — `screen` 이라 **겹칠수록 밝아진다.** 어두운 바탕에서
+    밀도를 읽는 방식이고, 두 묶음이 맞닿는 자리는 색이 섞여 경계가 보인다.
+    볼록껍질이 바깥쪽 몇 점만 이어 안쪽을 비워 두던 것과 다르다 */
+ .kde{mix-blend-mode:screen;pointer-events:none}
+ /* **라벨은 SVG 밖 div 다** — 툴팁과 같은 이유이고, 한 번 더 데였다.
+    이 viewBox 의 단위는 **도(degree)** 라서 SVG 안에서 `stroke-width:3px`
+    는 3px 가 아니라 **3도 ≈ 330km** 가 된다. 그 검은 테두리가 지도를
+    통째로 덮어 화면이 새까맣게 나왔다. 글자는 확대해도 같은 크기여야
+    하므로 애초에 지도 좌표계에 둘 것이 아니었다. */
+ /* 노선은 **배경 레이어**다 — 장비를 가리면 안 되니 굵되 흐리게 */
+ /* **23,039개를 노드 하나로 그린다.** circle 을 그만큼 만들면 브라우저가
+    버벅인다 — 길이 0 짜리 선분을 둥근 캡으로 찍으면 점이 된다 */
+ /* 도쿄 바깥 eNB. 1.4 → 2.2px 로는 **여전히 안 보인다**는 말을 들어
+    3.4px 로 올렸다. 생성 대상(`#f7eec7` 노랑)과 색이 갈려 있으므로
+    굵어져도 둘을 혼동하지 않는다 */
+ .allpt{fill:none;stroke:#828d9c;stroke-width:3.4px;stroke-opacity:.8;
+   stroke-linecap:round;vector-effect:non-scaling-stroke;pointer-events:none}
+ /* 실제 선로 — **배경이다.** 장비를 읽는 데 방해가 되면 안 되므로
+    가늘고 흐리게. JR 만 조금 밝게 해 뼈대가 보이게 한다 */
+ /* 노선 색은 **JS 가 이름 해시로 준다**(`lineColor`). 129개 노선에 손으로
+    색표를 매기면 노선이 하나 늘 때마다 표가 틀어진다. 여기서는 굵기와
+    세기만 정한다 — 전보다 진하지만(.6 → .85) 채도를 낮춰 두므로
+    장비를 이기지 않는다 */
+ .rl{fill:none;stroke-width:1.4px;stroke-opacity:.85;
+   stroke-linecap:round;vector-effect:non-scaling-stroke;pointer-events:none}
+ .rv{fill:none;stroke:#2d5f7a;stroke-width:1.6px;stroke-opacity:.8;
+   stroke-linecap:round;vector-effect:non-scaling-stroke;pointer-events:none}
+ /* 공원·수역 — **면이다.** 육지(`.adm` 의 #223040) 위에 색만 얹는다.
+    테두리를 주면 작은 공원이 점처럼 보여 장비와 섞인다 */
+ .gr{stroke:none;pointer-events:none}
+ .gr-park{fill:#27402f}
+ .gr-water{fill:#19354a}
+ /* 도로 — **가장 아래 배경이다.** 철도(`.rl`)보다 어둡게 둬야 뼈대가
+    철도 쪽으로 읽힌다. 등급마다 굵기를 달리하지 않으면 가로망이
+    회색 덩어리가 된다 */
+ .rd{fill:none;stroke-linecap:round;stroke-linejoin:round;
+   vector-effect:non-scaling-stroke;pointer-events:none}
+ /* 색을 **푸른 쪽으로** 둔다. 처음엔 중성 회색이었는데 장비 점
+    (`.allpt` #555e6b)과 명도가 겹쳐 어디까지가 도로인지 모호했다 */
+ /* **철도보다 연해야 한다.** 노선이 색을 얻으면서 도로까지 눈에
+    들어오면 둘이 다툰다 — 도로는 자리를 알려주는 바탕이다 */
+ .rd-motorway{stroke:#5a6574;stroke-width:2.2px}
+ .rd-trunk{stroke:#4f5968;stroke-width:1.8px}
+ .rd-primary{stroke:#464f5d;stroke-width:1.4px}
+ .rd-secondary{stroke:#3e4654;stroke-width:1.1px}
+ .rd-tertiary{stroke:#38404d;stroke-width:.9px}
+ /* **확대하면 굵어진다.** `non-scaling-stroke` 라 굵기가 화면 px 로
+    고정인데, 1km 폭 화면에서 1px 짜리 간선은 실제 도로폭(20m ≈ 24px)과
+    너무 달라 "가느다란 실"로 보였다. LOD 단계를 그대로 굵기 단계로 쓴다 */
+ svg[data-lod="2"] .rd-motorway{stroke-width:3.2px}
+ svg[data-lod="2"] .rd-trunk{stroke-width:2.6px}
+ svg[data-lod="2"] .rd-primary{stroke-width:2px}
+ svg[data-lod="2"] .rd-secondary{stroke-width:1.5px}
+ svg[data-lod="2"] .rd-tertiary{stroke-width:1.1px}
+ svg[data-lod="3"] .rd-motorway{stroke-width:5px}
+ svg[data-lod="3"] .rd-trunk{stroke-width:4px}
+ svg[data-lod="3"] .rd-primary{stroke-width:3px}
+ svg[data-lod="3"] .rd-secondary{stroke-width:2.2px}
+ svg[data-lod="3"] .rd-tertiary{stroke-width:1.6px}
+ /* 야마노테선 — JR 라인컬러(黄緑). 이 화면의 주인공 노선이다.
+    **`.rl` 뒤에 와야 이긴다** — 특이도가 같아 순서가 정한다 */
+ .rl-ymt{stroke:#9acd32;stroke-width:2.6px;stroke-opacity:.95}
+ .pick{fill:none;stroke:#ffd43b;stroke-width:.9px;stroke-opacity:.8;
+   vector-effect:non-scaling-stroke}
+ /* 고른 계통에 **불이 들어온다.** 전에는 노란 테두리 원만 그려 어느
+    장비가 걸렸는지 세어야 했다 — TA 히트맵과 같은 방식으로 영역째
+    밝힌다(사람 결정 2026-10-28) */
+ .glow{mix-blend-mode:screen;pointer-events:none}
+ #labels{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+ .lb{position:absolute;transform:translate(-50%,-50%);white-space:nowrap;
+   font-weight:700;color:#fff;text-shadow:0 0 3px #0b0e12,0 0 3px #0b0e12,
+   0 1px 2px #0b0e12}
+ .lb-h{font-size:13px;opacity:.9}
+ /* **상자를 없앴다**(2026-10-28). 검은 배경에 테두리까지 두르니 장비
+    번호가 역 이름보다 튀어, 배경이어야 할 것이 주인공이 됐다. 글자
+    그림자(`.lb`)만으로 어두운 지도 위에서 충분히 읽힌다 */
+ /* **두껍게를 푼다.** `.lb` 가 700 이라 장비 번호가 역 이름을 눌렀다 */
+ .lb-n{font-size:12px;font-weight:400}
+ /* 지명은 **배경이다** — 장비를 읽는 데 방해가 되면 안 된다 */
+ .lb-a{font-size:12px;font-weight:500;color:#7d8fa6;letter-spacing:.04em}
+ /* 점은 SVG 가 찍는다 — 여기서는 글자만. 왼쪽 끝을 점에 맞춘다 */
+ /* 역은 **어디인지 읽는 수단**이라 장비 다음으로 또렷해야 한다.
+    11px 흐린 회색일 때는 장비 번호 상자에 묻혔다 */
+ .lb-s{font-size:13px;font-weight:600;color:#fff;transform:translateY(-50%)}
+ #tip{position:absolute;pointer-events:none;background:#0b0e12f2;
+   border:1px solid #39414c;border-radius:4px;padding:5px 8px;font-size:12px;
+   white-space:pre;display:none;z-index:5}
+ #legend{position:absolute;left:10px;bottom:10px;z-index:3;background:#0b0e12e8;
+   border:1px solid #2a313a;border-radius:6px;padding:8px 10px;font-size:12px;
+   max-height:46%;overflow:auto;min-width:148px}
+ #legend h4{margin:0 0 6px;font-size:12px;opacity:.7;font-weight:600}
+ #legend div{display:flex;align-items:center;gap:6px;line-height:1.7}
+ #legend b{font-variant-numeric:tabular-nums}
+ #legend s{width:10px;height:10px;border-radius:50%;display:inline-block;
+   text-decoration:none;flex:none}
+ #sel{position:absolute;left:50%;transform:translateX(-50%);top:10px;z-index:4;
+   display:none;gap:14px;align-items:center;background:#0b0e12f2;
+   border:1px solid #ffd43b66;border-radius:6px;padding:7px 12px;font-size:12px;
+   white-space:nowrap}
+ #sel b{color:#ffd43b;margin-right:2px} #sel span{opacity:.8;margin-right:12px}
+ #sel button{margin-left:4px}
+ #src{position:absolute;right:8px;bottom:6px;font-size:11px;opacity:.45}
+ /* 축척 — 출처 줄 위에 둔다. 셀 간격이 수백 m 라 "지금 몇 m 를 보고
+    있나"가 장비 밀도를 읽는 데 필요하다 */
+ #scale{position:absolute;right:8px;bottom:24px;z-index:3;font-size:11px;
+   display:flex;align-items:center;gap:6px;opacity:.75;pointer-events:none}
+ #scale i{height:7px;border:1px solid #c6cedb;border-top:0;display:block}
+ #scale b{font-weight:600;font-variant-numeric:tabular-nums}
+</style></head><body>
+<header>
+  <b>장비 위치</b>
+  <label>보기 <select id=mode>
+    <option value=enb>전체 eNB</option>
+    <option value=ta>TA 목록</option>
+    <option value=sgw>SGW</option>
+    <option value=mme>MME</option>
+  </select></label>
+  <button id=reload>새로고침</button>
+  <button id=reset>전체 보기</button>
+  <div class=stat>
+    <span><i>셀</i><b id=ncell>0</b></span>
+    <span><i>eNB</i><b id=nenb>0</b></span>
+    <span><i>TAC</i><b id=ntac>0</b></span>
+    <span><i>TA목록</i><b id=ntal>0</b></span>
+    <span><i>SGW</i><b id=nsgw>0</b></span>
+    <span><i>MME</i><b id=nmme>0</b></span>
+    <span id=scope class=dimtag></span>
+    <span id=note class=warn></span>
+  </div>
+</header>
+<div id=wrap>
+  <svg id=svg>
+    <defs>
+      <!-- 커널. `primitiveUnits` 기본이 userSpaceOnUse 라 **도(degree) 단위**다 —
+           0.0022도 ≈ 200m. 줌해도 지리적 폭이 유지되는 쪽이 맞다(KDE 대역폭은
+           화면 거리가 아니라 지상 거리다) -->
+      <filter id=kdeblur x="-25%" y="-25%" width="150%" height="150%">
+        <feGaussianBlur stdDeviation="0.0022"/>
+      </filter>
+    </defs>
+    <g id=gAdm></g><g id=gGreen></g><g id=gRoad></g><g id=gRiv></g><g id=gRail></g><g id=gYmt></g><g id=gAll></g><g id=gKde></g><g id=gCell></g>
+    <g id=gPick></g><g id=gStn></g><g id=gNode></g></svg>
+  <div id=sel></div>
+  <div id=labels></div>
+  <div id=tip></div><div id=legend></div><div id=scale></div><div id=src></div>
+</div>
+<script>
+// ── 투영 — 웹 메르카토르. 도시 축척이라 간단한 식으로 충분하다 ──────────
+const R=180/Math.PI;
+const mx=(lon)=>lon, my=(lat)=>R*Math.log(Math.tan(Math.PI/4+lat*Math.PI/360));
+const el=(n)=>document.createElementNS('http://www.w3.org/2000/svg',n);
+const svg=document.getElementById('svg'), tip=document.getElementById('tip');
+let VB=null, HOME=null, D=null, GEO=null, ALL=null, RAIL=null, RIV=null;
+let ROAD=null, GREEN=null;
+
+// ── 보기 방식 — **무엇을 찍고 무엇으로 가를지** (사람 결정 2026-10-28) ──
+//
+// 전에는 `색` 셀렉트가 점 **색만** 바꿨다. 점은 늘 셀 7,694개였고 묶음은
+// 늘 볼록껍질이었다. 보는 사람이 바꾸고 싶은 것은 색이 아니라 **무엇을
+// 보느냐**였다.
+//
+//  unit  점을 무엇으로 찍나 (eNB 자리 / 셀)
+//  axis  무엇으로 색을 가르나 ('none' 이면 단일 색)
+//  kde   묶음을 밀도 면으로 칠하나
+//  focus 코어를 주인공으로 두나 — 그 종류만 크고 진하게, 셀은 물러난다
+//
+// **TAC 는 아직 없다** — TA 목록과 묶을지 검토 중이다(보류, 2026-10-28).
+// **`전체 Cell` 은 없다**(2026-10-28 사람 결정). 같은 eNB 의 셀은 좌표가
+// 같아서(2,177국 전부) 셀로 찍어도 eNB 모드와 **그림이 똑같았다** — 같은
+// 자리에 3.7겹이 쌓일 뿐이다. 셀 단위로 봐야 할 일은 점을 눌러서 한다.
+const MODE={
+  enb:  {unit:'enb',  axis:'none',    kde:false, focus:null},
+  ta:   {unit:'enb',  axis:'ta_list', kde:true,  focus:null},
+  sgw:  {unit:'enb',  axis:'sgw',     kde:false, focus:'sgw'},
+  mme:  {unit:'enb',  axis:'mme',     kde:false, focus:'mme'},
+};
+const modeOf=()=>MODE[document.getElementById('mode').value]||MODE.enb;
+
+//: eNB 대표점. **같은 eNB 의 셀은 좌표가 같다** — 2,177국 전부가 그렇고
+//: 평균 3.7섹터, 6섹터국이 744개다(실측 2026-10-28). 셀로 찍으면 같은
+//: 자리에 3.7겹이 쌓여 `d` 만 길어지고 무엇을 눌렀는지도 모른다.
+//: TAC·TA목록·SGW·MME 도 eNB 안에서 갈리지 않아(실측 0건) 대표 셀의
+//: 값을 그대로 쓴다.
+let ENB=null;
+function enbPoints(){
+  if(ENB) return ENB;
+  const m=new Map();
+  for(const c of D.cells){
+    const e=m.get(c.enb);
+    if(e) e.n++; else m.set(c.enb, {...c, key:c.enb, n:1});
+  }
+  return ENB=[...m.values()];
+}
+
+//: 커널 대역폭(도). 0.0045도 ≈ 400m — eNB 간격(수백 m)보다 조금 커야
+//: 낱낱의 점이 아니라 "영역"으로 읽힌다
+const KDE_BW=0.0045;
+function drawKde(axis){
+  const box=document.getElementById('gKde');
+  const grp={};
+  for(const c of enbPoints()){
+    const v=c[axis]; if(v===null||v==='') continue;
+    (grp[v]=grp[v]||[]).push(c);
+  }
+  // **묶음마다 그룹을 하나씩** 둔다. 번짐(`filter`)은 그룹 단위로 한 번
+  // 걸리고, 그 안에서 원들이 겹쳐 밀도가 쌓인다
+  for(const [v,pts] of Object.entries(grp)){
+    const wrap=el('g');
+    wrap.setAttribute('class','kde');
+    wrap.setAttribute('filter','url(#kdeblur)');
+    for(const c of pts){
+      const q=el('circle');
+      q.setAttribute('cx',mx(c.lon)); q.setAttribute('cy',-my(c.lat));
+      q.setAttribute('r',KDE_BW); q.setAttribute('fill',PAL[v]);
+      q.setAttribute('fill-opacity','.3');
+      wrap.appendChild(q);
+    }
+    box.appendChild(wrap);
+  }
+}
+
+// ── 축척 LOD — **멀리서 다 그리면 아무것도 안 보인다** ──────────────────
+//
+// 도로를 등급 구분 없이 깔았더니 전체 뷰가 회색 덩어리가 되고, 정작
+// 확대했을 때 새로 나올 것이 남지 않았다. 등급마다 "이보다 넓게 보면
+// 그리지 않는다"를 정해 축척이 내려갈수록 가로망이 채워지게 한다.
+//
+// viewBox 단위는 **도(degree)** 다. 도쿄 위도에서 경도 1도는 약 90.4km.
+const kmSpan=()=>VB?VB.w*90.4:1e9;
+const ROAD_LOD={motorway:1e9, trunk:1e9, primary:14, secondary:7, tertiary:3};
+//: 지금 화면이 몇 단계인지. 바뀔 때만 다시 그린다 — 줌할 때마다 17,708개를
+//: 다시 만들면 손이 멈춘다
+const lodOf=()=>{const k=kmSpan(); return k>14?0:k>7?1:k>3?2:3;};
+let LOD=-1;
+
+function setVB(v){VB=v; svg.setAttribute('viewBox',`${v.x} ${v.y} ${v.w} ${v.h}`);
+  drawScale();
+  // **단계가 바뀌면 draw 가 placeLabels 까지 한다** — 여기서 또 부르면 두 번이다
+  if(D && lodOf()!==LOD){ draw(); return; }
+  placeLabels();}
+
+// ── 라벨 — 지도 좌표를 화면 픽셀로 옮겨 div 로 놓는다 ────────────────────
+//
+// `getScreenCTM()` 으로 변환한다. viewBox 를 직접 나누면 틀린다 —
+// preserveAspectRatio 기본값이 `xMidYMid meet` 이라 남는 축에 여백이 붙는다.
+let LABELS=[];
+function placeLabels(){
+  const box=document.getElementById('labels'); if(!box) return;
+  const m=svg.getScreenCTM(); if(!m){ box.replaceChildren(); return; }
+  const r=document.getElementById('wrap').getBoundingClientRect();
+  // **겹치면 접는다.** 도쿄 중심부는 코어가 몰려 있어 라벨을 다 그리면
+  // 서로 덮어 아무것도 못 읽는다. 먼저 놓인 것이 이긴다 — LABELS 순서가
+  // 곧 우선순위다(묶음 → MME → SGW)
+  // 범례가 덮는 자리는 애초에 비운다 — 반쯤 가린 글자는 읽다가 틀린다
+  const lgb=document.getElementById('legend').getBoundingClientRect();
+  const out=[], put=[[lgb.left-r.left-6, lgb.top-r.top-6,
+                      lgb.right-r.left+6, lgb.bottom-r.top+6]];
+  for(const L of LABELS){
+    // 작아진 묶음은 라벨을 접는다 — 줌아웃하면 겹쳐서 못 읽는다
+    if(L.w!==undefined && L.w*m.a < 46) continue;
+    const x=L.x*m.a+m.e-r.left, y=L.y*m.d+m.f-r.top;
+    if(x<-80||y<-40||x>r.width+80||y>r.height+40) continue;
+    const fs=L.cls==='lb-h'?13:11, bw=L.t.length*fs*.62+10, bh=fs+8;
+    // `dx` 가 있으면 왼쪽 정렬이다(역 이름) — 상자가 점 오른쪽에 선다
+    const left=L.dx!==undefined, x0=left?x+L.dx*m.a+5:x-bw/2;
+    const b=[x0, y-bh/2, x0+bw, y+bh/2];
+    if(put.some(o=>b[0]<o[2]&&b[2]>o[0]&&b[1]<o[3]&&b[3]>o[1])) continue;
+    put.push(b);
+    const d=document.createElement('div');
+    d.className='lb '+L.cls;
+    d.style.left=(left?x0:x)+'px'; d.style.top=y+'px';
+    d.textContent=L.t; out.push(d);
+  }
+  box.replaceChildren(...out);
+}
+
+//: 노선 색 — **이름 해시**로 판다. 129개 노선에 손으로 색표를 매기면
+//: 노선이 하나 늘 때마다 표가 틀어진다. 채도 32% · 명도 64% 로 묶어
+//: 어느 값이 걸려도 파스텔을 벗어나지 않는다 — 노선은 배경이고,
+//: 장비(노랑)를 이기면 안 된다.
+function lineColor(name){
+  let h=0;
+  for(let i=0;i<String(name).length;i++) h=(h*31+String(name).charCodeAt(i))|0;
+  return `hsl(${((h%360)+360)%360} 32% 64%)`;
+}
+
+// ── 축척 ────────────────────────────────────────────────────────────
+//
+// 가로 1px 이 몇 m 인가로 센다. viewBox 의 x 는 **경도 그대로**라
+// (`mx` 가 항등 함수다) 도쿄 위도에서 1도 ≈ 90.4km 를 곱하면 된다.
+// 세로는 메르카토르라 늘어나 있지만, 축척 막대는 가로로만 읽는다.
+function drawScale(){
+  const box=document.getElementById('scale');
+  if(!VB||!box) return;
+  const w=document.getElementById('wrap').getBoundingClientRect().width;
+  if(!w) return;
+  const mpp=VB.w*90400/w;
+  // 1·2·5 계열에서 **140px 를 넘지 않는** 가장 큰 눈금을 고른다
+  const nice=[10,20,50,100,200,500,1000,2000,5000,10000,20000,50000];
+  let m=nice[0];
+  for(const v of nice) if(v/mpp<=140) m=v;
+  box.innerHTML=`<i style="width:${(m/mpp).toFixed(1)}px"></i>`
+    +`<b>${m>=1000?(m/1000)+' km':m+' m'}</b>`;
+}
+
+// **색은 축 안에서만 뜻이 있다.** 값 목록을 정렬해 순번으로 색을 준다 —
+// 축을 바꾸면 색이 통째로 바뀌는 것이 맞다. 같은 색이 늘 같은 TA 를
+// 가리키는 척하면 축을 바꿨을 때 사람이 옛 뜻으로 읽는다.
+let PAL={};
+function buildPal(axis){
+  if(axis==='none'){ PAL={}; return []; }
+  const vals=[...new Set(D.cells.map(c=>c[axis]).filter(v=>v!==null&&v!==''))]
+    .sort((a,b)=>String(a).localeCompare(String(b),undefined,{numeric:true}));
+  // 채도 68% 는 셀이 7,694개가 되자 눈이 아팠다 — 구분만 되면 된다
+  PAL={}; vals.forEach((v,i)=>PAL[v]=`hsl(${Math.round(i*360/Math.max(1,vals.length))} 42% 62%)`);
+  return vals;
+}
+function legend(axis, vals){
+  const L=document.getElementById('legend');
+  // **단일 색일 때는 범례가 거짓말이 된다** — 색이 아무 뜻도 없는데
+  // 색표를 띄우면 뜻이 있는 것처럼 읽힌다
+  if(axis==='none'){ L.style.display='none'; return; }
+  L.style.display='';
+  const label={ta_list:'TA 목록', tac:'TAC', sgw:'SGW', mme:'MME'}[axis];
+  // **몇 개인지가 아니라 얼마나 쏠렸는지가 중요하다.** 색만 9개 보이면
+  // 고르게 나뉜 것처럼 읽히는데, 실제로는 한 값이 89% 를 먹고 있었다
+  const cnt={}; for(const c of D.cells){ const v=c[axis];
+    if(v!==null&&v!=='') cnt[v]=(cnt[v]||0)+1; }
+  const tot=Object.values(cnt).reduce((a,b)=>a+b,0)||1;
+  const ord=[...vals].sort((a,b)=>(cnt[b]||0)-(cnt[a]||0));
+  const head=`<h4>${label} · ${vals.length}개</h4>`;
+  // 많으면 상위만 — 다 적으면 범례가 화면을 덮는다. **자른 사실을 말한다**
+  const top=ord.slice(0,18);
+  L.innerHTML = head + top.map(v=>{
+    const pc=Math.round((cnt[v]||0)*100/tot);
+    return `<div><s style="background:${PAL[v]}"></s>${v}`
+      + `<b style="margin-left:auto;opacity:${pc>=50?'.95':'.5'};font-weight:${pc>=50?700:400}">`
+      + `${cnt[v]||0}${pc>=10?` · ${pc}%`:''}</b></div>`;
+  }).join('')
+    + (vals.length>top.length ? `<div style="opacity:.55">… 외 ${vals.length-top.length}개</div>` : '');
+}
+
+// ── 야마노테선 집기 ─────────────────────────────────────────────────────
+//
+// **노선명만으로는 안 된다.** N02 의 `山手線` 은 공식 선명이라 品川→渋谷→
+// 新宿→池袋→田端 뿐이고, 운행상의 순환선 나머지는 `東海道線`(東京~品川)과
+// `東北線`(田端~東京)이다. 반대로 이름을 셋 다 넣으면 센다이·아타미까지
+// 딸려 온다.
+//
+// 그래서 **이름 ∧ 코리더** 로 집는다 — 역 30개를 이은 선에서 400m 안.
+// 실측(2026-10-28): 山手 46/50 · 東北 37/124 · 東海道 30/114 구간.
+// 지하철도 코리더에 들어오지만 이름에서 걸러진다.
+//: 山手線 은 **통째로** 순환선이다 — 코리더를 적용하지 않는다.
+//: 나머지 둘은 센다이·아타미까지 가므로 코리더로 잘라야 한다.
+const YMT_WHOLE = ['山手線'];
+const YMT_CUT = ['東北線', '東海道線'];
+const YMT_R = 700;       // m. 코리더는 역을 이은 **직선**이라 곡선 구간에서 벌어진다
+
+function markYamanote(){
+  const loop = (D.lines && D.lines[0] && D.lines[0].pts) || [];
+  if(!RAIL || loop.length < 3) return;
+  const seg = loop.map((p,i)=>[p, loop[(i+1)%loop.length]]);
+  const near = (p)=>{
+    const cy=Math.cos(p[1]*Math.PI/180);
+    let best=1e9;
+    for(const [a,b] of seg){
+      const ax=a[0]*cy, bx=b[0]*cy, px=p[0]*cy;
+      const dx=bx-ax, dy=b[1]-a[1], L=dx*dx+dy*dy;
+      const t=L? Math.max(0,Math.min(1,((px-ax)*dx+(p[1]-a[1])*dy)/L)) : 0;
+      best=Math.min(best, Math.hypot(px-(ax+t*dx), p[1]-(a[1]+t*dy)));
+    }
+    return best*111320;
+  };
+  for(const r of RAIL){
+    r.ymtSegs = null;
+    if(!/旅客鉄道/.test(r.op)) continue;
+    if(YMT_WHOLE.includes(r.name)){ r.ymtSegs = r.segs; continue; }
+    if(!YMT_CUT.includes(r.name)) continue;
+    // **점 단위로 자른다.** 구간 전체가 코리더 안이어야 통과시켰더니
+    // 조금만 벗어나도 통째로 빠져 **선이 끊어진 채로** 나왔다.
+    const keep = [];
+    for(const sg of r.segs){
+      let cur = [];
+      for(const p of sg){
+        if(near(p) < YMT_R) cur.push(p);
+        else { if(cur.length > 1) keep.push(cur); cur = []; }
+      }
+      if(cur.length > 1) keep.push(cur);
+    }
+    r.ymtSegs = keep;
+  }
+}
+
+function draw(){
+  if(!D) return;
+  LOD=lodOf();                       // 이 단계로 그린다 — `setVB` 가 비교한다
+  svg.setAttribute('data-lod', LOD);  // 도로 굵기를 CSS 가 단계별로 집는다
+  for(const id of ['gAdm','gGreen','gRoad','gRiv','gRail','gYmt','gAll','gKde','gCell','gPick','gStn','gNode'])
+    document.getElementById(id).replaceChildren();
+  LABELS=[];
+  if(GEO) for(const f of GEO.features) for(const ring of f.rings){
+    const q=el('path'); q.setAttribute('class','adm');
+    q.setAttribute('d','M'+ring.map(c=>`${mx(c[0])} ${-my(c[1])}`).join('L')+'Z');
+    q.dataset.t=f.name; document.getElementById('gAdm').appendChild(q);
+  }
+  // 하천·철도 — **국토수치정보 실측 선형.** 수가 많아 레이어마다
+  // path 하나로 합친다(셀 2만 개를 노드 하나로 그리는 것과 같은 이유)
+  {    // 배경·마스터·코어·지명은 **늘 그린다** — 끄는 자리를 없앴다(2026-10-28)
+    const put=(gid,cls,items)=>{
+      if(!items||!items.length) return;
+      const d=items.map(sg=>'M'+sg.map(p=>`${mx(p[0])} ${-my(p[1])}`).join('L')).join('');
+      if(!d) return;
+      const q=el('path'); q.setAttribute('class',cls); q.setAttribute('d',d);
+      document.getElementById(gid).appendChild(q);
+      return q;
+    };
+    // 공원·수역 — **면이라 축척을 안 탄다.** 368개뿐이고, 멀리서도
+    // 녹지·물은 "거기가 어디인지"를 알려주는 표식이다
+    for(const g of (GREEN||[])){
+      const d=(g.rings||[]).map(r=>'M'+r.map(p=>`${mx(p[0])} ${-my(p[1])}`)
+        .join('L')+'Z').join('');
+      if(!d) continue;
+      const q=el('path'); q.setAttribute('class','gr gr-'+g.kind);
+      q.setAttribute('d',d); document.getElementById('gGreen').appendChild(q);
+    }
+    // 도로 — 등급마다 보이기 시작하는 축척이 다르다(`ROAD_LOD`)
+    const km=kmSpan();
+    for(const r of (ROAD||[])){
+      if(km > (ROAD_LOD[r.cls]??0)) continue;
+      put('gRoad','rd rd-'+r.cls, r.segs);
+    }
+    put('gRiv','rv', (RIV||[]).flatMap(r=>r.segs));
+    // JR 과 사철을 갈라 그린다 — 한 색이면 뼈대가 안 보인다.
+    // 야마노테 구간은 빼서 **위 레이어에** 따로 그린다
+    // 야마노테로 집힌 것은 위 레이어가 그리므로 아래에서는 뺀다.
+    // `山手線` 은 통째로 올라가고, 나머지 둘은 잘린 조각만 올라간다
+    const other=(r)=>(YMT_WHOLE.includes(r.name) && r.ymtSegs) ? [] : (r.segs||[]);
+    // **노선마다 색이 다르다**(사람 결정 2026-10-28). 전에는 JR 과 사철
+    // 둘로만 갈라 회색 두 톤이었고, 어느 선이 어디로 가는지 눈으로
+    // 따라갈 수 없었다. 야마노테선만 JR 라인컬러를 그대로 쓴다
+    for(const r of (RAIL||[])){
+      const segs=other(r);
+      if(!segs.length) continue;
+      const q=put('gRail','rl', segs);
+      if(q){ q.setAttribute('stroke', lineColor(r.name||r.op));
+             q.dataset.t=`${r.op}  ${r.name}`; }
+    }
+    put('gYmt','rl rl-ymt', (RAIL||[]).flatMap(r=>r.ymtSegs||[]));
+  }
+
+  // 마스터 전량 — **좁힌 사실이 보여야 한다.** 생성 대상만 그렸더니
+  // "신주쿠에만 기지국이 있나"로 읽혔다
+  if(ALL){
+    const q=el('path'); q.setAttribute('class','allpt');
+    q.setAttribute('d', ALL.pts.map(p=>`M${mx(p[0])} ${-my(p[1])}l0 0`).join(''));
+    document.getElementById('gAll').appendChild(q);
+  }
+  // **모사 경로(역을 직선으로 이은 선)는 그리지 않는다** (2026-10-28).
+  // 실제 선로 레이어가 들어온 뒤로는 둘이 겹쳐 보이는데 직선 쪽이 틀린
+  // 그림이다. `D.lines` 는 **야마노테 구간을 집는 자**로만 쓴다.
+  const M=modeOf(), axis=M.axis;
+  const vals=buildPal(axis); legend(axis, vals);
+  const k = VB ? VB.w/1000 : 1;        // 확대해도 점 크기가 유지되게
+
+  // TA 묶음 — **선이 아니라 면이다**(사람 결정 2026-10-28).
+  // 볼록껍질은 바깥쪽 몇 점만 이어 안이 비고, 두 묶음이 겹치면 어디까지가
+  // 어느 쪽인지 읽히지 않았다. 기지국마다 커널을 얹어 밀도로 칠한다.
+  if(M.kde){ drawKde(axis); }
+  // 셀 → 코어로 잇는 선은 **지웠다**(2026-10-27). 셀이 촘촘해 부채꼴이
+  // 화면을 덮기만 했고, "어디를 덮나"는 묶음 테두리가 이미 말한다.
+
+  // **코어가 주인공인 모드에서는 셀이 물러난다.** SGW·MME 를 보려는데
+  // eNB 2천 개가 같은 세기로 깔리면 무엇이 주인지 안 보인다
+  const base = M.focus ? .3 : .8;
+  for(const c of (M.unit==='enb' ? enbPoints() : D.cells)){
+    const d=el('circle');
+    d.setAttribute('cx',mx(c.lon)); d.setAttribute('cy',-my(c.lat));
+    d.setAttribute('r',(M.unit==='enb'?4:4.5)*k);
+    // 축이 없을 때의 기본색은 **마스터 전량과 또렷이 갈려야 한다** —
+    // 둘 다 회색이면 무엇이 생성 대상인지 안 보인다
+    // **파스텔 노랑이 기본이다.** 회색(#9aa8bb)이던 때는 도로와 명도가
+    // 겹쳐 가로망 위에서 점이 사라졌다. 색축이 있는 모드는 팔레트가 이긴다
+    d.setAttribute('fill',PAL[c[axis]] || '#f7eec7');
+    d.setAttribute('fill-opacity',String(base));
+    d.dataset.kind=M.unit; d.dataset.id=c.key; d.dataset.enb=c.enb;
+    d.dataset.t = (M.unit==='enb'
+      ? `eNB ${c.enb}  (셀 ${c.n})`
+      : `${c.key}  (${c.name})`)
+      + `\nTAC ${c.tac} · TA목록 ${c.ta_list}\nSGW ${c.sgw} · MME ${c.mme}`;
+    document.getElementById('gCell').appendChild(d);
+  }
+  for(const kind of ['mme','sgw']) for(const n of D.nodes[kind]){
+    // 주인공은 키우고, 곁다리는 물린다. MME 모드에서 SGW 를 **지우지는
+    // 않는다** — 누르면 그 아래 SGW 까지 함께 진해지는 것이 보여야 한다
+    const hot = M.focus===kind;
+    const g=el('g'), r=(kind==='mme'?15:10)*(hot?1.45:1)*k;
+    if(M.focus && !hot) g.setAttribute('opacity','.3');
+    const sh=el(kind==='mme'?'rect':'circle');
+    if(kind==='mme'){ sh.setAttribute('x',mx(n.lon)-r); sh.setAttribute('y',-my(n.lat)-r);
+      sh.setAttribute('width',2*r); sh.setAttribute('height',2*r); }
+    else { sh.setAttribute('cx',mx(n.lon)); sh.setAttribute('cy',-my(n.lat));
+      sh.setAttribute('r',r); }
+    sh.setAttribute('fill', kind==='mme' ? '#c9797f' : '#5b8fbf');
+
+    sh.dataset.kind=kind; sh.dataset.id=n.id;
+    sh.dataset.t=`${kind.toUpperCase()} ${n.id}\n셀 ${n.cells} · eNB ${n.enb}\n(위치 = 맡은 셀의 중심)`;
+    g.appendChild(sh); document.getElementById('gNode').appendChild(g);
+    LABELS.push({x:mx(n.lon), y:-my(n.lat)-r*2.1,
+                 t:`${kind.toUpperCase()} ${n.id}`, cls:'lb-n'});
+  }
+  // **장비가 먼저, 지명·역은 남은 자리에.** 이 화면의 주인공은 장비고
+  // 역·구 이름은 "거기가 어디냐"를 알려주는 배경이다. 반대로 했더니
+  // 역 이름이 SGW 31개 중 26개를 밀어냈다
+  {
+    for(const st of (D.stations||[])){
+      // **점은 SVG 에 찍는다.** 전에는 HTML 라벨의 ::before 로 찍었는데,
+      // 라벨 상자가 `translate(-50%,-50%)` 로 중앙정렬이라 **글자가 길수록
+      // 점이 왼쪽으로 밀렸다** — 좌표가 틀린 것처럼 보인 원인이다
+      // **건물 모양이다**(사람 결정 2026-10-28). 노란 점이던 때는 장비
+      // 점과 섞여 "이것도 장비인가"로 읽혔다 — 색을 달리하는 것보다
+      // 형태를 달리하는 쪽이 확실히 갈린다
+      const sx=mx(st.lon), sy=-my(st.lat), sw=5*k, sh2=6*k;
+      const c=el('path');
+      c.setAttribute('d', `M${sx-sw} ${sy+sh2*.5} L${sx-sw} ${sy-sh2*.1} `
+        + `L${sx} ${sy-sh2*.75} L${sx+sw} ${sy-sh2*.1} L${sx+sw} ${sy+sh2*.5} Z`);
+      // **야마노테선 색을 띤다**(사람 결정 2026-10-28). 지금 역은 전부
+      // 야마노테선 역이라(`data/lines/`) 선과 같은 계열로 두면 "이 선
+      // 위의 역"이 한 묶음으로 읽힌다. 선(#9acd32)보다 흰색 쪽으로
+      // 당겨 역이 선보다 밝게 뜬다
+      c.setAttribute('fill','#e2efc4');
+      c.dataset.t=`${st.name}역\n덮는 셀 ${st.cells}`;
+      document.getElementById('gStn').appendChild(c);
+      // 글자는 점 **오른쪽**에 — 왼쪽 끝을 점에 맞춘다
+      LABELS.push({x:mx(st.lon), y:-my(st.lat), t:st.name, cls:'lb-s',
+                   dx:11*k});
+    }
+  }
+  if(GEO){
+    for(const f of GEO.features){
+      if(!f.name || !f.at) continue;
+      LABELS.push({x:mx(f.at[0]), y:-my(f.at[1]),
+                   t:(f.city && f.city!==f.name ? f.city+' '+f.name : f.name),
+                   cls:'lb-a'});
+    }
+  }
+  placeLabels(); drawPick();
+}
+
+async function load(){
+  D=await (await fetch('/api/map')).json();
+  ENB=null;                           // 셀이 바뀌면 eNB 묶음도 다시 만든다
+  const c=D.counts;
+  document.getElementById('ncell').textContent=D.cells.length;
+  document.getElementById('nenb').textContent=c.enb;
+  document.getElementById('ntac').textContent=c.tac;
+  document.getElementById('ntal').textContent=c.ta_list;
+  document.getElementById('nsgw').textContent=c.sgw;
+  document.getElementById('nmme').textContent=c.mme;
+  document.getElementById('note').textContent =
+    D.unmapped ? `좌표 없는 셀 ${D.unmapped}` : '';
+  if(!HOME && D.cells.length){
+    const xs=D.cells.map(c=>mx(c.lon)), ys=D.cells.map(c=>-my(c.lat));
+    const x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
+    const px=(x1-x0)*.12+.002, py=(y1-y0)*.12+.002;
+    HOME={x:x0-px,y:y0-py,w:(x1-x0)+2*px,h:(y1-y0)+2*py}; setVB({...HOME});
+    // **마스터를 먼저 받아 그 범위로 경계를 받는다.** 생성 범위로만 받으면
+    // `전체 보기` 에서 도쿄 바깥이 경계 없는 검은 바다로 남는다
+    ALL=await (await fetch('/api/map/all')).json();
+    const la=[...D.cells.map(c=>c.lat), ...(ALL.pts||[]).map(p=>p[1])];
+    const lo=[...D.cells.map(c=>c.lon), ...(ALL.pts||[]).map(p=>p[0])];
+    const g=await (await fetch(`/api/map/geo?bbox=${Math.min(...la)-.15},`
+      +`${Math.min(...lo)-.15},${Math.max(...la)+.15},${Math.max(...lo)+.15}`)).json();
+    GEO=g.features?g:null;
+    const src=[g.source||g.error||''];
+    for(const [nm,set] of [['rail',v=>RAIL=v],['rivers',v=>RIV=v],
+                          ['roads',v=>ROAD=v],['green',v=>GREEN=v]]){
+      const r=await (await fetch(`/api/map/layer/${nm}`)).json();
+      set(r.items||[]);
+      if(r.source && !src.includes(r.source)) src.push(r.source);
+      // 레이어가 없어도 지도는 선다 — 다만 **왜 없는지는 말한다**
+      if(r.error) document.getElementById('note').textContent=r.error;
+    }
+    // 출처 표기는 **약관 의무다.** 레이어를 늘리면 여기도 늘어야 한다
+    document.getElementById('src').textContent=src.filter(Boolean).join('  ·  ');
+    markYamanote();
+  }
+  // **점 하나는 셀이 아니라 자리(eNB)다.** 셀 수만 적으면 "2만 개가 왜
+  // 이것밖에 안 보이나"가 된다 — 겹친 섹터는 한 점이다
+  document.getElementById('scope').textContent =
+    `생성 범위 ${D.scope} — ` +
+    (ALL ? `마스터 ${ALL.enb.toLocaleString()} eNB / `
+         + `${ALL.cells.toLocaleString()}셀 중 ` : '')
+    + `${D.counts.enb} eNB / ${D.cells.length}셀`;
+  if(true){
+  }
+  draw();
+}
+
+// ── 고르면 계통을 잇는다 ────────────────────────────────────────────────
+//
+// 선을 **상시로** 긋던 때는 셀이 촘촘해 부채꼴이 화면을 덮기만 했다
+// (2026-10-27 에 지웠다). 고른 하나만 이으면 같은 정보가 읽힌다 —
+// eNB·셀 → SGW → MME. 레지스트리에 PGW 가 셀 단위로 없어 거기까지다.
+let PICK=null;
+function pickOf(kind,id){
+  if(!D) return null;
+  let cells=[];
+  if(kind==='cell'||kind==='enb'){
+    // **같은 eNB 의 셀을 다 집는다** — 한 자리에 섹터가 6개씩 겹쳐 있어
+    // 셀 하나만 집으면 무엇을 골랐는지 화면에서 안 보인다
+    const e = kind==='enb' ? id : (D.cells.find(c=>c.key===id)||{}).enb;
+    if(!e) return null;
+    cells=D.cells.filter(x=>String(x.enb)===String(e)); }
+  else cells=D.cells.filter(c=>String(c[kind])===String(id));
+  if(!cells.length) return null;
+  const sgw=[...new Set(cells.map(c=>c.sgw).filter(Boolean))];
+  const mme=[...new Set(cells.map(c=>c.mme).filter(Boolean))];
+  return {kind, id, cells, sgw, mme,
+          enb:[...new Set(cells.map(c=>c.enb))],
+          tac:[...new Set(cells.map(c=>c.tac).filter(Boolean))],
+          ta:[...new Set(cells.map(c=>c.ta_list).filter(Boolean))]};
+}
+function drawPick(){
+  const g=document.getElementById('gPick'); g.replaceChildren();
+  const bar=document.getElementById('sel');
+  // 고른 것이 없으면 `draw` 가 이미 모드별 기본 세기로 그려 뒀다
+  if(!PICK){ bar.style.display='none'; return; }
+  const k=VB?VB.w/1000:1;
+  const by={}; for(const kind of ['sgw','mme']) for(const n of D.nodes[kind])
+    by[kind+':'+n.id]=n;
+  const seg=(a,b)=>{ if(!a||!b) return;
+    const l=el('line'); l.setAttribute('class','pick');
+    l.setAttribute('x1',mx(a.lon)); l.setAttribute('y1',-my(a.lat));
+    l.setAttribute('x2',mx(b.lon)); l.setAttribute('y2',-my(b.lat));
+    g.appendChild(l); };
+  // ── 고른 계통에 불을 넣는다 (사람 결정 2026-10-28) ──────────────
+  //
+  // 전에는 고른 셀마다 노란 테두리 원을 그렸다. 섹터가 한 자리에 겹쳐
+  // 원이 포개지고, **어느 장비가 걸렸는지 눈으로 세어야 했다.** TA
+  // 히트맵과 같은 방식으로 영역째 밝힌다.
+  const hotN=new Set([...PICK.sgw.map(v=>'sgw:'+v), ...PICK.mme.map(v=>'mme:'+v)]);
+  const lit=el('g');
+  lit.setAttribute('class','glow'); lit.setAttribute('filter','url(#kdeblur)');
+  const litAt=(x,y,r)=>{ const q=el('circle');
+    q.setAttribute('cx',x); q.setAttribute('cy',y); q.setAttribute('r',r);
+    q.setAttribute('fill','#ffd43b'); q.setAttribute('fill-opacity','.5');
+    lit.appendChild(q); };
+  const seen=new Set();
+  for(const c of PICK.cells){
+    // **한 자리는 한 번만** — 6섹터국에 여섯 번 쌓으면 그 국만 타오른다
+    if(seen.has(c.enb)) continue; seen.add(c.enb);
+    litAt(mx(c.lon), -my(c.lat), KDE_BW*.75);
+  }
+  // 코어도 같이 — MME 를 고르면 그 아래 SGW 까지 밝아져야 한다
+  for(const key of hotN){ const n=by[key]; if(n) litAt(mx(n.lon), -my(n.lat), KDE_BW*1.6); }
+  g.appendChild(lit);
+
+  // **셀은 자기 SGW 에만 잇는다.** 전에는 선택에 걸린 SGW 전부에 이어
+  // MME 를 고르면 셀×SGW 개의 선이 나왔다 — 계통이 아니라 그물이었다
+  const up=new Set();
+  for(const c of PICK.cells){
+    seg(c, by['sgw:'+c.sgw]);
+    if(c.sgw && c.mme) up.add(c.sgw+'>'+c.mme);
+  }
+  for(const e of up){ const [a,b]=e.split('>');
+    seg(by['sgw:'+a], by['mme:'+b]); }
+  // **eNB 로 견준다** — 모드에 따라 점이 셀이기도 eNB 이기도 한데, 어느
+  // 쪽이든 한 자리는 한 eNB 다. 셀 키로 보면 eNB 모드에서 하나도 안 걸린다
+  const inPick=new Set(PICK.enb.map(String));
+  for(const d of document.getElementById('gCell').children)
+    d.setAttribute('fill-opacity', inPick.has(d.dataset.enb)?1:.12);
+  // 코어도 함께 진해진다 — MME 를 고르면 **그 아래 SGW 까지**가
+  // 사람이 보려던 것이다
+  for(const n of document.getElementById('gNode').children){
+    const sh=n.firstChild; if(!sh) continue;
+    n.setAttribute('opacity',
+      hotN.has(sh.dataset.kind+':'+sh.dataset.id) ? 1 : .18);
+  }
+  const lbl={cell:'eNB', enb:'eNB', sgw:'SGW', mme:'MME'}[PICK.kind];
+  const head = (PICK.kind==='cell'||PICK.kind==='enb')
+    ? `eNB ${PICK.enb[0]}` : `${lbl} ${PICK.id}`;
+  bar.style.display='flex';   // CSS 기본이 none 이라 '' 로는 안 열린다
+  bar.innerHTML=`<b>${head}</b>`
+    + `<span>셀 ${PICK.cells.length}</span>`
+    + (PICK.kind==='cell'||PICK.kind==='enb'?'':`<span>eNB ${PICK.enb.length}</span>`)
+    + `<span>TAC ${PICK.tac.join(', ')||'—'}</span>`
+    + `<span>TA목록 ${PICK.ta.join(', ')||'—'}</span>`
+    + `<span>SGW ${PICK.sgw.join(', ')||'—'}</span>`
+    + `<span>MME ${PICK.mme.join(', ')||'—'}</span>`
+    + `<button id=unpick>해제</button>`;
+  document.getElementById('unpick').onclick=()=>{PICK=null; draw();};
+}
+
+// ── 이동·확대 ────────────────────────────────────────────────────────────
+const wrap=document.getElementById('wrap'); let drag=null;
+let moved=0;
+wrap.addEventListener('mousedown',e=>{drag={x:e.clientX,y:e.clientY,vb:{...VB}};
+  moved=0; wrap.classList.add('drag');});
+addEventListener('mouseup',()=>{drag=null;wrap.classList.remove('drag');});
+addEventListener('mousemove',e=>{
+  if(drag){ const r=wrap.getBoundingClientRect();
+    moved=Math.max(moved,Math.abs(e.clientX-drag.x)+Math.abs(e.clientY-drag.y));
+    setVB({...drag.vb, x:drag.vb.x-(e.clientX-drag.x)*drag.vb.w/r.width,
+                       y:drag.vb.y-(e.clientY-drag.y)*drag.vb.h/r.height}); return; }
+  const t=e.target.dataset&&e.target.dataset.t;
+  if(t){ tip.style.display='block'; tip.textContent=t;
+    tip.style.left=(e.clientX+12)+'px'; tip.style.top=(e.clientY-10)+'px'; }
+  else tip.style.display='none';
+});
+wrap.addEventListener('wheel',e=>{
+  e.preventDefault(); if(!VB) return;
+  const r=wrap.getBoundingClientRect();
+  const fx=(e.clientX-r.left)/r.width, fy=(e.clientY-r.top)/r.height;
+  const z=e.deltaY>0?1.15:1/1.15;
+  setVB({w:VB.w*z,h:VB.h*z,x:VB.x+(VB.w-VB.w*z)*fx,y:VB.y+(VB.h-VB.h*z)*fy});
+  draw();
+},{passive:false});
+
+wrap.addEventListener('click',e=>{
+  if(moved>4) return;        // 끌고 놓은 것은 클릭이 아니다
+  const t=e.target.dataset||{};
+  if(!t.kind){ return; }      // 빈 곳은 **해제하지 않는다** — 끌다 놓으면 지워진다
+  const p=pickOf(t.kind,t.id);
+  PICK = (PICK && PICK.kind===t.kind && String(PICK.id)===String(t.id)) ? null : p;
+  // **다시 그린다.** 세기를 되돌리는 일을 `drawPick` 이 떠안으면 모드마다
+  // 기본값이 달라 어긋난다 — 기본은 `draw` 한 곳이 정한다
+  draw();
+});
+document.getElementById('reload').onclick=load;
+// 보기를 바꾸면 **고른 것을 푼다.** SGW 를 고른 채 MME 보기로 넘어가면
+// 바뀐 화면에 옛 선택의 테두리만 남아 무엇이 골라졌는지 안 읽힌다
+document.getElementById('mode').onchange=()=>{ PICK=null; draw(); };
+// **보이는 것 전체**에 맞춘다 — 마스터까지. 생성 범위로만 맞추면
+// "전체 보기"가 전체를 안 보여준다
+document.getElementById('reset').onclick=()=>{
+  const xs=[], ys=[];
+  for(const c of D.cells){ xs.push(mx(c.lon)); ys.push(-my(c.lat)); }
+  if(ALL) for(const p of ALL.pts){ xs.push(mx(p[0])); ys.push(-my(p[1])); }
+  if(!xs.length){ if(HOME){setVB({...HOME}); draw();} return; }
+  // **동떨어진 몇 점이 시야를 통째로 늘린다.** 도쿄도에는 이즈제도가
+  // 들어 있어 23,039셀 중 2셀이 120km 남쪽에 있고, 최대·최소로 맞추면
+  // 화면이 거기까지 벌어져 정작 볼 것이 점 하나가 된다.
+  // 1~99 백분위 폭의 두 배 밖은 뺀다 — **대신 몇 개를 뺐는지 적는다**
+  const band=(v)=>{ const a=[...v].sort((p,q)=>p-q);
+    const q0=a[Math.floor(a.length*.01)], q1=a[Math.ceil(a.length*.99)-1];
+    const w=(q1-q0)||.01; return [q0-w, q1+w]; };
+  const [bx0,bx1]=band(xs), [by0,by1]=band(ys);
+  let out=0, x0=1e9,x1=-1e9,y0=1e9,y1=-1e9;
+  for(let i=0;i<xs.length;i++){
+    if(xs[i]<bx0||xs[i]>bx1||ys[i]<by0||ys[i]>by1){ out++; continue; }
+    x0=Math.min(x0,xs[i]); x1=Math.max(x1,xs[i]);
+    y0=Math.min(y0,ys[i]); y1=Math.max(y1,ys[i]);
+  }
+  const px=(x1-x0)*.06+.002, py=(y1-y0)*.06+.002;
+  setVB({x:x0-px,y:y0-py,w:(x1-x0)+2*px,h:(y1-y0)+2*py}); draw();
+  document.getElementById('note').textContent =
+    out ? `화면 밖 ${out}셀 — 동떨어져 있어 범위에서 뺐다` : '';
+};
+load();
+</script></body></html>
+"""
+
+
+@app.get("/map", response_class=HTMLResponse)
+def map_page():
+    return _HTML_MAP
 
 
 @app.get("/topo", response_class=HTMLResponse)

@@ -80,6 +80,20 @@ class Cell:
     ims_pgw_id: int
     traffic_weight: float  # 상대 트래픽 규모 — 도심 셀일수록 크다
     display_name: str
+    #: **TAI List 번호** — 그 TA 가 속한 목록.
+    #:
+    #: LTE 는 TAU 를 TA 가 바뀔 때마다 하지 않는다. MME 가 UE 에게 TA
+    #: **목록**(TAI List)을 주고, 목록 **밖**의 TA 에 들어갈 때만 TAU 가
+    #: 난다 — 그게 도심의 잘은 TA 에서 ping-pong TAU 를 막는 장치다.
+    #:
+    #: 실측이 그 필요를 드러냈다: OpenCellID 도쿄 도코모 데이터에서
+    #: **신주쿠 2km 안에 TAC 가 49개**이고 이웃 셀 쌍의 **77%** 가 TA 경계를
+    #: 넘는다. TAC 변화만으로 TAU 를 내면 폭증한다.
+    #:
+    #: `0` 은 "목록 미정"이다 — 좌표가 없어 묶지 못한 셀이 그렇고, 그 셀에서는
+    #: 목록 경계가 없는 것으로 읽혀 TAU 가 나지 않는다(불변규칙 12·17).
+    #: 기본값을 둔 이유: `load_cells(path)` 가 **구 JSON 을 그대로** 읽는다.
+    ta_list: int = 0
 
 
 # generate_cells() 는 가져오지 않았다 — 행정경계 인덱스(graphio 본체의 geo.py +

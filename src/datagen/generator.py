@@ -152,6 +152,55 @@ class Subscriber:
     exchange: str
     dcnr: str
     home_cell: int
+    #: 이 가입자가 타는 경로 인덱스. `-1` 은 **고정 가입자**다.
+    #:
+    #: 이동을 가입자 속성으로 두는 이유: 호마다 추첨하면 같은 가입자가
+    #: 어떤 호에서는 움직이고 어떤 호에서는 안 움직인다. 그러면 궤적이
+    #: 가입자 단위로 이어지지 않아 **일별 체감(S-01)·민원 조회(SCR-07')가
+    #: "이 사람이 어디를 다녔나"를 말할 수 없다.**
+    route: int = -1
+    #: 경로 위의 현재 칸.
+    route_pos: int = 0
+    #: 진행 방향. 순환선이 아니면 끝에서 뒤집힌다(상행/하행).
+    route_fwd: bool = True
+    #: 이 칸에 들어온 시각(epoch). 체류시간이 지나면 다음 칸으로 간다.
+    route_t: float = 0.0
+    #: **하차 칸.** `-1` 은 끝없이 순환(노선 전체를 도는 사람).
+    #:
+    #: 여정을 두는 이유: 실제 승객은 노선을 영원히 돌지 않는다. 타고,
+    #: 내리고, 머물고, 다시 탄다. 영원히 돌게 두면 **역 주변 체류가 없어**
+    #: 역세권 혼잡(`j-sc-14` 도심 역 저녁 러시)이 생기지 않는다 — 모든
+    #: 가입자가 늘 이동 중이다.
+    route_to: int = -1
+    #: **승차 칸.** 여정이 끝나면 여기서 다시 시작한다.
+    route_from: int = -1
+    #: 여정 회차. 하차 후 다시 탈 때 늘어난다.
+    #:
+    #: **세션이 여정 경계를 넘지 않게 하는 수단이다.** 재승차는 하차 칸에서
+    #: 승차 칸으로 돌아가는 것이고 그 둘은 인접하지 않다 — 그때 열려 있던
+    #: 세션이 경로를 계속 따르면 **인접하지 않은 셀로 순간이동한 핸드오버**가
+    #: 나온다. 세션은 자기가 시작한 회차를 기억하고, 회차가 바뀌면 경로
+    #: 추종을 멈춘다(`session._route_cell`).
+    trip: int = 0
+    #: 하차 후 **다시 탈 시각**(epoch). `0` 은 승차 중이다.
+    route_wait: float = 0.0
+
+
+#: 거주지 격자 한 칸(도). 0.05도 ≈ 5.5km — `home_radius_m`(10km)보다 작아야
+#: 고리 하나로 반경을 덮는 데 두 칸이면 충분하다.
+_GRID_DEG = 0.05
+
+
+def _dist_m(a: Cell, b: Cell) -> float:
+    """두 셀 사이 거리(m). 경도는 위도에 따라 줄어들므로 보정한다.
+
+    `handover._dist2` 와 **다른 함수인 이유**: 저쪽은 정렬용이라 제곱 거리
+    (도 단위)를 쓰고 루트를 안 씌운다. 여기는 **미터로 자르는** 자리라
+    실제 거리가 필요하다.
+    """
+    k = math.cos(math.radians(a.latitude)) or 1.0
+    return math.hypot((a.latitude - b.latitude) * 111_320.0,
+                      (a.longitude - b.longitude) * 111_320.0 * k)
 
 
 def user_values(sub: Subscriber) -> tuple[str, ...]:
@@ -208,6 +257,38 @@ class Generator:
         self.cell_weights = [c.traffic_weight for c in cells]
         self._cum = self._cumulative(self.cell_weights)
         self.cell_by_key = {c.cell_key: c for c in cells}
+        #: 셀 키 → `cells` 인덱스. `_sub_for` 가 인덱스를 받으므로 필요하다 —
+        #: `_pick_cell` 은 `Cell` 을 돌려주고 `_subs_by_cell` 은 인덱스로
+        #: 색인돼 있다.
+        self.cell_index = {c.cell_key: i for i, c in enumerate(cells)}
+        #: 전환 토폴로지. `PemdbGen` 이 걸어 준다.
+        #:
+        #: **거주지 판정에는 쓰지 않는다**(2026-10-27). 전환 상대는 k-최근접
+        #: 이어야 하고(이웃이 없는 셀이 없어야 한다) 그래서 희소 지역에서
+        #: 수십 km 를 잡는다 — 거주지로는 "주변"이 아니다. 거주지는
+        #: `_cells_around` 가 **거리로** 찾는다.
+        self.ho_topo = None
+        self._near_cache: dict[int, list[int]] = {}
+        self._far_cache: dict[int, list[int]] = {}
+        self._grid: dict[tuple[int, int], list[int]] | None = None
+        #: 거주지로 볼 **주변 반경**(m). 전환 토폴로지의 k-최근접과 다른
+        #: 값이다 — 전환은 "이웃이 없는 셀이 없어야" 하므로 거리를 안 자르고,
+        #: 거주는 "주변이어야" 하므로 자른다.
+        #:
+        #: 10km 는 도심 생활권이다. 실측에서 자르지 않으면 90km 가 나왔고,
+        #: 2km 로 조이면 희소 지역 셀이 자기 주민만 보게 되어 꼬리가 사라진다.
+        self.home_radius_m = 10_000.0
+        #: 가입자를 **거주지 근처에서 뽑나.** 기본은 끄기다.
+        #:
+        #: **샘플 XDR 이 이 축을 규정하지 않는다** — 분포에 가입자↔셀 관계가
+        #: 없다(호출부 주석의 실측 목록). 규정하지 않는 축에 모델을 넣는 것은
+        #: 사람의 결정이어야 하고, 켜면 셀·분 `SUBS` 가 -22% 움직여 기존
+        #: 기준선과 전후 비교가 끊긴다.
+        #:
+        #: 켜야 하는 때: 일별 체감(S-01)·민원 조회(SCR-07' "이 가입자가 어디를
+        #: 다녔나")를 검증할 때. 끄면 한 가입자가 60분에 서로 다른 셀 25개
+        #: (전체 348개 중)에 나타난다 — 그 화면이 성립하지 않는다.
+        self.home_locality = False
         #: eNB 별 셀 목록 — **평시 PathSwitch 의 Last 셀**이 같은 eNB 의 다른
         #: 셀이어야 한다(`session._by_enb` 와 같은 이유). 다른 eNB 로 보내면
         #: 한 호가 두 노드를 탄 것처럼 되어 노드 축 집계가 호 안에서 갈린다.
@@ -223,8 +304,38 @@ class Generator:
         #: 대상이 레코드에 실제로 존재하는 값이어야 한다.
         self.apn_pool: list[str] = []
 
+        #: 이동 가입자가 **호를 만들 비율**. 태운 비율(`seat_routes(share)`)과
+        #: 다른 축이다 — 움직이는 사람이 전체의 12% 라도 그들이 더 자주
+        #: 통신하면 호 비중은 더 높다. 기본 0 이라 **경로를 깔아도
+        #: `mobility_share` 를 올리지 않으면 호는 평소와 같다.**
+        self.mobility_share = 0.0
+        #: 이동 경로. `seat_routes` 가 채운다 — 비어 있으면 아무도 움직이지
+        #: 않고, 그때 동작은 이 기능이 없던 때와 같다.
+        self.routes: list = []
+        #: 여정 명세 — `[{route, from, to, share}]`. 역 코드로 적는다.
+        #: `seat_routes` **전에** 걸어 둔다. 비면 모두 끝없이 순환한다
+        self.journeys: list = []
+        #: 하차 후 머무는 시간 범위(초). 그 동안 셀이 고정이고 전환이 없다
+        self.off_sec: tuple[int, int] = (300, 1800)
+        #: **TAC 가 바뀐 전환** — `[(가입자 index, 이전 셀, 새 셀)]`.
+        #:
+        #: TA 경계를 넘으면 단말이 Tracking Area Update 를 한다. 그건 핸드오버
+        #: 레코드와 **별개의 C-Plane 절차**이고(`call_type 5`), 그 레코드가
+        #: 없으면 "TAC 가 바뀌었는데 아무 절차도 없다"가 된다 — TAU 성공률·
+        #: 소요(C-01~05 의 TAU 갈래)가 통째로 비고, 0 은 "문제 없음"으로
+        #: 읽힌다(불변규칙 17).
+        #:
+        #: `records()` 가 매 분 비운다. 비우지 않으면 같은 전환으로 TAU 가
+        #: 계속 나온다.
+        self.tau_events: list[tuple[int, object, object]] = []
+        #: 이동 가입자 인덱스. `seat_routes` 가 채운다
+        self._mobile: list[int] = []
         pool = subscriber_pool or max(2000, len(cells) * 60)
         self.subs = self._make_subscribers(pool)
+        #: IMSI → 가입자 인덱스. **U-Plane 세션이 이것으로 되찾는다** —
+        #: `Call` 은 가입자 객체가 아니라 `USER_FIELDS` 값만 들고 가므로
+        #: (메모리 이유, `Call` 머리말) 이동 상태를 보려면 역색인이 있어야 한다.
+        self.sub_by_imsi = {s.imsi: i for i, s in enumerate(self.subs)}
         self._subs_by_cell: dict[int, list[int]] = {}
         for i, s in enumerate(self.subs):
             self._subs_by_cell.setdefault(s.home_cell, []).append(i)
@@ -240,6 +351,237 @@ class Generator:
             acc += w
             out.append(acc)
         return out
+
+    # -- 이동 -------------------------------------------------------------
+
+    def seat_routes(self, routes: list, share: float, rng) -> None:
+        """경로를 깔고 가입자 일부를 태운다.
+
+        **호출하지 않으면 아무도 움직이지 않는다** — `route = -1` 이 기본이고
+        그때 동작은 이 기능이 없던 때와 같다. 역호환을 그렇게 둔다.
+
+        출발 칸을 흩뿌린다. 전부 0번 칸에서 시작하면 **모두 같은 타이밍에
+        같은 구간을 전환해** 셀 쌍 표가 파도처럼 움직인다 — 그건 노선이
+        아니라 단체 행진이다.
+        """
+        # **먼저 전원 내린다.** 빈 목록으로 부르는 것이 "이동을 끄는" 길이고,
+        # 내리지 않으면 이미 태운 가입자가 사라진 경로를 가리킨다 — 테스트가
+        # 그 상태를 물려받아 뒤 테스트가 알 수 없는 이유로 깨진다.
+        for sub in self.subs:
+            sub.route = -1
+            sub.route_pos = 0
+            sub.route_fwd = True
+            sub.route_t = 0.0
+        self.routes = routes
+        self._mobile = []
+        if not routes or share <= 0.0:
+            return
+        for sub in self.subs:
+            if rng.random() >= share:
+                continue
+            ri = rng.randrange(len(routes))
+            sub.route = ri
+            sub.route_pos = rng.randrange(len(routes[ri]))
+            sub.route_fwd = rng.random() < 0.5
+            # 체류시간 안의 임의 지점에서 시작한다 — 전진 타이밍을 흩는다
+            sub.route_t = -rng.random() * routes[ri].dwell_sec[sub.route_pos]
+        self._mobile = [i for i, s in enumerate(self.subs) if s.route >= 0]
+        if self.journeys:
+            self._assign_journeys(rng)
+
+    @staticmethod
+    def _journey_pos(rt, v, where: str) -> int:
+        """`from`/`to` 값을 **칸 번호**로 바꾼다.
+
+        **모델은 칸 번호다.** 정수를 그대로 받고, 문자열이면 노선이 들고 온
+        역 색인(`station_pos`)으로 푼다 — 설정을 사람이 읽기 좋게 적을 수
+        있게 하는 **입력 편의**일 뿐이고, 이 아래로는 역이 무엇인지 아무도
+        모른다.
+
+        **범위를 벗어나거나 모르는 이름이면 멈춘다.** 조용히 자르면 여정이
+        엉뚱한 구간이 되고, "정의한 구간에 가입자가 없다"는 결과가 나오는데
+        원인이 설정 오타다.
+        """
+        if isinstance(v, bool):
+            raise RuntimeError(f"journey {where} 가 불린이다: {v!r}")
+        if isinstance(v, int):
+            if not (0 <= v < len(rt)):
+                raise RuntimeError(
+                    f"journey {where}={v} 가 노선 {rt.id} 의 칸 범위"
+                    f" 0~{len(rt)-1} 를 벗어난다")
+            return v
+        pos = rt.pos_of(str(v))
+        if pos is None:
+            raise RuntimeError(
+                f"journey {where}={v!r} 를 노선 {rt.id} 에서 못 찾는다"
+                f" (아는 이름: {sorted(rt.station_pos)})")
+        return pos
+
+    def _assign_journeys(self, rng) -> None:
+        """가입자에게 **승차 칸 → 하차 칸**을 준다.
+
+        ## 한쪽 방향만이다
+
+        한 가입자는 `5→9` 또는 `21→19` 처럼 **한 방향으로만** 간다. 하차하면
+        머물고, 다시 탈 때도 **같은 방향으로 같은 구간**을 간다.
+
+        전에는 왕복으로 두었다(내린 칸에서 타고 온 칸으로). 그러면 한 가입자가
+        두 방향을 다 겪어 **그 사람의 전환 구간이 양방향으로 섞인다** — 장애를
+        한 방향 구간에 주입했을 때 영향 가입자가 반대 방향 통행자까지 포함해
+        버린다.
+
+        `share` 합이 1 보다 작으면 나머지는 끝없이 순환한다 — 노선을 도는
+        사람도 있어야 전 구간에 트래픽이 깔린다.
+        """
+        by_id = {r.id: (i, r) for i, r in enumerate(self.routes)}
+        spec = []
+        for j in self.journeys:
+            got = by_id.get(j["route"])
+            if got is None:
+                raise RuntimeError(
+                    f"journey 의 모르는 노선 {j['route']!r} "
+                    f"(아는 것: {sorted(by_id)})")
+            ri, rt = got
+            a = self._journey_pos(rt, j["from"], "from")
+            b = self._journey_pos(rt, j["to"], "to")
+            if a == b:
+                raise RuntimeError(
+                    f"journey {j['route']} 의 from·to 가 같은 칸({a})이다 —"
+                    f" 이동이 0 이고 하차 판정이 즉시 선다")
+            spec.append((float(j.get("share", 0.0)), ri, a, b))
+        for i in self._mobile:
+            sub = self.subs[i]
+            x = rng.random()
+            for share, ri, a, b in spec:
+                x -= share
+                if x <= 0:
+                    sub.route, sub.route_pos = ri, a
+                    sub.route_from, sub.route_to = a, b
+                    # 방향은 칸 번호로 정한다. 외선·내선이 **별 노선**이라
+                    # 칸 번호가 늘어나는 쪽이 그 노선의 진행 방향이고,
+                    # 순환선에서 반대로 돌면 같은 두 역 사이인데 지나는
+                    # 구간이 전혀 다르다
+                    sub.route_fwd = b > a
+                    sub.route_t = -rng.random() * self.routes[ri].dwell_sec[a]
+                    sub.route_wait = 0.0
+                    break
+
+    def advance_routes(self, now: float) -> int:
+        """체류시간이 지난 이동 가입자를 다음 칸으로. **매 분 한 번 부른다.**
+
+        반환은 움직인 가입자 수다 — 0 이면 이동이 멈춘 것이고, 그건 보통
+        `seat_routes` 를 안 불렀거나 체류시간이 분보다 긴 경우다.
+
+        한 번에 **한 칸만** 간다. 밀린 만큼 여러 칸 보내면 중간 칸을 건너뛰어
+        그 구간의 전환이 데이터에 없다 — 체류시간이 분보다 짧으면 그만큼
+        천천히 진행하는 것이 낫다(한 세션이 여러 칸을 겪는 것이 목적이다).
+        """
+        moved = 0
+        for i, sub in enumerate(self.subs):
+            if sub.route < 0:
+                continue
+            rt = self.routes[sub.route]
+            if sub.route_wait > 0.0:
+                # **하차해서 머무는 중이다.** 셀은 그대로이고 전환이 없다 —
+                # 그게 역 주변 체류이고, 역세권 혼잡이 거기서 생긴다
+                if now < sub.route_wait:
+                    continue
+                sub.route_wait = 0.0
+                sub.route_t = now
+                if sub.route_to >= 0:
+                    # **같은 구간을 같은 방향으로 다시 간다.** 왕복이 아니다 —
+                    # 한 가입자의 통행은 한 방향이다(`_assign_journeys`).
+                    #
+                    # 승차 칸으로 되돌리는 것은 셀의 불연속이다. 그래서 회차를
+                    # 올려 **그 전에 열린 세션이 따라오지 못하게** 한다 —
+                    # 따라오면 인접하지 않은 셀로 순간이동한 핸드오버가 된다.
+                    sub.route_pos = sub.route_from
+                    sub.trip += 1
+                continue
+            if now - sub.route_t < rt.dwell_sec[sub.route_pos]:
+                continue
+            was = rt.cells[sub.route_pos]
+            sub.route_pos, sub.route_fwd = rt.step(sub.route_pos, sub.route_fwd)
+            sub.route_t = now
+            moved += 1
+            # **TAI List 밖으로 나갔을 때만 TAU 다.** TA 경계가 아니다 —
+            # MME 가 UE 에게 TA **목록**을 주고 목록 밖에 들어갈 때만 TAU 가
+            # 난다(`handover.build_ta_lists` 머리말).
+            #
+            # `tac` 으로 판정했더니 도심에서 폭증했다 — 실측으로 신주쿠 2km
+            # 안에 TAC 가 49개이고 이웃 셀 쌍의 77% 가 TA 경계를 넘는다.
+            #
+            # **목록이 `0`(미정)이면 판정하지 않는다.** 위치를 몰라 묶지 못한
+            # 셀이고, 경계를 지어내지 않는다(불변규칙 12·17).
+            now_c = rt.cells[sub.route_pos]
+            if (now_c is not was and was.ta_list and now_c.ta_list
+                    and now_c.ta_list != was.ta_list):
+                self.tau_events.append((i, was, now_c))
+            if sub.route_to >= 0 and sub.route_pos == sub.route_to:
+                a, b = self.off_sec
+                sub.route_wait = now + self.rng.randint(a, b)
+        return moved
+
+    def cell_of(self, sub: Subscriber) -> Cell | None:
+        """이동 가입자의 **현재 위치 셀**. 고정 가입자는 `None`."""
+        if sub.route < 0:
+            return None
+        return self.routes[sub.route].cells[sub.route_pos]
+
+    def pick_mobile(self):
+        """이동 가입자 하나와 그 위치 셀. 태운 가입자가 없으면 `None`.
+
+        호 생성이 **셀을 먼저 고르고 가입자를 나중에** 고르는 구조라
+        (`_pick_cell` → `_sub_for`), 이동 가입자는 그 순서를 뒤집어야 한다 —
+        그 사람이 지금 **어디 있는지**가 먼저다.
+        """
+        if not self._mobile:
+            return None
+        sub = self.subs[self._mobile[self.rng.randrange(len(self._mobile))]]
+        return sub, self.routes[sub.route].cells[sub.route_pos]
+
+    def tau_rec(self, ts, slot_start: float, sub: Subscriber,
+                src: "Cell", dst: "Cell"):
+        """TAC 경계를 넘은 단말의 **Tracking Area Update** 레코드.
+
+        `_lte_call` 을 복사하지 않고 그것을 불러 쓴 뒤 갈아 끼운다 — 복사하면
+        154필드 중 한쪽만 고쳐지는 자리가 생긴다. 바꾸는 것은 **가입자·셀·
+        절차**뿐이다.
+
+        `call_type` 은 호출부가 `_coerce(force_call_type=...)` 로 지켜야 한다 —
+        `_coerce` 가 실측 분포로 덮기 때문이다. 여기서 세워도 거기서 지워진다.
+
+        **`old_call_Last_TAC` 에 떠난 TAC 를 적는다.** TAU 가 왜 일어났는지는
+        그 값과 `interval_First_TAC` 의 차이로만 읽힌다 — 같은 값이면
+        "TA 가 안 바뀌었는데 TAU 를 했다"가 된다.
+        """
+        rec, _cell = self._lte_call(ts, slot_start)
+        self._common_user(rec, sub)
+        # 새 TA 에서 수행한다 — 셀은 전환 **후**다
+        rec.set("First_eNB_ID", dst.enb_id)
+        rec.set("First_Cell_ID", dst.cell_id)
+        rec.set("First_eNB_VLAN_ID", dst.vlan_id)
+        rec.set("First_eNB_PLMN", dst.plmn)
+        rec.set("Last_eNB_ID", dst.enb_id)
+        rec.set("Last_Cell_ID", dst.cell_id)
+        rec.set("Last_eNB_VLAN_ID", dst.vlan_id)
+        rec.set("Last_eNB_PLMN", dst.plmn)
+        rec.set("interval_First_eNB_ID", dst.enb_id)
+        rec.set("interval_First_Cell_ID", dst.cell_id)
+        rec.set("interval_First_eNB_C_UID", dst.c_uid)
+        rec.set("interval_First_TAC", dst.tac)
+        rec.set("interval_First_eNB_VLAN_ID", dst.vlan_id)
+        rec.set("interval_First_eNB_PLMN", dst.plmn)
+        rec.set("MME_ID", dst.mme_id)
+        rec.set("SGW_ID", dst.sgw_id)
+        rec.set("PGW_ID", dst.pgw_id)
+        rec.set("ims_PGW_ID", dst.ims_pgw_id)
+        # 떠난 TA — TAU 의 사유다
+        rec.set("old_call_Last_eNB_ID", src.enb_id)
+        rec.set("old_call_Last_Cell_ID", src.cell_id)
+        rec.set("old_call_Last_TAC", src.tac)
+        rec.set("old_call_Last_eNB_PLMN", src.plmn)
+        return rec, dst
 
     def _pick_cell(self) -> Cell:
         import bisect
@@ -364,10 +706,109 @@ class Generator:
     # -- record builders -------------------------------------------------
 
     def _sub_for(self, cell_idx: int) -> Subscriber:
+        """그 셀에 사는 가입자 하나. 없으면 전체에서 뽑는다.
+
+        **꼬리는 `주변 셀`이다 — 전국이 아니다**(2026-10-27 사람 결정).
+        전부 home 으로 묶으면 셀마다 가입자 집합이 완전히 갈려 "옆 셀에서도
+        통신한다"가 사라진다. 그래서 28% 는 다른 사람을 뽑는데, 그 사람도
+        **이 셀 주변에 사는 사람**이어야 한다.
+
+        전에는 그 자리가 전체 균일 추첨이었다. 그러면 한 가입자가 60분에
+        서로 다른 셀 9개에 나타나고(home 적중률은 99% 인데도) 그중 대부분이
+        **전국에 흩어진 셀**이다 — 노선을 타지 않는 사람의 이동은 그런
+        모양이 아니다. 장비가 옮겨 가는 것이 아니면 **그 셀 또는 그 주변**에
+        있어야 한다.
+
+        주변은 `handover.Topology` 가 안다 — 전환 상대를 고르는 데 쓰는 그
+        관계를 그대로 쓴다. 두 벌로 두면 "전환은 되는데 그 셀에 사는 사람이
+        없다"가 생긴다.
+
+        **`_lte_call` 이 이것을 부른다**(2026-10-27). 그 전에는 전체 균일
+        추첨이었고 이 함수가 죽은 코드였다 — 근거는 호출부 주석.
+        """
+        rng = self.rng
         pool = self._subs_by_cell.get(cell_idx)
-        if pool and self.rng.random() < 0.72:
-            return self.subs[self.rng.choice(pool)]
-        return self.subs[self.rng.randrange(len(self.subs))]
+        if pool and rng.random() < 0.72:
+            return self.subs[rng.choice(pool)]
+        near = self._near_subs(cell_idx)
+        if near:
+            return self.subs[near[rng.randrange(len(near))]]
+        # **주변에 없으면 그 셀 사람으로 되돌린다.** 꼬리를 뽑으려다 전국에서
+        # 뽑으면 지역성이 거기서 깨진다 — 실측에서 그 경로가 home 에서
+        # 90km 떨어진 셀까지 만들었다.
+        if pool:
+            return self.subs[rng.choice(pool)]
+        # **그 셀에 아무도 살지 않는다.** 셀 수가 가입자 수에 비해 많으면
+        # 일어난다(실측 348셀 중 1개). 전에는 여기서 전체 추첨이었고, 그
+        # 한 셀 때문에 **제주 가입자가 서울 셀에 나타났다**(471km · 관측의
+        # 2.94%). 가장 가까운 주민으로 바꾼다 — 반경을 넘더라도 그것이
+        # 가능한 선택 중 가장 지역적이다.
+        nearest = self._nearest_subs(cell_idx)
+        return self.subs[nearest[rng.randrange(len(nearest))]]
+
+    def _near_subs(self, cell_idx: int) -> list[int]:
+        """그 셀 **주변**에 사는 가입자 인덱스. 한 번 구해 캐시한다.
+
+        매 호마다 토폴로지를 되짚으면 분당 수천 번이다. 셀 수만큼만 캐시하면
+        되므로 메모리는 문제가 아니다.
+        """
+        got = self._near_cache.get(cell_idx)
+        if got is not None:
+            return got
+        here = self.cells[cell_idx]
+        out: list[int] = []
+        for i in self._cells_around(cell_idx):
+            if _dist_m(here, self.cells[i]) <= self.home_radius_m:
+                out.extend(self._subs_by_cell.get(i, ()))
+        self._near_cache[cell_idx] = out
+        return out
+
+    def _nearest_subs(self, cell_idx: int) -> list[int]:
+        """**가장 가까운** 주민이 있는 셀의 가입자들. 반경을 넘어도 돌려준다.
+
+        그 셀에 아무도 살지 않을 때의 마지막 수단이다. 반경 안에 없으면
+        고리를 넓혀 가며 찾으므로 **빈 목록을 돌려주지 않는다** — 돌려주면
+        호출부가 전체 추첨으로 떨어지고 거기서 지역성이 깨진다.
+        """
+        got = self._far_cache.get(cell_idx)
+        if got is not None:
+            return got
+        here = self.cells[cell_idx]
+        best: list[int] = []
+        r = self.home_radius_m
+        while not best and r < 4e7:            # 지구 둘레면 더 넓힐 데가 없다
+            cand = [(_dist_m(here, self.cells[i]), i)
+                    for i in self._cells_around(cell_idx, r)
+                    if self._subs_by_cell.get(i)]
+            if cand:
+                best = list(self._subs_by_cell[min(cand)[1]])
+            r *= 4
+        self._far_cache[cell_idx] = best or list(range(len(self.subs)))
+        return self._far_cache[cell_idx]
+
+    def _cells_around(self, cell_idx: int, radius: float | None = None):
+        """반경 안의 셀 인덱스 — 격자 버킷으로 후보를 줄인다.
+
+        **전수 비교를 피한다.** 운영 셀 마스터는 수십만 행이고(`enb_limit`
+        으로 줄이지만) 셀마다 전수를 돌면 기동이 멈춘다. 격자는 한 번만
+        만든다.
+        """
+        if self._grid is None:
+            self._grid = {}
+            for i, c in enumerate(self.cells):
+                self._grid.setdefault(
+                    (int(c.latitude / _GRID_DEG),
+                     int(c.longitude / _GRID_DEG)), []).append(i)
+        here = self.cells[cell_idx]
+        rad = self.home_radius_m if radius is None else radius
+        span = max(1, int(rad / (_GRID_DEG * 111_320.0)) + 1)
+        gy = int(here.latitude / _GRID_DEG)
+        gx = int(here.longitude / _GRID_DEG)
+        for dy in range(-span, span + 1):
+            for dx in range(-span, span + 1):
+                for i in self._grid.get((gy + dy, gx + dx), ()):
+                    if i != cell_idx:
+                        yield i
 
     def _common_user(self, rec: Rec, sub: Subscriber) -> None:
         for name, value in zip(USER_FIELDS, user_values(sub)):
@@ -376,8 +817,41 @@ class Generator:
     def _lte_call(self, ts: datetime, slot_start: float) -> tuple[Rec, Cell]:
         smp = self.samplers["lte_call"]
         rng = self.rng
-        cell = self._pick_cell()
-        sub = self.subs[rng.randrange(len(self.subs))]
+        # **이동 가입자는 순서가 뒤집힌다.** 평소에는 셀을 가중 추첨하고
+        # 가입자를 따로 뽑는데, 움직이는 사람은 "지금 어디 있는지"가 먼저다.
+        # 그러지 않으면 궤적이 호에 반영되지 않아 **경로를 깔아도 전환이
+        # 추첨으로 돌아간다.**
+        got = self.pick_mobile() if rng.random() < self.mobility_share else None
+        if got is not None:
+            sub, cell = got
+        else:
+            cell = self._pick_cell()
+            # **기본은 전체 균일 추첨이다 — 샘플 XDR 이 그렇게 말한다.**
+            #
+            # 정확히는 **말하지 않는다.** 샘플 분포(`_distributions.json`)에
+            # 있는 축은 call_type · flags · release_cause · first_error ·
+            # durations · apn · vendor_model 이고, `profile.json` 의
+            # `lte_call` 범주형 51개 중 셀·가입자를 잇는 것은 없다
+            # (`First_eNB_PLMN`·`imsi_mcc_mnc_info` 는 PLMN 접두어다).
+            # **가입자↔셀 관계는 샘플이 규정하지 않는 축**이고, 그러면
+            # 기본값은 모델을 넣지 않는 쪽이어야 한다.
+            #
+            # `home_locality` 를 켜면 `home_cell` 근처에서 뽑는다. 그건
+            # 사람이 더하는 것이다 — 지하철 노선(`mobility.journeys`)과 같은
+            # 층이고, 켜면 셀·분 `SUBS` 가 **-22%** 움직여(8.7 → 6.8)
+            # 기존 기준선과 전후 비교가 끊긴다.
+            if self.home_locality:
+                sub = self._sub_for(self.cell_index[cell.cell_key])
+            else:
+                sub = self.subs[rng.randrange(len(self.subs))]
+            # **고른 사람이 이동 중이면 셀을 그 사람 위치로 옮긴다.**
+            # `mobility_share` 는 "이동 가입자를 얼마나 자주 고르나"일 뿐이고,
+            # 한 번 고른 뒤에 임의 셀에 두면 **그 사람이 경로를 벗어난다** —
+            # 실측으로 이동 가입자 925명 중 863명이 그렇게 경로 밖 셀에
+            # 나타났다. 궤적이 깨지면 경로를 깐 의미가 없다.
+            at = self.cell_of(sub)
+            if at is not None:
+                cell = at
 
         values = self.templates["lte_call"].copy()
         rec = Rec(values, self.index["lte_call"], "lte_call")
@@ -525,7 +999,8 @@ class Generator:
     def uplane_rec(self, series: str, ts: datetime, tf: float,
                    cell: Cell, t: float, user: tuple[str, ...],
                    apn: str | None, ongoing: str, sid: str,
-                   domain: str | None = None) -> Rec:
+                   domain: str | None = None,
+                   core: tuple[int, int, int] | None = None) -> Rec:
         """U-Plane 레코드 하나 — **식별자·셀·시각을 호출부가 준다.**
 
         구 `_user_traffic` 의 본문이고, 달라진 것은 셀·가입자·시각을 스스로
@@ -554,9 +1029,15 @@ class Generator:
         rec.set("SessionCreatedTime", f"{t:.6f}")
         for name, value in zip(USER_FIELDS, user):
             rec.set(name, value)
-        rec.set("SGW_ID", cell.sgw_id)
-        rec.set("PGW_ID", cell.pgw_id)
-        rec.set("MME_ID", cell.mme_id)
+        # 코어 장비는 **세션이 들고 다닌다.** 셀 마스터 값을 그대로 쓰면
+        # 핸드오버로 셀이 바뀔 때마다 MME·SGW 가 함께 바뀐다 — X2 핸드오버는
+        # 코어 재배치가 없으므로 그건 틀린 모양이다(`handover` 머리말의 표).
+        # 재배치가 있는 종류(`S1`·`S1_MME`)에서만 호출부가 이 값을 갈아 준다.
+        mme, sgw, pgw = ((cell.mme_id, cell.sgw_id, cell.pgw_id)
+                         if core is None else core)
+        rec.set("SGW_ID", sgw)
+        rec.set("PGW_ID", pgw)
+        rec.set("MME_ID", mme)
         rec.set("eNB_ID", cell.enb_id)
         rec.set("Cell_ID", cell.cell_id)
         rec.set("APN", smp.categorical("APN", "") if apn is None else apn)
@@ -573,6 +1054,22 @@ class Generator:
         ):
             rec.set(f, int(smp.numeric(f)))
         for direction in ("Uplink", "Dnlink"):
+            # **`PayloadSize` 와 `ThroughputTime` 은 같은 분위수에서 뽑는다**
+            # (2026-10-28). 처리율 `U-15` 가 그 둘의 비(比)이므로 독립으로
+            # 뽑으면 레코드마다 처리율이 **무작위**가 된다. 실측에서 셀·분
+            # `U-15` 의 84.2% 가 `0.01 Mbps` 미만이고 최대가 228 Mbps,
+            # 셀별 변동계수가 **평균 3.51** 이었다 — 그 분산 위에서는 D1
+            # 절대 임계도 `EV-08` 의 30% 하락 판정도 서지 않고, 그래서
+            # `j-sc-16`(앵커 고착)의 주 신호가 통째로 막혔다(확정대장 §9.8.9).
+            #
+            # **주변분포는 그대로다** — 각 필드는 여전히 자기 실측 백분위에서
+            # 뽑힌다. 생기는 것은 둘 사이의 **상관**뿐이고, 그것이 "큰 전송은
+            # 시간도 길다" 는 물리에 맞는다.
+            #
+            # **나머지 셋은 묶지 않는다.** `RetransPacketCount` 를 묶으면
+            # 재전송률이 상수에 가까워져 `U-12` 탐지가 죽는다. 패킷 수 두 개는
+            # `U-15` 와 무관하고, 묶으면 평균 패킷 크기가 고정된다.
+            u_thr = rng.random() * 10
             for f in (
                 "PacketCount", "PayloadPacketCount", "PayloadSize",
                 "ThroughputTime", "RetransPacketCount",
@@ -584,7 +1081,9 @@ class Generator:
                 # 망이 가장 빠른 것으로 보이고, 실제와 반대다. 둘을 함께 늘리면
                 # 비율은 그대로고 **총량만** 시간대를 따른다 — 그것이 "사용량이
                 # 늘어난다"의 뜻이다. 혼잡에 따른 품질 저하는 장애 주입이 한다.
-                v = int(smp.numeric(key) * tf)
+                v = int(smp.numeric(
+                    key, u=u_thr if f in ("PayloadSize", "ThroughputTime")
+                    else None) * tf)
                 rec.set(key, v)
                 # **`Delta` 도 같은 값으로 둔다.** 이 레코드는 그 자체로 한
                 # 세션(`ONGOINGFLAG=20`)이므로 "세션 누적"과 "이 분의 증분"이

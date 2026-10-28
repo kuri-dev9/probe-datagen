@@ -298,8 +298,28 @@ class Sampler:
     #: p90 쪽에 몰린다.** 4 는 실측으로 정했다 — 아래 근거.
     TAIL_K = 4.0
 
-    def numeric(self, field_name: str, default: float = 0.0) -> float:
+    def numeric(self, field_name: str, default: float = 0.0,
+                u: float | None = None) -> float:
         """백분위 11개(p0~p100)에서 하나를 뽑는다.
+
+        ## ``u`` — **분위수를 호출부가 준다** (2026-10-28)
+
+        ``[0, 10)`` 범위의 분위수(백분위 ÷ 10)다. ``None`` 이면 여기서 뽑는다.
+
+        **왜 열어 두나.** 한 레코드 안에서 **함께 움직여야 하는 필드**가 있다.
+        `Traffic_Total_*_PayloadSize` 와 `*_ThroughputTime` 이 그렇다 — 처리율
+        (`U-15`)이 **그 둘의 비(比)** 라서, 각자 독립으로 뽑으면 레코드마다
+        처리율이 무작위가 된다. 실측이 그 모양이었다(확정대장 §9.8.9):
+
+            셀·분 U-15    84.2% 가 0.01 Mbps 미만  ·  최대 228 Mbps
+            셀별 변동계수  평균 3.51 (σ 가 µ 의 3.5배)
+
+        그 분산 위에서는 **D1 절대 임계도 EV-08 의 30% 하락 판정도 서지 않는다.**
+        같은 ``u`` 를 주면 **큰 전송이 긴 시간을 갖고** 처리율이 안정된다.
+
+        **주변분포는 바뀌지 않는다.** 각 필드는 여전히 자기 실측 백분위에서
+        뽑히고, 생기는 것은 **둘 사이의 상관**뿐이다. 그래서 `pemdb1` 대조
+        통계(필드별 분포)는 그대로다.
 
         ## 마지막 구간은 선형이 아니다 (2026-10-15)
 
@@ -330,7 +350,10 @@ class Sampler:
         dec = self.p.numeric.get(field_name)
         if not dec or len(dec) < 2:
             return default
-        u = self.rng.random() * 10
+        # **호출부가 준 분위수를 쓸 때도 난수를 소비하지 않는다.** 소비하면
+        # 같은 시드로 돌린 전후가 어긋나 재현이 깨진다.
+        if u is None:
+            u = self.rng.random() * 10
         i = min(9, int(u))
         frac = u - i
         a, b = dec[i], dec[i + 1]

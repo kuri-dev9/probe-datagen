@@ -311,10 +311,21 @@ class Scenario:
             # 다른 모양이 된다.
             phase = (elapsed // max(1, self.flap_period)) % 2
             return max(0.0, (1.0 if phase == 0 else self.flap_low) * self.peak)
-        if self.shape == "RAMP":
-            base = min(1.0, (elapsed + 1) / max(1, self.duration * 0.6))
-        else:
-            base = min(1.0, (elapsed + 1) / max(1, self.ramp_in))
+        # **상승 시간은 `ramp_in` 이 정한다 — `duration` 이 아니다**
+        # (2026-10-27 교정). RAMP 만 `duration * 0.6` 을 쓰고 있었다. 그러면
+        # 30분짜리를 주입했을 때 **18분 동안 거의 무증상**이다 — 실제로
+        # 그 상태를 보고 "장애를 주입했는데 화면에 안 나온다"는 보고가 올라왔다
+        # (10분 지나 누적 실패 0.7%). 지속시간과 악화속도는 **다른 축**이다.
+        # 장비 하나가 죽는 사건은 오래 간다고 해서 천천히 나빠지지 않는다.
+        #
+        # 비대칭이기도 했다 — 회복은 아래 `remain <= 2` 로 **길이와 무관하게
+        # 2분**인데 상승만 비례했다. `ramp_in` 필드는 이미 있었고 STEP 계열만
+        # 쓰고 있었다(`ramp_in=1`·`2`). RAMP 는 기본값 3 을 쓴다.
+        #
+        # **짧은 장애는 램프를 더 줄인다.** `duration` 이 `ramp_in` 보다 짧으면
+        # 피크에 닿기 전에 끝나, 강도를 1.0 으로 줘도 최대치가 나오지 않는다.
+        ramp = max(1, min(self.ramp_in, self.duration - 1))
+        base = min(1.0, (elapsed + 1) / ramp)
         if remain <= 2:  # 회복 구간
             base *= remain / 3.0
         return max(0.0, base * self.peak)
@@ -533,6 +544,19 @@ KIND_SPECS: dict[str, dict] = {
         expect_rules=("R-09e",), expect_geo="SCATTER",
         shape="RAMP", series=("transport", "http"),
         scope_kind="NODE", expect_kpi="U-12",
+    ),
+    # `j-sc-16` — 일본 요구 「アンテナは立つが遅い」 (2026-10-28).
+    #
+    # **`expect_kpi` 가 `U-15` 다.** 그 탐지 스펙은 graphio 쪽에 넣었지만
+    # **임계가 아직 비어 있어 돌지 않는다** — 재생성 후 평시 분포를 보고
+    # 정한다(확정대장 OPEN-41). 그때까지 이 시나리오는 주입은 되고
+    # Incident 는 열리지 않는다.
+    "anchor_saturation": dict(
+        title="5G 체감 품질 저하 (앵커 경합)",
+        truth_code="SA_QUALITY_LOW", truth_category="5G",
+        expect_rules=("R-39",), expect_geo="CLUSTER",
+        shape="RAMP", series=("transport",),
+        scope_kind="CELL", expect_kpi="U-15",
     ),
     "enb_s1_outage": dict(
         title="eNB 전송 단절 (무호)",
@@ -1512,6 +1536,54 @@ def _pgw_uplane_degradation(plan, sc, intensity, rng, cell) -> bool:
 
 
 # --------------------------------------------------------------------------
+# J-SC-16 · anchor_saturation — 「アンテナは立つが遅い」 5G 체감 저하
+# --------------------------------------------------------------------------
+
+
+@plan_mutator("anchor_saturation")
+def _anchor_saturation(plan, sc, intensity, rng, cell) -> bool:
+    """5G 로 **붙었는데 느리다** — 셀 경합 (R-39).
+
+    일본 요구 「アンテナは立つが遅い」(안테나는 서는데 느리다)다. `g-sc-16`
+    의 식(`ThroughputTime` 유지 · `PayloadSize` 축소 → `U-15` 하락)을
+    **NODE 축에서 CELL 축으로** 옮긴 것이고 새 식이 아니다.
+
+    ## 건드리지 않는 것이 이 mutator 의 정의다
+
+    **`initial_nr_conn_time`** — 그것을 `0` 으로 만들면 `N-02`(NR 레그
+    연결률)가 떨어져 `R-33`(`NSA_NR_LEG_FAILURE`)이 깨어나고, 같은 주입에서
+    두 원인이 나와 Top-1 이 갈린다(불변규칙 10 · 확정대장 §9.4). 그리고
+    그 값은 **다른 시나리오의 것이다** — SA 관점에서 `= 0` 은 *5G 를 못
+    쓴다*(`j-sc-17` 폴백)이고, 여기는 *쓰는데 느리다* 다(§9.8.1).
+
+    **재전송·RTT** — 올리면 `R-09`(`TRANSPORT_LOSS`)·`R-09e`
+    (`GW_OVERLOAD`)와 경쟁한다. `R-39` 가 "재전송·aRTT 정상" 을 조건으로
+    걸고 있으므로 올리는 순간 **아무 룰도 안 붙는다.**
+
+    **up 축** — Service/Backbone 축이다(불변규칙 8).
+
+    `g-sc-16` 이 `_down_loss` 로 손실을 함께 넣는 것과 **일부러 다르다.**
+    그쪽은 GW 사용자평면 과부하라 손실이 실제로 생기고, 이쪽은 무선 구간
+    스케줄링 경합이라 **패킷이 버려지지 않고 늦게 간다.**
+
+    ⚠️ `OUT_STALL` 은 제외한다(V3 §7.2) — 이미 재전송이 8~20배라 `U-12`
+    가 움직이고, 그러면 `R-39` 의 ② 조건에 걸려 자기 룰이 안 붙는다.
+    """
+    if cell.cell_key not in sc.active_cells_cache:
+        return False
+    if plan.outcome == "stall":
+        return False
+    if rng.random() >= intensity * 0.9:
+        return False
+    # 하한 0.25 는 `g-sc-16`(0.2)보다 얕다. 저쪽은 손실과 RTT 를 함께
+    # 올려 신호가 셋이고, 이쪽은 **처리율 하나로만** 판정되므로 폭이
+    # 필요하다 — `EV-08` 의 `throughput_drop_pct` 가 30% 다.
+    plan.scale("Traffic_Total_Dnlink_PayloadSize",
+               max(0.25, 1.0 - 0.6 * intensity))
+    return True
+
+
+# --------------------------------------------------------------------------
 # SC-17 · enb_s1_outage — eNB/S1 전송 단절 (무호)
 # --------------------------------------------------------------------------
 
@@ -1885,6 +1957,12 @@ def build_scenarios(
         cells, rng, 40, _floor("transport_loss"))
     nsa_cells, nsa_sgg = _cells_in_one_sgg(
         cells, rng, 60, _floor("nsa_nr_leg", "nsa_policy_restrict"))
+    # **`nsa_cells` 를 재사용하지 않는다.** 확정대장 §9.8.6 요소 ① 이
+    # `REUSE` 라고 적었는데, 같은 셀에 `g-sc-13`(NR 레그 미성립)과 함께
+    # 걸리면 같은 분의 `N-02` 가 섞여 **`R-39` 의 ④ 조건("N-02 정상")이
+    # 거짓이 된다.** 두 시나리오가 서로의 발동을 막는 모양이라 셀을 가른다.
+    anchor_cells, anchor_sgg = _cells_in_one_sgg(
+        cells, rng, 50, _floor("anchor_saturation"))
     compound_cells, compound_sgg = _cells_in_one_sgg(
         cells, rng, 40, _floor("partial_recovery", "dns_flap",
                                "compound_causal_failure"))
@@ -1945,6 +2023,9 @@ def build_scenarios(
         spec("SC-13", "nsa_nr_leg",
              target=Target(cell_keys={c.cell_key for c in nsa_cells},
                            sgg_codes={nsa_sgg})),
+        spec("J-SC-16", "anchor_saturation",
+             target=Target(cell_keys={c.cell_key for c in anchor_cells},
+                           sgg_codes={anchor_sgg})),
         spec("SC-13b", "nsa_policy_restrict",
              target=Target(cell_keys={c.cell_key for c in by_mme[other_mme]},
                            mme_id=other_mme)),

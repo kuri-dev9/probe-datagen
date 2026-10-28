@@ -1,0 +1,91 @@
+# 정답지에 **없는** call_type 을 있는 패턴에서 파생한다
+#
+# 실측 XDR 표본 204호에 여섯 종만 있다 —
+#
+#     1 Attach MO 103 · 3 Service MO 49 · 4 Service MT 15
+#     5 TAU        25 · 6 Paging     12
+#     2·7·8·9·10·11  **0**
+#
+# 없는 것을 **지어내지 않고 파생한다**(사용자 확정 2026-10-28). 각
+# call_type 이 무엇으로 갈리는지는 정답지가 100% 결정적으로 말해 준다 —
+#
+#     call_type      RRC Est.Cause      CNDomain   paging_att/suc
+#     1 Attach MO    3 MO_Signalling       -1          0 / 0
+#     3 Service MO   4 MO_Data             -1          0 / 0
+#     4 Service MT   2 MT_ACCESS            0          1 / 1
+#     6 Paging      -1                      0          1 / 0
+#
+# **MT 는 세 필드가 함께 움직인다.** 하나만 바꾸면 "페이징 없이 MT_ACCESS"
+# 같은 레코드가 되고, Call Type × 플래그 교차 KPI 가 무너진다(불변규칙 3).
+
+derive:
+  2:
+    name: "Attach MT (paging)"
+    # Attach 절차는 MO 와 같다 — **페이징이 선행하는 것만 다르다.**
+    from: 1
+    set:
+      InitialUEMessage_RRC_Establishment_Cause: 2   # MT_ACCESS
+      CNDomain: 0
+      paging_attempt_flag: 1
+      paging_success_flag: 1
+
+  7:
+    name: "Extended Service MO"
+    # **CSFB 다.** `CNDomain = 1 (cs)` 가 Service(ps)와 가르는 축이고,
+    # 규격 `CNDomain: 0 : ps | 1 : cs` 가 그 뜻이다.
+    from: 3
+    set:
+      CNDomain: 1
+
+  8:
+    name: "Extended Service MT (Paging)"
+    from: 4
+    set:
+      CNDomain: 1
+
+  9:
+    name: "Detach MO"
+    # **`detach_flag = 1` ⟺ `DetachRequest_Time` 있음** — 정답지 23호가
+    # 완전히 일치한다. 그래서 `detach_flag` 가 선 패턴만 골라 쓴다
+    # (시각·Type·Switchoff 가 이미 들어 있다).
+    #
+    # 정답지에서 Detach 는 call_type **1·3·4** 에 붙어 있다(18·3·2) —
+    # `9` 는 *"UE 가 주도한 detach 가 주 절차인 호"* 이므로
+    # `Direction = 0 (uplink)` 으로 고정한다.
+    from_any: [1, 3, 4]
+    require: {detach_flag: "1"}
+    set:
+      DetachRequest_Direction: 0                    # uplink
+    draw:
+      # 정답지 23호: Type 1(13) · 3(10) · Switchoff 1(6) · 0(4) · -1(13)
+      DetachRequest_Type: {1: 0.57, 3: 0.43}
+      DetachRequest_Switchoff: {1: 0.60, 0: 0.40}
+
+  10:
+    name: "S1 Handover Inter MME"
+    # **MME 간 핸드오버.** 레코드에 장비 필드가 한 벌뿐이라 전환 **후**
+    # 값이 남는다(`pemdb1._apply_handover` 머리말) — 떠난 자리는
+    # `old_call_Last_*` 가 가리킨다. 그래서 호출부가 셀을 이웃으로 옮기고
+    # 직전 호를 출발 셀로 적는다(`patterns.place` 의 `neighbour`).
+    #
+    # ⚠ **`OngoingFlag = 4` 와 다른 축이다.** 이쪽은 *호의 종류*이고
+    # 저쪽은 *레코드를 끊는 자리*다 — C-Plane 호는 짧아 전환이 나면 호가
+    # 끝나거나 새 호가 시작되고, U-Plane 세션은 1~10분이라 전환 중에도
+    # 이어져 끊어야 한다. 실측도 그렇다: C-Plane 204호 전량 `flag=2`,
+    # U-Plane transport 에 `flag=4` 가 2,107건.
+    from: 3
+    set:
+      InitialUEMessage_RRC_Establishment_Cause: 3   # MO_Signalling
+    handover: true
+
+  11:
+    name: "Reroute"
+    # **규격서에 없다**(`codes.CALL_TYPE` 주석 — 상용 실측 2,516건
+    # 0.075% 를 사용자가 확인해 넣은 값). 실측 구성비도 0.03% 로 극소다.
+    # 호를 다른 노드로 다시 보내는 절차라 `MOBILITY` 그룹이고
+    # **소통 성공/실패의 분모가 아니다** — `attempt`·`success` 를 세우지
+    # 않는다(`CALL_TYPE_GROUP` 주석).
+    from: 3
+    set:
+      attempt_flag: 0
+      success_flag: 0
