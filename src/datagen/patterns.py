@@ -216,8 +216,8 @@ def place(rec: dict, cell, user: dict, rng: random.Random,
 
 def build(gen, bank: Bank, *, keys=None, n: int = 1000, ts=None,
           rng: random.Random | None = None,
-          derive: "Derive | None" = None, call_type: int | None = None
-          ) -> list[dict]:
+          derive: "Derive | None" = None, call_type: int | None = None,
+          minutes: int = 1) -> list[dict]:
     """패턴에서 레코드 ``n`` 건.
 
     ``gen`` 은 `Generator` — 셀·가입자만 빌린다. **레코드를 만들지
@@ -246,7 +246,10 @@ def build(gen, bank: Bank, *, keys=None, n: int = 1000, ts=None,
         cell = gen.cells[rng.randrange(len(gen.cells))]
         sub = gen.subs[rng.randrange(len(gen.subs))]
         user = _user_fields(gen, sub)
-        rec = stamp(pat, slot + rng.random() * 60)
+        # **분을 가로질러 뿌린다.** 한 분에 몰면 원시 경로 규칙으로 낼 때
+        # 파일 하나에 다 들어가고, 집계가 보는 "분당 레코드 수" 가 실제와
+        # 전혀 다른 모양이 된다.
+        rec = stamp(pat, slot + rng.random() * 60 * max(1, minutes))
         if derived:
             rec = derive.apply(rec, call_type, rng)
         src = None
@@ -320,15 +323,18 @@ def write(recs: list[dict], path: Path) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     data: dict[str, list[str]] = {}
     # 분 귀속 — `call_start_time`(epoch 소수)에서 분을 만든다.
-    from datetime import datetime, timezone
+    from datetime import datetime
     slots = []
     for r in recs:
         try:
             t = float(str(r.get("call_start_time") or 0) or 0)
         except ValueError:
             t = 0.0
-        dt = datetime.fromtimestamp(t, tz=timezone.utc).replace(
-            second=0, microsecond=0, tzinfo=None) if t > 0 else None
+        # **로컬 시각으로 되돌린다.** 생성기가 `ts.timestamp()` 로 naive
+        # datetime 을 epoch 로 만들고 그것은 로컬 기준이다 — UTC 로 풀면
+        # 분이 9시간 밀려 `raw_parquet.minutes()` 가 못 찾는다.
+        dt = datetime.fromtimestamp(t).replace(
+            second=0, microsecond=0) if t > 0 else None
         slots.append(dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "")
     data[CPLANE_SLOT] = slots
     for dst, src, *_ in CPLANE_FIELDS:
@@ -409,3 +415,220 @@ class Derive:
             if ok:
                 return rng.choice(ok)
         return rng.choice(pats)
+
+
+# ── U-Plane — **C-Plane 호에서 파생된다** ──────────────────────────────────
+
+
+#: 계열별 패턴 파일. C-Plane 은 `patterns.jsonl`, U-Plane 은 계열 이름이 붙는다.
+def bank_path(series: str) -> Path:
+    base = DEFAULT_BANK.parent
+    return base / ("patterns.jsonl" if series == "lte_call"
+                   else f"patterns_{series}.jsonl")
+
+
+#: **C-Plane 호에서 물려받는 것.** 스펙 §4.4 의 CP–UP 조인이 성립하려면
+#: 이 셋이 맞아야 한다 — 가입자·시간 구간·셀.
+#:
+#:     UP.IMSI = CP.IMSI
+#:     AND UP.SummaryCreateTime BETWEEN CP.call_start_time AND CP.call_end_time
+#:     AND (UP.eNB_ID, UP.Cell_ID) ∈ {CP.First_*, CP.Last_*, …}
+#:
+#: `APN` 도 함께 간다 — **한 베어러의 APN 이 계열마다 다를 수 없다**
+#: (`generator.uplane_rec` 주석).
+INHERIT = (
+    ("IMSI", "IMSI"), ("MDN", "MDN"), ("IMEI", "IMEI"),
+    ("ServiceCode", "ServiceCode"),
+    ("imsi_mcc_mnc_info", "imsi_mcc_mnc_info"),
+    ("APN", "APN"),
+    ("eNB_ID", "First_eNB_ID"), ("Cell_ID", "First_Cell_ID"),
+    ("MME_ID", "MME_ID"), ("SGW_ID", "SGW_ID"), ("PGW_ID", "PGW_ID"),
+)
+
+
+def session_id(imsi: str, t0: float, rng: random.Random) -> str:
+    """`SessionID` 를 다시 만든다 — **IMSI 가 그 안에 들어 있다.**
+
+    실측 구조(2026-10-28) —
+
+        2887582732.950798296.6.<IMSI>.1787682997.434389
+        └ IP(uint)  └ port    └proto └ 가입자  └ 세션 시작 epoch.µs
+
+    그래서 가입자를 바꾸면 이 값도 **반드시 다시 만들어야** 한다. 패턴의
+    것을 그대로 쓰면 실측 암호문이 레코드에 남는다.
+    """
+    ip = rng.randint(2886729728, 2887778303)      # 172.16/12 대역
+    port = rng.randint(1024, 65535) * 10000 + rng.randint(0, 9999)
+    proto = rng.choice((6, 6, 6, 17))             # 실측 6 이 우세
+    frac = rng.randint(0, 999999)
+    return f"{ip}.{port}.{proto}.{imsi}.{int(t0)}.{frac:06d}"
+
+
+def build_uplane(bank: Bank, calls: list[dict], series: str, *,
+                 per_call: float = 1.0,
+                 rng: random.Random | None = None) -> list[dict]:
+    """C-Plane 호에서 U-Plane 레코드를 파생한다.
+
+    **성공한 호에서만 나온다** — 베어러가 서지 않았으면 흘릴 것이 없다
+    (`session.SessionEngine.classify` 와 같은 규칙).
+
+    ``per_call`` 은 호당 평균 레코드 수다. 계열마다 다르다 — 실측
+    비율(`rates`)이 정본이고 호출부가 준다.
+    """
+    rng = rng or random.Random(20261028)
+    ok = [c for c in calls if str(c.get("success_flag") or "") == "1"]
+    out: list[dict] = []
+    if not ok or not bank.keys:
+        return out
+    for call in ok:
+        n = int(per_call) + (1 if rng.random() < (per_call % 1) else 0)
+        for _ in range(n):
+            _k, pat = bank.draw(bank.keys, rng)
+            rec = _from_call(pat, call, rng)
+            if rec:
+                out.append(rec)
+    return out
+
+
+def _from_call(pat: dict, call: dict, rng: random.Random) -> dict | None:
+    """패턴 한 장을 **그 호의 것**으로 만든다."""
+    try:
+        t0 = float(str(call.get("call_start_time") or 0) or 0)
+        t1 = float(str(call.get("call_end_time") or 0) or 0)
+    except ValueError:
+        return None
+    if t0 <= 0:
+        return None
+    # **호 구간 안에 놓는다.** 그래야 §4.4 의 시간 조건이 선다. 호가
+    # 짧으면 그 안에서, 길면 앞쪽에 몰리지 않게 고르게 뿌린다.
+    span = max(t1 - t0, 0.0)
+    at = t0 + (rng.random() * span if span > 0 else 0.0)
+    rec = stamp(pat, at)
+    imsi = str(call.get("IMSI") or "")
+    for dst, src in INHERIT:
+        if dst in rec:
+            rec[dst] = str(call.get(src) or "")
+    if "SessionID" in rec:
+        rec["SessionID"] = session_id(imsi, t0, rng)
+    return rec
+
+
+def write_uplane(recs: list[dict], path: Path, series: str) -> int:
+    """U-Plane Parquet — **원시와 같은 모양이어야 한다.**
+
+    C-Plane 의 `write()` 와 같은 규율이다. 상용 컬럼명(`pemdb1.UPLANE_FIELDS`)
+    으로 적고 전부 문자열로 둔다 — `graphio.uplane_agg` 가 그 이름을 읽는다.
+    분 귀속은 `UPLANE_SLOT`(= `EVENT_TIME`)이고 **C-Plane 과 같은 컬럼명**
+    이다(`pemdb1.UPLANE_SLOT` 주석).
+    """
+    from datetime import datetime, timezone
+
+    import polars as pl
+
+    from .pemdb1 import UPLANE_FIELDS, UPLANE_SLOT
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    slots = []
+    for r in recs:
+        try:
+            t = float(str(r.get("SummaryCreateTime") or 0) or 0)
+        except ValueError:
+            t = 0.0
+        dt = (datetime.fromtimestamp(t)
+              .replace(second=0, microsecond=0)) if t > 0 else None
+        slots.append(dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "")
+    data: dict[str, list[str]] = {UPLANE_SLOT: slots}
+    for dst, src, *_ in UPLANE_FIELDS[series]:
+        data[dst] = [str(r.get(src, "") or "") for r in recs]
+    pl.DataFrame(data).write_parquet(path, compression="zstd")
+    return len(recs)
+
+
+#: `UPLANE_FIELDS` 의 타입 글자 → polars 타입.
+_PL_TYPE = {"i8": "Int8", "i32": "Int32", "i64": "Int64", "f64": "Float64"}
+
+
+def _cast(vals: list[str], typ: str):
+    """선언 타입으로 접는다. **빈 값은 `None` 이다** — `0` 이 아니다.
+
+    `0` 으로 채우면 "관측하지 못했다" 와 "값이 0" 이 섞인다(불변규칙 17).
+    `ReplyCode = 0` 은 DNS NOERROR 라 실제로 뜻이 있는 값이다.
+    """
+    import polars as pl
+
+    if typ not in _PL_TYPE:
+        return vals
+    dt = getattr(pl, _PL_TYPE[typ])
+    out = []
+    for v in vals:
+        v = v.strip()
+        if v == "":
+            out.append(None)
+            continue
+        try:
+            out.append(int(float(v)) if typ != "f64" else float(v))
+        except ValueError:
+            out.append(None)
+    return pl.Series(out, dtype=dt)
+
+
+def write_raw_layout(recs: list[dict], root: Path, series: str) -> int:
+    """**원시 경로 규칙대로** 내보낸다 — `<root>/<series>/<날짜>/<HHMM>.parquet`.
+
+    평면 파일(`write`·`write_uplane`)은 한 번에 질의하기 편하지만
+    **집계가 읽지 못한다** — `raw_parquet.minutes()` 가 그 규칙으로 분을
+    찾기 때문이다. 데이터셋을 파이프라인에 그대로 태우려면 이쪽이다.
+
+    경로 규칙의 정본은 `raw_parquet` 이고 **여기서 글롭을 만들지 않는다**
+    (graphio 불변규칙 15 — 세 벌이 되면 한쪽만 고쳐질 때 집계는 보는데
+    조회는 못 보고, 에러가 나지 않는다).
+    """
+    from collections import defaultdict
+    from datetime import datetime
+
+    import polars as pl
+
+    from . import raw_parquet as rp
+    from .pemdb1 import CPLANE_FIELDS, CPLANE_SLOT, UPLANE_FIELDS, UPLANE_SLOT
+
+    cplane = series == "lte_call"
+    slot_col = CPLANE_SLOT if cplane else UPLANE_SLOT
+    fields = CPLANE_FIELDS if cplane else UPLANE_FIELDS[series]
+    src_time = "call_start_time" if cplane else "SummaryCreateTime"
+
+    by_min: dict[datetime, list[dict]] = defaultdict(list)
+    for r in recs:
+        try:
+            t = float(str(r.get(src_time) or 0) or 0)
+        except ValueError:
+            continue
+        if t <= 0:
+            continue
+        dt = datetime.fromtimestamp(t).replace(second=0, microsecond=0)
+        by_min[dt].append(r)
+
+    n = 0
+    for dt, rows in sorted(by_min.items()):
+        p = rp.minute_path(root, series, dt)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        # **U-Plane 은 타입이 선언돼 있다.** `UPLANE_FIELDS` 의 셋째 자리가
+        # `i8`·`i32`·`i64`·`f64`·`str` 이고 적재가 그대로 쓴다
+        # (`pemdb1.PemdbWriter.write_uplane`). 전부 문자열로 내면 집계가
+        # `ONGOING_FLAG.is_in([2, 20])` 에서 멈춘다 — 정수와 문자열을
+        # 비교할 수 없다. C-Plane 은 반대로 **전량 문자열**이다
+        # (`CPLANE_FIELDS` 에 타입 자리가 없다 · `cell_agg` 머리말).
+        data = {}
+        for dst, s2, *rest in fields:
+            raw = [str(r.get(s2, "") or "") for r in rows]
+            typ = rest[0] if (rest and not cplane) else "str"
+            data[dst] = _cast(raw, typ)
+        df = pl.DataFrame(data)
+        # **분 귀속만 `Datetime` 이다.** 원시 Parquet 이 그 모양이고
+        # (나머지 154/132 컬럼은 전부 문자열), 집계가 그 컬럼으로 구간을
+        # 거른다 — 문자열로 두면 `cannot compare datetime to a string` 으로
+        # 멈춘다. **첫 컬럼 자리도 원시와 같게** 앞에 붙인다.
+        df = df.with_columns(pl.lit(dt).cast(pl.Datetime("us")).alias(slot_col))
+        df = df.select([slot_col] + [c for c in df.columns if c != slot_col])
+        df.write_parquet(p, compression="zstd")
+        n += len(rows)
+    return n

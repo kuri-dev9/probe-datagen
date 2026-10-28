@@ -47,17 +47,36 @@ GHOST_AT = 140
 DELIM = "\x1e"
 
 
-def field_names() -> list[str]:
+#: U-Plane 정답지 — **계열별 10만 줄**. C-Plane 과 달리 필드 수가 목록과
+#: 그대로 맞는다(transport 132 · dns 137 · http 146 — 2026-10-28 대조).
+SUMMARY_DIR = SAMPLE_DIR / "summary"
+
+
+def field_names(series: str = "lte_call") -> list[str]:
+    """그 계열의 필드 이름. **C-Plane 만 보정이 들어간다.**"""
     sys.path.insert(0, str(HERE / "src"))
-    from datagen.fields import LTE_CALL_FIELDS
-    names = list(LTE_CALL_FIELDS)
+    from datagen.fields import SERIES_FIELDS
+    names = list(SERIES_FIELDS[series])
+    if series != "lte_call":
+        return names
     return names[:GHOST_AT] + ["_UNKNOWN_140"] + names[GHOST_AT:]
 
 
-def read(paths=None) -> list[dict]:
-    """정답지를 `{필드명: 값}` 목록으로. 길이가 안 맞으면 **멈춘다.**"""
-    names = field_names()
-    paths = paths or sorted(SAMPLE_DIR.glob("*.txt"))
+def sample_files(series: str) -> list[Path]:
+    """그 계열의 정답지 파일. C-Plane 은 `*.txt`, U-Plane 은 `summary/` 다."""
+    if series == "lte_call":
+        return sorted(SAMPLE_DIR.glob("*.txt"))
+    return sorted(SUMMARY_DIR.glob(f"{series}/*/*.dat"))
+
+
+def read(paths=None, series: str = "lte_call", limit: int | None = None
+         ) -> list[dict]:
+    """정답지를 `{필드명: 값}` 목록으로. 길이가 안 맞으면 **멈춘다.**
+
+    U-Plane 은 계열당 10만 줄이라 ``limit`` 으로 끊어 읽는다.
+    """
+    names = field_names(series)
+    paths = paths or sample_files(series)
     out = []
     for p in paths:
         for i, line in enumerate(Path(p).open(encoding="utf-8", errors="replace"), 1):
@@ -70,6 +89,8 @@ def read(paths=None) -> list[dict]:
                     f"{p}:{i} 필드 {len(v)}개 — 기대 {len(names)}개. "
                     f"샘플 포맷이 바뀌었다면 `GHOST_AT` 을 다시 본다")
             out.append(dict(zip(names, v)))
+            if limit and len(out) >= limit:
+                return out
     return out
 
 

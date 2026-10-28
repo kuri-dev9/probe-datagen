@@ -2185,15 +2185,45 @@ def cmd_patterns(args) -> int:
                 groups.append((f"ct{ct:02d}", [], ct))
     else:
         groups.append(("all", bank.keys, None))
+    made: list[tuple] = []
     for name, keys, ct in groups:
         if not keys and ct is None:
             continue
         recs = patterns.build(gen, bank, keys=keys or None, n=args.count,
                               rng=_r.Random(args.seed + len(name) + (ct or 0)),
-                              derive=der, call_type=ct)
-        n = patterns.write(recs, out / f"{name}.parquet")
+                              derive=der, call_type=ct, minutes=args.minutes)
+        # **`--raw-layout` 은 모아서 한 번에 쓴다.** 그룹마다 쓰면 같은
+        # 분 파일을 11번 덮어써 **마지막 call_type 만 남는다**(실제로
+        # 그랬다 — 한 분이 통째로 Reroute 였다).
+        n = (len(recs) if args.raw_layout else
+             patterns.write(recs, out / f"{name}.parquet"))
+        made.append((name, keys, ct, recs))
         tag = f"파생 ← {der.sources(ct)}" if ct else f"키 {len(keys)}종"
         print(f" ✓ {name:8s} {n:7,d}건  ({tag})")
+    # ── U-Plane — **C-Plane 호에서 파생한다** ────────────────────────
+    #
+    # 따로 만들지 않는다. 성공한 호의 가입자·셀·장비·APN 을 물려받고
+    # 시각을 그 호 구간 안에 놓아야 스펙 §4.4 의 CP–UP 조인이 선다 —
+    # 그러지 않으면 `net_mode`·`call_type` 을 물려받을 수 없고 U-Plane 이
+    # 통째로 `UNKNOWN` 이 된다.
+    all_calls = [r for _n, _k, _c, recs in made for r in recs]
+    if args.raw_layout:
+        n = patterns.write_raw_layout(all_calls, out, "lte_call")
+        print(f"\n ✓ lte_call {n:7,d}건  (원시 경로 규칙 · 11종 합본)")
+    if not args.no_uplane:
+        print()
+        for series, per in (("transport", args.transport),
+                            ("dns", args.dns), ("http", args.http)):
+            if per <= 0:
+                continue
+            b = patterns.Bank(patterns.bank_path(series))
+            recs = patterns.build_uplane(b, all_calls, series, per_call=per,
+                                         rng=_r.Random(args.seed + len(series)))
+            n = (patterns.write_raw_layout(recs, out, series)
+                 if args.raw_layout else
+                 patterns.write_uplane(recs, out / f"{series}.parquet", series))
+            print(f" ✓ {series:8s} {n:7,d}건  (C-Plane 성공 호에서 파생)")
+
     print(f"\n→ {out}")
     return 0
 
@@ -2224,6 +2254,17 @@ def main(argv=None) -> int:
     pt.add_argument("--out", help="나갈 곳 (기본 data/callflow/dataset)")
     pt.add_argument("--count", type=int, default=5000, help="묶음당 레코드")
     pt.add_argument("--seed", type=int, default=20261028)
+    pt.add_argument("--minutes", type=int, default=10,
+                    help="레코드를 몇 분에 걸쳐 뿌릴지")
+    pt.add_argument("--raw-layout", action="store_true",
+                    help="원시 경로 규칙(<series>/<날짜>/<HHMM>.parquet)으로 "
+                         "내보낸다 — **집계가 그대로 읽는다**")
+    pt.add_argument("--no-uplane", action="store_true",
+                    help="U-Plane 을 만들지 않는다 (C-Plane 만)")
+    pt.add_argument("--transport", type=float, default=1.8,
+                    help="성공 호당 transport 레코드 (실측 비율)")
+    pt.add_argument("--dns", type=float, default=0.6)
+    pt.add_argument("--http", type=float, default=0.9)
     pt.add_argument("--no-derive", action="store_true",
                     help="정답지에 없는 call_type 을 만들지 않는다")
     pt.add_argument("--by-call-type", action="store_true",

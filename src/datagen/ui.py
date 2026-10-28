@@ -3382,6 +3382,7 @@ _LAYER = {
     "rivers": ("geo_rivers", "国土数値情報 (国土交通省) · 河川 W05"),
     "roads":  ("geo_roads",  "© OpenStreetMap contributors"),
     "green":  ("geo_green",  "© OpenStreetMap contributors"),
+    "station_bldg": ("geo_station_bldg", "© OpenStreetMap contributors"),
 }
 
 
@@ -3655,7 +3656,13 @@ _HTML_MAP = """<!doctype html>
  /* 점은 SVG 가 찍는다 — 여기서는 글자만. 왼쪽 끝을 점에 맞춘다 */
  /* 역은 **어디인지 읽는 수단**이라 장비 다음으로 또렷해야 한다.
     11px 흐린 회색일 때는 장비 번호 상자에 묻혔다 */
- .lb-s{font-size:13px;font-weight:600;color:#fff;transform:translateY(-50%)}
+ /* 역 이름도 야마노테선 계열이다 — 선(#9acd32)을 흰색 쪽으로 당겼다.
+    흰색일 때는 지명·장비와 섞여 "이게 역인지" 가 색으로 안 갈렸다 */
+ .lb-s{font-size:13px;font-weight:600;color:#d6ecaa;transform:translateY(-50%)}
+ /* 역 건물 — **심볼이 아니라 실제 윤곽이다**(사람 결정 2026-10-28).
+    집 모양을 그리던 때는 "알 수 없는 모양"으로 읽혔다. 면적 중앙값이
+    한 변 34m 라 멀리서는 점만 하고, 당기면 역사 모양이 드러난다 */
+ .stb{fill:#e2efc4;fill-opacity:.92;stroke:none}
  #tip{position:absolute;pointer-events:none;background:#0b0e12f2;
    border:1px solid #39414c;border-radius:4px;padding:5px 8px;font-size:12px;
    white-space:pre;display:none;z-index:5}
@@ -3725,7 +3732,7 @@ const mx=(lon)=>lon, my=(lat)=>R*Math.log(Math.tan(Math.PI/4+lat*Math.PI/360));
 const el=(n)=>document.createElementNS('http://www.w3.org/2000/svg',n);
 const svg=document.getElementById('svg'), tip=document.getElementById('tip');
 let VB=null, HOME=null, D=null, GEO=null, ALL=null, RAIL=null, RIV=null;
-let ROAD=null, GREEN=null;
+let ROAD=null, GREEN=null, STBL=null;
 
 // ── 보기 방식 — **무엇을 찍고 무엇으로 가를지** (사람 결정 2026-10-28) ──
 //
@@ -4086,24 +4093,21 @@ function draw(){
   // 역·구 이름은 "거기가 어디냐"를 알려주는 배경이다. 반대로 했더니
   // 역 이름이 SGW 31개 중 26개를 밀어냈다
   {
+    // 역 건물 — **OSM 윤곽 그대로**. 이름이 없는 것도 그린다(380개 중
+    // 이름 있는 것은 169개). 이름은 화면이 `D.stations`(셀 기반 30역)로
+    // 이미 들고 있고, 여기서 맞추려 들면 역 하나가 두 번 이름을 얻는다
+    for(const b of (STBL||[])){
+      const q=el('path'); q.setAttribute('class','stb');
+      q.setAttribute('d','M'+b.ring.map(p=>`${mx(p[0])} ${-my(p[1])}`)
+        .join('L')+'Z');
+      if(b.name) q.dataset.t=b.name;
+      document.getElementById('gStn').appendChild(q);
+    }
     for(const st of (D.stations||[])){
       // **점은 SVG 에 찍는다.** 전에는 HTML 라벨의 ::before 로 찍었는데,
       // 라벨 상자가 `translate(-50%,-50%)` 로 중앙정렬이라 **글자가 길수록
       // 점이 왼쪽으로 밀렸다** — 좌표가 틀린 것처럼 보인 원인이다
-      // **건물 모양이다**(사람 결정 2026-10-28). 노란 점이던 때는 장비
-      // 점과 섞여 "이것도 장비인가"로 읽혔다 — 색을 달리하는 것보다
-      // 형태를 달리하는 쪽이 확실히 갈린다
-      const sx=mx(st.lon), sy=-my(st.lat), sw=5*k, sh2=6*k;
-      const c=el('path');
-      c.setAttribute('d', `M${sx-sw} ${sy+sh2*.5} L${sx-sw} ${sy-sh2*.1} `
-        + `L${sx} ${sy-sh2*.75} L${sx+sw} ${sy-sh2*.1} L${sx+sw} ${sy+sh2*.5} Z`);
-      // **야마노테선 색을 띤다**(사람 결정 2026-10-28). 지금 역은 전부
-      // 야마노테선 역이라(`data/lines/`) 선과 같은 계열로 두면 "이 선
-      // 위의 역"이 한 묶음으로 읽힌다. 선(#9acd32)보다 흰색 쪽으로
-      // 당겨 역이 선보다 밝게 뜬다
-      c.setAttribute('fill','#e2efc4');
-      c.dataset.t=`${st.name}역\n덮는 셀 ${st.cells}`;
-      document.getElementById('gStn').appendChild(c);
+      // 점·심볼을 그리지 않는다 — 건물 윤곽은 아래에서 통째로 깐다
       // 글자는 점 **오른쪽**에 — 왼쪽 끝을 점에 맞춘다
       LABELS.push({x:mx(st.lon), y:-my(st.lat), t:st.name, cls:'lb-s',
                    dx:11*k});
@@ -4147,7 +4151,8 @@ async function load(){
     GEO=g.features?g:null;
     const src=[g.source||g.error||''];
     for(const [nm,set] of [['rail',v=>RAIL=v],['rivers',v=>RIV=v],
-                          ['roads',v=>ROAD=v],['green',v=>GREEN=v]]){
+                          ['roads',v=>ROAD=v],['green',v=>GREEN=v],
+                          ['station_bldg',v=>STBL=v]]){
       const r=await (await fetch(`/api/map/layer/${nm}`)).json();
       set(r.items||[]);
       if(r.source && !src.includes(r.source)) src.push(r.source);

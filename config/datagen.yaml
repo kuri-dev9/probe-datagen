@@ -244,6 +244,7 @@ pemdb1:
   geo_rivers: ../graphio-probe-rca/data/geo/jp/rivers.json      # 하천 W05 (배경)
   geo_roads: ../graphio-probe-rca/data/geo/jp/roads.json        # 도로 OSM (배경)
   geo_green: ../graphio-probe-rca/data/geo/jp/green.json        # 공원·수역 OSM (배경)
+  geo_station_bldg: ../graphio-probe-rca/data/geo/jp/station_bldg.json  # 역 건물 OSM (배경)
   rates:
     # 분당 호 수(주간 피크 기준 — 야간은 DIURNAL 곡선으로 0.14배까지 내려간다).
     # eNB 60개 · 셀 2,161개에 20,000/분이면 eNB 당 ~330건 · 셀당 ~9건이다.
