@@ -3586,7 +3586,7 @@ _HTML_MAP = """<!doctype html>
  /* **23,039개를 노드 하나로 그린다.** circle 을 그만큼 만들면 브라우저가
     버벅인다 — 길이 0 짜리 선분을 둥근 캡으로 찍으면 점이 된다 */
  /* 도쿄 바깥 eNB. 1.4 → 2.2px 로는 **여전히 안 보인다**는 말을 들어
-    3.4px 로 올렸다. 생성 대상(`#f7eec7` 노랑)과 색이 갈려 있으므로
+    3.4px 로 올렸다. 생성 대상(`#f6b3cd` 연분홍)과 색이 갈려 있으므로
     굵어져도 둘을 혼동하지 않는다 */
  .allpt{fill:none;stroke:#828d9c;stroke-width:3.4px;stroke-opacity:.8;
    stroke-linecap:round;vector-effect:non-scaling-stroke;pointer-events:none}
@@ -3635,7 +3635,9 @@ _HTML_MAP = """<!doctype html>
  /* 야마노테선 — JR 라인컬러(黄緑). 이 화면의 주인공 노선이다.
     **`.rl` 뒤에 와야 이긴다** — 특이도가 같아 순서가 정한다 */
  .rl-ymt{stroke:#9acd32;stroke-width:2.6px;stroke-opacity:.95}
- .pick{fill:none;stroke:#ffd43b;stroke-width:.9px;stroke-opacity:.8;
+ /* 고른 계통 — **기지국과 같은 계열이다.** 노란 계통선은 역 이름·건물과
+    섞여 "무엇이 골라졌나"가 색으로 안 갈렸다 */
+ .pick{fill:none;stroke:#ff9ec4;stroke-width:.9px;stroke-opacity:.85;
    vector-effect:non-scaling-stroke}
  /* 고른 계통에 **불이 들어온다.** 전에는 노란 테두리 원만 그려 어느
     장비가 걸렸는지 세어야 했다 — TA 히트맵과 같은 방식으로 영역째
@@ -3676,9 +3678,9 @@ _HTML_MAP = """<!doctype html>
    text-decoration:none;flex:none}
  #sel{position:absolute;left:50%;transform:translateX(-50%);top:10px;z-index:4;
    display:none;gap:14px;align-items:center;background:#0b0e12f2;
-   border:1px solid #ffd43b66;border-radius:6px;padding:7px 12px;font-size:12px;
+   border:1px solid #ff9ec466;border-radius:6px;padding:7px 12px;font-size:12px;
    white-space:nowrap}
- #sel b{color:#ffd43b;margin-right:2px} #sel span{opacity:.8;margin-right:12px}
+ #sel b{color:#ff9ec4;margin-right:2px} #sel span{opacity:.8;margin-right:12px}
  #sel button{margin-left:4px}
  #src{position:absolute;right:8px;bottom:6px;font-size:11px;opacity:.45}
  /* 축척 — 출처 줄 위에 둔다. 셀 간격이 수백 m 라 "지금 몇 m 를 보고
@@ -4059,9 +4061,12 @@ function draw(){
     d.setAttribute('r',(M.unit==='enb'?4:4.5)*k);
     // 축이 없을 때의 기본색은 **마스터 전량과 또렷이 갈려야 한다** —
     // 둘 다 회색이면 무엇이 생성 대상인지 안 보인다
-    // **파스텔 노랑이 기본이다.** 회색(#9aa8bb)이던 때는 도로와 명도가
-    // 겹쳐 가로망 위에서 점이 사라졌다. 색축이 있는 모드는 팔레트가 이긴다
-    d.setAttribute('fill',PAL[c[axis]] || '#f7eec7');
+    // **연분홍이 기본이다**(사람 결정 2026-10-28). 회색일 때는 도로에
+    // 묻혔고, 파스텔 노랑(#f7eec7)으로 옮기자 이번엔 **역 건물**
+    // (#e2efc4 연녹)과 명도·색상이 겹쳐 역 위의 기지국이 사라졌다.
+    // 배경이 쓰지 않는 색상환 자리로 뺀다 — 색축이 있는 모드는
+    // 팔레트가 이긴다
+    d.setAttribute('fill',PAL[c[axis]] || '#f6b3cd');
     d.setAttribute('fill-opacity',String(base));
     d.dataset.kind=M.unit; d.dataset.id=c.key; d.dataset.enb=c.enb;
     d.dataset.t = (M.unit==='enb'
@@ -4222,7 +4227,7 @@ function drawPick(){
   lit.setAttribute('class','glow'); lit.setAttribute('filter','url(#kdeblur)');
   const litAt=(x,y,r)=>{ const q=el('circle');
     q.setAttribute('cx',x); q.setAttribute('cy',y); q.setAttribute('r',r);
-    q.setAttribute('fill','#ffd43b'); q.setAttribute('fill-opacity','.5');
+    q.setAttribute('fill','#ff8ebc'); q.setAttribute('fill-opacity','.5');
     lit.appendChild(q); };
   const seen=new Set();
   for(const c of PICK.cells){
