@@ -335,6 +335,30 @@ def _retention_sweep(conn, hours: float) -> dict[str, int]:
     return _purge_pemdb1(conn, hours)
 
 
+def _capacity_shift(pem: dict) -> dict | None:
+    """`pemdb1.capacity_shift` — `file` 이 있으면 그 JSON 을 읽어 합친다.
+
+    **eNB ID 를 추적본 yaml 에 적지 않는다.** 이 저장소는 PUBLIC 이고 값은
+    실제 일본 망 eNB 번호다 — 야마노테선 노선 파일(`data/lines/`)과 같은
+    이유로 `data/`(gitignore)에 둔다. 환경마다 한 번 만든다.
+
+    파일을 적었는데 없으면 **멈추지 않고 크게 알린다.** 24번 하나가 해석
+    실패로 취소될 뿐 생성 전체를 세울 일이 아니다 — 노선 파일과 다른 점은
+    그쪽은 없으면 이동 가입자 전부가 엉뚱하게 깔린다는 것이다.
+    """
+    sec = dict(pem.get("capacity_shift") or {})
+    f = sec.pop("file", None)
+    if not f:
+        return sec or None
+    path = Path(f) if Path(f).is_absolute() else HERE / f
+    if not path.exists():
+        print(f"  ! capacity_shift 파일이 없다 — {path} · 24번(증설 부하 이동)은 "
+              "주입해도 취소된다", flush=True)
+        return sec or None
+    sec.update(json.loads(path.read_text(encoding="utf-8")))
+    return sec
+
+
 def _truth_path(pem: dict, data_dir: Path) -> Path:
     """`ground_truth.json` 경로. 상대경로는 **저장소 루트 기준**으로 푼다 —
     cwd 에 따라 정답이 엉뚱한 자리에 떨어지면 graphio 는 "ground_truth.json
@@ -396,6 +420,10 @@ def _live_truth(P, gen, scs: list) -> None:
     목록에서 빼는데, 그때 빈 파일을 쓰면 **방금 끝난 장애의 정답이 사라진다** —
     채점은 장애가 끝난 뒤에 돌린다.
     """
+    # **채점 문항만 센다**(2026-10-29). 24번(증설 재현, `scored=False`)만
+    # 걸려 있을 때 그대로 쓰면 `write_truth` 가 그것을 빼고 **빈 목록을
+    # 써서 직전 장애의 정답을 지운다** — 실제로 한 번 지워졌다.
+    scs = [sc for sc in scs if getattr(sc, "scored", True)]
     path = getattr(gen, "truth_path", None)
     if path is None or gen.anchor is None or not scs:
         return
@@ -551,7 +579,8 @@ def cmd_capacity(args) -> int:
             uplane_session=pem.get("uplane_session"), mobility=pem.get("mobility"),
             locale=pem.get("locale", "kr"), tac_only=bool(pem.get("tac_only", False)),
             sectors_per_enb=pem.get("sectors_per_enb"), scope=pem.get("scope"),
-            baseline=pem.get("baseline"), fault=pem.get("fault"))
+            baseline=pem.get("baseline"), fault=pem.get("fault"),
+            capacity_shift=_capacity_shift(pem))
         # **보관 정리를 끈다**(retain 0). 측정 중에 지우면 쓴 바이트를 셀 수
         # 없고, 임시 디렉터리라 어차피 통째로 버린다.
         writer = P.PemdbWriter(conn, mapping,
@@ -711,6 +740,7 @@ def cmd_run(args) -> int:
             # 평시 배경(절차 플래그·절단·PathSwitch)과 TIMEOUT 대기시간.
             # 없으면 `pemdb1.Baseline`·`scenarios.FaultCfg` 기본값이다.
             baseline=pem.get("baseline"), fault=pem.get("fault"),
+            capacity_shift=_capacity_shift(pem),
         )
         # 실시간 주입도 정답을 남긴다 — `_live_truth` 가 활성 집합이 바뀔 때 쓴다
         gen.truth_path = _truth_path(pem, data_dir)
@@ -925,7 +955,6 @@ def cmd_run(args) -> int:
                 print(f"  파티션 추가 — {added}", flush=True)
             minute_idx = gen.minute_of(ts)
             rows = gen.records(minute_idx, ts)
-            n = writer.write_xdr(ts, rows)
             # U-Plane 은 **같은 분 좌표**로 만든다. 다른 좌표를 쓰면 같은 분의
             # C-Plane 과 시나리오 강도가 어긋나 한 장애가 두 축에서 다른 시각에
             # 나타난다.
@@ -933,7 +962,12 @@ def cmd_run(args) -> int:
             # 봐야 하는데, `uplane_records` 를 두 번 부르면 rng 상태가 달라져
             # **적재한 것과 다른 데이터를 세게 된다.**
             up_rows = gen.uplane_records(minute_idx, ts)
+            # **C-Plane 을 마지막에 쓴다** (2026-10-29). corr 는 C-Plane 분
+            # 파일이 보이면 그 분을 굽고 다시 굽지 않는다(graphio
+            # `pipeline.run_tick` ③). U-Plane 이 뒤에 오면 그 틈에 구운 분의
+            # U-Plane 이 영구히 빈다. 생성 순서(rng)는 그대로 두고 쓰기만 바꾼다.
             un = writer.write_uplane_all(ts, up_rows, umaps)
+            n = writer.write_xdr(ts, rows)
             # 그 1분만 집계한다. 구간 멱등이라 다시 돌려도 같은 값이다.
             P.aggregate_all(conn, ts, ts + timedelta(minutes=1), cp_root)
             # 분 단위 멱등이다 — 그냥 INSERT 하면 같은 분을 두 번 돌릴 때
@@ -1060,6 +1094,7 @@ def cmd_pemfill(args) -> int:
             locale=pem.get("locale", "kr"), tac_only=bool(pem.get("tac_only", False)),
             sectors_per_enb=pem.get("sectors_per_enb"), scope=pem.get("scope"),
             baseline=pem.get("baseline"), fault=pem.get("fault"),
+            capacity_shift=_capacity_shift(pem),
         )
         gen.truth_path = _truth_path(pem, data_dir)
         mapped = [c for c in gen.cells if c.geo_status == "MAPPED"]
@@ -1250,8 +1285,9 @@ def _pem_follow(conn, P, gen, w, last_done, *, umaps: dict,
             un: dict[str, int] = {}
             for attempt in range(1, 4):
                 try:
-                    n = w.write_xdr(pending, rows)
+                    # C-Plane 이 분 완료 표식이다 — 마지막에 쓴다(`cmd_run` 주석).
                     un = w.write_uplane_all(pending, up_rows, umaps)
+                    n = w.write_xdr(pending, rows)
                     if not no_agg:
                         P.aggregate_all(conn, pending,
                                         pending + timedelta(minutes=1),

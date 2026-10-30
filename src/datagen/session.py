@@ -180,7 +180,8 @@ OUT_ABORT = "abort"         #: U 에 의한 종료 — C-Plane 정상인데 HTTP
 #: 누적이라 **모든 분 레코드가 같은 값을 나른다** — 종료 레코드만 집계되므로
 #: `U-01`(TCP 연결 성공률)의 분자·분모가 구 구현과 같아진다.
 TRANSPORT_CONST = (
-    "APN", "SessionQCI", "App_Group_Code", "App_ID", "Protocol", "Tethering",
+    "APN", "SessionQCI", "App_Group_Code", "App_ID", "App_IPv4", "App_Port",
+    "Protocol", "Tethering",
     "SynMssSize", "SynAckMssSize", "SynCount", "SynAckCount", "FinCount",
     "RstCount", "UplinkWindowCloseCount", "DnlinkWindowCloseCount",
     "ICMP_Delta_Uplink_IcmpPacketCount", "ICMP_Delta_Dnlink_IcmpPacketCount",
@@ -250,6 +251,9 @@ class Shape:
     #: 확률로 만든다 — 세션이 **끊기지 않고** 셀만 바뀌는 것을 검증할 수 있어야
     #: 한다(§7.6). C-Plane 이동성이 생기면 이 확률을 그쪽에서 받아야 한다.
     handover: float = 0.25
+    #: 앱 그룹별 세션 트래픽 — `app_traffic()` (2026-10-29 사람 결정).
+    #: 빈 dict 면 옛 동작(앱과 무관한 프로파일 총량) 그대로다.
+    app_traffic: dict = field(default_factory=dict)
 
     @classmethod
     def from_cfg(cls, cfg: dict | None) -> "Shape":
@@ -260,6 +264,71 @@ class Shape:
                 raise RuntimeError(f"pemdb1.uplane_session 의 모르는 키: {k}")
             setattr(s, k, type(getattr(s, k))(v))
         return s
+
+
+# --------------------------------------------------------------------------
+# 앱 그룹별 트래픽 (2026-10-29)
+# --------------------------------------------------------------------------
+
+#: 바이트 → 패킷 환산에 쓰는 기본 패킷 크기(B). down 은 MSS 근처, up 은 ACK·
+#: 작은 요청이 대부분이다. 그룹 설정의 `pkt_bytes` 가 덮는다.
+_PKT_BYTES = {"Dnlink": 1400.0, "Uplink": 200.0}
+
+
+def app_traffic(traffic: list[float], group: str | None, span: int,
+                cfg: dict, rng) -> list[float]:
+    """세션 총량(`TRAFFIC_PAIRS` 순서)을 **앱 그룹에 맞게** 다시 정한다.
+
+    ## 왜 (2026-10-29 실측)
+
+    전에는 총량을 앱과 무관하게 실측 프로파일 하나에서 뽑았다. 그래서 22개
+    그룹이 전부 **가입자-분 1.6KB · 패킷 2개 · 활성 50ms** 로 같았다 — 동영상도
+    1.6KB 다. graphio 체감 판정(활성 500ms · 패킷 10개 이상)을 넘는 가입자-분이
+    3% 뿐이라 혼잡·저속 장애를 넣어도 판정할 대상이 없었다.
+
+    배수만 곱하는 안은 버렸다 — 가입자-분의 32% 가 down 패킷 0 이라 몇 배를
+    해도 통과율이 42% 에서 멈추고, 꼬리(흐름 상위 1% = 1.2만 패킷)가 함께
+    부풀어 비현실이 된다.
+
+    ## 두 갈래
+
+    * **프로파일 그룹**(`active_s` 가 있는 것 — 동영상·게임): 분마다 활성 초
+      `active_s` 와 활성 중 down 속도 `dn_mbps` 를 범위에서 뽑아 총량을 **새로
+      만든다.** up 은 down 바이트 × `up_ratio`. 패킷은 바이트 ÷ `pkt_bytes`.
+    * **그 외**: 프로파일 총량 × `default.scale`(처리시간 포함 — 처리율은 그대로).
+
+    재전송·전체 패킷은 프로파일 표본이 가진 **비율을 유지**한다 — U-12 평시
+    값이 이 보강 때문에 움직이지 않게 한다. 장애 훅(`plan_mutate`)보다 **앞**에서
+    부른다 — 장애가 줄이고 늘리는 것은 이 새 기준선 위에서 일어나야 한다.
+    """
+    if not cfg:
+        return traffic
+    prof = cfg.get(group or "") or {}
+    if "active_s" not in prof:
+        k = float((cfg.get("default") or {}).get("scale", 1.0))
+        return traffic if k == 1.0 else [v * k for v in traffic]
+
+    t = dict(zip(TRAFFIC_PAIRS, traffic))
+    lo, hi = prof["active_s"]
+    active_us = sum(rng.uniform(lo, hi) for _ in range(span)) * 1e6
+    lo, hi = prof["dn_mbps"]
+    dn_bytes = rng.uniform(lo, hi) * 1e6 / 8 * active_us / 1e6
+    lo, hi = prof.get("up_ratio", (0.02, 0.05))
+    up_bytes = dn_bytes * rng.uniform(lo, hi)
+    pkt = {**_PKT_BYTES, **(prof.get("pkt_bytes") or {})}
+    out = dict(t)
+    for way, size in (("Dnlink", dn_bytes), ("Uplink", up_bytes)):
+        pay_old = t[f"{way}_PayloadPacketCount"]
+        pay = max(1.0, size / float(pkt[way]))
+        # 비율 유지 — 표본에 payload 가 없었으면 재전송 0 · 전체 = payload
+        retx = t[f"{way}_RetransPacketCount"] / pay_old if pay_old > 0 else 0.0
+        allp = t[f"{way}_PacketCount"] / pay_old if pay_old > 0 else 1.0
+        out[f"{way}_PayloadSize"] = size
+        out[f"{way}_PayloadPacketCount"] = pay
+        out[f"{way}_PacketCount"] = pay * max(1.0, allp)
+        out[f"{way}_RetransPacketCount"] = pay * retx
+        out[f"{way}_ThroughputTime"] = active_us
+    return [out[n] for n in TRAFFIC_PAIRS]
 
 
 # --------------------------------------------------------------------------
@@ -384,6 +453,45 @@ class Session:
     #: 칸으로 돌아가는 것이고 그 둘은 인접하지 않다. 따라가게 두면 **인접하지
     #: 않은 셀로 순간이동한 핸드오버**가 나온다.
     trip: int = 0
+    #: **down payload 가 멈추는 구간** `(a, b)` — 세션 누적 비율 좌표.
+    #: `None` 은 없음. 장애가 요청한 세션만 갖는다(확정대장 §4.1 G-3·G-4)
+    #: — 평시 세션은 언제나 `None` 이라 배분이 선형 그대로다.
+    #:
+    #: - `j-sc-14` 혼잡: 세션 한가운데 **한 분**(`_plan` 에서 정한다)
+    #: - `j-sc-15` 전환 정체: **핸드오버 직후 3–8초**(`_emit` 에서 정한다)
+    #:
+    #: **구간 시작 전의 배분은 선형과 같다** — 그래서 핸드오버 시점에야
+    #: 정해도 이미 낸 레코드와 어긋나지 않는다(`_freeze_frac`).
+    freeze: tuple[float, float] | None = None
+    #: 이 세션의 앱 (`apps.App`). `None` 이면 사전이 비어 옛 동작이다.
+    #: HTTP 레코드도 같은 앱 필드를 싣는다 — 한 세션은 한 앱이다.
+    app: object = None
+    app_ip: str = ""
+    #: 장애가 요청한 재시도 세션 수(`Plan.retries`) — `_open` 이 읽는다
+    retries: int = 0
+    #: 핸드오버 직후 정체 **길이(초)**. `0` 은 없음. 첫 전환에서 `freeze` 로
+    #: 바뀌고 0 이 된다 — 한 세션에 한 번이다.
+    ho_stall_s: float = 0.0
+
+
+#: 정체 구간에 **멈추는** 누적 필드 — down payload 만이다. 재전송·패킷 수는
+#: 계속 오른다(보냈는데 안 들어간다). `ThroughputTime` 도 흐른다 — 활성인데
+#: 바이트가 안 오는 것이 정체이고, 그래야 `Q-05` 도 함께 꺾인다.
+STALL_FROZEN = ("Dnlink_PayloadPacketCount", "Dnlink_PayloadSize")
+
+
+def _freeze_frac(f: float, a: float, b: float) -> float:
+    """선형 누적 비율 `f` → `[a, b]` 동안 멈춘 비율.
+
+    `a` 이전은 **선형 그대로**, `[a, b]` 는 평평, `b` 이후 남은 구간이
+    밀린 양을 나눠 갖는다(정체가 풀리면 몰려 들어온다). 연속 함수이고
+    `f=1` 이면 1 이라 `Σ Delta = Total` 이 유지된다(대장 §5 조건 10).
+    """
+    if f <= a:
+        return f
+    if f <= b:
+        return a
+    return a + (f - b) * (1.0 - a) / (1.0 - b)
 
 
 # --------------------------------------------------------------------------
@@ -444,6 +552,9 @@ class SessionEngine:
         self.rng = random.Random(seed + 909)
         self.active: list[Session] = []
         self._sid_n = 0
+        #: 정지 셀 → 이웃 셀 (`j-sc-27`). `pemdb1` 이 **분마다** 넣는다 —
+        #: 장애가 없는 분에는 `None` 이고 그때는 아무 일도 하지 않는다.
+        self.relocate = None
 
         #: Call Type 가중 — 설정이 있으면 기본표 위에 덮는다(키만 바꿀 수 있게).
         self._ctw = dict(CT_SESSION_W)
@@ -627,7 +738,7 @@ class SessionEngine:
         return out
 
     def _open(self, ts: datetime, slot: float, tf: float, call: Call,
-              out: dict, mutate, plan_mutate=None) -> None:
+              out: dict, mutate, plan_mutate=None, retry_of=None) -> None:
         """세션 하나를 열고 그 분의 레코드를 낸다.
 
         순서는 실제 call flow 다 — 도메인을 풀고(DNS), 연결하고(TCP), 요청한다
@@ -640,14 +751,39 @@ class SessionEngine:
         # 그 호의 U-Plane 이 **같은 분**에 보여야 시나리오 강도가 어긋나지
         # 않기 때문이다(`cli.cmd_run` 의 "같은 분 좌표" 주석).
         t0 = min(max(call.t, slot), slot + 58.0)
+        if retry_of is not None:
+            # 재시도는 **조금 뒤**다 — 실패를 보고 다시 누르기까지
+            t0 = min(t0 + rng.uniform(1.0, 8.0), slot + 59.0)
 
         self._sid_n += 1
         sid = f"{int(slot):x}{self._sid_n:05x}"
+
+        # ⓪ 앱 — **이미 매핑된 것처럼** 사전의 엔드포인트 하나를 고른다
+        # (`apps` 머리말). DNS 질의명·TCP 상대·HTTP Host 가 전부 이 앱이다
+        # 장애 대상 셀이면 **대상 앱이 더 자주 나오는 사전**이다(22번 결제 등)
+        if retry_of is not None:
+            app, host = retry_of      # **같은 앱**을 다시 시도한다
+        else:
+            app = gen.app_book_for(call.cell).pick(rng) if gen.app_book else None
+            host = app.host(rng) if app is not None else None
+        #: 서버 주소는 **세션 하나에 하나**다 — CIDR 이 넓으면 레코드마다
+        #: 다시 뽑지 않게 여기서 정한다
+        app_ip = app.ip_out(rng) if app is not None else ""
 
         # ① DNS — 선행. 확률 p_dns 로만 일어난다(나머지는 캐시 히트)
         if rng.random() < self.p_dns:
             rec = gen.uplane_rec("dns", ts, tf, call.cell, t0 - 0.02,
                                  call.user, call.apn, F_SINGLE, sid)
+            if host is not None:
+                rec.set("QueryName", "." + host)
+                # **앱 식별은 질의 도메인으로 붙인다**(2026-10-28 사용자 결정).
+                # 운영 프로브도 DNS 는 질의명을 `DOMAIN_PATTERN` 에 맞춰 앱을
+                # 판정한다. 없으면 결제 DNS 지연(`j-sc-22`)이 PAY 등급에 안
+                # 보이고 프로파일 라벨(`T-Service`)로 묻힌다.
+                # `App_IPv4`·`App_Port` 는 **그대로 둔다** — 그 상대는 앱
+                # 서버가 아니라 DNS 서버다.
+                rec.set("App_ID", app.idx)
+                rec.set("App_Group_Code", app.group)
             if mutate is not None:
                 mutate("dns", rec, call.cell)
             out["dns"].append(rec.values)
@@ -660,10 +796,17 @@ class SessionEngine:
         if call.outcome == OUT_RST:
             # 즉시 끊김 — 무선이 끊어졌으므로 길게 못 간다
             span = 1 if rng.random() < 0.7 else 2
-        sess = self._plan(ts, tf, call, t0, span, sid, plan_mutate)
+        sess = self._plan(ts, tf, call, t0, span, sid, plan_mutate, app, host,
+                          app_ip)
         self._emit(ts, slot, sess, out, mutate)
         if sess.i < sess.span:
             self.active.append(sess)
+        # 장애가 재시도를 요청했으면 **같은 앱으로 새 세션**을 연다. 재시도의
+        # 재시도는 없다 — 끝없이 불어나면 분당 레코드 수가 폭주한다
+        if retry_of is None and app is not None:
+            for _ in range(sess.retries):
+                self._open(ts, slot, tf, call, out, mutate, plan_mutate,
+                           retry_of=(app, host))
 
     @staticmethod
     def _dns_failed(rec: Rec) -> bool:
@@ -699,7 +842,8 @@ class SessionEngine:
         return ans is not None and ans <= 0
 
     def _plan(self, ts: datetime, tf: float, call: Call, t0: float,
-              span: int, sid: str, plan_mutate=None) -> Session:
+              span: int, sid: str, plan_mutate=None,
+              app=None, host: str | None = None, app_ip: str = "") -> Session:
         """세션 하나의 수명치를 **한 번에** 정한다.
 
         짧은 단위로 레코드 하나씩 만들지 않는 이유는 성능이다(설계 §5.1) —
@@ -723,6 +867,23 @@ class SessionEngine:
         traffic = [float(vals[idx[f"Traffic_Total_{n}"]] or 0) * size_f
                    for n in TRAFFIC_PAIRS]
         plain = tuple(float(vals[idx[n]] or 0) * size_f for n in CUM_PLAIN)
+        # 앱 그룹별로 총량을 다시 정한다 — `app_traffic` 머리말. 처리시간 상한
+        # (아래 `cap_us`)과 장애 훅보다 **앞**이다
+        traffic = app_traffic(traffic, app.group if app is not None else None,
+                              span, self.shape.app_traffic, rng)
+
+        # **처리시간은 세션 길이를 넘을 수 없다**(2026-10-28). 총량을 실측 분포
+        # (몇 시간짜리 세션이 섞여 있다)에서 뽑아 몇 분짜리 세션에 쪼개 넣으면
+        # 1분 레코드의 `Delta.ThroughputTime` 이 1분을 넘는다 — 실측 상위 1% 가
+        # 분당 16,524초였다. 그러면 큰 전송일수록 처리율이 0 에 붙어 체감 저속
+        # 판정이 전원에게 켜지고, 장애 셀과 평시 셀이 구분되지 않는다.
+        # 분 쪼개기가 균등(`_emit` 의 `(i+1)/span`)이라 총량 상한 `span × 60초`
+        # 가 곧 분당 60초 상한이다. **장애 훅보다 먼저 건다** — 장애가 늘린
+        # 처리시간(저속 시나리오)은 그대로 살아야 한다.
+        cap_us = span * 60e6
+        for i, n in enumerate(TRAFFIC_PAIRS):
+            if n.endswith("ThroughputTime"):
+                traffic[i] = min(traffic[i], cap_us)
 
         if call.outcome == OUT_STALL:
             # 한쪽만 지속 — 재전송이 급증하고 ACK 이 안 온다. `U-12`(down
@@ -733,6 +894,19 @@ class SessionEngine:
                     traffic[i] = max(1.0, traffic[i]) * rng.uniform(8.0, 20.0)
 
         const = [vals[idx[f]] for f in TRANSPORT_CONST]
+        if app is not None:
+            # **장애 훅보다 먼저 덮는다** — `plan.const` 로 앱을 보고 고르는
+            # 장애(21·22번)가 덮이기 전 값(프로파일 추첨)을 보면 안 된다
+            for f, v in (("App_ID", app.idx), ("App_Group_Code", app.group),
+                         ("App_IPv4", app_ip), ("App_Port", app.port_out),
+                         ("Protocol", app.protocol),
+                         ("ClientHelloDomain", "." + host),
+                         ("LastDnsQueryName", "." + host)):
+                const[_C[f]] = v
+        freeze: tuple[float, float] | None = None
+        ho_stall_s = 0.0
+        reset = syn_fail = False
+        retries = 0
 
         # ── 장애 훅 (V3 규칙 U-1) ─────────────────────────────────────
         #
@@ -753,6 +927,15 @@ class SessionEngine:
             plan_mutate(call.cell, pl)
             traffic = [totals[f"Traffic_Total_{n}"] for n in TRAFFIC_PAIRS]
             plain = tuple(totals[n] for n in CUM_PLAIN)
+            # **C-Plane 정상 정체**(G-3) — 장애가 명시로 요청했을 때만이다.
+            # `classify()` 의 `drop_flag → OUT_STALL` 은 손대지 않는다. 처음·
+            # 마지막 분은 비우지 않는다 — 열린 적 없는 세션처럼 보인다
+            if pl.stall and span >= 3 and call.outcome != OUT_STALL:
+                k = rng.randint(1, span - 2)
+                freeze = (k / span, (k + 1) / span)
+            if pl.ho_stall and call.outcome != OUT_STALL:
+                ho_stall_s = rng.uniform(3.0, 8.0)
+            reset, syn_fail, retries = pl.reset, pl.syn_fail, pl.retries
 
         # 규칙 U-4 — **재전송은 페이로드 패킷을 넘지 않는다.** 배율이 겹치면
         # (`OUT_STALL` 의 8~20배 × 장애 훅) 넘을 수 있다. 장애가 없는 분에도
@@ -770,6 +953,44 @@ class SessionEngine:
             # ACK 이 안 왔다 → `TCP_OK` 가 세어지지 않아 `U-01` 이 내려간다
             const[_C["AckTime"]] = "0.0"
             const[_C["DnlinkWindowCloseCount"]] = str(rng.randint(1, 4))
+        elif freeze is not None or ho_stall_s > 0:
+            # 수신 창이 닫혔다 — 정체(bad_mask 16)의 증거 필드다. `AckTime`
+            # 은 그대로 둔다: 연결은 섰고(`U-01` 정상) 도중에 막힌 것이다
+            const[_C["DnlinkWindowCloseCount"]] = str(rng.randint(1, 4))
+
+        tcp = app is None or app.protocol != "17"
+        if tcp and syn_fail:
+            # **연결이 서지 않았다** — SYN 을 몇 번 보내고 ACK 를 못 받았다.
+            # 흐른 데이터가 없고 1분 안에 끝난다. `U-01` 의 분모에는 들고
+            # (`SYN_COUNT>0`) 분자에서는 빠진다(`ACK_TIME=0`)
+            const[_C["SynCount"]] = str(rng.randint(2, 4))
+            const[_C["SynAckCount"]] = "0"
+            const[_C["AckTime"]] = "0.0"
+            const[_C["FinCount"]] = "0"
+            traffic = [0.0] * len(traffic)
+            plain = tuple(0.0 for _ in plain)
+            span = 1
+            freeze, ho_stall_s = None, 0.0
+        elif tcp and reset:
+            # 도중에 끊겼다 — 정상 종료(FIN) 대신 RST
+            const[_C["RstCount"]] = "1"
+            const[_C["FinCount"]] = "0"
+        elif reset:
+            # **UDP 에는 RST 가 없다** — 끊김은 흐름이 일찍 멎는 것으로만
+            # 보인다(QUIC 이 타임아웃으로 닫힌다). 수명을 1~2분으로 자른다
+            span = min(span, rng.randint(1, 2))
+            if freeze is not None and freeze[1] >= 1.0 - 1.0 / span:
+                freeze = None
+        if app is not None and app.protocol == "17":
+            # **UDP 에는 TCP 핸드셰이크가 없다**(QUIC·게임·통화). 남기면
+            # `U-01`(TCP 연결 성공률)이 UDP 세션을 시도로 센다 — graphio 는
+            # `SYN_COUNT`·`ACK_TIME` 이 0 보다 클 때만 센다(`uplane_agg`)
+            for f, v in (("SynCount", "0"), ("SynAckCount", "0"),
+                         ("AckTime", "0.0"), ("SynFirstTime", ""),
+                         ("SynAckFirstTime", ""), ("FinCount", "0"),
+                         ("RstCount", "0"), ("UplinkWindowCloseCount", "0"),
+                         ("DnlinkWindowCloseCount", "0")):
+                const[_C[f]] = v
 
         # 핸드오버는 **수명 3분 이상**에서만 관측된다. 1~2분 세션에 끼우면
         # `H/O Interim` 이 `End` 자리를 차지해 "열리면 닫힌다"가 깨진다(§7.3).
@@ -779,7 +1000,8 @@ class SessionEngine:
             ho = rng.randint(1, span - 2)
 
         m = 0
-        if rng.random() < self.p_http:
+        # 연결이 안 섰으면 요청도 없다
+        if not (tcp and syn_fail) and rng.random() < self.p_http:
             # 긴 세션이 더 많이 요청한다(§1.3). 평균은 `http_tx_mean` 이고
             # 그것이 `p_http` 와 짝이라 분당 HTTP 레코드 수가 설정을 재현한다.
             scale = span / max(1.0, self.shape.span_mean)
@@ -800,7 +1022,10 @@ class SessionEngine:
             trip=(gen.subs[si].trip if si >= 0 else 0),
             t0=t0, t_end=t0 + (span - 1) * 60.0 + rng.random() * 55.0,
             span=span, i=0, outcome=call.outcome, ho_at=ho, http_left=m,
-            domain=smp.domain() if smp is not None else "",
+            domain=(host if host is not None
+                    else smp.domain() if smp is not None else ""),
+            freeze=freeze, ho_stall_s=ho_stall_s, app=app, app_ip=app_ip,
+            retries=retries,
         )
 
     # -- 레코드 ----------------------------------------------------------
@@ -907,6 +1132,13 @@ class SessionEngine:
             # 나오면 셀 쌍 표가 "이 쌍은 이런 전환"이라고 말할 수 없다
             got = ((moved, kind_of(before, moved)) if moved is not None
                    else self._neighbour(before))
+            # **정지한 셀로는 넘어가지 않는다**(`j-sc-27`). 추첨 상대가 죽은
+            # 셀이면 그 셀이 넘겨줄 이웃으로 바꾸고, 그게 원래 셀이면 전환을
+            # 취소한다 — 두면 정지 셀에 U-Plane 이 남는다
+            if got is not None and self.relocate is not None:
+                dst = self.relocate(got[0])
+                if dst is not None:
+                    got = None if dst is before else (dst, kind_of(before, dst))
             if got is None:
                 self._put(out, mutate, s, F_INTERIM, t, prev, now,
                           slot, before)
@@ -923,6 +1155,18 @@ class SessionEngine:
             #    떠난 셀이고, 새 셀에 적으면 원인이 한 칸 뒤로 밀린다.
             # **`1 Interim` 으로 나간다** — `4` 는 적지 않는다(위 상수).
             self._put(out, mutate, s, F_INTERIM, t_ho, prev, mid, slot, before)
+
+            # **전환 직후 정체**(`j-sc-15` · 확정대장 §7.0 "H/O 직후 3–8초").
+            # 앞 줄을 낸 **뒤에** 정한다 — 구간 시작(`mid`) 이전의 배분은
+            # 선형과 같으므로 이미 낸 줄과 어긋나지 않는다. 길이는 초를 이
+            # 분 남은 시간의 비율로 옮긴 것이다
+            #
+            # **마지막 분이면 걸지 않는다** — 밀린 양을 받을 뒤 구간이 없어
+            # `Total` 이 모자란 채 끝난다(`b < 1` 이 `_freeze_frac` 의 전제)
+            if s.ho_stall_s > 0 and s.freeze is None and now < 1.0:
+                left = max(1e-6, t - t_ho)
+                s.freeze = (mid, mid + (now - mid) * min(1.0, s.ho_stall_s / left))
+                s.ho_stall_s = 0.0
 
             # ② 새 셀로 이어진다. 마지막 분이면 `End` 지만 `ho_at` 이
             #    `span-2` 이하라 실제로는 `Interim` 이다(방어적으로 둔다).
@@ -965,6 +1209,11 @@ class SessionEngine:
                 h = gen.uplane_rec("http", ts, 1.0, hc, th, s.user,
                                    s.apn, F_SINGLE, s.sid, domain=s.domain,
                                    core=s.core)
+                if s.app is not None:
+                    a = s.app
+                    for f, v in (("App_ID", a.idx), ("App_Group_Code", a.group),
+                                 ("App_IPv4", s.app_ip), ("App_Port", a.port_out)):
+                        h.set(f, v)
                 if s.outcome == OUT_ABORT:
                     # U 에 의한 종료 — 요청은 갔는데 응답이 없다(§3).
                     # `U-26`(HTTP 무응답률)이 이것을 집는다. `U-23` 의 분모는
@@ -1000,13 +1249,19 @@ class SessionEngine:
         # **누적은 `base` 부터다** — 현재 장비가 보기 시작한 지점. Delta 는
         # 구간 증분이라 `base` 와 무관하다(앞뒤 차이로 구한다)
         b = s.base
-        for (i_tot, i_del), v in zip(self._i_traffic, s.traffic):
+        fz = s.freeze
+        for n, (i_tot, i_del), v in zip(TRAFFIC_PAIRS, self._i_traffic, s.traffic):
             # **둘을 같은 절단 급수의 차이로 구한다.** `int(v*(f-b))` 와
             # `int(v*f) - int(v*b)` 는 최대 1 씩 어긋나고, 그 오차가 레코드
             # 수만큼 쌓여 `Σ Delta == Total` 이 깨진다(실측 0.96%).
-            cum = int(v * f_now)
-            vals[i_tot] = str(cum - int(v * b))
-            vals[i_del] = str(cum - int(v * f_prev))
+            if fz is not None and n in STALL_FROZEN:
+                fp, fn_, fb = (_freeze_frac(x, *fz)
+                               for x in (f_prev, f_now, b))
+            else:
+                fp, fn_, fb = f_prev, f_now, b
+            cum = int(v * fn_)
+            vals[i_tot] = str(cum - int(v * fb))
+            vals[i_del] = str(cum - int(v * fp))
         for j, v in zip(self._i_plain, s.plain):
             vals[j] = str(int(v * f_now) - int(v * b))
         # 양(量)의 관측 구간. `Total` 은 **현재 장비가 보기 시작한 시각**부터,
@@ -1037,14 +1292,33 @@ class SessionEngine:
         (실측 4만 전이 중 1건이 그렇게 새어 나갔다). 그 세션은 마지막 셀에
         머문 채 끝나야 한다 — 소유자는 이미 다음 통행을 시작했다.
         """
+        # **정지한 셀에 있던 세션은 이웃 셀로 넘어간다**(`j-sc-27`). 경로보다
+        # 앞선다 — 셀이 죽으면 이동 중이든 아니든 그 셀에 머물 수 없다.
+        # 이동 가입자 표시(`False`)는 경로 판정과 무관하게 "추첨 허용" 쪽이다
+        if self.relocate is not None:
+            dst = self.relocate(s.cell)
+            if dst is not None:
+                return dst, False
         if s.sub_i < 0:
             return None, False
         sub = self.gen.subs[s.sub_i]
         if sub.route < 0:
-            return None, False
+            # **그냥 이동**(`seat_walkers`)이면 그 사람이 지금 있는 셀을
+            # 따른다. 이동은 늘 이웃 eNB 로 한 칸이라 순간이동이 없다 —
+            # 회차(`trip`)를 볼 필요가 없다
+            here = sub.walk_cell
+            if here is None:
+                return None, False
+            if self.relocate is not None:
+                here = self.relocate(here) or here
+            return here, True
         if sub.trip != s.trip:
             return None, True
-        return self.gen.cell_of(sub), True
+        here = self.gen.cell_of(sub)
+        if here is not None and self.relocate is not None:
+            # 경로의 다음 칸이 정지 셀이면 그 이웃에 붙는다
+            here = self.relocate(here) or here
+        return here, True
 
     def _neighbour(self, cell: Cell) -> tuple[Cell, str] | None:
         """전환 상대와 종류. **없으면 `None` — 호출부가 전환을 취소한다.**

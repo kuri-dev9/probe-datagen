@@ -23,7 +23,8 @@ from .cells import Cell, encrypt_id
 from .plmn import Plmn
 from .profile import Sampler, SeriesProfile
 from .identity import synth_imei, synth_imsi, synth_mdn
-from .scenarios import Rec, MUTATORS, Scenario
+from .scenarios import Rec, MUTATORS, Scenario, host_site
+from .apps import AppBook
 
 SEP = "\x1e"
 
@@ -182,9 +183,109 @@ class Subscriber:
     #: 나온다. 세션은 자기가 시작한 회차를 기억하고, 회차가 바뀌면 경로
     #: 추종을 멈춘다(`session._route_cell`).
     trip: int = 0
-    #: 하차 후 **다시 탈 시각**(epoch). `0` 은 승차 중이다.
+    #: 하차 후 **다시 탈 시각**(epoch). `0` 은 승차 중이다. **음수는 "첫
+    #: 틱 기준 상대 초"** — 기동 때는 벽시계를 몰라서 `advance_routes` 가
+    #: 처음 볼 때 절대 시각으로 바꾼다(`_assign_journeys` 의 초기 분산).
     route_wait: float = 0.0
+    #: **몇 역을 타고 내리나** `(최소, 최대)`. `None` 이면 고정 구간
+    #: (`route_from`→`route_to`)을 되풀이한다. 값이 있으면 내린 역에서 다시
+    #: 타고 새로 뽑은 n 역 뒤에 내린다 — 원형 노선 위의 임의 구간이다.
+    route_hops: tuple[int, int] | None = None
+    #: **그냥 이동**(도보·버스·차) 중인 셀. `None` 이면 걷지 않는다.
+    #: 노선(`route`)과 배타다 — 한 사람은 한 그룹이다(`seat_walkers`).
+    walk_cell: Cell | None = None
+    #: 이 셀에 들어온 시각과 머물 시간(초). 음수 시각은 `route_t` 와 같은
+    #: 뜻이다 — 첫 틱에서 벽시계에 붙인다
+    walk_t: float = 0.0
+    walk_dwell: float = 0.0
 
+
+#: `_assign_journeys` 의 spec 에서 "n 역 여정"을 고정 구간과 가르는 표시
+_HOPS = -1
+
+
+class Groups:
+    """시간대별 **호 그룹 비율** — 고정 / 그냥 이동 / 지하철.
+
+    표의 한 줄은 `[시작시, 끝시, 고정%, 이동%, 지하철%]` 이고 **지하철은 이동에
+    포함된다**(사람 결정 2026-10-29) — 그냥 이동 = 이동 − 지하철. 지하철은
+    운행 시간(`subway_hours`) 밖에서 0 이고 그 몫은 그냥 이동이 가져간다
+    (이동하는 사람의 총량은 표대로다).
+
+    경계는 `blend_min` 분에 걸쳐 **선형으로** 넘어간다. 정시에 계단으로
+    바꾸면 그 분에 전환·TAU 가 뚝 끊기거나 몰린다.
+    """
+
+    def __init__(self, rows: list, subway_hours=(6, 24), blend_min: int = 60):
+        bands = []
+        for r in rows:
+            if len(r) != 5:
+                raise RuntimeError(f"mobility.hourly 의 줄은 [시작,끝,고정,이동,지하철] 이다: {r}")
+            h0, h1, fx, mv, sw = (float(v) for v in r)
+            if not (0 <= h0 < h1 <= 24):
+                raise RuntimeError(f"mobility.hourly 시각 범위가 틀렸다: {r}")
+            if abs(fx + mv - 100) > 1e-6 or not (0 <= sw <= mv):
+                raise RuntimeError(f"mobility.hourly — 고정+이동=100, 0≤지하철≤이동 이어야 한다: {r}")
+            bands.append((h0, h1, mv / 100.0, sw / 100.0))
+        bands.sort()
+        cover = 0.0
+        for h0, h1, *_ in bands:
+            if h0 != cover:
+                raise RuntimeError(f"mobility.hourly 가 {cover}시부터 비어 있거나 겹친다")
+            cover = h1
+        if cover != 24:
+            raise RuntimeError("mobility.hourly 는 0시부터 24시까지 빈틈없이 덮어야 한다")
+        self.bands = bands
+        self.sub_h = (float(subway_hours[0]), float(subway_hours[1]))
+        self.blend_h = max(0.0, float(blend_min)) / 60.0
+
+    def _band(self, h: float) -> tuple[float, float]:
+        h %= 24
+        for h0, h1, mv, sw in self.bands:
+            if h0 <= h < h1:
+                return mv, sw
+        return self.bands[-1][2], self.bands[-1][3]
+
+    def _hour(self, ts) -> float:
+        if isinstance(ts, (int, float)):
+            ts = datetime.fromtimestamp(ts)
+        return ts.hour + ts.minute / 60.0 + ts.second / 3600.0
+
+    def subway_running(self, ts) -> bool:
+        a, b = self.sub_h
+        h = self._hour(ts)
+        return a <= h < b
+
+    def walk_pace(self, ts) -> float:
+        """걷는 속도 배율 0~1 — 지금 그냥 이동 몫 ÷ 하루 중 가장 큰 몫."""
+        _, wk = self.shares(ts)
+        if not hasattr(self, "_wk_max"):
+            # 운행 시각 안팎이 섞이도록 하루를 10분 간격으로 훑는다
+            day = datetime(2000, 1, 1)
+            self._wk_max = max(self.shares(day.replace(hour=h, minute=m))[1]
+                               for h in range(24) for m in range(0, 60, 10)) or 1.0
+        return min(1.0, wk / self._wk_max)
+
+    def shares(self, ts) -> tuple[float, float]:
+        """`(지하철, 그냥 이동)` 비율 — 나머지가 고정이다."""
+        h = self._hour(ts)
+        mv, sw = self._band(h)
+        if self.blend_h > 0:
+            # 가장 가까운 경계를 찾아 그 앞뒤 반 창 안이면 섞는다
+            half = self.blend_h / 2
+            for h0, *_ in self.bands:
+                for edge in (h0, h0 + 24, h0 - 24):
+                    d = h - edge
+                    if -half <= d < half:
+                        w = (d + half) / self.blend_h          # 0 → 1
+                        pm, ps = self._band(edge - 1e-6)
+                        nm, ns = self._band(edge + 1e-6)
+                        mv = pm + (nm - pm) * w
+                        sw = ps + (ns - ps) * w
+                        break
+        if not self.subway_running(ts):
+            sw = 0.0
+        return sw, mv - sw
 
 #: 거주지 격자 한 칸(도). 0.05도 ≈ 5.5km — `home_radius_m`(10km)보다 작아야
 #: 고리 하나로 반경을 덮는 데 두 칸이면 충분하다.
@@ -254,8 +355,16 @@ class Generator:
         self.templates = {s: _template(s) for s in SERIES_FIELDS}
         self.index = {s: _index(s) for s in SERIES_FIELDS}
 
+        #: 앱 사전 (`apps.AppBook`). 비어 있으면 앱 필드를 프로파일에서 각자
+        #: 뽑는 옛 동작이다 — `PemdbGen` 이 `CM_APP_CODE` 를 읽어 채운다.
+        self.app_book = AppBook([])
+        #: 장애 중 앱 비중을 바꾼 사전 — `[(대상 셀 키 | None=전국, 사전)]`.
+        #: `PemdbGen` 이 분마다 채운다(`scenarios.APP_BOOSTERS`)
+        self.app_boosts: list[tuple[set[str] | None, AppBook]] = []
         self.cell_weights = [c.traffic_weight for c in cells]
         self._cum = self._cumulative(self.cell_weights)
+        #: 지금 `_cum` 에 걸린 가중 배율(`set_weight_boost`). `None` 이면 평시.
+        self._boost_key: tuple | None = None
         self.cell_by_key = {c.cell_key: c for c in cells}
         #: 셀 키 → `cells` 인덱스. `_sub_for` 가 인덱스를 받으므로 필요하다 —
         #: `_pick_cell` 은 `Cell` 을 돌려주고 `_subs_by_cell` 은 인덱스로
@@ -330,6 +439,15 @@ class Generator:
         self.tau_events: list[tuple[int, object, object]] = []
         #: 이동 가입자 인덱스. `seat_routes` 가 채운다
         self._mobile: list[int] = []
+        #: 그냥 이동 가입자 인덱스(`seat_walkers`)와 셀 체류 범위(초)
+        self._walkers: list[int] = []
+        self.walk_sec: tuple[int, int] = (180, 600)
+        #: **고정 가입자** 인덱스 — 노선도 걷기도 아닌 사람. 시간대 표가
+        #: 있을 때 고정 호는 여기서만 뽑는다(아래 `groups`)
+        self._fixed: list[int] = []
+        #: 시간대별 그룹 비율(`Groups`). `None` 이면 종전대로 `mobility_share`
+        #: 하나로 노선 탑승자를 고른다
+        self.groups = None
         pool = subscriber_pool or max(2000, len(cells) * 60)
         self.subs = self._make_subscribers(pool)
         #: IMSI → 가입자 인덱스. **U-Plane 세션이 이것으로 되찾는다** —
@@ -442,6 +560,25 @@ class Generator:
                     f"journey 의 모르는 노선 {j['route']!r} "
                     f"(아는 것: {sorted(by_id)})")
             ri, rt = got
+            if "stations" in j:
+                # **임의 역에서 타서 n 역 뒤에 내린다** (2026-10-29 사람 의도).
+                # `from`/`to` 고정 구간은 전원을 같은 칸에 세워 단체 행진을
+                # 만들었다 — 2,500명이 한 칸에 타고 1분에 한 칸씩 같이 움직여
+                # eNB 하나가 전국 호의 25% 를 받았다.
+                if "from" in j or "to" in j:
+                    raise RuntimeError(f"journey {j['route']}: `stations` 와 "
+                                       "`from`/`to` 를 함께 줄 수 없다")
+                lo, hi = (int(v) for v in j["stations"])
+                n_st = len(rt.station_pos)
+                if not (1 <= lo <= hi) or (n_st and hi >= n_st):
+                    raise RuntimeError(
+                        f"journey {j['route']} 의 stations={j['stations']} — "
+                        f"1 ≤ 최소 ≤ 최대 < 역 수({n_st}) 여야 한다")
+                if n_st < 2:
+                    raise RuntimeError(f"journey {j['route']}: 역 정보가 없다 "
+                                       "(`station_pos`) — `stations` 를 쓸 수 없다")
+                spec.append((float(j.get("share", 0.0)), ri, _HOPS, (lo, hi)))
+                continue
             a = self._journey_pos(rt, j["from"], "from")
             b = self._journey_pos(rt, j["to"], "to")
             if a == b:
@@ -454,6 +591,9 @@ class Generator:
             x = rng.random()
             for share, ri, a, b in spec:
                 x -= share
+                if x <= 0 and a == _HOPS:
+                    self._seat_hops(sub, ri, b, rng)
+                    break
                 if x <= 0:
                     sub.route, sub.route_pos = ri, a
                     sub.route_from, sub.route_to = a, b
@@ -466,6 +606,56 @@ class Generator:
                     sub.route_wait = 0.0
                     break
 
+    def _stations_of(self, ri: int) -> list[int]:
+        """노선의 역 칸 번호 — **진행 순서**로. 외선·내선이 별 노선이라
+        칸 번호가 늘어나는 쪽이 그 노선의 진행 방향이다."""
+        return sorted(self.routes[ri].station_pos.values())
+
+    def _next_hop(self, sub: Subscriber, ri: int, at_idx: int, rng) -> None:
+        """`at_idx` 번째 역에서 타서 n 역 뒤를 하차 칸으로 정한다."""
+        st = self._stations_of(ri)
+        lo, hi = sub.route_hops
+        n = rng.randint(lo, hi)
+        if self.routes[ri].loop:
+            to_idx = (at_idx + n) % len(st)
+        else:
+            # 순환이 아니면 끝을 넘지 않는다 — 넘으면 `step` 이 방향을 뒤집어
+            # "한 방향" 이 깨진다
+            to_idx = min(at_idx + n, len(st) - 1)
+            if to_idx == at_idx:
+                to_idx = max(0, at_idx - n)
+        sub.route_from, sub.route_to = st[at_idx], st[to_idx]
+        sub.route_fwd = True if self.routes[ri].loop else st[to_idx] > st[at_idx]
+
+    def _seat_hops(self, sub: Subscriber, ri: int, hops: tuple[int, int],
+                   rng) -> None:
+        """임의 역·임의 n 역 여정에 태우고 **처음 상태를 흩는다.**
+
+        전원을 승차 역에 세우면 같은 순간에 출발해 같은 칸으로 몰린다. 그래서
+        구간 위의 임의 칸에서 이미 타고 있거나(대부분), 하차 역에서 머무는
+        중인 상태로 시작한다. 머무는 비율은 평균 승차 시간과 평균 체류의
+        비로 정한다 — 정상 상태에서 그 비율이 그렇게 된다.
+        """
+        rt = self.routes[ri]
+        sub.route, sub.route_hops = ri, hops
+        st = self._stations_of(ri)
+        self._next_hop(sub, ri, rng.randrange(len(st)), rng)
+        n = len(rt.cells)
+        span = ((sub.route_to - sub.route_from) % n if rt.loop
+                else abs(sub.route_to - sub.route_from)) or 1
+        ride = span * (sum(rt.dwell_sec) / max(1, n))
+        a, b = self.off_sec
+        stay = (a + b) / 2
+        if rng.random() < stay / (ride + stay):
+            sub.route_pos = sub.route_to
+            sub.route_wait = -float(rng.randint(a, b))   # 첫 틱에 절대 시각으로
+        else:
+            k = rng.randrange(span)
+            sub.route_pos = ((sub.route_from + k) % n if rt.loop
+                             else sub.route_from + (k if sub.route_fwd else -k))
+            sub.route_wait = 0.0
+        sub.route_t = -rng.random() * rt.dwell_sec[sub.route_pos]
+
     def advance_routes(self, now: float) -> int:
         """체류시간이 지난 이동 가입자를 다음 칸으로. **매 분 한 번 부른다.**
 
@@ -476,11 +666,20 @@ class Generator:
         그 구간의 전환이 데이터에 없다 — 체류시간이 분보다 짧으면 그만큼
         천천히 진행하는 것이 낫다(한 세션이 여러 칸을 겪는 것이 목적이다).
         """
-        moved = 0
+        moved = self._advance_walkers(now)
+        # **운행 시간 밖에는 열차가 서 있다** — 새벽에 노선 탑승자가 계속
+        # 칸을 옮기면 아무도 통화하지 않는 시각에 TAU 만 쏟아진다
+        if self.groups is not None and not self.groups.subway_running(now):
+            return moved
         for i, sub in enumerate(self.subs):
             if sub.route < 0:
                 continue
             rt = self.routes[sub.route]
+            if sub.route_wait < 0.0:
+                # 기동 때 흩어 둔 "머무는 중" — 첫 틱에서 벽시계에 붙인다
+                sub.route_wait = now - sub.route_wait
+            if sub.route_t < 0.0:
+                sub.route_t = now + sub.route_t
             if sub.route_wait > 0.0:
                 # **하차해서 머무는 중이다.** 셀은 그대로이고 전환이 없다 —
                 # 그게 역 주변 체류이고, 역세권 혼잡이 거기서 생긴다
@@ -488,6 +687,12 @@ class Generator:
                     continue
                 sub.route_wait = 0.0
                 sub.route_t = now
+                if sub.route_hops is not None:
+                    # **내린 역에서 다시 탄다** — 순간이동이 없으므로 회차를
+                    # 올리지 않아도 셀이 이어진다. 다음 n 역을 새로 뽑는다
+                    st = self._stations_of(sub.route)
+                    self._next_hop(sub, sub.route, st.index(sub.route_pos), rng=self.rng)
+                    continue
                 if sub.route_to >= 0:
                     # **같은 구간을 같은 방향으로 다시 간다.** 왕복이 아니다 —
                     # 한 가입자의 통행은 한 방향이다(`_assign_journeys`).
@@ -525,8 +730,76 @@ class Generator:
     def cell_of(self, sub: Subscriber) -> Cell | None:
         """이동 가입자의 **현재 위치 셀**. 고정 가입자는 `None`."""
         if sub.route < 0:
-            return None
+            return sub.walk_cell
         return self.routes[sub.route].cells[sub.route_pos]
+
+    def seat_walkers(self, share: float, rng, dwell: tuple[int, int] | None = None) -> None:
+        """노선에 타지 않은 가입자 중 `share` 를 **그냥 이동** 그룹에 넣는다.
+
+        출발 셀은 고정 호와 같은 가중 추첨(`_pick_cell`)이다 — 걷는 사람이
+        사는 곳의 분포가 따로 정해져 있지 않으므로 호 분포를 따른다. 머무는
+        시간과 출발 시차를 흩는다 — 전원이 같은 분에 움직이면 노선의
+        단체 행진과 같은 파도가 된다.
+
+        `seat_routes` **뒤에** 부른다 — 노선 탑승자는 건너뛴다.
+        """
+        if dwell:
+            self.walk_sec = (int(dwell[0]), int(dwell[1]))
+        a, b = self.walk_sec
+        self._walkers = []
+        for i, sub in enumerate(self.subs):
+            sub.walk_cell = None
+            if sub.route >= 0 or share <= 0.0 or rng.random() >= share:
+                continue
+            sub.walk_cell = self._pick_cell()
+            sub.walk_dwell = float(rng.randint(a, b))
+            sub.walk_t = -rng.random() * sub.walk_dwell
+            self._walkers.append(i)
+        self._fixed = [i for i, s in enumerate(self.subs)
+                       if s.route < 0 and s.walk_cell is None]
+
+    def _advance_walkers(self, now: float) -> int:
+        """머문 시간이 지난 걷는 사람을 **이웃 eNB 의 셀**로 옮긴다.
+
+        상대는 핸드오버 토폴로지(`ho_topo`)의 이웃이다 — 같은 모듈이 C-Plane
+        전환과 U-Plane 세션 전환을 고르므로, 걷는 사람의 이동이 그 두 쪽과
+        같은 이웃 관계를 따른다. 이웃이 없으면 그 자리에 머문다.
+        TA 목록이 바뀌면 TAU 를 낸다 — 노선과 같은 규칙이다.
+        """
+        topo = getattr(self, "ho_topo", None)
+        if topo is None or not self._walkers:
+            return 0
+        a, b = self.walk_sec
+        # **걷는 속도는 그 시각의 "그냥 이동" 몫에 비례한다.** 새벽에 낮과
+        # 같은 속도로 걸으면 아무도 통화하지 않는 시각에 TAU 만 분당 300건이
+        # 났다(실측). 몫이 가장 큰 시각이 기준 속도다
+        pace = self.groups.walk_pace(now) if self.groups is not None else 1.0
+        moved = 0
+        for i in self._walkers:
+            sub = self.subs[i]
+            if sub.walk_t < 0.0:
+                sub.walk_t = now + sub.walk_t
+            if now - sub.walk_t < sub.walk_dwell:
+                continue
+            was = sub.walk_cell
+            pool = topo.inter.get(was.cell_key) or topo.intra.get(was.cell_key) or ()
+            sub.walk_t = now
+            sub.walk_dwell = float(self.rng.randint(a, b))
+            if not pool or self.rng.random() >= pace:
+                continue
+            now_c = pool[self.rng.randrange(len(pool))]
+            sub.walk_cell = now_c
+            moved += 1
+            if (was.ta_list and now_c.ta_list and now_c.ta_list != was.ta_list):
+                self.tau_events.append((i, was, now_c))
+        return moved
+
+    def pick_walker(self):
+        """걷는 사람 하나와 그 위치 셀. 없으면 `None`."""
+        if not self._walkers:
+            return None
+        sub = self.subs[self._walkers[self.rng.randrange(len(self._walkers))]]
+        return sub, sub.walk_cell
 
     def pick_mobile(self):
         """이동 가입자 하나와 그 위치 셀. 태운 가입자가 없으면 `None`.
@@ -583,6 +856,30 @@ class Generator:
         rec.set("old_call_Last_eNB_PLMN", src.plmn)
         return rec, dst
 
+    def app_book_for(self, cell: Cell) -> AppBook:
+        """이 셀의 세션이 쓸 사전 — 장애 대상 셀이면 비중을 바꾼 사본."""
+        for keys, book in self.app_boosts:
+            if keys is None or cell.cell_key in keys:
+                return book
+        return self.app_book
+
+    def set_weight_boost(self, boost: dict[str, float] | None) -> None:
+        """셀 키 → 가중 배율. **분마다 부른다** — 장애 창이 끝나면 `None`.
+
+        `traffic_weight`·셀 마스터는 그대로 두고 추첨 누적표만 다시 만든다
+        (확정대장 §3.3 "셀 마스터와 `_pick_cell` 은 손대지 않는다"). 전국 호
+        수는 `_volume` 이 정하므로 그대로다 — 대상이 더 받는 만큼 나머지가
+        조금씩 덜 받는다. 같은 배율이면 다시 만들지 않는다.
+        """
+        key = tuple(sorted(boost.items())) if boost else None
+        if key == self._boost_key:
+            return
+        self._boost_key = key
+        w = self.cell_weights
+        if boost:
+            w = [x * boost.get(c.cell_key, 1.0) for c, x in zip(self.cells, w)]
+        self._cum = self._cumulative(w)
+
     def _pick_cell(self) -> Cell:
         import bisect
 
@@ -634,6 +931,35 @@ class Generator:
 
     #: 도메인을 프로파일에서 받아야 하는 kind — 둘 다 한 Host 에 집중시킨다
     _DOMAIN_KINDS = ("external_server", "external_path_latency")
+    #: 도메인이 아니라 **호스트 사이트**로 거는 kind (`j-sc-21`)
+    _SITE_KINDS = ("cdn_degradation",)
+    #: 결제 그룹 앱으로 거는 kind (`j-sc-22`)
+    _PAY_KINDS = ("pay_dns_delay",)
+
+    def _top_video_site(self) -> str:
+        """http·transport **양쪽**에 나오는 동영상 등급 사이트 중 트래픽 상위.
+
+        한쪽에만 있으면 HTTP 는 느려지는데 처리율(transport)은 그대로이거나
+        그 반대가 된다 — 두 계열의 도메인 표본이 따로 뽑히기 때문이다.
+        """
+        from .scenarios import app_class_hit, host_site
+
+        def weight(series: str) -> dict[str, float]:
+            # `SeriesProfile.domain()` 의 Zipf 가중과 같은 식 — 실제로 뽑히는 비중
+            doms = self.profiles.get(series, SeriesProfile()).domains
+            out: dict[str, float] = {}
+            for i, d in enumerate(doms):
+                if app_class_hit(d, "VIDEO"):
+                    site = host_site(d)
+                    out[site] = out.get(site, 0.0) + 1.0 / (i + 1) ** 0.85
+            return out
+
+        http, tr = weight("http"), weight("transport")
+        # **약한 쪽이 큰 사이트**를 고른다 — 곱이나 합으로 고르면 한쪽에만
+        # 큰 사이트가 이겨 다른 계열의 표본이 비는 처음 문제가 돌아온다
+        both = {k: min(http[k], tr[k]) for k in http if k in tr}
+        pick = both or http
+        return max(pick, key=pick.get) if pick else "cdn"
     #: APN 을 프로파일에서 받아야 하는 kind.
     #:
     #: **상위 트래픽 APN 을 고른다**(V3 §SC-19 권장안). 그래야 그 APN 의 실패가
@@ -645,10 +971,38 @@ class Generator:
     def _bind_scenario_targets(self) -> None:
         """프로파일에 의존하는 시나리오 대상(도메인·기종·APN)을 실제 값으로 채운다."""
         for sc in self.scenarios:
+            if sc.kind in self._SITE_KINDS and not (sc.target.domain or sc.target.app_id):
+                # 사전이 있으면 **스트리밍 그룹에서 비중이 가장 큰 앱**이다 —
+                # 원래 요구("특정 App_IP 대역")에 가장 가까운 단위
+                a = self.app_book.first_of("STREAMING") if self.app_book else None
+                if a is not None:
+                    sc.target.app_id, sc.target.app_group = a.idx, a.group
+                else:
+                    sc.target.domain = self._top_video_site()
+            if sc.kind in self._PAY_KINDS and not sc.target.app_hosts and self.app_book:
+                hosts = self.app_book.domains_of("PAY")
+                if hosts:
+                    sc.target.app_group, sc.target.app_hosts = "PAY", hosts
+            if sc.kind in self._DOMAIN_KINDS and not sc.target.domain and self.app_book:
+                # **사전이 있으면 사전의 도메인이다** — 세션이 사전의 앱으로만
+                # 나가므로 프로파일 도메인(한국 실측)은 레코드에 한 건도 없다.
+                # 거기서 고르면 주입해도 아무 일이 없고 에러도 없다
+                # **기대 트래픽 1위 도메인**이다 (2026-10-30). 전에는 비중 상위
+                # 행 4개 중 하나를 무작위로 골랐다. 사전의 `weight` 는 엔드포인트
+                # **한 행**의 비중이고 그 행의 도메인들이 나눠 가지므로, 행 순위는
+                # 도메인 트래픽 순위가 아니다 — SC-06b 가 분당 ~20건짜리
+                # `facebook.com` 을 골라 탐지 표본(`U-27 min_denom=60`)에 못 미쳐
+                # 미탐지가 났다(같은 시각 google 은 113~150건). 아래 주석의
+                # "상위 트래픽 도메인이어야 분모가 확보된다"가 원래 의도다.
+                dom = self._top_traffic_domain()
+                if dom:
+                    sc.target.domain = dom
             if sc.kind in self._DOMAIN_KINDS and not sc.target.domain:
                 doms = self.profiles.get("http", SeriesProfile()).domains
-                # 상위 트래픽 도메인이어야 도메인 차원 탐지의 분모가 확보된다
-                sc.target.domain = doms[self.rng.randrange(min(4, len(doms)))] if doms else "cdn.example.com"
+                # 상위 트래픽 도메인이어야 도메인 차원 탐지의 분모가 확보된다.
+                # 프로파일은 이미 트래픽 순이므로 1위로 고정한다(무작위 금지 —
+                # 위 사전 경로와 같은 이유)
+                sc.target.domain = doms[0] if doms else "cdn.example.com"
             if sc.kind == "ue_model" and sc.target.vendor_model is None:
                 cnt: dict[tuple[str, str], int] = {}
                 for s in self.subs:
@@ -659,6 +1013,24 @@ class Generator:
                     sc.target.vendor_model = ranked[min(2, len(ranked) - 1)][0]
             if sc.kind in self._APN_KINDS and sc.target.apn is None:
                 sc.target.apn = self._top_apn()
+
+    def _top_traffic_domain(self) -> str | None:
+        """사전에서 **기대 트래픽이 가장 큰 대표 도메인**.
+
+        각 행의 비중을 그 행 도메인 수로 나눠(호스트는 행 안에서 균등 추첨 —
+        `App.host`) 도메인별로 더한다. 후보는 행의 대표 도메인(`domains[0]`)이고,
+        후보의 트래픽은 **주입 판정과 같은 부분 문자열 규칙**(`scenarios._domain_hit`
+        — `target in host`)으로 센다. 그래야 고른 값이 실제로 걸리는 양과 맞는다.
+        """
+        share: dict[str, float] = {}
+        for a in self.app_book.apps:
+            for d in a.domains:
+                share[d.lower()] = share.get(d.lower(), 0.0) + a.weight / len(a.domains)
+        cand = {a.domains[0].lower() for a in self.app_book.apps if a.domains}
+        if not cand:
+            return None
+        hit = {c: sum(w for h, w in share.items() if c in h) for c in cand}
+        return max(sorted(hit), key=lambda c: hit[c])
 
     def _top_apn(self) -> str | None:
         """트래픽 상위 3위 안의 APN 하나.
@@ -814,14 +1186,31 @@ class Generator:
         for name, value in zip(USER_FIELDS, user_values(sub)):
             rec.set(name, value)
 
-    def _lte_call(self, ts: datetime, slot_start: float) -> tuple[Rec, Cell]:
+    def _lte_call(self, ts: datetime, slot_start: float,
+                  at: tuple[Subscriber, Cell] | None = None) -> tuple[Rec, Cell]:
         smp = self.samplers["lte_call"]
         rng = self.rng
         # **이동 가입자는 순서가 뒤집힌다.** 평소에는 셀을 가중 추첨하고
         # 가입자를 따로 뽑는데, 움직이는 사람은 "지금 어디 있는지"가 먼저다.
         # 그러지 않으면 궤적이 호에 반영되지 않아 **경로를 깔아도 전환이
         # 추첨으로 돌아간다.**
-        got = self.pick_mobile() if rng.random() < self.mobility_share else None
+        # **`at` 은 가입자와 셀을 정해서 부르는 자리다**(`j-sc-27` 재접속).
+        # 정지한 셀에 있던 **그 사람**이 이웃 셀에 다시 붙어야 하므로 추첨을
+        # 건너뛴다 — 다시 뽑으면 다른 가입자가 되어 "재분배" 일 뿐이다
+        fixed_only = False
+        if at is not None:
+            got = at
+        elif self.groups is not None:
+            # **시간대별 그룹 비율** (2026-10-29 사람 결정). 고르는 순서는
+            # 지하철 → 그냥 이동 → 고정이고, 그룹이 비어 있으면 고정으로 간다
+            sw, wk = self.groups.shares(ts)
+            x = rng.random()
+            got = (self.pick_mobile() if x < sw
+                   else self.pick_walker() if x < sw + wk else None)
+            fixed_only = got is None
+        else:
+            got = (self.pick_mobile() if rng.random() < self.mobility_share
+                   else None)
         if got is not None:
             sub, cell = got
         else:
@@ -840,7 +1229,12 @@ class Generator:
             # 사람이 더하는 것이다 — 지하철 노선(`mobility.journeys`)과 같은
             # 층이고, 켜면 셀·분 `SUBS` 가 **-22%** 움직여(8.7 → 6.8)
             # 기존 기준선과 전후 비교가 끊긴다.
-            if self.home_locality:
+            if fixed_only and self._fixed:
+                # 그룹을 나눴으면 **고정 호는 고정 가입자**다. 전체에서 뽑으면
+                # 아래 `cell_of` 가 이동 중인 사람의 위치로 셀을 바꿔, 고정
+                # 몫이 이동 몫으로 새어 나간다
+                sub = self.subs[self._fixed[rng.randrange(len(self._fixed))]]
+            elif self.home_locality:
                 sub = self._sub_for(self.cell_index[cell.cell_key])
             else:
                 sub = self.subs[rng.randrange(len(self.subs))]
@@ -1190,10 +1584,25 @@ class Generator:
         else:  # http
             host = smp.domain() if domain is None else domain
             rec.set("Host", host)
-            rec.set("Host_Site", host.split(".")[-2] if host.count(".") >= 1 else host)
+            # **`co.jp`·`co.kr` 를 한 칸 더 들어간다** — 끝에서 두 번째
+            # 마디로 자르면 `yahoo.co.jp`·`amazon.co.jp` 가 둘 다 `co` 가 되어
+            # 사이트 축에서 서로 다른 서비스가 합쳐진다
+            rec.set("Host_Site", host_site(host))
             rec.set("Host_Prefix", host.split(".")[0])
-            rec.set("Method", smp.categorical("Method", "GET"))
-            status = smp.categorical("StatusCode", "200")
+            # **URL 이 있는 레코드만 만든다 — 상태·메서드도 그 모집단에서 뽑는다**
+            # (2026-10-29 사람 확인). HTTP XDR 은 80·8080 포트 트래픽이면 HTTP
+            # 가 아니어도 찍혀서, 실 샘플의 54.6% 가 URL·요청·응답 시각이 모두
+            # 비고 `StatusCode = 0`·`Method = ''` 인 레코드다. 프로파일은 그것을
+            # 섞은 주변분포라 그대로 뽑으면 "요청·응답 있음 + 상태 0" 이라는
+            # **실데이터에 없는 조합**이 57% 나왔고, 판정기는 그것을 무응답으로
+            # 셌다(평시 HTTP 무응답 58%).
+            #
+            # URL 이 있는 실 샘플 8,804건에서 상태 0 은 3.36% 이고 **전부 응답
+            # 시각이 없는 무응답**이다. 무응답은 세션 결말(`OUT_ABORT` ·
+            # `session._emit`)이 응답 시각과 함께 만든다 — 여기서 0 을 뽑으면
+            # 응답 시각이 있는 0 이 다시 생긴다.
+            rec.set("Method", smp.categorical_without("Method", frozenset({""}), "GET"))
+            status = smp.categorical_without("StatusCode", frozenset({"0"}), "200")
             if self.success_only and status.startswith("5"):
                 status = "200"   # 5xx 는 EXTERNAL_SERVER 시나리오가 만들 몫이다
             rec.set("StatusCode", status)
@@ -1226,14 +1635,15 @@ class Generator:
 
     # -- per-minute generation -------------------------------------------
 
-    def base_lte_call(self, ts: datetime, slot_start: float) -> tuple[Rec, Cell]:
+    def base_lte_call(self, ts: datetime, slot_start: float,
+                      at: tuple[Subscriber, Cell] | None = None) -> tuple[Rec, Cell]:
         """시나리오 변형 **전**의 LTE-CALL 레코드 하나.
 
         상용 스키마 어댑터(`pemdb1.PemdbGen`)가 생성과 변형 사이에 끼어들어
         실측 분포로 값을 덮어쓴다. 변형 뒤에 덮으면 주입한 장애가 지워지므로
         그 중간 단계를 공개한다. `generate_minute` 경로는 그대로다.
         """
-        return self._lte_call(ts, slot_start)
+        return self._lte_call(ts, slot_start, at)
 
     def generate_minute(self, minute: int, ts: datetime) -> dict[str, list[str]]:
         """**구 경로** — 계열별 1분 .dat 파일용 레코드.

@@ -25,10 +25,19 @@
 25개 mutator 를 다 읽어야 하고, 빠진 것(S13 단말식별·S6a 가입정보 거절)이
 있어도 드러나지 않는다.
 
-명세는 그것을 **데이터로 꺼낸 것**이다. 실측으로 확인한 공백 둘 —
+**2026-10-28 부터 장애 주입도 이 명세를 탄다**(`inject` · `drop`). 위 세
+도우미는 그때 지웠다 — 오류 칸만 적고 정답지의 시간·해제·직전 호 서명을
+적지 않았다.
 
-    first_error_interface_protocol = 8 (S13)   생성 데이터에 0건
+명세는 그것을 **데이터로 꺼낸 것**이다. 실측으로 확인한 공백 —
+
     UpdateLocation_Cause 장애 주입              없음 (평시 배경만)
+
+`first_error_interface_protocol = 8`(S13)도 생성 데이터에 0건이라 공백으로
+봤는데 **공백이 아니었다.** 정답지 실패 141호에도 0건이고, S13 오류가 실제로
+난 1호는 `first_error` 를 EMM 에 준다 — 프로브가 그 구간을 Call Error
+후보로 보지 않는다(`CALL_ERROR_EXCLUDED_IFACE`). EIR 장애는 **구간
+Cause 로만** 재현한다.
 
 ## 단계 전개 규칙
 
@@ -47,7 +56,7 @@ from __future__ import annotations
 
 import math
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import yaml
@@ -83,6 +92,22 @@ TIMEOUT_CAUSE = 900
 #: TIMEOUT 이 First 자리를 받지 못하고 **하류 NAS 거절이 그 자리에 온다.**
 TIMEOUT_EXCLUDED_IFACE = {1, 8}
 
+#: **TIMEOUT 이 아니어도 First Error 가 되지 못하는 구간.**
+#:
+#: S13 은 거절을 받아도 `first_error_interface_protocol` 에 올라오지 않는다.
+#: 정답지 실패 141호에 `iface = 8` 이 **한 건도 없고**, S13 오류가 실제로
+#: 난 1호는 이렇게 적혀 있다 —
+#:
+#:     s13_error_Cause       = 5012      ← 구간에는 적는다
+#:     MEIdentityCheck_Cause = 5012
+#:     first_error           = (5, 21)   ← **EMM 이 받는다**
+#:     last_error            = (2, 301)
+#:
+#: 그래서 "S13 공백을 메운다" 는 전제가 틀렸다 — 공백이 아니라 프로브가
+#: Call Error 후보로 보지 않는 구간이다. 여기 `8` 을 빼면 정답지에 없는
+#: `iface = 8` 이 생성되고, `H-17`(미정의 조합)이 그것을 잡지 못한다.
+CALL_ERROR_EXCLUDED_IFACE = {8}
+
 #: **`first_error_interface_protocol` 에 쓰면 안 되는 값.** 통합 규격이 S3 를
 #: Call Error 에 반영하지 않는다(기능정의서 §3.2.6) — 3G 연동 실패는
 #: `s3_error_*` 로만 남고 First Error 로 올라오지 않는다.
@@ -103,6 +128,13 @@ class Step:
     cause_field: str = ""     #: 절차 Cause 필드
     error_prefix: str = ""    #: `{prefix}_error_*` 구간 필드
     error_message: int = 0
+    #: First Error 에 적는 메시지. `0` 이면 `error_message` 와 같다.
+    #: S11 은 둘이 다르다(First `32` 요청 · 구간 `33` 응답).
+    first_message: int = 0
+    #: 이 단계에서 끊긴 호의 **실측 서명** — 시간·메시지·식별자·직전 호.
+    #: 키: `core_us [lo, hi]` · `core_msgs` · `response_gap [lo, hi]`(초) ·
+    #: `clear [필드]` · `old_call_same`(비율) · `end_at_response`.
+    on_fail: dict = field(default_factory=dict)
     #: **성공해도 적는 Cause.** 실측에서 `2001 DIAMETER_SUCCESS` 가
     #: `MEIdentityCheck` 98.5% · `UpdateLocation` 86% · `Authentication`
     #: 73.5% 다. 비우면 "절차는 있었는데 결과를 모른다" 가 되어 실패와
@@ -130,6 +162,66 @@ class Fault:
     causes: dict[int, float]
     timeout: bool = False
     downstream: dict | None = None
+    #: **하류 거절이 아예 없다.** `downstream` 이 `None` 인 것과 다르다 —
+    #: 그쪽은 `downstream_map` 에 맡긴다는 뜻이고, 이쪽은 **망이 거절을
+    #: 내지 않았다** 는 사실이다(`last_error` 가 비워진다).
+    no_downstream: bool = False
+    #: **First Error 구간 덮어쓰기.** 끊기는 *단계*와 거절을 적는 *구간*이
+    #: 다를 때 쓴다 — 세션 단계에서 MME 가 PDN 연결을 ESM 으로 거절하면
+    #: 단계는 `session`(S11)인데 First 는 `6/esm` 이다. 정답지의 `iface=6`
+    #: 20호가 `s11_error_Cause` 없이 ESM 만 들고 있다. `0` 이면 구간이
+    #: 없다(`902 NO_CAUSE_PAGING` — 적을 메시지가 없다).
+    iface: int | None = None
+    prefix: str | None = None
+    #: 그 장애가 성립하는 call_type. 비우면 단계열이 정한다(`call_types_for`).
+    #: 정답지가 `(5,9)·(5,10)·(5,40)` 을 **TAU 에서만** 보여 주듯 같은
+    #: 단계(`rrc`)라도 절차마다 거절 사유가 다르다.
+    call_types: tuple[int, ...] = ()
+    #: Cause 마다 다른 하류. **적혀 있으면 전역 `downstream_map` 으로
+    #: 떨어지지 않는다** — 없는 Cause 는 하류가 없는 것이다(Last = First).
+    downstream_by_cause: dict = field(default_factory=dict)
+    #: 하류가 붙는 비율. 정답지 `(2,404)` 4호 중 2호만 `EMM 98` 을 남긴다.
+    downstream_rate: float = 1.0
+    #: 해제 분포 — **`fail_release` 보다 이긴다.** 같은 단계라도 장애마다
+    #: 닫히는 자리가 다르다(`(2,103)` 은 `103`, 세션 거절은 `302`).
+    release: dict | None = None
+    #: **eNB 가 요청한 해제다** — `UEContextReleaseRequest_Cause` 에 같은
+    #: 값이 실린다. 정답지 `(2,103)` 4호가 `rreq = rel = 103` 이다.
+    release_request: bool = False
+    #: 해제 사유 = 뽑힌 Cause. 무선 실패(`125`·`126`)는 eNB 가 그 사유로
+    #: 해제를 요청한다(정답지 `rreq = rel = 126`).
+    release_from_cause: bool = False
+    #: Cause 마다 다른 해제 — `release` 보다 이긴다. 정답지에서 `302` 로
+    #: 닫힌 인증 거절은 **`5012` 한 건뿐**이다. 전체에 7% 를 뿌리면 정답지에
+    #: 없는 `15001 → 302` 같은 호가 생긴다.
+    release_by_cause: dict = field(default_factory=dict)
+    #: call_type 마다 다른 해제 — `{ct: {causes: {...}, request: bool}}`.
+    #: Attach 실패는 MME 가 `302` 로 닫고, 서비스 호 실패는 **eNB 가 `120`
+    #: 으로 해제를 요청한다**(실측 `rreq = rel`).
+    release_by_call_type: dict = field(default_factory=dict)
+    #: `release_request` 를 이 call_type 에만 건다. 비우면 전부.
+    release_request_call_types: tuple[int, ...] = ()
+    #: 메시지 덮어쓰기 — 구간을 덮어쓴 장애는 단계의 메시지가 맞지 않는다
+    #: (ESM 거절에 `33 CREATE_SESSION_RESPONSE` 가 실린다). First·구간에 함께.
+    message: int | None = None
+    message_by_cause: dict = field(default_factory=dict)
+    #: 끊긴 단계의 `on_fail` 서명을 **이 장애에서만** 덮는다(키 단위 병합).
+    #: 같은 세션 단계라도 S11 거절(GW 응답 대기·재전송)과 ESM 거절(MME 가
+    #: 바로 거절)은 시간 모양이 다르다.
+    on_fail: dict = field(default_factory=dict)
+    #: **First 에만 적는 Cause.** 구간·하류·해제는 뽑힌 Cause(응답)를 따른다.
+    #: 정답지 S11 `900` 10호가 그렇다 — First 는 `(3, 900, msg 32)` 인데
+    #: `s11_error_Cause` 에는 응답 Cause(`72`·`92`·`93`·`68`, msg 33)가 있고
+    #: 하류도 그것을 따른다. 첫 요청이 시간 초과로 재전송되고 결국 거절
+    #: 응답을 받은 꼴이다.
+    first_cause: int | None = None
+    #: **런타임 주입에서만 넓히는 절차** — 비우면 `call_types` 와 같다.
+    #: 정답지 대조 데이터셋(`build`)은 `call_types` 를 따르고, UI 주입
+    #: (`inject`)은 이것을 따른다. 정답지의 S6a 장애는 전부 Attach 인데
+    #: 생성기 평시 호는 TAU·서비스 호에도 인증을 붙여, Attach 에만 실패를
+    #: 넣으면 인증 성공률이 1~2%p 밖에 안 움직인다(사용자 결정 2026-10-28:
+    #: *"케이스가 적어도 시뮬레이션이니까 시나리오대로 나와야지"*).
+    inject_call_types: tuple[int, ...] = ()
     source: str = ""
 
     def draw_cause(self, rng: random.Random) -> int:
@@ -184,11 +276,18 @@ class Spec:
     downstream_map: dict[int, dict]
     #: 단계 이름 → 그 단계가 실패했을 때의 `UEContextRelease_Cause` 분포.
     fail_release: dict[str, dict[int, float]]
+    #: 〃 **타임아웃일 때.** 거절과 무응답이 같은 자리로 닫히지 않는다 —
+    #: 답이 없으면 MME 가 보낼 Authentication Failure 도 없다.
+    fail_release_timeout: dict[str, dict[int, float]]
     #: 직전 호 기록 — `{fail_share, same_iface}`. **실패 호에만 쓴다.**
     old_call: dict[str, float]
+    #: 연결 후 절단의 모양 — `drop()` 이 읽는다.
+    drop: dict = field(default_factory=dict)
 
     def downstream_for(self, cause: int, fault: Fault | None) -> dict | None:
         """그 Cause 의 하류. 장애가 따로 적었으면 그쪽이 이긴다."""
+        if fault is not None and fault.downstream_by_cause:
+            return fault.downstream_by_cause.get(cause)
         if fault is not None and fault.downstream:
             return fault.downstream
         return self.downstream_map.get(cause)
@@ -212,6 +311,8 @@ class Spec:
                 continue
             st = self.steps[fault.break_at]
             if st.gate and fl.share.get(fault.break_at, 1.0) <= 0.0:
+                continue
+            if fault.call_types and ct not in fault.call_types:
                 continue
             out.append(ct)
         return tuple(out)
@@ -245,6 +346,33 @@ def load_spec(path: Path | str | None = None) -> Spec:
                           causes={int(k): float(w) for k, w in v["causes"].items()},
                           timeout=bool(v.get("timeout")),
                           downstream=v.get("downstream"),
+                          no_downstream=bool(v.get("no_downstream")),
+                          iface=v.get("iface"),
+                          prefix=v.get("prefix"),
+                          call_types=tuple(int(c) for c in v.get("call_types") or ()),
+                          downstream_by_cause={int(k): d for k, d in
+                                               (v.get("downstream_by_cause") or {}).items()},
+                          downstream_rate=float(v.get("downstream_rate", 1.0)),
+                          release={int(k): float(w) for k, w in v["release"].items()}
+                                  if v.get("release") else None,
+                          release_request=bool(v.get("release_request")),
+                          release_from_cause=bool(v.get("release_from_cause")),
+                          message=v.get("message"),
+                          on_fail=dict(v.get("on_fail") or {}),
+                          first_cause=(int(v["first_cause"])
+                                       if v.get("first_cause") is not None else None),
+                          inject_call_types=tuple(
+                              int(c) for c in v.get("inject_call_types") or ()),
+                          message_by_cause={int(k): int(m) for k, m in
+                                            (v.get("message_by_cause") or {}).items()},
+                          release_request_call_types=tuple(
+                              int(x) for x in v.get("release_request_call_types") or ()),
+                          release_by_call_type={
+                              int(k): {"causes": {int(c): float(x) for c, x in d["causes"].items()},
+                                       "request": bool(d.get("request"))}
+                              for k, d in (v.get("release_by_call_type") or {}).items()},
+                          release_by_cause={int(k): {int(c): float(x) for c, x in d.items()}
+                                            for k, d in (v.get("release_by_cause") or {}).items()},
                           source=v.get("source", ""))
     # 규격이 금지한 인터페이스가 명세에 섞이면 **생성 전에** 멈춘다.
     for s in steps.values():
@@ -259,11 +387,14 @@ def load_spec(path: Path | str | None = None) -> Spec:
         mme_causes={int(k): float(v) for k, v in (r.get("mme_causes") or {}).items()},
     )
     dmap = {int(k): v for k, v in (raw.get("downstream_map") or {}).items()}
-    frel = {k: {int(c): float(w) for c, w in v.items()}
-            for k, v in (raw.get("fail_release") or {}).items()}
+    def _rel(key):
+        return {k: {int(c): float(w) for c, w in v.items()}
+                for k, v in (raw.get(key) or {}).items()}
     oc = {k: float(v) for k, v in (raw.get("old_call") or {}).items()}
     return Spec(steps=steps, flows=flows, faults=faults, release=rel,
-                downstream_map=dmap, fail_release=frel, old_call=oc)
+                downstream_map=dmap, fail_release=_rel("fail_release"),
+                fail_release_timeout=_rel("fail_release_timeout"), old_call=oc,
+                drop=dict(raw.get("drop") or {}))
 
 
 # ── 단계 전개 ──────────────────────────────────────────────────────────────
@@ -287,6 +418,13 @@ class Walk:
     #: 임시 키를 쓰면 값이 사라지고 에러도 없다(이 모듈이 `verify_fields`
     #: 로 막는 바로 그 함정이다).
     release_cause: int = 0
+    #: eNB 가 요청한 해제인가 — `_close_call` 이 `Request_Cause` 를 채운다.
+    release_request: bool = False
+    #: 끊은 장애. `apply` 가 구간 덮어쓰기(`Fault.iface`)를 읽는다.
+    fault: "Fault | None" = None
+    #: 끊긴 구간의 **응답 시각**(`on_fail.response_gap`). 하류·해제·호 끝이
+    #: 여기에 맞춰진다. `0` 이면 응답 간격을 두지 않는 단계다.
+    resp_time: float = 0.0
 
 
 def _cut(steps: list[Step], at: int) -> list[Step]:
@@ -345,15 +483,18 @@ def active_steps(spec: Spec, call_type: int, flags: dict[str, int],
 def walk(spec: Spec, call_type: int, flags: dict[str, int], rng: random.Random,
          *, t0: float, call_dur_us: float,
          phase_totals: dict[str, float],
-         fault: Fault | None = None) -> Walk:
+         fault: Fault | None = None, use_flags: bool = False) -> Walk:
     """단계를 전개한다. ``fault`` 가 있으면 그 단계에서 **끊는다**.
+
+    ``use_flags`` 면 단계 발생을 정답지 비율(`share`)로 다시 뽑지 않고
+    **그 레코드의 시도 플래그**를 따른다 — 런타임 주입(`inject`)의 경로다.
 
     ``phase_totals`` 는 phase 별 총 소요시간(µs)이고 **호출부가 준다** —
     실측 백분위에서 뽑은 값을 배분만 하려는 것이다. 주변분포가 바뀌면
     `pemdb1` 대조 통계가 어긋난다.
     """
     w = Walk(call_type=call_type)
-    steps = active_steps(spec, call_type, flags, rng)
+    steps = active_steps(spec, call_type, flags, None if use_flags else rng)
     #: 끊기기 **전** 전체 단계열. phase 총량을 비례 배분할 때 분모가 된다.
     all_steps = list(steps)
 
@@ -372,6 +513,7 @@ def walk(spec: Spec, call_type: int, flags: dict[str, int], rng: random.Random,
             steps = _cut(steps, cut)
             w.cause = fault.draw_cause(rng)
             w.timeout = fault.timeout
+            w.fault = fault
 
     # **평시 실패도 뒤 단계를 끊는다.** 정답지에서 인증이 실패한 18호는
     # `mecheck` 0 · `ulr` 0 이다 — MME 는 인증이 깨지면 ULR 을 보내지
@@ -399,17 +541,28 @@ def walk(spec: Spec, call_type: int, flags: dict[str, int], rng: random.Random,
     # `release` phase 는 `PHASES` 에 없으므로 `totals` 에도 없다 — 아래
     # 루프가 `.get(…, 0.0)` 으로 받아 소요시간 0 이 된다. 시각은 호를 닫을
     # 때 `call_end` 로 덮인다(`_close_call`).
+    # **실패 호의 실측값을 받은 phase 는 줄이지 않는다** (2026-10-28).
+    # `on_fail.core_us`·`access_us` 는 끊긴 호에서 잰 길이라 이미 "끝까지
+    # 밟지 않은" 값이다. 아래 두 축소를 또 받으면 서비스 호 S11 실패의
+    # core 가 155µs 까지 내려갔다(실측 최소 30ms). 호 길이는 `_close_call`
+    # 이 단계 뒤로 늘린다.
+    fixed: set[str] = set()
+    if fault is not None:
+        of = on_fail_of(spec.steps[fault.break_at], fault, call_type)
+        fixed = {p for p in PHASES if of.get(f"{p}_us")}
     totals = {}
     for p in PHASES:
         if used[p] <= 0:
             totals[p] = 0.0          # 일어나지 않은 phase 는 **0 이다**
-        elif full[p] > 0:
-            totals[p] = phase_totals.get(p, 0.0) * (used[p] / full[p])
-        else:
+        elif p in fixed or full[p] <= 0:
             totals[p] = phase_totals.get(p, 0.0)
+        else:
+            totals[p] = phase_totals.get(p, 0.0) * (used[p] / full[p])
     # 단계 합이 호 길이를 넘지 않는다. 한 phase 만 깎으면 그쪽 분포가 치우치므로
-    # 비례 축소한다.
-    if call_dur_us > 0:
+    # 비례 축소한다. **실측값을 받은 호는 줄이지 않는다** — 호 길이를 그
+    # 실측에 맞춰 `_close_call` 이 늘린다. 남은 몫으로 다른 phase 를 깎으면
+    # 페이징이 0µs 가 되어 플래그와 시간이 어긋났다(`verify` 페이징 불일치).
+    if call_dur_us > 0 and not fixed:
         tot = sum(totals.values())
         if tot > call_dur_us:
             k = call_dur_us / tot
@@ -497,19 +650,38 @@ def apply(rec, spec: Spec, w: Walk, flags: dict[str, int],
     s = w.broken_at
     t = w.times[s.name] + w.durations[s.name] / US
 
-    # ① 끊긴 단계가 First Error 다 — **단 S6a·S13 의 TIMEOUT 은 아니다.**
-    #    §3.2.6 이 그 둘만 TIMEOUT 을 Call Error 에서 뺀다. 그러면 First
-    #    자리가 비고 **하류 NAS 거절이 그것을 받는다**(`set_downstream`).
+    # ① 끊긴 단계가 First Error 다 — **두 경우만 아니다.**
+    #    §3.2.6 이 S6a·S13 의 TIMEOUT 을 Call Error 에서 빼고, S13 은
+    #    **거절도** 올라오지 않는다(`CALL_ERROR_EXCLUDED_IFACE`). 그러면
+    #    First 자리가 비고 **하류 NAS 거절이 그것을 받는다**
+    #    (`set_downstream`).
     rec.set("success_flag", 0)
-    if w.timeout and s.iface in TIMEOUT_EXCLUDED_IFACE:
+    over = w.fault is not None and w.fault.iface is not None
+    fmsg = None
+    if w.fault is not None:
+        fmsg = w.fault.message_by_cause.get(w.cause) or w.fault.message
+    sec_msg = fmsg or s.error_message
+    first_msg = fmsg or s.first_message or s.error_message
+    iface = w.fault.iface if over else s.iface
+    prefix = (w.fault.prefix or "") if over else s.error_prefix
+    if over and iface == 0:
+        # **구간이 없는 실패.** `902 NO_CAUSE_PAGING` — 적을 메시지가 없어
+        # 구간도 시각도 `0` 이다(정답지 `(0,902)` 4호 전부 `time = 0.0`).
+        rec.set("first_error_interface_protocol", 0)
+        rec.set("first_error_cause", w.cause)
+        rec.set("first_error_message", 0)
+        rec.set("first_error_time", "0.0")
+    elif (s.iface in CALL_ERROR_EXCLUDED_IFACE
+            or (w.timeout and s.iface in TIMEOUT_EXCLUDED_IFACE)):
         rec.set("first_error_interface_protocol", 0)
         rec.set("first_error_cause", 0)
         rec.set("first_error_message", 0)
         rec.set("first_error_time", "")
     else:
-        rec.set("first_error_interface_protocol", s.iface)
-        rec.set("first_error_cause", w.cause)
-        rec.set("first_error_message", s.error_message)
+        rec.set("first_error_interface_protocol", iface)
+        fc = w.fault.first_cause if w.fault is not None else None
+        rec.set("first_error_cause", w.cause if fc is None else fc)
+        rec.set("first_error_message", first_msg)
         rec.set("first_error_time", f"{t:.6f}")
     # 접속 실패와 연결 후 절단을 한 레코드에 두지 않는다(규칙 C-2).
     rec.set("drop_flag", 0)
@@ -540,69 +712,145 @@ def apply(rec, spec: Spec, w: Walk, flags: dict[str, int],
     #    비우라고 한 것은 **구간 Cause**(`s6a_error_Cause`)이고, 그쪽은
     #    Diameter Result-Code 를 담는 자리라 응답이 없으면 적을 값이 없다.
     #    절차 Cause 는 "그 절차가 어떻게 끝났나" 라서 `900` 이 답이다.
-    if s.cause_field:
+    # 구간을 덮어쓴 장애는 **단계의 절차 Cause 를 적지 않는다** — 그
+    # 절차가 응답한 게 아니라 다른 구간이 거절한 것이다. 정답지 `(5,6)`
+    # 은 `ulr` 단계에서 끊기지만 `UpdateLocation_Cause` 가 비어 있다.
+    if s.cause_field and not over:
         rec.set(s.cause_field, w.cause)
     if not w.timeout:
-        if s.error_prefix:
-            rec.set(f"{s.error_prefix}_error_Cause", w.cause)
-            rec.set(f"{s.error_prefix}_error_Message", s.error_message)
-            rec.set(f"{s.error_prefix}_error_Time", f"{t:.6f}")
-    elif s.error_prefix:
-        # 시각은 남긴다 — **언제 기다리다 포기했는지**는 사실이다.
-        rec.set(f"{s.error_prefix}_error_Time", f"{t:.6f}")
-        rec.set(f"{s.error_prefix}_error_Message", s.error_message)
+        if prefix:
+            rec.set(f"{prefix}_error_Cause", w.cause)
+            rec.set(f"{prefix}_error_Message", sec_msg)
+            rec.set(f"{prefix}_error_Time", f"{t:.6f}")
+    # ── 끊긴 단계의 실측 서명 (`Step.on_fail`) ─────────────────────────
+    of = on_fail_of(s, w.fault, w.call_type)
+    if of:
+        if of.get("core_msgs"):
+            rec.set("initial_core_msg_count", int(of["core_msgs"]))
+        gap = of.get("response_gap")
+        if gap:
+            # **First 는 요청, 구간은 응답이다** — 둘 사이가 실측 0.2~0.55초.
+            w.resp_time = t + rng.uniform(float(gap[0]), float(gap[1]))
+            if prefix and not w.timeout:
+                rec.set(f"{prefix}_error_Time", f"{w.resp_time:.6f}")
+        if of.get("pgw_from_sgw"):
+            # **실측은 `PGW_ID = 0` 이다** — 세션이 안 만들어져 PGW 가 배정되지
+            # 않았다(실패 호 전부). 그대로 두면 graphio 노드 축이 `'0'` 을
+            # 장비 하나로 세어 "PGW 0번이 실패를 독차지" 하는 Incident 가 선다.
+            # **SGW 와 같은 번호로 채운다** — 구 장비 대부분이 SGW·PGW 를 한
+            # 노드(SPGW)로 써서 번호가 같았다(사용자 확정 2026-10-28).
+            rec.set("PGW_ID", rec.get("SGW_ID"))
+    # TIMEOUT 이면 **구간 칸을 아예 적지 않는다.** 전에는 "언제 기다리다
+    # 포기했는지는 사실" 이라며 시각·메시지를 남겼는데, 정답지의 S6a
+    # TIMEOUT 3호(`AuthenticationInformation_Cause = 900`)와 페이징 TIMEOUT
+    # 1호가 **구간 메시지·시각이 전부 비어 있다.** 프로브는 응답이 없는
+    # 구간에 기록을 남기지 않는다 — 기다린 사실은 절차 Cause `900` 이 말한다.
 
 
 def set_downstream(rec, spec: Spec, w: Walk, fault: Fault | None,
                    t: float, rng: random.Random) -> None:
-    """하류 NAS 거절을 적는다 (불변규칙 7).
+    """하류 NAS 거절과 해제를 적는다 (불변규칙 7).
 
     **Cause 마다 다르다.** 정답지가 그 대응을 직접 보여 준다 —
     `15004 ROAMING_NOT_ALLOWED` 는 `EMM 11 PLMN not allowed` 로,
     `15421 RAT_NOT_ALLOWED` 는 `EMM 15 No suitable cells in TA` 로 간다.
     고정 하류 하나로 뭉뚱그리면 그 의미가 사라진다.
 
-    하류가 없으면 Last = First 다 — 하류 증상이 없다는 뜻이고 그것도
-    사실이다(규칙 C-5).
+    ## 해제를 **먼저** 뽑는다
+
+    구 구현은 하류가 없으면 `Last = First` 를 적고 **바로 나갔다.** 그러면
+    해제 사유가 정해지지 않아 `_close_call` 이 평시 분포에서 뽑는다 —
+    실패한 호가 `release:` 절의 정상 해제로 닫히는 레코드가 된다.
+
+    `last_error` 는 해제가 정한다. 정답지의 `last = (2, 301)` 26건이
+    **전부** `s1ap_error_Cause = 301` 이고 `UEContextRelease_Cause = 301`
+    이다 — **해제 사유가 곧 마지막 오류**다. `302`(Detach)로 닫힌 호는
+    정상 해제라 오류가 아니고, 그때 EMM 거절이 last 를 받는다.
     """
-    d = spec.downstream_for(w.cause, fault)
-    if not d:
-        for k in ("interface_protocol", "cause", "message", "time"):
-            rec.set(f"last_error_{k}", rec.get(f"first_error_{k}"))
-        return
-    td = t + rng.uniform(0.01, 0.10)
-    rec.set(f"{d['prefix']}_error_Cause", d["cause"])
-    rec.set(f"{d['prefix']}_error_Time", f"{td:.6f}")
-    rec.set(f"{d['prefix']}_error_Message", d.get("message", 0))
+    d = None if (fault is not None and fault.no_downstream) \
+        else spec.downstream_for(w.cause, fault)
+    if d and fault is not None and rng.random() >= fault.downstream_rate:
+        d = None
+    if d and not d.get("message"):
+        # **하류 거절의 메시지는 구간이 정한다.** 정답지에서 하류 EMM 은
+        # `68 ATTACH_REJECT`(TAU 면 `75`), 하류 ESM 은 `209
+        # PDN_CONNECTIVITY_REJECT` 다 — 예외가 없다. 비워 두면 Cause 만 있고
+        # 메시지가 `0` 인 레코드가 된다.
+        emm = (75 if w.call_type == 5           # TAU_REJECT
+               else 78 if w.call_type in (3, 4, 7, 8)   # SERVICE_REJECT
+               else 68)                          # ATTACH_REJECT
+        d = dict(d, message={"emm": emm, "esm": 209}.get(d["prefix"], 0))
+    # 하류 거절은 **응답과 같은 순간**이다(실측 8/8 — MME 가 응답을 받자마자
+    # NAS 거절을 낸다). 서명이 없는 단계는 예전처럼 조금 뒤에 둔다.
+    td = w.resp_time if w.resp_time else t + rng.uniform(0.01, 0.10)
 
-    # **First 가 비어 있으면 하류가 그 자리도 받는다.** S6a·S13 TIMEOUT 이
-    # Call Error 에서 빠진 경우다(§3.2.6) — 정답지의 `auth=900` 3호가
-    # 전부 `first_error = 5/17` 이다.
-    if not str(rec.get("first_error_interface_protocol") or "0").strip("0"):
-        rec.set("first_error_interface_protocol", d["iface"])
-        rec.set("first_error_cause", d["cause"])
-        rec.set("first_error_message", d.get("message", 0))
-        rec.set("first_error_time", f"{td:.6f}")
+    if d:
+        rec.set(f"{d['prefix']}_error_Cause", d["cause"])
+        rec.set(f"{d['prefix']}_error_Time", f"{td:.6f}")
+        rec.set(f"{d['prefix']}_error_Message", d.get("message", 0))
 
-    # **해제 사유가 곧 마지막 오류인 경우가 있다.** 인증이 깨진 호는 S1AP
-    # `301 Authentication Failure` 로 닫히고, 실측 18호 중 그렇게 닫힌
-    # 14호의 `last_error` 가 전부 `2/301` 이다. `302`(Detach)로 닫힌 4호는
-    # EMM 거절이 last 를 받는다 — 그래서 해제 Cause 를 먼저 뽑는다.
-    rel = spec.fail_release.get(w.broken_at.name if w.broken_at else "")
+        # **First 가 비어 있으면 하류가 그 자리도 받는다.** S6a TIMEOUT 과
+        # S13 거절이 Call Error 에서 빠진 경우다(§3.2.6) — 정답지의
+        # `auth=900` 3호가 전부 `first_error = 5/17` 이다.
+        if not str(rec.get("first_error_interface_protocol") or "0").strip("0"):
+            rec.set("first_error_interface_protocol", d["iface"])
+            rec.set("first_error_cause", d["cause"])
+            rec.set("first_error_message", d.get("message", 0))
+            rec.set("first_error_time", f"{td:.6f}")
+
+    # ── 해제 — **하류가 없어도 뽑는다** ──────────────────────────────
+    name = w.broken_at.name if w.broken_at else ""
+    # 타임아웃 표가 먼저다. 없으면 거절 표로 떨어진다(역호환).
+    rel = ({w.cause: 1.0} if fault is not None and fault.release_from_cause
+           else None) \
+        or (fault.release_by_cause.get(w.cause) if fault is not None else None) \
+        or ((fault.release_by_call_type.get(w.call_type) or {}).get("causes")
+            if fault is not None else None) \
+        or (fault.release if fault is not None and fault.release else None) \
+        or (spec.fail_release_timeout.get(name) if w.timeout else None) \
+        or spec.fail_release.get(name)
+    w.release_request = bool(fault is not None and (
+        (fault.release_request and (not fault.release_request_call_types
+                                    or w.call_type in fault.release_request_call_types))
+        or (fault.release_by_call_type.get(w.call_type) or {}).get("request")))
     if rel:
         ks = list(rel)
         c = rng.choices(ks, weights=[rel[k] for k in ks], k=1)[0]
         w.release_cause = c                     # `_close_call` 이 읽는다
         if c not in _S1AP_NORMAL:
+            # **구간 Cause 도 적는다.** 정답지의 `last = (2,301)` 26건이
+            # 예외 없이 `s1ap_error_Cause = 301` 을 들고 있다. 비우면
+            # last 가 S1AP 를 가리키는데 그 구간에 근거가 없는 레코드가
+            # 되고, 불변규칙 7(First Error 가 원인)의 대조가 서지 않는다.
+            rec.set("s1ap_error_Cause", c)
+            rec.set("s1ap_error_Message", 23)   # UEContextRelease
+            rec.set("s1ap_error_Time", f"{td:.6f}")
             rec.set("last_error_interface_protocol", 2)
             rec.set("last_error_cause", c)
-            rec.set("last_error_message", 23)   # UEContextRelease
+            rec.set("last_error_message", 23)
             rec.set("last_error_time", f"{td:.6f}")
             return
-    rec.set("last_error_interface_protocol", d["iface"])
-    rec.set("last_error_cause", d["cause"])
-    rec.set("last_error_message", d.get("message", 0))
-    rec.set("last_error_time", f"{td:.6f}")
+
+    if d:
+        rec.set("last_error_interface_protocol", d["iface"])
+        rec.set("last_error_cause", d["cause"])
+        rec.set("last_error_message", d.get("message", 0))
+        rec.set("last_error_time", f"{td:.6f}")
+        return
+
+    if fault is not None and fault.no_downstream:
+        # **비운다 — First 를 복사하지 않는다.** 정답지의 페이징 무응답
+        # 1호가 `first = (2,900)` 인데 `last = (0,0)` 이다. 오류가 아니라
+        # 응답이 없었던 것이라 망이 거절을 내지 않는다.
+        for k in ("interface_protocol", "cause", "message"):
+            rec.set(f"last_error_{k}", 0)
+        rec.set("last_error_time", "0.0")   # 숫자 필드의 "없음" 은 `0` 이다
+        return
+
+    # 하류가 없으면 Last = First 다 — 하류 증상이 없다는 뜻이고 그것도
+    # 사실이다(규칙 C-5).
+    for k in ("interface_protocol", "cause", "message", "time"):
+        rec.set(f"last_error_{k}", rec.get(f"first_error_{k}"))
 
 
 #: 정상 종료로 보는 S1AP Cause (불변규칙 6 · `codes.S1AP_NORMAL_CAUSES`).
@@ -624,6 +872,21 @@ def set_old_call(rec, spec: Spec, w: Walk, rng: random.Random) -> None:
     **같은 구간 반복이 기본값이다**(정답지 93%). `OLD_SAME_IFACE` 가 세는
     축이고, 재시도가 같은 자리에서 또 막히는 모양이다.
     """
+    of = on_fail_of(w.broken_at, w.fault, w.call_type)
+    if of.get("old_call_clear"):
+        # 재시도 흔적이 없는 절차다 — 서비스 호의 S11 실패는 직전 호 오류가
+        # 0/12 다(실측). 평시 `fail_share` 로 채우면 없는 재시도가 생긴다.
+        rec.set("old_call_error_interface_protocol", "")
+        rec.set("old_call_error_cause", "")
+        return
+    if w.broken_at is not None and rng.random() < float(of.get("old_call_same", 0.0)):
+        # **재시도하다 또 막힌 호다** — 직전 호가 같은 구간·같은 Cause 로
+        # 실패했다. 실측 S11 세션 실패 8/8 이 그렇다(Cause 가 `900` 이면
+        # 직전도 `900`). 자원이 모자란 GW 앞에서 단말이 같은 요청을 반복한다.
+        rec.set("old_call_error_interface_protocol",
+                int(rec.num("first_error_interface_protocol")))
+        rec.set("old_call_error_cause", int(rec.num("first_error_cause")))
+        return
     if w.broken_at is None:
         # 성공 호 — 위치만 남기고 오류 기록은 **비운다.**
         rec.set("old_call_error_interface_protocol", "")
@@ -671,6 +934,20 @@ def _close_call(rec, t0: float, end: float, dur_us: float,
     실측 분포가 더 길면 그쪽을 쓴다. 절차가 끝난 뒤에도 호는 이어지고
     (데이터를 주고받는다) 그것이 정상이다.
     """
+    if w is not None and w.resp_time:
+        # **응답보다 먼저 끝나는 호는 없다** — 하한이다.
+        end = max(end, w.resp_time)
+        of = on_fail_of(w.broken_at, w.fault, w.call_type)
+        if of.get("end_at_response"):
+            # **응답이 곧 호의 끝이다** — 실측 Attach 8/8 에서 S11 응답·하류·
+            # 해제·`call_end` 가 같은 시각이다.
+            dur_us = 0.0
+        elif of.get("tail_s"):
+            # 응답 뒤로 호가 **이어진다** — 서비스 호는 이미 붙어 있던 단말이라
+            # 거절 뒤에도 eNB 가 해제를 요청할 때까지 남는다(실측 3~20초).
+            lo, hi = (float(v) for v in of["tail_s"])
+            end = w.resp_time + math.exp(rng.uniform(math.log(lo), math.log(hi)))
+            dur_us = 0.0
     span = max(end - t0, 0.0)
     want = max(dur_us / US, span)
     if want <= 0.0:
@@ -696,14 +973,19 @@ def _close_call(rec, t0: float, end: float, dur_us: float,
         return
     names = {st.name for st in w.steps}
     if "release" not in names:
-        # **단계열에 해제가 없으면 그 필드를 비운다.** `base_lte_call` 이
-        # 자체 분포로 `UEContextRelease_*` 를 채워 두는데, 그대로 두면
-        # Paging 레코드(접속 자체가 없다)에 해제 기록이 남는다 — 실측
-        # 12호 전부 그 필드가 비어 있다.
-        for col in ("UEContextRelease_Time", "UEContextRelease_Cause",
-                    "UEContextReleaseRequest_Time",
-                    "UEContextReleaseRequest_Cause"):
-            rec.set(col, "")
+        # **단계열에 해제가 없으면 그 필드를 `0` 으로 되돌린다.**
+        # `base_lte_call` 이 자체 분포로 `UEContextRelease_*` 를 채워 두는데,
+        # 그대로 두면 Paging 레코드(접속 자체가 없다)에 해제 기록이 남는다.
+        #
+        # **빈 문자열이 아니라 `0` 이다.** 정답지 `ct=6` 12호가 전부
+        # `Cause = 0` · `Time = 0.0` 이고, 204호 전체에서 빈 문자열이 나오는
+        # 필드는 `APN`·`IMEI`·`PLMN` 같은 **텍스트뿐**이다 — 숫자 필드의
+        # "없음" 은 `0` 으로 적는다. `''` 로 두면 Parquet 에서
+        # `TRY_CAST('' AS BIGINT)` 가 NULL 이 되어 집계가 갈린다.
+        for col in ("UEContextRelease_Cause", "UEContextReleaseRequest_Cause"):
+            rec.set(col, 0)
+        for col in ("UEContextRelease_Time", "UEContextReleaseRequest_Time"):
+            rec.set(col, "0.0")
         return
     req_cause, rel_cause = spec.release.draw(w.call_type, rng)
     # **절차가 깨진 호는 해제 사유가 그것을 말한다.** `set_downstream` 이
@@ -711,7 +993,11 @@ def _close_call(rec, t0: float, end: float, dur_us: float,
     # 78%, 나머지는 `302 Detach` 다(실측 18호: 14 : 4).
     if w.release_cause:
         rel_cause = w.release_cause
-        req_cause = 0          # MME 주도 해제다 — eNB 가 요청한 것이 아니다
+        # MME 주도 해제면 요청이 없다. **eNB 가 요청했으면 같은 값이
+        # 실린다**(정답지 `(2,103)`·`(3,68)` — `rreq = rel`).
+        req_cause = rel_cause if w.release_request else 0
+        if w.release_request:
+            names = names | {"release_request"}
     rec.set("UEContextRelease_Time", f"{t1:.6f}")
     rec.set("UEContextRelease_Cause", rel_cause)
     if req_cause and "release_request" in names:
@@ -720,10 +1006,11 @@ def _close_call(rec, t0: float, end: float, dur_us: float,
                 f"{max(t0, t1 - rng.uniform(0.005, 0.05)):.6f}")
         rec.set("UEContextReleaseRequest_Cause", req_cause)
     else:
-        # **요청이 없었으면 비워 둔다.** `0` 을 적으면 "요청이 있었고
-        # Cause 가 0" 처럼 읽힌다(불변규칙 17).
-        rec.set("UEContextReleaseRequest_Time", "")
-        rec.set("UEContextReleaseRequest_Cause", "")
+        # **요청이 없었으면 `0` 이다.** 전에는 빈 문자열로 뒀는데 정답지가
+        # 그렇게 적지 않는다 — 숫자 필드의 "없음" 은 `0` 이고, 그것이
+        # "요청이 없었다" 를 말하는 이 규격의 방식이다.
+        rec.set("UEContextReleaseRequest_Time", "0.0")
+        rec.set("UEContextReleaseRequest_Cause", 0)
 
 
 # ── 검증 ───────────────────────────────────────────────────────────────────
@@ -801,7 +1088,10 @@ def verify(recs: list, spec: Spec) -> list[str]:
         # 오류가 있는데 성공으로 적힌 호는 `C-02` 를 위로 밀어 올린다.
         failed = str(r.get("success_flag")) in ("0", "False")
         att = str(r.get("attempt_flag")) in ("1", "True")
-        if att and failed and fi == 0:
+        # **구간과 Cause 가 둘 다 비어야 "없음" 이다.** `902 NO_CAUSE_PAGING`
+        # 은 적을 메시지가 없어 구간이 `0` 이지만 Cause 는 있다 — 정답지
+        # `(0,902)` 4호가 전부 `attempt=1 · success=0` 이다.
+        if att and failed and fi == 0 and not r.num("first_error_cause"):
             ferr += 1
 
         # 끊긴 뒤 절차를 **시도했다고 적지 않는다.** 인증이 깨졌는데
@@ -946,6 +1236,7 @@ def build(gen, dist, spec: Spec, *, call_type: int | None = None,
         dur = rec.num("call_duration_time")
         smp = gen.samplers["lte_call"]
         totals = {p: nonzero_quantile(smp, PHASE_FIELD[p], rng) for p in PHASES}
+        totals = fail_totals(spec, f_spec, totals, rng, ct)
         w = walk(spec, ct, flags, rng, t0=t0, call_dur_us=dur,
                  phase_totals=totals, fault=f_spec)
         # **장애 데이터셋에는 그 장애를 실제로 겪은 호만 담는다.** 플래그를
@@ -965,6 +1256,185 @@ def build(gen, dist, spec: Spec, *, call_type: int | None = None,
         _close_call(rec, t0, end, dur, rng, spec=spec, w=w)
         out.append(rec)
     return out
+
+
+#: 레코드 플래그 → `flags()` 키. `build()` 가 쓰는 표의 역방향이다.
+_FLAG_COLS = (("att", "attempt_flag"), ("suc", "success_flag"),
+              ("drop", "drop_flag"), ("detach", "detach_flag"),
+              ("pg_att", "paging_attempt_flag"), ("pg_suc", "paging_success_flag"),
+              ("auth_att", "auth_attempt_flag"), ("auth_suc", "auth_success_flag"),
+              ("loc_att", "location_attempt_flag"),
+              ("loc_suc", "location_success_flag"),
+              ("mec_att", "mecheck_attempt_flag"),
+              ("mec_suc", "mecheck_success_flag"))
+
+_SPEC_CACHE: list[Spec] = []
+
+
+def _spec() -> Spec:
+    if not _SPEC_CACHE:
+        _SPEC_CACHE.append(load_spec())
+    return _SPEC_CACHE[0]
+
+
+def on_fail_of(step: Step | None, fault: Fault | None,
+               call_type: int | None = None) -> dict:
+    """끊긴 자리의 실측 서명 — 단계 기본값 위에 장애가, 그 위에 call_type 이 덮는다.
+
+    **같은 단계라도 절차마다 꼴이 다르다.** S11 세션 실패가 Attach 에서는
+    재전송 끝에 1.4~2.0초 걸리고 호가 응답에서 닫히는데, 서비스 호에서는
+    2~120ms 에 거절되고 호가 10초가량 이어진다(실측). `by_call_type` 이 그
+    차이를 적는 자리다.
+    """
+    if step is None:
+        return {}
+    out: dict = {}
+    for src in (step.on_fail, fault.on_fail if fault is not None else {}):
+        out.update({k: v for k, v in src.items() if k != "by_call_type"})
+        if call_type is not None:
+            out.update((src.get("by_call_type") or {}).get(call_type) or {})
+    return out
+
+
+def fail_totals(spec: Spec, fault: Fault | None, totals: dict[str, float],
+                rng: random.Random, call_type: int | None = None) -> dict[str, float]:
+    """끊길 단계에 `on_fail.core_us` 가 있으면 **core phase 총량을 그 값으로.**
+
+    `walk` 가 phase 총량을 단계에 나눠 시각을 매기므로, 여기서 바꿔야 단계
+    시각·First 시각·호 길이가 함께 맞는다. 레코드에 길이만 덮으면 시각과
+    길이가 서로 다른 말을 한다.
+    """
+    if fault is None:
+        return totals
+    of = on_fail_of(spec.steps[fault.break_at], fault, call_type)
+    out = dict(totals)
+    for phase in ("access", "core"):
+        lo_hi = of.get(f"{phase}_us")
+        if lo_hi:
+            lo, hi = (float(v) for v in lo_hi)
+            # 로그 균등 — 실측이 몇 배 폭으로 퍼진다(core 0.7~3.0초 · access 2~6초).
+            out[phase] = math.exp(rng.uniform(math.log(lo), math.log(hi)))
+    return out
+
+
+def inject(rec, fault_name: str, rng: random.Random, *, tries: int = 6,
+           cause: int | None = None, downstream: bool = True) -> bool:
+    """**런타임 레코드 한 건을 그 장애 호로 다시 쓴다** — UI 주입 경로.
+
+    `build()` 의 한 호 처리와 같은 순서다(`walk → apply → set_downstream →
+    set_old_call → _close_call`). 다른 것은 둘 —
+
+    * **레코드가 이미 있다.** 셀·가입자·식별자·시각은 생성기가 만든 그대로
+      두고, call flow 가 정하는 칸만 덮는다. 그래서 주입된 호가 그 분의
+      다른 호와 같은 셀·같은 장비에 실린다.
+    * **끊을 단계를 못 밟으면 손대지 않는다**(`False`). `build()` 는 호를
+      다시 뽑지만 여기서는 호가 하나뿐이다 — 플래그를 세워 억지로 끊으면
+      분모를 장애가 만드는 꼴이 된다(`build` 의 같은 주석).
+
+    phase 총량은 그 레코드의 값을 쓴다. 비어 있으면(실측도 대부분 0 이다 —
+    `nonzero_quantile` 머리말) 작은 기본값으로 단계 시각만 세운다.
+
+    ``cause`` 를 주면 **Cause 는 장애가 정한다** — 시나리오가 고른 값(SC-11
+    의 ESM `30` 등)은 그대로 두고 그 Cause 가 실리는 호의 **모양**만 명세에서
+    가져온다. 명세의 `causes` 표는 정답지 비율이고, 시나리오는 그중 한
+    원인을 겨냥한다.
+
+    ``downstream=False`` 면 하류 거절을 만들지 않는다 — Last = First 다.
+    SC-18 이 그렇다(2026-10-22 사용자 조건: *"모든 Timeout 에 ESM 30 을
+    강제하는 전역 규칙은 만들지 않음"*).
+    """
+    spec = _spec()
+    fault = spec.faults[fault_name]
+    if cause is not None:
+        fault = replace(fault, causes={int(cause): 1.0})
+    if not downstream:
+        fault = replace(fault, downstream_rate=0.0)
+    try:
+        ct = int(rec.get("call_type"))
+    except (TypeError, ValueError):
+        return False
+    if ct not in (fault.inject_call_types or spec.call_types_for(fault)):
+        return False
+    flags = {k: int(rec.num(col)) for k, col in _FLAG_COLS}
+    t0 = rec.num("call_start_time")
+    dur = rec.num("call_duration_time")
+    if not t0:
+        return False
+    totals = {p: (rec.num(PHASE_FIELD[p]) or 50_000.0) for p in PHASES}
+    totals = fail_totals(spec, fault, totals, rng, ct)
+    for _ in range(tries):
+        w = walk(spec, ct, flags, rng, t0=t0, call_dur_us=dur,
+                 phase_totals=totals, fault=fault,
+                 # **레코드가 이미 시도 여부를 말한다** — 다시 뽑으면 장애가
+                 # 시도 플래그(성공률의 분모)를 바꾼다(`auth_failure` 주석)
+                 use_flags=True)
+        if w.broken_at is not None and w.broken_at.name == fault.break_at:
+            break
+    else:
+        return False
+    apply(rec, spec, w, flags, rng)
+    written = sum(rec.num(f"initial_{p}_duration") for p in PHASES)
+    end = max(_flow_end(w, t0), t0 + written / US)
+    t = w.times[w.broken_at.name] + w.durations[w.broken_at.name] / US
+    set_downstream(rec, spec, w, fault, t, rng)
+    end = max(end, rec.num("last_error_time"))
+    set_old_call(rec, spec, w, rng)
+    _close_call(rec, t0, end, dur, rng, spec=spec, w=w)
+    return True
+
+
+def drop(rec, cause: int, rng: random.Random) -> bool:
+    """**연결된 호를 비정상 해제로 끊는다** — `spec.drop` 의 실측 모양.
+
+    call flow 는 성공했으므로 단계를 다시 밟지 않는다. 바꾸는 것은 호의 끝 —
+    eNB 가 `cause` 로 해제를 요청하고(First, msg 18) MME 가 해제한다(Last,
+    msg 23). 호 길이를 줄이고 그 끝에 둘을 놓는다.
+
+    연결되지 않은 호(`success_flag != 1`)는 손대지 않는다(`False`) — 절단은
+    접속된 호에만 있다(규칙 C-2·C-4).
+    """
+    d = _spec().drop
+    if str(rec.get("success_flag")) not in ("1", "True"):
+        return False
+    cts = d.get("call_types")
+    if cts and str(rec.get("call_type")) not in {str(c) for c in cts}:
+        return False
+    t0 = rec.num("call_start_time")
+    dur = rec.num("call_duration_time") / US
+    if not t0 or dur <= 0:
+        return False
+    # 절차가 끝난 뒤여야 한다 — 단계 합보다 먼저 끊을 수 없다.
+    floor = sum(rec.num(f"initial_{p}_duration") for p in PHASES) / US
+    lo, hi = (float(v) for v in d.get("duration_scale", (0.15, 0.6)))
+    t_req = t0 + max(floor + 0.01, dur * rng.uniform(lo, hi))
+    gap = ((d.get("request_gap_ms_by_cause") or {}).get(cause)
+           or d.get("request_gap_ms", (1, 12)))
+    g_lo, g_hi = (float(v) / 1000 for v in gap)
+    t_rel = t_req + rng.uniform(g_lo, g_hi)
+    m_req, m_rel = int(d.get("first_message", 18)), int(d.get("last_message", 23))
+    rec.set("drop_flag", 1)
+    rec.set("first_error_interface_protocol", 2)
+    rec.set("first_error_cause", cause)
+    rec.set("first_error_message", m_req)
+    rec.set("first_error_time", f"{t_req:.6f}")
+    for k, v in (("interface_protocol", 2), ("cause", cause), ("message", m_rel),
+                 ("time", f"{t_rel:.6f}")):
+        rec.set(f"last_error_{k}", v)
+    rec.set("s1ap_error_Cause", cause)
+    rec.set("s1ap_error_Message", m_rel)
+    rec.set("s1ap_error_Time", f"{t_rel:.6f}")
+    rec.set("UEContextReleaseRequest_Cause", cause)
+    rec.set("UEContextReleaseRequest_Time", f"{t_req:.6f}")
+    rec.set("UEContextRelease_Cause", cause)
+    rec.set("UEContextRelease_Time", f"{t_rel:.6f}")
+    # 직전 호 오류는 없다 — 실측 0/81. 절단은 재시도의 결과가 아니다.
+    rec.set("old_call_error_interface_protocol", "")
+    rec.set("old_call_error_cause", "")
+    us = int(math.ceil((t_rel - t0) * US))
+    rec.set("call_end_time", f"{t0 + us / US:.6f}")
+    rec.set("call_duration_time", us)
+    rec.set("SummaryCreateTime", f"{t0 + us / US + 0.05:.6f}")
+    return True
 
 
 def _fixtures(cfg: dict, data_dir: Path, seed: int):

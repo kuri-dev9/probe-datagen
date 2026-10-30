@@ -32,6 +32,12 @@ from datetime import datetime
 T_CONFIG = "CM_DATAGEN_CONFIG"
 T_FAULT = "CM_DATAGEN_FAULT"
 T_HISTORY = "CM_DATAGEN_HISTORY"
+#: 장애 시나리오 목록 — **화면·지도가 읽는 고정 목록이다** (2026-10-28).
+#: `CM_DATAGEN_*` 가 아닌 이유: 생성기 제어가 아니라 **장애 카탈로그**라
+#: graphio 지도·다른 화면도 같은 표를 본다(사용자 지정 이름).
+T_SCENARIO = "CM_ERROR_SCENARIO"
+#: 앱 사전 — 정의와 적재는 `apps` 가 갖고 DDL 만 여기 모은다
+from .apps import T_APP  # noqa: E402
 
 #: 주입 가능한 장애 종류 — **`scenarios.KIND_SPECS` 의 키와 1:1 이어야 한다.**
 #:
@@ -48,12 +54,103 @@ KINDS = (
     "mobility", "change_suspected", "ims_pdn", "nsa_nr_leg",
     # 하위 변형 3
     "gw_pgw_restart", "external_path_latency", "nsa_policy_restrict",
-    "anchor_saturation",
+    "anchor_saturation", "son_param_change", "ran_congestion",
+    "ho_interruption", "earthquake", "cdn_degradation", "pay_dns_delay",
+    "event_crowd",
     # 신규 8종
     "auc_no_response", "dra_route_failure", "s6a_undetermined",
     "pgw_uplane_degradation", "enb_s1_outage", "partial_recovery",
     "apn_pdn_failure", "dns_flap", "compound_causal_failure",
+    # 장애가 아닌 재현 — 증설 후 부하 이동(`j-sc-24`)
+    "capacity_shift",
 )
+
+#: **장애 시나리오 고정 목록** — `CM_ERROR_SCENARIO` 의 정본 (2026-10-28).
+#:
+#: `(번호, 이름, 장애 종류, 같은 데이터 원본 번호, 발생 장비, 설명)`.
+#: 장애 종류가 `None` 이면 준비 중이다. **발생 장비**는 그 시나리오를 걸 수
+#: 있는 장비 종류이고 DB 에서는 장비마다 `*_YN` 마스크로 풀린다 — 지도에서
+#: 장비를 찍으면 그 장비가 `Y` 인 시나리오만 보인다. 걸면 주입 API 의
+#: `TARGET` 이 `MME-n`·`SGW-n`·`PGW-n`·`ENB:n` 이 되고, 생성기는 그 장비에
+#: 물린 셀의 호만 변형한다(`pemdb1` 의 `active_cells_cache` 조건).
+#:
+#: 장비 배정 근거(사용자 결정 2026-10-28):
+#:   * MME·SGW 장애는 그 장비에서 난다.
+#:   * S6a 인증 거절은 MME–HSS 구간 문제라 그 아래 SGW·eNB 도 함께 받는다.
+#:   * DNS 열화·외부 서버 5xx 는 SGW(사용자 평면 경로) 단위.
+#:   * 단말 기종은 가입자 축인데 가입자 단위로 걸 수 없다 — SGW 아래 여러
+#:     셀에 흩어져 나게 한다(`R-10` 의 "지리 흩어짐" 조건).
+#:   * IMS 는 IMS PGW 문제지만 PGW 번호를 SGW 와 같게 쓰므로(구 SPGW) SGW 로 건다.
+#:   * 무선·전송·NR·핸드오버 계열은 eNB.
+SCENARIOS: tuple[tuple[int, str, str | None, int | None, tuple[str, ...], str], ...] = (
+    (1, "SGW 자원 소진", "gw_resource", None, ("SGW",),
+     "S11 Create Session 이 73(No resources)으로 거절된다 — 하류 ESM 26"),
+    (2, "무선 구간 열화", "ran_radio", None, ("ENB",),
+     "접속 지연 증가 + Context Setup 실패(125/126) + 무선 절단(121)"),
+    (3, "SGW 노드 무응답", "gw_node_down", None, ("SGW",),
+     "S11 재전송 타임아웃(First 900) — 결국 거절 응답, 하류 ESM 30"),
+    (4, "인증(S6a) 거절", "auth_failure", None, ("MME", "SGW", "ENB"),
+     "MME–HSS 구간 인증 거절 — 정답지 Result-Code 구성비, 해제 301"),
+    (5, "DNS 열화", "dns_degradation", None, ("SGW",),
+     "DNS 응답 지연·실패 증가 — 도메인 자동 선택"),
+    (6, "외부 서버 5xx", "external_server", None, ("SGW",),
+     "특정 도메인 HTTP 5xx 증가 — 망 지표는 정상"),
+    (7, "전송망 손실", "transport_loss", None, ("ENB",),
+     "down 재전송·RTT 증가 — C-Plane 은 정상"),
+    (8, "특정 단말 기종", "ue_model", None, ("SGW",),
+     "한 기종만 접속 실패 — SGW 아래 여러 셀에 흩어져 난다"),
+    (9, "핸드오버 이상", "mobility", None, ("ENB",),
+     "셀 쌍 Path Switch 실패 + 핸드오버 절단(106)"),
+    (10, "MME 과부하", "mme_overload", None, ("MME",),
+     "지연 증가 + Context Setup 실패·절단(500) — 확산형"),
+    (11, "작업/변경 의심 (MME×APN)", "change_suspected", None, ("MME",),
+     "그 MME 의 한 APN 만 S11 68 → ESM 30 — 계단형"),
+    (12, "IMS PDN 이상", "ims_pdn", None, ("SGW", "PGW"),
+     "IMS 접속만 실패, 데이터는 정상"),
+    (13, "NSA NR leg 실패", "nsa_nr_leg", None, ("ENB",),
+     "5G NSA 단말의 NR 레그 미성립"),
+    (14, "도심 역 저녁 러시 Sub6 혼잡", "ran_congestion", None, ("ENB",),
+     "상위 트래픽 셀 8개 활성 가입자 최대 1.8배 + 처리율·RTT 악화·정체 — CP 정상"),
+    (15, "야마노테선 구간 4G↔5G 전환 정체", "ho_interruption", None, ("ENB",),
+     "코리도 셀 쌍에서 전환 직후 3–8초 down 정체 + NR 레그 해제 — CP 정상"),
+    (16, "앵커 고착 — 안테나는 서는데 느리다", "anchor_saturation", None, ("ENB",),
+     "LTE 앵커 경합으로 5G 체감 저하"),
+    (17, "SA→LTE 폴백 급증", None, None, (), "보류 — XDR 에 SA 판정 근거가 없다"),
+    (18, "SA UPF 자원 소진 → EPC 재현", "gw_resource", 1, ("SGW",),
+     "1번과 같은 데이터 — UPF 라고 주장하지 않는다"),
+    (19, "AMF 과부하 확산 → EPC 재현", "mme_overload", 10, ("MME",),
+     "10번과 같은 데이터 — AMF 라고 주장하지 않는다"),
+    (20, "VoNR / EPS Fallback 음성 접속 → IMS 접속 장애 재현", "ims_pdn", 12,
+     ("SGW", "PGW"), "12번과 같은 데이터 — 음성 분기를 주장하지 않는다"),
+    (21, "동영상 CDN 서버측 열화", "cdn_degradation", None, ("SGW",),
+     "동영상 CDN 호스트 사이트 하나가 느리게 답한다 — HTTP 응답 지연·처리율 하락, 망은 정상"),
+    (22, "결제 앱 응답 지연 (DNS 기인)", "pay_dns_delay", None, ("SGW",),
+     "결제 등급 도메인만 DNS 응답시간 상승(일부 실패) — 도메인 패턴으로 등급 판정"),
+    (23, "대형 이벤트 일시 군중 혼잡 + 업링크", "event_crowd", None, ("ENB",),
+     "행사장 셀 8개 활성 가입자 3배·2시간 + 업로드 급증으로 업링크 처리율·RTT 악화"),
+    # 24 는 **장애가 아니다**(2026-10-29) — 정답 원인이 `—`(효과 검증)이고
+    # 판정 자리가 스펙 §8.3 투자 효과 검증이다. 그래서 채점에서 빠진다
+    # (`write_truth`). 대상은 설정(`pemdb1.capacity_shift`)이 고정하므로
+    # 발생 장비가 없다 — 지도에서 고른 eNB 에 걸리는 것처럼 보이면 안 된다.
+    (24, "기지국 증설 후 부하 이동", "capacity_shift", None, (),
+     "30분 고정 — A eNB 에 10분간 호가 몰려 혼잡 → 소등 eNB(B) 개통, "
+     "A 40 · B 60 으로 나뉘며 A 회복 → 10분 분석 뒤 B 소등. 채점 제외"),
+    (25, "SON 파라미터 변경 후 계단형 저하", "son_param_change", None, ("ENB",),
+     "그 eNB 의 셀 쌍 핸드오버 실패가 계단으로 선다"),
+    (26, "특정 단말 SW 업데이트 후 등록 실패 → 기종 장애 재현", "ue_model", 8,
+     ("SGW",), "8번과 같은 데이터 — SW 버전 필드가 XDR 에 없다"),
+    (27, "지진 — 국지 다수 셀 정지 + 주변 부하 유입", "earthquake", None, ("ENB",),
+     "지역 셀 25개 중 40% 정지 — 그 가입자가 이웃 셀로 옮겨 붙고 주변이 혼잡해진다"),
+)
+
+#: **증거 없음** — 데이터에 그 장애를 판정할 근거 필드가 없어 만들지 않는 번호.
+#: "준비 중"(아직 안 만들었다)과 다르다. 이쪽은 만들면 근거 없는 주장이 된다 —
+#: 18~20번이 "UPF·AMF 라고 주장하지 않는다"로 남은 것과 같은 결이다.
+#: 화면은 `STATUS='NO_EVIDENCE'` 를 "증거 없음"으로 그린다(2026-10-29).
+NO_EVIDENCE = frozenset({17})
+
+#: `CM_ERROR_SCENARIO` 의 장비 마스크 컬럼 — 순서가 곧 화면 표기 순서다.
+SCENARIO_EQUIP = ("MME", "SGW", "PGW", "ENB")
 
 #: 상태 전이: pending → active → done. cancelled 는 pending/active 어디서든.
 DDL = f"""
@@ -111,6 +208,45 @@ CREATE TABLE IF NOT EXISTS `{T_HISTORY}` (
   KEY `IX_CM_DATAGEN_HISTORY_SLOT` (`EVENT_TIME`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_general_ci
   COMMENT='분 단위 생성 이력 — 제어 화면의 인입 현황';
+
+-- ── CM_ERROR_SCENARIO ───────────────────────────────────────────────────────
+-- 장애 시나리오 고정 목록. **정본은 `control.SCENARIOS` 이고 `ensure_tables`
+-- 가 매번 덮어쓴다** — 손으로 고친 값은 다음 기동에 사라진다. 화면·지도는
+-- 읽기만 한다. 발생 장비를 한 칸에 몰지 않고 장비마다 마스크(`*_YN`)로 둔다
+-- — 다른 화면이 "이 장비에 걸 수 있는 시나리오" 를 `WHERE SGW_YN='Y'` 로 고른다.
+CREATE TABLE IF NOT EXISTS `{T_SCENARIO}` (
+  `SCENARIO_NO`    int          NOT NULL             COMMENT '화면 번호 1~27',
+  `SCENARIO_NAME`  varchar(100) NOT NULL,
+  `FAULT_KIND`     varchar(32)      DEFAULT NULL     COMMENT '주입 API 의 kind (CM_DATAGEN_FAULT.FAULT_KIND). NULL = 준비 중',
+  `SAME_AS_NO`     int              DEFAULT NULL     COMMENT '같은 데이터를 쓰는 원본 시나리오 번호 (DOWNGRADE)',
+  `STATUS`         varchar(12)  NOT NULL             COMMENT 'READY | PENDING | NO_EVIDENCE',
+  `MME_YN`         varchar(1)   NOT NULL DEFAULT 'N' COMMENT 'MME 에 걸 수 있다 → TARGET MME-n',
+  `SGW_YN`         varchar(1)   NOT NULL DEFAULT 'N' COMMENT 'SGW 에 걸 수 있다 → TARGET SGW-n',
+  `PGW_YN`         varchar(1)   NOT NULL DEFAULT 'N' COMMENT 'PGW 에 걸 수 있다 → TARGET PGW-n',
+  `ENB_YN`         varchar(1)   NOT NULL DEFAULT 'N' COMMENT 'eNB 에 걸 수 있다 → TARGET ENB:n',
+  `DESCRIPTION`    varchar(500)     DEFAULT NULL,
+  `UPDATED_TIME`   datetime     NOT NULL,
+  PRIMARY KEY (`SCENARIO_NO`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_general_ci
+  COMMENT='장애 시나리오 고정 목록 · 발생 장비 마스크 — 정본 control.SCENARIOS';
+CREATE TABLE IF NOT EXISTS `{T_APP}` (
+  `APP_IDX`         varchar(20)  NOT NULL             COMMENT '앱 코드 → XDR App_ID',
+  `ENDPOINT_SEQ`    int          NOT NULL DEFAULT 1   COMMENT '앱 안의 엔드포인트 번호 — 앱 하나에 IP·포트가 여럿일 수 있다',
+  `APP_NAME`        varchar(100) NOT NULL,
+  `GROUP_CODE`      varchar(50)  NOT NULL             COMMENT '앱 그룹 → XDR App_Group_Code (STREAMING·PAY·SNS…)',
+  `APP_TYPE`        varchar(20)      DEFAULT NULL     COMMENT '엔드포인트 성격 (API·CDN·WEB…)',
+  `PROTOCOL`        int              DEFAULT NULL     COMMENT 'IP 프로토콜 번호 (6 TCP · 17 UDP)',
+  `IP`              varchar(45)      DEFAULT NULL     COMMENT 'CIDR (192.168.49.26/32) → XDR App_IPv4. NULL = 도메인으로 매핑되는 앱',
+  `PORT`            int              DEFAULT NULL     COMMENT '→ XDR App_Port. NULL 이면 생성기가 443 으로 낸다',
+  `DOMAIN`          varchar(500)     DEFAULT NULL     COMMENT '도메인 목록 (| 구분) — DNS 질의명·HTTP Host 를 앱에 잇는다',
+  `DESCRIPTION`     varchar(500)     DEFAULT NULL,
+  `WEIGHT`          double       NOT NULL DEFAULT 1   COMMENT '생성 비중 (gen 전용) — 세션이 이 앱을 고를 상대 확률',
+  `USE_YN`          varchar(1)   NOT NULL DEFAULT 'Y',
+  `UPDATED_TIME`    datetime     NOT NULL,
+  PRIMARY KEY (`APP_IDX`, `ENDPOINT_SEQ`),
+  KEY `IX_APP_ENDPOINT` (`PROTOCOL`, `IP`, `PORT`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_general_ci
+  COMMENT='앱 사전 — Protocol·IP·Port 또는 도메인 → 앱. 사람이 관리한다(apps.import_csv)';
 """
 
 
@@ -158,7 +294,45 @@ def ensure_tables(conn) -> None:
                 "AND column_name = %s", [table, column])
             if not cur.fetchone()[0]:
                 cur.execute(f"ALTER TABLE `{table}` ADD COLUMN `{column}` {ddl}")
+    seed_scenarios(conn)
+    # 앱 사전은 **넣지 않는다** — 원본이 사람이 준 CSV 다(`apps.import_csv`)
     conn.commit()
+
+
+def seed_scenarios(conn) -> None:
+    """`SCENARIOS` 를 `CM_ERROR_SCENARIO` 에 **그대로** 맞춘다.
+
+    목록에서 빠진 번호는 지운다 — 남기면 화면에 유령 시나리오가 뜬다.
+    """
+    now = datetime.now()
+    rows = []
+    for no, name, kind, same, equip, desc in SCENARIOS:
+        if kind is not None and kind not in KINDS:
+            raise ValueError(f"SCENARIOS #{no}: 모르는 kind {kind!r}")
+        rows.append([no, name, kind, same, ("READY" if kind
+                     else "NO_EVIDENCE" if no in NO_EVIDENCE else "PENDING"),
+                     *("Y" if e in equip else "N" for e in SCENARIO_EQUIP),
+                     desc, now])
+    with conn.cursor() as cur:
+        cur.executemany(
+            f"REPLACE INTO {T_SCENARIO} (SCENARIO_NO, SCENARIO_NAME, FAULT_KIND, "
+            "SAME_AS_NO, STATUS, MME_YN, SGW_YN, PGW_YN, ENB_YN, DESCRIPTION, "
+            "UPDATED_TIME) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", rows)
+        cur.execute(
+            f"DELETE FROM {T_SCENARIO} WHERE SCENARIO_NO NOT IN "
+            f"({','.join(['%s'] * len(rows))})", [r[0] for r in rows])
+
+
+def list_scenarios(conn) -> list[dict]:
+    """화면·지도용 — 번호 순."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT SCENARIO_NO AS no, SCENARIO_NAME AS name, FAULT_KIND AS kind, "
+            "SAME_AS_NO AS same_as, STATUS AS status, MME_YN AS mme, "
+            "SGW_YN AS sgw, PGW_YN AS pgw, ENB_YN AS enb, DESCRIPTION AS description "
+            f"FROM {T_SCENARIO} ORDER BY SCENARIO_NO")
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
 def add_fault(conn, kind: str, target: str | None, start_ts: datetime,
@@ -166,6 +340,13 @@ def add_fault(conn, kind: str, target: str | None, start_ts: datetime,
               mode: str = "manual", note: str | None = None) -> int:
     if kind not in KINDS:
         raise ValueError(f"알 수 없는 kind: {kind!r} — {', '.join(KINDS)}")
+    if kind == "capacity_shift":
+        # **길이를 여기서 고정한다** — `faults.build` 에서만 30분으로 늘리면
+        # `poll_transitions` 가 행의 `DURATION_MIN`(화면 기본 10분)으로 장애를
+        # 끝내, B 가 켜지는 순간 시나리오가 내려간다. 화면·지도·CLI 어느
+        # 경로로 들어와도 이 함수를 지난다.
+        from .scenarios import SHIFT_TOTAL
+        duration_min = SHIFT_TOTAL
     now = datetime.now()
     with conn.cursor() as cur:
         cur.execute(

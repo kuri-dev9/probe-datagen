@@ -117,6 +117,47 @@ steps:
     # 없는 필드를 만들지 않는다.
     error_prefix: s11
     error_message: 33        # CREATE_SESSION_RESPONSE
+    # **First 는 요청 메시지다.** 정답지 S11 First 33호(ct 1·3·4)가 전부
+    # `first_error_message = 32`(CREATE_SESSION_REQUEST)이고 같은 호의
+    # `s11_error_Message` 는 `33` 이다 — 구간은 받은 응답을, First 는 그
+    # 절차를 연 요청을 가리킨다.
+    first_message: 32
+    # ── 이 단계에서 끊긴 호의 **실측 서명** (2026-10-28) ────────────────
+    #
+    # 상용 스냅숏 R1(시도 40,024호)의 S11 세션 실패 8호와 FAIL 표본 8호가
+    # Cause(`72`·`73`·`900`)와 무관하게 **같은 꼴**이다 —
+    #
+    #                     Attach 성공    S11 세션 실패
+    #     core 구간 시간      358ms       1.4~2.0초 (재전송)
+    #     core 메시지          3          5
+    #     PGW_ID              절반 0      **전부 0** — 세션이 안 만들어졌다
+    #     직전 호 오류          0%        **100% 같은 S11·같은 Cause** (재시도)
+    #
+    #     ULR ─(0.4~1.1s)→ First(요청 32) ─(0.2~0.55s)→ S11 응답(33)
+    #                                         = 하류 = 해제 = 호 끝   (8/8 같은 시각)
+    #
+    # 이게 없으면 조합·Cause 는 맞는데 **호가 7ms 만에 실패하고 12초 동안
+    # 이어지는** 레코드가 된다.
+    on_fail:
+      core_us: [900000, 3000000]       # 실측 중앙 1.4~2.0초 — 로그 균등 중앙 1.64초
+      core_msgs: 5
+      response_gap: [0.20, 0.55]
+      pgw_from_sgw: true               # 실측 0 → SGW 번호 (SPGW 한 노드)
+      old_call_same: 1.0
+      end_at_response: true
+      # **서비스 호는 꼴이 다르다** (FAIL+R1 ct 3·4 의 S11 실패 12호) —
+      #     core 2~120ms · 메시지 1 (재전송 없음) · 응답 간격 0.12~0.28초
+      #     호는 응답 뒤로 ~10초 이어진다 · 직전 호 오류 0/12
+      by_call_type:
+        3: &svc_s11
+          core_us: [2000, 150000]
+          core_msgs: 1
+          response_gap: [0.12, 0.28]
+          old_call_same: 0.0
+          old_call_clear: true
+          end_at_response: false
+          tail_s: [3.0, 25.0]            # 응답 → 호 끝 (실측 3.1~19.6초)
+        4: *svc_s11
 
   ctxsetup:
     phase: access
@@ -125,6 +166,19 @@ steps:
     weight: 0.4
     error_prefix: s1ap
     error_message: 9         # INITIAL_CONTEXT_SETUP_FAILURE
+    # ── 실측 서명 (R1·FAIL 의 Context Setup 실패 msg 9 · 2026-10-28) ──
+    #
+    #     access 2.0~6.0초 — eNB 무선 타이머가 끝나야 실패가 난다
+    #     Last = 해제 = 호 끝 (대부분)
+    #     Attach: 직전 호도 같은 S1AP 오류가 잦다 · 서비스: 직전 호 오류 없음
+    on_fail:
+      access_us: [2000000, 6000000]
+      response_gap: [0.0005, 0.08]     # First(msg 9) → 해제(msg 23) 0~73ms
+      end_at_response: true            # 해제가 곧 호 끝 (예외 1건만 6초 뒤)
+      old_call_same: 0.5
+      by_call_type:
+        3: {old_call_same: 0.0, old_call_clear: true}
+        4: {old_call_same: 0.0, old_call_clear: true}
 
   s10ctx:
     phase: core
@@ -314,9 +368,31 @@ downstream_map:
 #
 # ULR 실패 8호는 전부 `302` 다 — 가입정보 거절은 정상 해제로 닫힌다.
 fail_release:
-  auth: {301: 0.78, 302: 0.22}
+  # **타임아웃 몫을 걷어낸 값이다.** 전에는 `{301: 0.78, 302: 0.22}` 였는데
+  # 그 18호에 타임아웃 3호가 섞여 있었다 — 그쪽은 전부 `302` 라 거절의
+  # `302` 비율을 3배로 부풀리고 있었다. 거절만 세면 `301` 14 · `302` 1 이다.
+  auth: {301: 0.93, 302: 0.07}
   ulr:  {302: 1.0}
-  mecheck: {302: 1.0}
+  # 정답지의 S13 오류 1건이 `UEContextRelease_Cause = 301` 이다 — EIR 이
+  # 거절하면 인증 실패와 같은 자리로 닫힌다(둘 다 가입자 자격 문제다).
+  mecheck: {301: 1.0}
+  # 페이징 무응답은 **정상 해제**다. `300` 은 `codes.S1AP_NORMAL_CAUSES`
+  # 에 있으므로 `last_error` 가 되지 않는다(불변규칙 6).
+  paging: {300: 1.0}
+
+# ── 타임아웃은 다르게 닫힌다 ─────────────────────────────────────────────
+#
+# **거절과 무응답이 같은 자리로 닫히지 않는다.** 위 `auth` 는 `301`
+# (Authentication Failure)이 78% 인데, 그것은 HSS 가 **거절을 보냈을** 때다.
+# 답이 아예 없으면 MME 가 보낼 Authentication Failure 도 없다 — 정답지의
+# `AuthenticationInformation_Cause = 900` 3호가 **전부 `302`(Detach)** 이고
+# `s1ap_error_Cause` 가 비어 있다.
+#
+# 이 표가 없으면 타임아웃 호의 78% 가 S1AP 301 로 닫혀, **보낸 적 없는
+# 메시지**가 레코드에 남는다.
+fail_release_timeout:
+  auth: {302: 1.0}
+  paging: {300: 1.0}
 
 # ── 직전 호 — **실패 호에서만 의미가 있다** ───────────────────────────────
 #
@@ -337,6 +413,32 @@ fail_release:
 # 실측 근거 주석이 없고 정답지는 `0.574` · `0.93` 을 말한다. 데이터셋은
 # 정답지를 따르고, **런타임을 고칠지는 사람이 판단한다**(`OLD_FAIL_CNT`·
 # `OLD_SAME_IFACE` 두 컬럼의 수준이 세 배로 움직인다).
+# ── 연결 후 절단 — **call flow 는 성공했고 해제가 비정상이다** ───────────────
+#
+# 실측 R1 81호(`drop_flag = 1`)가 예외 없이 같은 꼴이다 —
+#
+#     First = S1AP `C` · msg 18 (UEContextReleaseRequest) = eNB 요청 시각
+#     Last  = S1AP `C` · msg 23 (UEContextRelease) = 해제 = 호 끝   1~11ms 뒤
+#     s1ap_error = `C` · msg 23 · `rreq = rel = C`
+#     절단은 호의 **맨 끝**이다. 대신 호가 짧다 — 중앙 3.3초 (평시 11.3초)
+#     직전 호 오류 0/81
+#
+# `success_flag` 는 그대로 `1` 이다 — 접속은 됐다. 절단(`C-03`)과 접속
+# 실패(`C-02`)를 한 레코드에 두지 않는다(규칙 C-2).
+drop:
+  # **절단이 실리는 절차** — R1 절단 157호: ct3 130 · ct4 24 · ct1 2 · ct5 1.
+  # Extended Service(7·8)·Paging(6)·Reroute(11) 등은 0 이다.
+  call_types: [1, 3, 4, 5]
+  first_message: 18
+  last_message: 23
+  request_gap_ms: [1, 12]
+  # **전송 자원 부족은 해제가 늦다** — S1AP `200` 절단 2호(R1·FAIL 중복
+  # 제외)의 요청→해제가 0.74초·3.61초다. 망이 eNB 에 닿지 못해 해제
+  # 응답이 지체되는 모양이다.
+  request_gap_ms_by_cause:
+    200: [700, 3700]
+  duration_scale: [0.15, 0.6]
+
 old_call:
   fail_share: 0.574
   same_iface: 0.93
@@ -355,8 +457,35 @@ faults:
   auth_reject:
     title: "S6a 인증 거절 (AIA 오류 Result-Code)"
     break_at: auth
-    # 5012 UNABLE_TO_COMPLY · 5030 ERROR_USER_UNKNOWN · 3004 TOO_BUSY
-    causes: {5012: 0.5, 5030: 0.3, 3004: 0.2}
+    # **정답지 인증 단계 15호의 실측 구성비다**(`Authentication_Cause` 가
+    # `2001` 도 `0` 도 아닌 호. 타임아웃 `900` 3호는 `auth_timeout` 소관):
+    #
+    #     15001  4    5003  4    15420  2    14181  2    5012  2
+    #
+    # 전에는 `{5012, 5030, 3004}` 였다 — **가장 흔한 둘(`15001`·`5003`)이
+    # 통째로 빠져 있었다.** `15001`(Experimental `5001` USER_UNKNOWN)은
+    # 정답지 최다인데 한 건도 만들지 못했다.
+    #
+    # `5030`·`3004` 는 정답지에 없지만 코드 표에 있어 소량 남긴다 —
+    # 204호 표본이 작아 "프로브가 안 쓴다" 까지는 말할 수 없다.
+    #
+    # 15001 USER_UNKNOWN(Exp) · 5003 AUTHORIZATION_REJECTED
+    # · 15420 UNKNOWN_EPS_SUBSCRIPTION(Exp) · 14181 AUTH_DATA_UNAVAILABLE(Exp)
+    # · 5012 UNABLE_TO_COMPLY · 5030 USER_UNKNOWN · 3004 TOO_BUSY
+    # 정답지의 S6a 장애 23호는 **전부 Attach MO(ct 1)** 다. TAU 에도 인증·ULR
+    # 단계가 있어 막지 않으면 하류 EMM 이 `75 TAU_REJECT` 로 찍힌다.
+    call_types: [1]
+    # 시뮬레이션 확장 — 평시 호가 인증을 붙이는 절차 전부(`Fault.inject_call_types`)
+    inject_call_types: [1, 2, 3, 4, 5, 7, 8]
+    causes: {15001: 0.26, 5003: 0.26, 15420: 0.13, 14181: 0.13, 5012: 0.13,
+             5030: 0.05, 3004: 0.04}
+    # **`302` 는 `5012` 에만 있다.** 정답지 인증 거절 15호 중 `302` 로 닫힌
+    # 1호가 `5012` 이고(`5012` 인증 갈래 2호 = `301` 1 · `302` 1), 나머지
+    # Cause 는 전부 `301` 이다. `fail_release.auth` 의 7% 를 모든 Cause 에
+    # 뿌리면 정답지에 없는 조합이 생긴다.
+    release: {301: 1.0}
+    release_by_cause:
+      5012: {301: 0.5, 302: 0.5}
     # `downstream` 을 적지 않는다 — `downstream_map` 이 Cause 마다 고른다.
     source: "scenarios._auth_failure (SC-04)"
 
@@ -366,6 +495,11 @@ faults:
     # 900 = `codes.TIMEOUT_CAUSE`. **`901`·`902` 와 다르다** — 저 둘은
     # 적을 메시지가 없어 `first_error_interface_protocol = 0` 이고,
     # `900` 은 보낸 요청이 있어 구간이 들어온다(codes.py 머리말).
+    # 정답지의 S6a 장애 23호는 **전부 Attach MO(ct 1)** 다. TAU 에도 인증·ULR
+    # 단계가 있어 막지 않으면 하류 EMM 이 `75 TAU_REJECT` 로 찍힌다.
+    call_types: [1]
+    # 시뮬레이션 확장 — 평시 호가 인증을 붙이는 절차 전부(`Fault.inject_call_types`)
+    inject_call_types: [1, 2, 3, 4, 5, 7, 8]
     causes: {900: 1.0}
     timeout: true
     source: "scenarios._auc_no_response (SC-14)"
@@ -374,7 +508,13 @@ faults:
     title: "S6a 라우팅 계층 이상 (Diameter 3xxx)"
     break_at: auth
     # 3002 UNABLE_TO_DELIVER · 3004 TOO_BUSY · 3005 LOOP_DETECTED
+    # 정답지의 S6a 장애 23호는 **전부 Attach MO(ct 1)** 다. TAU 에도 인증·ULR
+    # 단계가 있어 막지 않으면 하류 EMM 이 `75 TAU_REJECT` 로 찍힌다.
+    call_types: [1]
+    # 시뮬레이션 확장 — 평시 호가 인증을 붙이는 절차 전부(`Fault.inject_call_types`)
+    inject_call_types: [1, 2, 3, 4, 5, 7, 8]
     causes: {3002: 0.4, 3004: 0.35, 3005: 0.25}
+    release: {301: 1.0}               # 정답지 인증 갈래 `3002` 1호 = `301`
     source: "scenarios._dra_route_failure (SC-15)"
 
   # **기존 시나리오에 없던 것.** `first_error_interface_protocol = 8` 이
@@ -389,16 +529,46 @@ faults:
     # `schema/codes.DIAMETER_CAUSE`)에 없다. 규격서가 정본이고, 표 밖의
     # 코드를 쓰면 `H-17`(미정의 코드 출현률)이 오르며 화면이 `UNKNOWN` 으로
     # 적는다 — **의미가 더 정확한 코드를 쓰려다 그 호가 무엇인지 잃는다.**
+    # 정답지의 S6a 장애 23호는 **전부 Attach MO(ct 1)** 다. TAU 에도 인증·ULR
+    # 단계가 있어 막지 않으면 하류 EMM 이 `75 TAU_REJECT` 로 찍힌다.
+    call_types: [1]
     causes: {5003: 0.6, 5004: 0.4}
-    downstream: {iface: 5, cause: 5, prefix: emm}   # EMM 5 IMEI not accepted
+    # **하류를 적지 않는다** — `downstream_map` 이 Cause 마다 고른다.
+    # 전에는 `EMM 5 IMEI not accepted` 로 못 박았는데 정답지에 `EMM 5` 가
+    # 한 건도 없다. S13 오류 1건은 `MEIdentityCheck_Cause = 5012` 이고
+    # 하류가 `emm 17` 이다 — **거절 사유가 IMEI 불량이라고 단정할 근거가
+    # 없다.** 블랙리스트든 EIR 과부하든 같은 Result-Code 로 온다.
 
   # 〃 — `UpdateLocation_Cause` 는 평시 배경만 쓰고 장애 주입이 없었다.
   updatelocation_reject:
     title: "S6a 가입정보 거절 (ULA 오류)"
     break_at: ulr
-    # 5420 ERROR_UNKNOWN_EPS_SUBSCRIPTION · 5421 ERROR_RAT_NOT_ALLOWED
-    # · 5004 INVALID_AVP_VALUE
-    causes: {5420: 0.5, 5421: 0.3, 5004: 0.2}
+    # **Experimental-Result-Code 는 `+10000` 으로 적는다**(AVP 298). 정답지가
+    # `15420`·`15421`·`15004` 로만 나오고 맨값 `5420` 은 한 건도 없다.
+    #
+    # 맨값을 쓰면 `downstream_map` 이 **못 찾아서** 하류가 안 붙고
+    # `last_error == first_error` 가 된다 — 정답지의 `iface=1` 23건은
+    # first==last 가 **0건**이다. 에러는 나지 않고 조합만 틀린다.
+    #
+    # `15004` 는 `ROAMING_NOT_ALLOWED` 다 — 맨값 `5004 INVALID_AVP_VALUE`
+    # 와 **뜻이 다르다.** ULA 맥락에서는 로밍 거절이 맞다.
+    #
+    # 정답지 ULR 단계 8호(`UpdateLocation_Cause` 가 `2001` 도 `0` 도 아닌 호):
+    #
+    #     15004  2    5012  2    15421  2    3002  1    15420  1
+    #
+    # **`5012`·`3002` 도 여기서 난다** — HSS 가 어느 요청에든 낼 수 있는
+    # Result-Code 라 인증 단계와 ULR 단계 양쪽에 나타난다. 한쪽에만 두면
+    # `first_error` 는 같은데 `Authen`/`Update` 중 어디가 차 있느냐로
+    # 갈리는 실제 모양이 재현되지 않는다.
+    #
+    # 15420 UNKNOWN_EPS_SUBSCRIPTION · 15421 RAT_NOT_ALLOWED
+    # · 15004 ROAMING_NOT_ALLOWED · 5012 UNABLE_TO_COMPLY
+    # · 3002 UNABLE_TO_DELIVER
+    # 정답지의 S6a 장애 23호는 **전부 Attach MO(ct 1)** 다. TAU 에도 인증·ULR
+    # 단계가 있어 막지 않으면 하류 EMM 이 `75 TAU_REJECT` 로 찍힌다.
+    call_types: [1]
+    causes: {15004: 0.25, 5012: 0.25, 15421: 0.25, 3002: 0.125, 15420: 0.125}
     # 하류는 `downstream_map` 이 Cause 마다 고른다.
 
   session_resource:
@@ -406,7 +576,85 @@ faults:
     break_at: session
     causes: {73: 1.0}                 # No resources available
     downstream: {iface: 6, cause: 26, prefix: esm}   # ESM 26 Insufficient resources
+    # **해제를 적지 않으면 평시 분포에서 뽑힌다** — 실패한 호가 `126`·`504`
+    # 같은 무선 사유로 닫히고 있었다. 정답지 3호 전부 Attach MO · `302`.
+    # **서비스 호(3·4)에도 건다.** 정답지의 `73` 은 Attach 3호뿐이지만,
+    # 생성기의 Attach 는 분당 5호(전국)라 SGW 한 대에 몰면 1분 표본 20 을
+    # 못 채운다(불변규칙 5). 서비스 호의 S11 실패는 실측에 꼴이 있다 —
+    # `(3,68)`·`(3,93)`·`(3,900)` 12호.
+    call_types: [1, 3, 4]
+    release_by_call_type:
+      1: {causes: {302: 1.0}}                       # MME 가 닫는다
+      3: {causes: {120: 0.75, 504: 0.25}, request: true}   # eNB 가 요청(8호 중 6·2)
+      4: {causes: {120: 0.75, 504: 0.25}, request: true}
     source: "scenarios._gw_resource (SC-01)"
+
+  s11_reject_svc:
+    title: "S11 세션 거절 — 서비스 호 (GW 가 거절 응답)"
+    break_at: session
+    # **정답지의 서비스 호 S11 거절은 `68` 6호 · `93` 1호다** (`s11_reject`
+    # 의 정답지는 전부 Attach). `68` 6호는 **전부 한 APN**(로밍 APN 하나 ·
+    # `PGW_ID = 0`)이라 "그 APN 라우팅이 틀려 GW 가 서비스를 거절" 한
+    # 모양이다 — SC-11(MME × APN 설정 오변경)이 이것을 쓴다.
+    #
+    # `72` 는 정답지에서 Attach 뿐이다. SC-03b 가 서비스 호에 싣는 것은
+    # `session_resource` 의 `73` 과 같은 확장이다 — 생성기의 Attach 는
+    # 분당 5호(전국)라 노드 하나에 몰아도 표본이 서지 않는다.
+    call_types: [3, 4]
+    causes: {68: 1.0}                 # 기본은 정답지 다수. 시나리오가 `cause=` 로 고른다
+    # 하류는 응답 Cause 를 따른다 — `68`·`72` → ESM 30 · `93` → ESM 33
+    # (정답지 6호·1호 · `s11_reject` 와 같은 대응)
+    downstream_by_cause:
+      68: {iface: 6, cause: 30, prefix: esm}
+      72: {iface: 6, cause: 30, prefix: esm}
+      78: {iface: 6, cause: 27, prefix: esm}   # SC-19 확장 — 정답지는 Attach 4호
+      93: {iface: 6, cause: 33, prefix: esm}
+    # 시간 모양은 `session` 단계의 서비스 호 갈래(`svc_s11`)를 그대로 받는다 —
+    # 응답 뒤 호가 이어져 eNB 요청으로 닫힌다(`68` 6호: `120` 5 · `504` 1).
+    release_by_call_type:
+      3: {causes: {120: 0.80, 504: 0.20}, request: true}
+      4: {causes: {120: 0.80, 504: 0.20}, request: true}
+    source: "scenarios._change_suspected (SC-11) · _gw_pgw_restart (SC-03b) · _apn_pdn_failure (SC-19)"
+
+  # ── S11 재전송 타임아웃 — First 는 `900`, 구간은 결국 받은 거절 응답 ──
+  #
+  # 정답지 S11 `900` 10호(Attach 8 · 서비스 3 — 중복 1)가 **전부** 이 꼴이다:
+  #
+  #     First       (3, 900, msg 32 요청)
+  #     s11 구간    응답 Cause (72 ×4 · 92 ×3 · 68 ×2 · 93 ×1), msg 33 응답
+  #     하류        응답을 따른다 — 72·68 → ESM 30 · 92 → EMM 15 · 93 → ESM 33
+  #     Attach      해제 302 · Last = 호 끝 · 직전 호 (3, 900) 8/8
+  #     서비스      eNB 요청 120 (3/3) · 호가 이어진다
+  #
+  # **SGW 무응답(SC-03)의 하류는 ESM 30 만 쓴다** — 2026-10-22 사용자 조건부
+  # 승인. EMM 15(No Suitable Cells)는 SGW 장애와 뜻이 맞지 않아 판정을
+  # 흐린다. 그래서 응답 Cause 를 하류가 ESM 30 인 둘(Attach `72` · 서비스
+  # `68`)로 좁히고, 하류 없는 갈래를 30% 남긴다(같은 결정).
+  s11_retry_timeout:
+    title: "S11 재전송 타임아웃 (SGW 무응답 → 거절)"
+    break_at: session
+    call_types: [1]
+    first_cause: 900
+    causes: {72: 1.0}                 # System failure
+    downstream_by_cause:
+      72: {iface: 6, cause: 30, prefix: esm}
+    downstream_rate: 0.7
+    release: {302: 1.0}
+    source: "scenarios._gw_node_down (SC-03) · _partial_recovery (SC-18)"
+
+  s11_retry_timeout_svc:
+    title: "S11 재전송 타임아웃 — 서비스 호"
+    break_at: session
+    call_types: [3, 4]
+    first_cause: 900
+    causes: {68: 1.0}                 # Service not supported
+    downstream_by_cause:
+      68: {iface: 6, cause: 30, prefix: esm}
+    downstream_rate: 0.7
+    release_by_call_type:
+      3: {causes: {120: 1.0}, request: true}
+      4: {causes: {120: 1.0}, request: true}
+    source: "scenarios._gw_node_down (SC-03) · _partial_recovery (SC-18)"
 
   ctxsetup_failure:
     title: "S1AP Initial Context Setup 실패 (무선)"
@@ -415,6 +663,14 @@ faults:
     # **`scenarios._ran_radio` 와 같은 값을 쓴다** — 같은 현상을 call flow 로
     # 표현한 것이므로 다른 Cause 를 쓰면 두 벌이 된다.
     causes: {125: 0.5, 126: 0.5}
+    # **eNB 가 같은 사유로 해제를 요청한다** — 정답지 `rreq = rel = 126`.
+    # 무선 실패는 eNB 가 먼저 안다. `release_from_cause` 는 뽑힌 Cause 를
+    # 그대로 해제 사유로 쓴다(`125` 면 `125`).
+    release_from_cause: true
+    release_request: true
+    # **eNB 요청은 Attach 만이다.** 서비스 호의 Context Setup 실패는 MME 가
+    # 닫는다 — 실측 ct 3·4 의 `126` 5호 중 4호가 `rreq = 0 · rel = 126`.
+    release_request_call_types: [1]
     source: "scenarios._ran_radio (SC-02)"
 
   paging_no_response:
@@ -426,3 +682,172 @@ faults:
     # 4 : 33 으로 902 가 더 드물다).
     causes: {900: 1.0}
     timeout: true
+    # **Paging 전용 호(ct 6)는 뺀다.** 해제 단계가 없어 `300` 을 적을 자리가
+    # 없고, 정답지의 이 1호는 서비스 호(해제 `300`)다. 해제가 있는 MT 계열
+    # (2·4·8)만 쓴다.
+    call_types: [2, 4, 8]
+    message: 9               # 정답지 `(2,900)` 1호의 First 메시지
+    # **하류가 없고 `last_error` 도 비운다.** 정답지 1건이 `first=(2,900)`
+    # 인데 `last=(0,0)` 이다 — 페이징 무응답은 *오류*가 아니라 *응답 없음*
+    # 이라서 망이 거절을 내지 않는다. UE 가 꺼져 있거나 권외다.
+    #
+    # 해제도 `300`(정상)으로 닫힌다. `first_error` 에 `(2,900)` 이 남는
+    # 것은 "페이징을 보냈고 답이 없었다" 는 **관측 사실**이고, 그것과
+    # "망이 거절했다" 는 다른 말이다.
+    no_downstream: true
+
+  # ═══ 정답지에서 꺼낸 장애 — 2026-10-28 2차 ══════════════════════════════
+  #
+  # 아래는 **정답지 실패 조합을 그대로 옮긴 것**이다. `causes` 의 비중은
+  # 정답지 건수이고(합이 1 이 아니어도 `random.choices` 가중치로 쓰인다),
+  # 모양(구간 Cause · 해제 · 하류)은 `tools/` 대조에서 확인했다.
+  #
+  # 끊기는 *단계*와 거절을 적는 *구간*이 다른 것이 많다 — `iface`·`prefix`
+  # 가 그 덮어쓰기다(`Fault.iface` 머리말).
+
+  s11_reject:
+    title: "S11 세션 생성 거절 (GW 가 Create Session 을 거절)"
+    break_at: session
+    call_types: [1]                    # 정답지 전부 Attach MO
+    # 72 Context Not Found 계열 · 78 Missing/unknown APN · 89 Service denied
+    # · 93 Request rejected · 94 Collision · 92 UE not responding
+    causes: {72: 4, 78: 4, 89: 4, 93: 4, 92: 4, 94: 1}
+    # **S11 Cause 마다 ESM 하류가 다르다.** `78 → ESM 27`(Missing APN)·
+    # `93 → ESM 33`(option not subscribed) 처럼 뜻이 이어진다.
+    # `92` 만 EMM 으로 간다 — 세션이 아니라 단말 쪽 문제로 Attach 를 접는다.
+    downstream_by_cause:
+      72: {iface: 6, cause: 30, prefix: esm}
+      78: {iface: 6, cause: 27, prefix: esm}
+      89: {iface: 6, cause: 30, prefix: esm}
+      93: {iface: 6, cause: 33, prefix: esm}
+      94: {iface: 6, cause: 30, prefix: esm}
+      92: {iface: 5, cause: 15, prefix: emm}
+    release: {302: 1.0}                # 정답지 20호 전부 302
+
+  esm_reject:
+    title: "ESM PDN 연결 거절 (MME 가 직접 거절)"
+    break_at: session
+    call_types: [1]
+    # **S11 에 오류가 없다** — 정답지 `iface=6` 호는 `s11_error_Cause` 가
+    # 비어 있다. GW 까지 가지 않고 MME 가 PDN Connectivity 를 거절한 것이다.
+    # 8 Operator determined barring · 30 Request rejected by GW · 31 Request
+    # rejected, unspecified · 33 option not subscribed · 53 ESM info not received
+    iface: 6
+    prefix: esm
+    causes: {8: 4, 30: 4, 31: 3, 33: 4, 53: 3}
+    # **S11 거절과 시간 모양이 다르다** — GW 응답을 기다리지 않고 MME 가 바로
+    # 거절한다. 실측 Attach ESM 거절 30호(FAIL+R1):
+    #
+    #     core   중앙 597ms (p10 337 · p90 1,091)   메시지 3 (재전송 없음)
+    #     First = 하류 = 호 끝   83%                 PGW_ID = 0   30/30
+    #     직전 호 같은 구간·Cause  73%
+    on_fail:
+      core_us: [300000, 1200000]
+      core_msgs: 3
+      response_gap: [0.0, 0.0]
+      old_call_same: 0.73
+    message: 209                       # PDN_CONNECTIVITY_REJECT (18호 전부)
+    release: {302: 1.0}                # first == last · 302 (17호 전부)
+
+  esm_ue_reject:
+    title: "단말이 기본 베어러를 거절 (프로토콜 오류)"
+    break_at: session
+    # **Attach 만이다.** 서비스 호에서 단말이 ESM `195` 로 거절한 실측 4호는
+    # 전부 **호가 성공**했다(First 없음 · Last 만 ESM). 호 실패로 만들 근거는
+    # Attach 뿐이다 — 그쪽 ESM 거절 30호의 모양을 `esm_reject` 와 같이 쓴다.
+    call_types: [1]
+    iface: 6
+    prefix: esm
+    # 96 Invalid mandatory information · 99 IE non-existent — 3GPP 공통 프로토콜
+    # 오류 대역(EMM·ESM·5GMM 같은 번호). **정답지에 이 Cause 는 없다** — 그릇만
+    # 실측이다(docs/jp/j-sc-26-의미매핑.md §2.1)
+    causes: {96: 1, 99: 1}
+    on_fail:
+      core_us: [300000, 1200000]
+      core_msgs: 3
+      response_gap: [0.0, 0.0]
+      old_call_same: 0.73
+    message: 195                       # ACTIVATE_DEFAULT_EPS_BEARER_CONTEXT_REJECT (IN)
+    release: {302: 1.0}
+    source: "scenarios._ue_model (SC-08 · J-SC-26)"
+
+  emm_reject_attach:
+    title: "EMM Attach 거절 (가입·지역 제한)"
+    break_at: rrc
+    call_types: [1]
+    # 11 PLMN not allowed · 15 No suitable cells in TA. **어느 Diameter 절차도
+    # 오류를 내지 않았다** — 구간 Cause 가 `emm` 하나뿐이다.
+    iface: 5
+    prefix: emm
+    causes: {11: 4, 15: 2}
+    message: 68                        # ATTACH_REJECT
+    release: {302: 1.0}
+
+  emm_reject_tau:
+    title: "EMM TAU 거절"
+    break_at: rrc
+    call_types: [5]
+    # 9 UE identity cannot be derived · 10 Implicitly detached
+    # · 40 No EPS bearer context activated — **TAU 에서만 나온다.**
+    iface: 5
+    prefix: emm
+    causes: {9: 4, 10: 4, 40: 4}
+    message: 75                        # TAU_REJECT (12호 전부)
+    release: {302: 1.0}
+
+  ctxsetup_overload:
+    title: "S1AP Initial Context Setup 실패 (MME 과부하 500)"
+    break_at: ctxsetup
+    # **정답지에 `500` 이 없다** — 평시 스냅숏이라 과부하가 없었다(R1 S1AP
+    # 5xx 0건). Cause 는 `codes.S1AP_CAUSE[500] Control Processing Overload`
+    # 이고, **그릇(Context Setup 실패의 시간·해제 모양)은 실측 `126`·`103`
+    # 에서 왔다.** `R-23` 은 해제 사유의 `500` 을 보므로 해제가 Cause 를
+    # 따라가야 한다(`release_from_cause`).
+    call_types: [1, 3, 4]
+    causes: {500: 1.0}
+    release_from_cause: true
+    release_request: true
+    release_request_call_types: [1]
+
+  ctxsetup_reject_103:
+    title: "S1AP Initial Context Setup 실패 (MME UE S1AP ID 불일치)"
+    break_at: ctxsetup
+    call_types: [1]
+    # 103 Unknown or already allocated MME UE S1AP ID — 인증·ULR 은 성공했다.
+    causes: {103: 1.0}
+    # **eNB 가 해제를 요청한다** — `rreq = rel = 103`(4호 전부).
+    release: {103: 1.0}
+    release_request: true
+
+  s1ap_auth_failure:
+    title: "S1AP NAS 인증 실패 (S6a 없이)"
+    break_at: rrc
+    call_types: [1]
+    # 정답지 `(2,301)` 2호는 **구간 Cause 가 `s1ap=301` 하나뿐**이다 —
+    # HSS 에 묻기 전에(또는 단말이 AKA 를 실패해) S1AP 로 닫혔다.
+    causes: {301: 1.0}
+    message: 23                        # UEContextRelease (2호 전부)
+    release: {301: 1.0}
+
+  paging_no_cause:
+    title: "Paging 메시지 없음 (902 NO_CAUSE_PAGING)"
+    break_at: paging
+    call_types: [6]
+    # **보낸 메시지가 없다** → 구간 `0` · 시각 `0.0`. `paging_no_response`
+    # (`2/900`, 보냈는데 답이 없다)와 다른 사건이다.
+    iface: 0
+    causes: {902: 1.0}
+    no_downstream: true
+
+  paging_s11_reject:
+    title: "Paging 호의 S11 거절 (Downlink Data Notification)"
+    break_at: paging
+    call_types: [6]
+    # 87 UE not responding · 90 Unable to page UE — **SGW 가 내린 DDN 이
+    # 실패했다.** Paging 호라 해제 단계가 없고, 구간 Cause 가 `s11` 하나다.
+    iface: 3
+    prefix: s11
+    causes: {87: 1, 90: 1}
+    # 메시지가 Cause 마다 다르다 — `87 → 70`, `90 → 177`(각 4호 전부, First·
+    # 구간 같음). 둘 다 DDN 계열이지만 프로브가 다른 메시지로 적는다.
+    message_by_cause: {87: 70, 90: 177}

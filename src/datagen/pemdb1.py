@@ -34,6 +34,8 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import collections
+import zlib
 from collections.abc import Iterable
 from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta
@@ -55,20 +57,35 @@ from .cells import Cell
 from . import handover as HO
 from .faults import resolve_active as resolve_active_faults
 from .fields import SERIES_FIELDS
-from .generator import Generator, USER_FIELDS
+from .generator import Generator, Groups, USER_FIELDS
 from .identity import synth_imei, synth_imsi
 from .plmn import Plmn
+from .region import apn_map
 from .profile import load as load_profiles
 from .scenarios import (
+    APP_BOOSTERS,
+    BOOSTERS,
+    RELOCATORS,
     PACKET_DENOM_KPIS,
     MUTATORS,
     PLAN_MUTATORS,
     SUPPRESSORS,
     Scenario,
     set_fault_cfg,
+    set_shift_cfg,
+    shift_split,
+    visible_level,
 )
+from . import scenarios as _scenarios
+
+
+def _shift_cfg():
+    """지금 걸린 `capacity_shift` 설정 — 모듈 전역을 매번 다시 읽는다
+    (`set_shift_cfg` 가 갈아 끼우므로 import 시점 값을 붙잡으면 안 된다)."""
+    return _scenarios.SHIFT
 from .scenarios import build_scenarios as build_sim_scenarios
 from .session import Call, SessionEngine, Shape
+from .apps import load as load_apps
 
 # --------------------------------------------------------------------------
 # 상수
@@ -206,7 +223,7 @@ PM_EPC = "PM_EPC_KPI_1M_ORG"
 UPLANE_FIELDS: dict[str, tuple[tuple[str, str, str, int | None], ...]] = {
     "transport": (
         ("ENB_ID", "eNB_ID", "str", 30),
-        ("CELL_ID", "Cell_ID", "str", 3),
+        ("CELL_ID", "Cell_ID", "str", 10),
         ("IMSI", "IMSI", "str", 30),
         ("ONGOING_FLAG", "OngoingFlag", "i8", None),
         ("SESSION_ID", "SessionID", "str", 32),
@@ -233,10 +250,16 @@ UPLANE_FIELDS: dict[str, tuple[tuple[str, str, str, int | None], ...]] = {
         ("THROUGHPUT_TIME_UP", "Traffic_Total_Uplink_ThroughputTime", "f64", None),
         ("THROUGHPUT_TIME_DN", "Traffic_Total_Dnlink_ThroughputTime", "f64", None),
         ("TETHERING", "Tethering", "i8", None),
+        # 앱 축 (2026-10-28 · `CM_APP_CODE`). **이름은 규격 그대로** —
+        # 운영 프로브가 Protocol·IP·Port 로 매핑해 붙이는 값이다
+        ("APP_ID", "App_ID", "str", 20),
+        ("APP_GROUP_CODE", "App_Group_Code", "str", 50),
+        ("APP_IP", "App_IPv4", "str", 45),
+        ("APP_PORT", "App_Port", "i32", None),
     ),
     "dns": (
         ("ENB_ID", "eNB_ID", "str", 30),
-        ("CELL_ID", "Cell_ID", "str", 3),
+        ("CELL_ID", "Cell_ID", "str", 10),
         ("IMSI", "IMSI", "str", 30),
         ("ONGOING_FLAG", "OngoingFlag", "i8", None),
         ("SESSION_ID", "SessionID", "str", 32),
@@ -253,10 +276,17 @@ UPLANE_FIELDS: dict[str, tuple[tuple[str, str, str, int | None], ...]] = {
         ("REQUEST_FIRST_TIME", "RequestFirstTime", "f64", None),
         ("PAYLOAD_SIZE_UP", "Traffic_Total_Uplink_PayloadSize", "i64", None),
         ("PAYLOAD_SIZE_DN", "Traffic_Total_Dnlink_PayloadSize", "i64", None),
+        ("TETHERING", "Tethering", "i8", None),
+        # 앱 축 — transport·http 와 같은 이름(2026-10-28). DNS 는 앱 사전을
+        # 타지 않아 `App_ID` 가 비고 `App_IPv4` 가 `0` 이다 — 생성기 값 그대로다
+        ("APP_ID", "App_ID", "str", 20),
+        ("APP_GROUP_CODE", "App_Group_Code", "str", 50),
+        ("APP_IP", "App_IPv4", "str", 45),
+        ("APP_PORT", "App_Port", "i32", None),
     ),
     "http": (
         ("ENB_ID", "eNB_ID", "str", 30),
-        ("CELL_ID", "Cell_ID", "str", 3),
+        ("CELL_ID", "Cell_ID", "str", 10),
         ("IMSI", "IMSI", "str", 30),
         ("ONGOING_FLAG", "OngoingFlag", "i8", None),
         ("SESSION_ID", "SessionID", "str", 32),
@@ -276,8 +306,69 @@ UPLANE_FIELDS: dict[str, tuple[tuple[str, str, str, int | None], ...]] = {
         ("PAYLOAD_PKT_DN", "Traffic_Total_Dnlink_PayloadPacketCount", "i64", None),
         ("PAYLOAD_SIZE_DN", "Traffic_Total_Dnlink_PayloadSize", "i64", None),
         ("THROUGHPUT_TIME_DN", "Traffic_Total_Dnlink_ThroughputTime", "f64", None),
+        ("TETHERING", "Tethering", "i8", None),
+        # 앱 축 (2026-10-28 · `CM_APP_CODE`). **이름은 규격 그대로** —
+        # 운영 프로브가 Protocol·IP·Port 로 매핑해 붙이는 값이다
+        ("APP_ID", "App_ID", "str", 20),
+        ("APP_GROUP_CODE", "App_Group_Code", "str", 50),
+        ("APP_IP", "App_IPv4", "str", 45),
+        ("APP_PORT", "App_Port", "i32", None),
     ),
 }
+
+# ── 체감품질(XP) 필드 — 세 계열에 **같은 이름**으로 덧붙인다 (2026-10-28) ──
+#
+# **기존 파일에 컬럼을 더한다(통합).** 체감 전용 Parquet 를 따로 쓰는 안과
+# 실측 비교했다 — 분당 3.7MB/0.31초(통합) vs 4.2MB/0.35초(분리). 키 6컬럼이
+# 두 파일에 중복되지 않는 만큼 통합이 가볍다(사용자 결정). 기존 집계는 이름으로
+# 골라 읽으므로(`graphio store/raw_parquet.scan`) 컬럼이 늘어도 값이 같다.
+#
+# **Delta 가 체감 판정의 기준이다.** Interim 레코드의 `Traffic_Total_*` 는 세션
+# 누적이라 분에 귀속할 수 없다 — 그 분에 흐른 양은 Delta 다(개발스펙 X-3).
+# 장애 훅은 세션 총량에 걸리고(`PLAN_MUTATORS`) Total 과 Delta 가 같은 총량에서
+# 쪼개지므로(`session._emit`) **Delta 에도 장애가 그대로 실린다.**
+#
+# **Bearer 블록·`User_*`·`IP_Version` 은 생성기가 모델링하지 않는다** — 값이
+# 전부 템플릿 기본값(`0`·빈칸)이다. 규격 필드라 싣되, 그 `0` 은 관측이 아니다.
+#
+# 이름은 30자 상한(상용 Oracle 포팅)을 지킨다 — Delta 는 `DLT_` 접두로 Total
+# (접두 없음)과 가른다. `D_` 는 `DN`(down)과 헷갈린다.
+_XP_SESSION: tuple[tuple[str, str, str, int | None], ...] = (
+    ("SESSION_CREATED_TIME", "SessionCreatedTime", "f64", None),
+    ("SESSION_QCI", "SessionQCI", "i32", None),
+    ("BEARER_CREATED_TIME", "BearerCreatedTime", "f64", None),
+    ("BEARER_ID", "BearerID", "str", 50),
+    ("PARENT_EBI", "ParentEBI", "i32", None),
+    ("EBI", "EBI", "i32", None),
+    ("DEDICATED_QCI", "DedicatedQCI", "i32", None),
+    ("DEDICATED_BEARER", "DedicatedBearer", "i8", None),
+    ("PROTOCOL", "Protocol", "i32", None),
+    ("IP_VERSION", "IP_Version", "i8", None),
+    ("APP_IPV6", "App_IPv6", "str", 38),
+    ("USER_IP", "User_IPv4", "str", 45),
+    ("USER_IPV6", "User_IPv6", "str", 38),
+    ("USER_PORT", "User_Port", "i32", None),
+)
+_DLT_PARTS: tuple[tuple[str, str, str], ...] = (
+    ("FIRST_TIME", "FirstTime", "f64"),
+    ("LAST_TIME", "LastTime", "f64"),
+    ("PKT", "PacketCount", "i64"),
+    ("DATA_SIZE", "DataSize", "i64"),
+    ("PAYLOAD_PKT", "PayloadPacketCount", "i64"),
+    ("PAYLOAD_SIZE", "PayloadSize", "i64"),
+    ("RETRANS_PKT", "RetransPacketCount", "i64"),
+    ("RETRANS_DATA_SIZE", "RetransDataSize", "i64"),
+    ("RETRANS_PAYLOAD_SIZE", "RetransPayloadSize", "i64"),
+    ("THROUGHPUT_TIME", "ThroughputTime", "f64"),
+)
+_XP_DELTA: tuple[tuple[str, str, str, int | None], ...] = tuple(
+    (f"DLT_{col}_{d}", f"Traffic_Delta_{full}_{field}", kind, None)
+    for d, full in (("UP", "Uplink"), ("DN", "Dnlink"))
+    for col, field, kind in _DLT_PARTS
+)
+for _s in UPLANE_FIELDS:
+    UPLANE_FIELDS[_s] = UPLANE_FIELDS[_s] + _XP_SESSION + _XP_DELTA
+del _s
 
 #: 분 귀속 컬럼 — **C-Plane 과 U-Plane 이 같은 이름을 쓴다**(2026-10-14).
 #: 예전에는 U-Plane 만 `SUMMARY_CREATE_TIME`(규격 `SummaryCreateTime`)이고
@@ -536,6 +627,9 @@ CPLANE_FIELDS: tuple[tuple[str, str, int], ...] = (
     ("RESERVED6", "RESERVED_154", 10),
 )
 
+#: C-Plane Parquet 에서 **값을 비우는** 컬럼(`write_xdr`). 컬럼 자체는 남는다.
+CPLANE_REDACTED: tuple[str, ...] = ("GENDER", "AGE", "EXCHANGENUMBER")
+
 
 # --------------------------------------------------------------------------
 # 평시 배경 — 장애가 없을 때도 분모가 있어야 한다
@@ -729,7 +823,9 @@ class Distributions:
 
     def __init__(self, path: Path, rng: random.Random, success_only: bool = True,
                  call_type_floor: float | None = None,
-                 baseline: "Baseline | None" = None):
+                 baseline: "Baseline | None" = None,
+                 #: APN 값 변환표(`region.apn_map`). 비면 실측(한국) 값 그대로다.
+                 apn_map: dict[str, str] | None = None):
         d = json.loads(path.read_text(encoding="utf-8"))
         self.rng = rng
         self.success_only = success_only
@@ -768,7 +864,12 @@ class Distributions:
         self.abnormal = [e["v"] for e in ab] or ["500"]
         self.abnormal_w = [e["n"] for e in ab] or [1]
 
-        self.apns = [e["v"] for e in d["apn"]]
+        # **비중은 실측 그대로, 값만 그 나라 것으로** (2026-10-30). 실측 분포는
+        # 한국 SKT APN 이라 JP 로 돌려도 `*.sktelecom.com…mcc450` 이 나왔다 —
+        # 시나리오 정답지(SC-11·19)와 APN 축이 한국 값을 말했다. 표에 없는 값은
+        # 그대로 둔다(빈 값 · 표가 모르는 새 값).
+        amap = apn_map or {}
+        self.apns = [amap.get(e["v"], e["v"]) for e in d["apn"]]
         self.apn_w = [e["n"] for e in d["apn"]]
 
         self.vendor_models = [(e["vendor"], e["model"]) for e in d["vendor_model"]]
@@ -1324,7 +1425,7 @@ def load_cells(conn, enb_limit: int | None = None,
         cur.execute(
             "SELECT c.ENB_ID, c.CELLNUM, c.C_UID, c.MME_GRP_ID, c.EMS_ID, "
             "       r.CITY_ID, r.GU_ID, r.DONG_ID, r.LATITUDE, r.LONGITUDE, "
-            "       r.TAC, r.SGW_ID, r.MME_ID "
+            "       r.TAC, r.SGW_ID, r.MME_ID, r.PGW_ID "
             f"FROM `{cellmap_tbl}` AS c "
             # **`tac_only` 면 INNER JOIN 이다.** LEFT 로 두고 뒤에서 걸러도
             # 되지만, 질의가 걸러 주는 쪽이 기동이 빠르다
@@ -1434,19 +1535,19 @@ def load_cells(conn, enb_limit: int | None = None,
             for key, (city, gu, dong, lat, lon) in made.items():
                 r = uniq.get(key)
                 if r is not None:
-                    # **길이를 지킨다** — 행이 13-tuple(끝이 TAC·SGW_ID·
-                    # MME_ID)이고 아래 언패킹이 그 수를 센다. 줄이면
+                    # **길이를 지킨다** — 행이 14-tuple(끝이 TAC·SGW_ID·
+                    # MME_ID·PGW_ID)이고 아래 언패킹이 그 수를 센다. 줄이면
                     # `ValueError` 로 죽는다
-                    uniq[key] = r[:5] + (city, gu, dong, lat, lon) + r[10:13]
+                    uniq[key] = r[:5] + (city, gu, dong, lat, lon) + r[10:14]
     cells: list[Cell] = []
-    #: 마스터가 지정한 `(SGW_ID, MME_ID)` — 셀과 **같은 순서**로 쌓는다.
+    #: 마스터가 지정한 `(SGW_ID, MME_ID, PGW_ID)` — 셀과 **같은 순서**로 쌓는다.
     #: `Cell` 에 자리를 만들지 않는 이유: 그 값은 "마스터가 뭐라 했나"이고
     #: 최종 배정(`Cell.sgw_id`)과 뜻이 다르다. 섞으면 어느 쪽이 적용됐는지
     #: 알 수 없다.
-    equip: list[tuple[str | None, str | None]] = []
+    equip: list[tuple[str | None, str | None, str | None]] = []
     for (enb, cellnum), (_e, _c, c_uid, grp, ems,
                          city, gu, dong, lat, lon,
-                         tac_raw, sgw_raw, mme_raw) in sorted(uniq.items()):
+                         tac_raw, sgw_raw, mme_raw, pgw_raw) in sorted(uniq.items()):
         # **`NULL` 은 0 이 된다 — "TA 모름"이다.** `int(None)` 이 터지지 않게
         # 걸러 두는 것이 아니라, 아래 장비 유도가 `if tac` 로 갈리기 때문이다
         tac = int(tac_raw) if tac_raw not in (None, "", 0, "0") else 0
@@ -1479,7 +1580,8 @@ def load_cells(conn, enb_limit: int | None = None,
         ims = pgws[(h // 13) % len(pgws)]
         mapped = city is not None
         equip.append((str(sgw_raw) if sgw_raw else None,
-                      str(mme_raw) if mme_raw else None))
+                      str(mme_raw) if mme_raw else None,
+                      str(pgw_raw) if pgw_raw else None))
         cells.append(Cell(
             cell_key=f"{enb}-{cellnum}",
             enb_id=enb,
@@ -1562,11 +1664,18 @@ def load_cells(conn, enb_limit: int | None = None,
     # **양쪽이 같은 규칙을 각자 구현하지 않으려고 컬럼에 적는다** — 묶는
     # 쪽은 graphio, 읽는 쪽은 여기이고 서로 다른 저장소라 코드를 공유할 수
     # 없다. 각자 구현하면 한쪽만 고쳐질 때 에러 없이 대응이 갈린다.
-    for c, (sg, mm) in zip(cells, equip):
+    #
+    # **PGW 도 마스터가 정한다**(2026-10-28 `PGW_ID` 컬럼). 전에는 위 산술
+    # (`ta_list // _TA_PER_PGW`)뿐이라 범위를 좁히면 목록 번호가 앞쪽에만
+    # 생겨 PGW 3702 차례가 오지 않았다. `ims_pgw_id` 는 마스터에 자리가
+    # 없어 산술 그대로다.
+    for c, (sg, mm, pg) in zip(cells, equip):
         if sg:
             c.sgw_id = sg
         if mm:
             c.mme_id = mm
+        if pg:
+            c.pgw_id = pg
 
     # ── 범위 — **맨 마지막이다** ──────────────────────────────────────
     #
@@ -1830,13 +1939,28 @@ class Mobility:
     #: 이동 가입자를 **고를** 비율. `sub_share` 와 다른 축이다 — 움직이는
     #: 사람이 전체의 12% 라도 그들이 더 자주 통신하면 호 비중은 더 높다
     call_share: float = 0.0
-    #: 여정 — `[{route, from, to, share}]`. 역 코드로 적는다.
+    #: 여정 — `[{route, stations: [최소, 최대], share}]`(임의 역에서 n 역)
+    #: 또는 `[{route, from, to, share}]`(고정 구간). 고정 구간은 전원이 같은
+    #: 칸에서 출발한다 — 시연용 데이터에는 앞의 것을 쓴다.
     #: 비면 모두 끝없이 순환한다(노선 전체를 도는 사람).
     journeys: list = field(default_factory=list)
     #: 하차 후 머무는 시간(초). 그 동안 셀이 고정이고 전환이 없다 —
     #: 그게 역 주변 체류이고 역세권 혼잡이 거기서 생긴다
     off_sec_min: int = 300
     off_sec_max: int = 1800
+    #: **그냥 이동**(도보·버스·차) 그룹에 넣을 가입자 비율 — 노선에 타지
+    #: 않은 사람 중에서. 이웃 eNB 로 `walk_sec` 마다 옮겨 간다
+    walk_share: float = 0.0
+    walk_sec_min: int = 180
+    walk_sec_max: int = 600
+    #: **시간대별 호 그룹 비율** — `[[시작시, 끝시, 고정%, 이동%, 지하철%], …]`
+    #: (`generator.Groups`). 지하철은 이동에 포함된다. 비면 종전대로
+    #: `call_share` 하나로 노선 탑승자를 고른다. 있으면 `call_share` 는 안 쓴다
+    hourly: list = field(default_factory=list)
+    #: 지하철 운행 시각 `[시작, 끝)`. 밖에서는 지하철 몫이 0 이고 열차가 선다
+    subway_hours: list = field(default_factory=lambda: [6, 24])
+    #: 시간대 경계를 넘어가는 시간(분) — 경계 앞뒤 절반씩
+    blend_min: int = 60
     #: **노선을 타지 않는 가입자**를 거주지 근처에서 뽑나. 기본 끄기.
     #:
     #: 경로와 **다른 축이다.** 경로는 "이 사람이 이 구간을 다닌다"이고 이쪽은
@@ -1891,13 +2015,37 @@ class PemdbGen:
                  sectors_per_enb: int | None = None,
                  #: **생성 범위** — 분당 호를 어느 지역에 흘리나(`Scope`).
                  #: 비면 마스터 전량이다.
-                 scope: dict | None = None):
+                 scope: dict | None = None,
+                 #: `j-sc-24` 부하 이동 — A eNB 와 소등 eNB 목록
+                 #: (`scenarios.ShiftCfg`). 비면 소등 eNB 가 없다.
+                 capacity_shift: dict | None = None):
         self.plmn = plmn or Plmn()
-        self.cells = load_cells(conn, enb_limit=enb_limit, drawable=drawable,
-                                ensure_coords=ensure_coords, plmn=self.plmn,
-                                locale=locale, tac_only=tac_only,
-                                sectors_per_enb=sectors_per_enb,
-                                scope=Scope.from_cfg(scope))
+        cells = load_cells(conn, enb_limit=enb_limit, drawable=drawable,
+                           ensure_coords=ensure_coords, plmn=self.plmn,
+                           locale=locale, tac_only=tac_only,
+                           sectors_per_enb=sectors_per_enb,
+                           scope=Scope.from_cfg(scope))
+        # ── 소등 eNB 를 **셀 목록에서 뺀다** (`j-sc-24` · 2026-10-29) ────────
+        #
+        # 마스터 전량을 생성하므로(`enb_limit: 0`) 그대로 두면 B 에도 평소
+        # 호가 생긴다. 추첨에서만 빼면 부족하다 — 핸드오버 이웃
+        # (`HO.Topology`), 다른 장애의 대상 선정(`busy_cluster`·`area_cells`
+        # ·`_busiest`), 지진의 이동처가 전부 `self.cells` 에서 고른다. 목록에
+        # 아예 없어야 그 길로 새지 않는다. 시나리오가 켰을 때만
+        # `_shifter` 가 여기서 꺼내 호를 붙인다.
+        shift = set_shift_cfg(capacity_shift)
+        off = set(shift.standby_enbs)
+        #: 소등 eNB → 그 셀들. **생성 대상이 아니다** — `_shifter` 만 쓴다
+        self.standby: dict[str, list[Cell]] = {e: [] for e in shift.standby_enbs}
+        self.cells = []
+        for c in cells:
+            (self.standby[c.enb_id] if c.enb_id in off else self.cells).append(c)
+        missing = [e for e, v in self.standby.items() if not v]
+        if missing:
+            # 멈추지 않는다 — 로케일을 바꾸면(kr) 일본 eNB 가 없는 것이 맞고,
+            # 그때는 24번만 해석 실패로 취소된다. 대신 크게 알린다.
+            print(f"  ! 소등 eNB 가 셀 마스터(생성 범위)에 없다 — {missing}",
+                  flush=True)
         if not self.cells:
             raise RuntimeError("CL_CELL_MAP 이 비어 있다 — 마스터를 먼저 적재하라")
         #: 평시 배경 모수(`pemdb1.baseline`). **장애 mutator 와 무관하다** —
@@ -1910,6 +2058,11 @@ class PemdbGen:
             data_dir / "pemdb1" / "_distributions.json",
             random.Random(seed + 101), success_only=success_only,
             call_type_floor=call_type_floor, baseline=self.baseline,
+            # APN 은 **셀 마스터와 같은 나라축**을 따른다(`locale` — 셀 좌표·
+            # 지역 벌을 고르는 그 값). `plmn` 을 따르지 않는 이유: plmn 은
+            # 일부러 KR 로 남아 있고(`datagen.yaml` 의 plmn 블록 주석), 그
+            # 결정과 APN 을 묶으면 APN 만 바꾸려 해도 IMSI 가 함께 바뀐다.
+            apn_map=apn_map(locale),
         )
         profiles = load_profiles(data_dir / "profile.json")
         # **`lte_call` 이 반드시 첫 자리여야 한다.** `Generator.__init__` 이
@@ -1970,6 +2123,10 @@ class PemdbGen:
             a for a, _ in sorted(zip(self.dist.apns, self.dist.apn_w),
                                  key=lambda kv: -kv[1])
         ]
+        # 앱 사전 — 세션이 **이미 매핑된 앱**으로 나간다(`apps` 머리말).
+        # 시나리오 대상(21·22번)이 이 사전에서 앱을 고르므로 같은 이유로
+        # `set_faults` 전에 서 있어야 한다
+        self.gen.app_book = load_apps(conn)
         #: U-Plane 세션 엔진 — **C-Plane 과 U-Plane 을 잇는 자리**(2026-10-14).
         #: `rates` 의 U-Plane 세 값이 여기서 파생 계수로 환산된다
         #: (`session` 머리말 §1.4). 활성 세션을 분 사이에 들고 있으므로
@@ -2023,6 +2180,13 @@ class PemdbGen:
             # MDN 은 두 값에 의존하지 않으므로 그대로 둔다.
             sub.imsi = synth_imsi(sub.mcc_mnc, i)
             sub.imei = synth_imei(sub.vendor, sub.model, i)
+        # **IMSI 역색인을 다시 만든다**(2026-10-29). `Generator.__init__` 이
+        # 바꾸기 전 IMSI 로 만들어 두었고, 위에서 IMSI 를 전부 새로 썼다.
+        # 그대로 두면 가입자 2,000명 중 285명(14%)만 찾혀 — **에러 없이** —
+        # "같은 사람을 다른 셀로"(`j-sc-27` 재접속 · `j-sc-24` 부하 이동)가
+        # 대부분 일어나지 않고, U-Plane 세션이 이동 가입자를 되찾지 못한다
+        # (`session` 의 `sub_i`).
+        self.gen.sub_by_imsi = {s.imsi: i for i, s in enumerate(self.gen.subs)}
 
     # -- 분 단위 ---------------------------------------------------------
 
@@ -2036,6 +2200,9 @@ class PemdbGen:
         active = [sc for sc in self.gen.scenarios if sc.covers(minute)]
         for sc in active:
             sc.active_cells_cache = sc.active_cells(minute)  # type: ignore[attr-defined]
+            # booster·shifter 는 서명에 분이 없다 — 국면을 보려면 여기서
+            # 세워 둔다(`j-sc-24` 의 `shift_*`)
+            sc._minute = minute
         return active
 
     def _mutator(self, minute: int, active: list[Scenario]):
@@ -2107,6 +2274,114 @@ class PemdbGen:
                        for sc in sel)
 
         return suppress
+
+    def _boost(self, minute: int, active: list[Scenario]) -> dict[str, float] | None:
+        """셀 키 → 가중 배율 (`scenarios.BOOSTERS`) — `j-sc-14` 활성 가입자 증가.
+
+        suppressor 의 대칭이다. 둘 다 "어느 셀에 호가 생기나"를 바꾸므로
+        mutator(레코드를 고친다)로는 쓸 수 없다. 여러 장애가 같은 셀에 걸리면
+        곱한다.
+        """
+        out: dict[str, float] = {}
+        for sc in active:
+            fn = BOOSTERS.get(sc.kind)
+            if fn is None or not sc.target.cell_keys:
+                continue
+            f = fn(sc, sc.intensity(minute))
+            for k in sc.active_cells_cache:
+                out[k] = out.get(k, 1.0) * f
+        return out or None
+
+    def _relocator(self, minute: int, active: list[Scenario]):
+        """정지 셀 → 이웃 셀 콜백 (`scenarios.RELOCATORS`) — `j-sc-27`.
+
+        호(`records`)와 이어지는 세션(`SessionEngine.relocate`)이 **같은
+        함수**를 쓴다. 따로 두면 새 호는 옮겨 가는데 열려 있던 세션은 죽은
+        셀에서 계속 흘러, 정지 셀에 U-Plane 만 남는다.
+        """
+        sel = [sc for sc in active if sc.kind in RELOCATORS and sc.target.cell_keys]
+        # **꺼진 소등 eNB 에 남은 세션도 떠난다**(`j-sc-24`). B 를 끄면 새 호는
+        # 즉시 0 이지만 B 에서 열린 세션은 몇 분 더 흐른다 — 꺼진 기지국에
+        # 사용자 트래픽이 남는다. 지금 켜져 있는 B 는 빼고, 나머지 소등 셀은
+        # A(`from_enb`)로 보낸다. A 가 생성 범위에 없으면 아무 데로도 보내지 않는다.
+        lit = {sc.target.shift_to for sc in active
+               if sc.kind == "capacity_shift" and shift_split(sc) > 0}
+        dark = {c.cell_key for e, v in self.standby.items() if e not in lit for c in v}
+        home = [c for c in self.cells if c.enb_id == _shift_cfg().from_enb] if dark else []
+        if not sel and not (dark and home):
+            return None
+        by_key = self.gen.cell_by_key
+        pools = {sc.id: [by_key[k] for k in sc.target.cell_keys if k in by_key]
+                 for sc in sel}
+
+        def relocate(cell):
+            if home and cell.cell_key in dark:
+                return home[zlib.crc32(cell.cell_key.encode()) % len(home)]
+            for sc in sel:
+                if cell.cell_key not in sc.active_cells_cache:
+                    continue
+                dst = RELOCATORS[sc.kind](sc, cell, sc.intensity(minute),
+                                          pools[sc.id])
+                if dst is not None:
+                    return dst
+            return None
+
+        return relocate
+
+    def _floor_drafts(self, minute: int, active: list[Scenario], landed,
+                      suppress, ts, slot_start):
+        """장애 대상 셀마다 **판정 하한까지 모자란 호**를 낸다.
+
+        대상이 `floor_max_cells` 를 넘으면 걸지 않는다(장비 전체 대상).
+        억제된 셀(무호 장애)에는 채우지 않는다 — 꺼진 셀에 호를 만들면 장애가
+        지워진다. 가입자는 고정 그룹에서 뽑는다 — 이동 그룹에서 뽑으면 그
+        사람의 궤적 밖 셀에 호가 생긴다.
+        """
+        gen, cfg = self.gen, self.fault
+        by_key = gen.cell_by_key
+        pool = gen._fixed or range(len(gen.subs))
+        done: set[str] = set()
+        for sc in active:
+            keys = sc.target.cell_keys
+            if not keys or len(keys) > cfg.floor_max_cells:
+                continue
+            want = cfg.floor_per_cell * visible_level(sc, minute)
+            for k in sorted(sc.active_cells_cache):
+                cell = by_key.get(k)
+                if cell is None or k in done:
+                    continue
+                done.add(k)                     # 두 장애가 같은 셀이면 한 번만
+                if suppress is not None and suppress(cell):
+                    continue
+                need = int(want + gen.rng.random()) - landed[k]
+                for _ in range(max(0, need)):
+                    sub = gen.subs[pool[gen.rng.randrange(len(pool))]]
+                    yield gen.base_lte_call(ts, slot_start, at=(sub, cell))
+
+    def _shifter(self, minute: int, active: list[Scenario]):
+        """A 셀로 뽑힌 호 → 소등 eNB(B) 셀 콜백 — `j-sc-24` 부하 이동.
+
+        `_relocator` 와 비슷하지만 **세션에는 걸지 않는다.** 그쪽은 "셀이
+        죽었다"를 뜻해 열려 있던 세션까지 옮기고 분마다 다시 묻는다 — 살아
+        있는 A 에 그 콜백을 쓰면 확률이 분마다 겹쳐 A 의 세션이 거의 다 B 로
+        간다. 새 호만 나누면 그 호에서 파생되는 새 세션이 B 에서 열리고,
+        A 에 열려 있던 세션은 자연히 끝난다.
+        """
+        sel = [sc for sc in active
+               if sc.kind == "capacity_shift" and sc.target.shift_to
+               and self.standby.get(sc.target.shift_to) and shift_split(sc) > 0]
+        if not sel:
+            return None
+        rng = self.gen.rng
+
+        def shift(cell):
+            for sc in sel:
+                if cell.cell_key in sc.active_cells_cache and rng.random() < shift_split(sc):
+                    pool = self.standby[sc.target.shift_to]
+                    return pool[rng.randrange(len(pool))]
+            return None
+
+        return shift
 
     def reassign_nodes(self, spec: dict | None) -> dict:
         """장비 재배정 — ``{"SGW": {"0015": "0103"}, ...}``. 적용 결과를 돌려준다.
@@ -2274,12 +2549,22 @@ class PemdbGen:
                 self.ho_topo, self.cells, mb.count, rng, length=mb.length,
                 dwell=(mb.dwell_min, mb.dwell_max), loop_share=mb.loop_share)
         else:
+            # 노선이 없어도 그냥 이동·시간대 비율은 선다 — 둘은 노선과 다른 축이다
+            self._seat_groups(mb, rng)
             return
         # **여정을 `seat_routes` 전에 걸어야 한다** — 그 안에서 배정한다
         self.gen.journeys = list(mb.journeys)
         self.gen.off_sec = (mb.off_sec_min, mb.off_sec_max)
         self.gen.seat_routes(routes, mb.sub_share, rng)
         self.gen.mobility_share = mb.call_share
+        self._seat_groups(mb, rng)
+
+    def _seat_groups(self, mb: "Mobility", rng: random.Random) -> None:
+        """그냥 이동 그룹과 시간대 비율을 건다 — **노선 뒤에** 부른다(노선
+        탑승자를 건너뛰고 나머지에서 고른다)."""
+        self.gen.seat_walkers(mb.walk_share, rng, (mb.walk_sec_min, mb.walk_sec_max))
+        self.gen.groups = (Groups(mb.hourly, mb.subway_hours, mb.blend_min)
+                           if mb.hourly else None)
 
     def records(self, minute: int, ts: datetime) -> list[list[str]]:
         """한 분의 레코드(생성기 필드 순서의 값 리스트)를 만든다.
@@ -2321,28 +2606,68 @@ class PemdbGen:
         # U-Plane 도 자연히 멈춘다 — 세션이 호에서 파생되므로 따로 막을 필요가
         # 없고, 그 인과를 끊어 두면 "호는 0인데 트래픽은 있다"가 된다.
         n_calls = 0 if "lte_call" in self._blocked else gen._volume("lte_call", ts)
+        # **장애가 없는 분에도 부른다** — 창이 끝난 분에 `None` 으로 되돌려야
+        # 가중이 평시로 돌아온다
+        gen.set_weight_boost(self._boost(minute, active))
         suppress = self._suppressor(minute, active)
-        for _ in range(n_calls):
-            if suppress is None:
-                rec, cell = gen.base_lte_call(ts, slot_start)
-            else:
-                # ── 억제된 셀의 호는 **버리지 않고 다른 셀로 재추첨한다** ──
-                #
-                # 실제 망에서 인접 셀이 흡수하는 모습이고, **전국 호 수가
-                # 유지되어 "전국 트래픽 급감"이라는 가짜 신호가 생기지
-                # 않는다** — D4 「트래픽 소멸」의 ① 결측 가드가 바로 그
-                # 구분(수집 결측 vs 특정 eNB 무호)을 본다.
-                #
-                # 상한 8회: 대상 eNB 가 전체의 1/60 이므로 8회 연속 실패
-                # 확률이 `(1/60)^8` 로 무시할 수 있다. 그래도 상한을 두는
-                # 것은 운영자가 eNB 를 하나만 남기고 억제하는 설정을 넣을 수
-                # 있어서다 — 그때 무한 루프가 되면 데몬이 멈춘다.
-                for _retry in range(8):
+        relocate = self._relocator(minute, active)
+        shift = self._shifter(minute, active)
+        i_imsi = idx["IMSI"]
+        # **장애 대상 셀의 판정 하한** (2026-10-29 사람 결정 · `FaultCfg.floor_*`).
+        # 사람이 위치를 찍어 장애를 넣었는데 그 셀에 호가 분당 0.3건이면
+        # 열화를 걸어도 최소 표본(20)이 서지 않아 **아무 데도 안 보인다**
+        # (실측: 14번 대상 8셀 합계 분당 1~6건, 이벤트 0). 그래서 평소 호를
+        # 다 낸 뒤 대상 셀마다 모자란 만큼 **그 셀에 호를 더 만든다.** 더 만든
+        # 호도 아래 같은 경로(이동·덮기·장애 변형·세션 파생)를 탄다.
+        # 세는 것은 **이동 전 셀**이다 — 24번은 A 에 채운 뒤 60% 가 B 로 간다.
+        landed: collections.Counter = collections.Counter()
+
+        def drafts():
+            for _ in range(n_calls):
+                if suppress is None:
                     rec, cell = gen.base_lte_call(ts, slot_start)
-                    if not suppress(cell):
-                        break
                 else:
-                    continue
+                    # ── 억제된 셀의 호는 **버리지 않고 다른 셀로 재추첨한다** ──
+                    #
+                    # 실제 망에서 인접 셀이 흡수하는 모습이고, **전국 호 수가
+                    # 유지되어 "전국 트래픽 급감"이라는 가짜 신호가 생기지
+                    # 않는다** — D4 「트래픽 소멸」의 ① 결측 가드가 바로 그
+                    # 구분(수집 결측 vs 특정 eNB 무호)을 본다.
+                    #
+                    # 상한 8회: 대상 eNB 가 전체의 1/60 이므로 8회 연속 실패
+                    # 확률이 `(1/60)^8` 로 무시할 수 있다. 그래도 상한을 두는
+                    # 것은 운영자가 eNB 를 하나만 남기고 억제하는 설정을 넣을 수
+                    # 있어서다 — 그때 무한 루프가 되면 데몬이 멈춘다.
+                    for _retry in range(8):
+                        rec, cell = gen.base_lte_call(ts, slot_start)
+                        if not suppress(cell):
+                            break
+                    else:
+                        continue
+                yield rec, cell
+            # 평소 호를 다 낸 뒤 — `landed` 가 이 분의 대상 셀 호 수를 다 셌다
+            if n_calls:
+                yield from self._floor_drafts(minute, active, landed, suppress,
+                                              ts, slot_start)
+
+        for rec, cell in drafts():
+            landed[cell.cell_key] += 1
+            dst = relocate(cell) if relocate is not None else None
+            if dst is None and shift is not None:
+                # 증설된 B 로 붙는 호(`j-sc-24`) — 아래와 같이 **같은 사람**이다
+                dst = shift(cell)
+            if dst is not None:
+                # ── 정지 셀의 호는 **같은 사람**이 이웃 셀에서 다시 건다 ──
+                #
+                # 위 suppressor 처럼 다시 추첨하면 다른 가입자가 나와 "재분배"
+                # 일 뿐이다. 확정대장 §11.3 조건 4 가 "정지 직전 그 셀에 있던
+                # IMSI 가 주변 셀에 나타날 것"이다. 가입자를 되찾지 못하면
+                # (뮤테이터가 IMSI 를 바꾼 경우는 여기 오기 전이라 없다)
+                # 원래 호를 그대로 둔다
+                si = gen.sub_by_imsi.get(rec.values[i_imsi], -1)
+                if si >= 0:
+                    rec, cell = gen.base_lte_call(ts, slot_start,
+                                                  at=(gen.subs[si], dst))
             self._coerce(rec, cell)
             if mutate is not None:
                 mutate("lte_call", rec, cell)
@@ -2376,8 +2701,15 @@ class PemdbGen:
         # 않는다 — TAU 레코드는 이미 전환의 결과이고, 거기에 또 셀을 바꾸면
         # 떠난 TA 기록(`old_call_Last_TAC`)과 어긋난다.
         tau = gen.tau_events
+        # **TAU 도 생성량 비율을 따른다**(2026-10-29 사람 결정). 호 수는
+        # `volume_pct`(현장 15%)로 줄이는데 움직이는 사람 수는 가입자 풀
+        # 그대로라, TAU 만 100% 로 나와 낮에 전체 레코드의 20%(분당 ~700건)
+        # 가 됐다. 이동·TA 판정은 건드리지 않고 **기록만** 같은 비율로 뽑는다
+        keep = min(1.0, max(0.0, self._volume_pct / 100.0))
         if tau and "lte_call" not in self._blocked:
             for sub_i, src, dst in tau:
+                if keep < 1.0 and gen.rng.random() >= keep:
+                    continue
                 rec, cell = gen.tau_rec(ts, slot_start, gen.subs[sub_i],
                                         src, dst)
                 self._coerce(rec, None, force_call_type=TAU_CALL_TYPE)
@@ -2412,6 +2744,16 @@ class PemdbGen:
                 f"(호 목록은 {self._calls_at} 것이다). U-Plane 은 그 분의 성공 "
                 "호에서 파생된다 — 순서를 바꾸면 인과가 끊어진다")
         active = self._active(minute)
+        # 열려 있던 세션도 정지 셀을 떠난다 — `records` 와 같은 콜백이다
+        self.sessions.relocate = self._relocator(minute, active)
+        # 장애 대상 셀의 세션은 **대상 앱을 더 자주 고른다** — 장애가 없는
+        # 분에는 빈 목록으로 되돌린다
+        book = self.gen.app_book
+        self.gen.app_boosts = [
+            (set(sc.active_cells_cache) if sc.target.cell_keys else None,
+             book.boosted(lambda a, sc=sc, i=sc.intensity(minute):
+                          APP_BOOSTERS[sc.kind](sc, i, a)))
+            for sc in active if sc.kind in APP_BOOSTERS] if book else []
         got = self.sessions.minute(ts, self._calls,
                                    self._mutator(minute, active),
                                    self._plan_mutator(minute, active))
@@ -2916,6 +3258,15 @@ class PemdbWriter:
                 pl.col(n).str.slice(0, w)
                 for n, w in zip(names, widths) if w is not None
             ])
+        # **민감 필드는 컬럼을 남기고 값을 비운다**(2026-10-28 사용자 결정).
+        # 일본은 `通信の秘密` 로 보관 자체를 문제로 본다 — API 경계에서 막는
+        # 것(불변규칙 13)보다 한 단계 앞이다. 컬럼을 지우지 않는 이유는
+        # `xdr_mapping` 이 154필드를 **위치로** 맞추기 때문이다 — 하나를 빼면
+        # 뒤 필드가 전부 한 칸씩 밀린다. 읽는 쪽(graphio)은 이 셋을 고르지 않는다.
+        frame = frame.with_columns([
+            pl.lit("", dtype=pl.String).alias(n)
+            for n in CPLANE_REDACTED if n in frame.columns
+        ])
         frame = frame.with_columns(
             # 분 귀속 컬럼. **마이크로초 해상도**다 — 읽는 쪽이 `[lo, hi)`
             # 비교를 하므로 해상도가 달라지면 경계에서 어긋난다
@@ -3136,7 +3487,32 @@ def _p_derived() -> list[pl.Expr]:
     ]
 
 
-def _enb_master(conn) -> pl.DataFrame:
+#: `_enb_master` 캐시 (2026-10-29). 전에는 1분마다 두 번(`aggregate_enb` ·
+#: `aggregate_enb_cause`) `CL_CELL_MAP` 을 GROUP BY 로 다시 읽었다.
+#:
+#: **프로세스당 한 번 읽는다.** 생성기는 셀 목록을 기동 때 한 번 읽으므로
+#: (`load_cells`) 마스터를 고쳐도 재기동 전에는 그 셀의 트래픽이 생기지 않는다
+#: — 집계 쪽만 매분 새로 읽을 이유가 없다. 다시 읽는 것은 **처음 보는 eNB 가
+#: 데이터에 나타났을 때**뿐이다.
+#:
+#: `absent` 는 다시 읽고도 마스터에 없던 eNB 다. 마스터에 없는 eNB 는 정상
+#: 경로이고(LEFT JOIN 인 이유 · 불변규칙 12) 그것을 "처음 본다"로 세면 매분
+#: 다시 읽게 되어 캐시가 무의미해진다.
+_ENB_CACHE: dict = {"frame": None, "known": frozenset(), "absent": set()}
+
+
+def _enb_master(conn, need: Iterable[str] = ()) -> pl.DataFrame:
+    """eNB 대표 속성. ``need`` 는 이번 집계에 나온 eNB — 모르는 것이 있으면 다시 읽는다."""
+    c = _ENB_CACHE
+    unseen = {e for e in need if e is not None} - c["known"] - c["absent"]
+    if c["frame"] is None or unseen:
+        c["frame"] = _load_enb_master(conn)
+        c["known"] = frozenset(c["frame"]["ENB_ID"].to_list())
+        c["absent"] |= unseen - c["known"]
+    return c["frame"]
+
+
+def _load_enb_master(conn) -> pl.DataFrame:
     """eNB 대표 속성을 polars 프레임으로. 조인 키는 **평문 문자열**이다."""
     with conn.cursor() as cur:
         cur.execute(_ENB_MASTER_SQL)
@@ -3263,7 +3639,8 @@ def aggregate_enb(conn, lo: datetime, hi: datetime,
     )
     # LEFT JOIN 이다 — 마스터에 없는 eNB 도 행이 남아야 한다. `how="left"` 가
     # 그 의미이고, 없으면 그 eNB 의 트래픽이 통째로 사라진다(불변규칙 12).
-    frame = frame.join(_enb_master(conn), on="ENB_ID", how="left")
+    frame = frame.join(_enb_master(conn, frame["ENB_ID"].unique().to_list()),
+                       on="ENB_ID", how="left")
     return _wipe_insert(conn, PM_ENB, "EVENT_TIME", cols, frame, lo, hi)
 
 
@@ -3331,8 +3708,9 @@ def aggregate_enb_cause(conn, lo: datetime, hi: datetime,
           .rename({"FIRST_ENB_ID": "ENB_ID"})
           .with_columns(_p_derived())
           .collect()
-          .join(_enb_master(conn), on="ENB_ID", how="left")
     )
+    frame = frame.join(_enb_master(conn, frame["ENB_ID"].unique().to_list()),
+                       on="ENB_ID", how="left")
     return _wipe_insert(conn, PM_ENB_CAUSE, "EVENT_TIME", cols, frame, lo, hi)
 
 
@@ -3679,7 +4057,8 @@ SUPPORTED: tuple[str, ...] = (
     # 일본 시연 시나리오. **접두를 `J-` 로 가른다** — `g-sc` 25종은
     # 기존 채점의 기준선이고(확정대장 §14.7) 번호를 이어 붙이면 둘이
     # 섞여 "어느 쪽 회귀인지" 를 가를 수 없다.
-    "J-SC-16",
+    "J-SC-14", "J-SC-15", "J-SC-16", "J-SC-21", "J-SC-22", "J-SC-23",
+    "J-SC-25", "J-SC-27",
 )
 
 
@@ -3776,7 +4155,10 @@ def write_truth(path: Path, start: datetime, minutes: int,
     doc = {
         "start": start.isoformat(),
         "minutes": minutes,
-        "scenarios": [sc.as_truth() for sc in scenarios],
+        # **채점 문항이 아닌 재현은 넣지 않는다**(`Scenario.scored` ·
+        # `j-sc-24` 증설). 넣으면 "맞혀야 할 원인"이 빈 문자열인 문항이
+        # 생기고, 그 창의 A 혼잡을 RCA 가 맞혀도 오답으로 센다.
+        "scenarios": [sc.as_truth() for sc in scenarios if sc.scored],
         # 미연동을 정답에 넣지 않는다. 넣으면 분모가 13이 되어 탐지하지
         # 못한 것이 아니라 **원천이 없는 것**까지 실패로 세게 된다.
         "unsupported": UNSUPPORTED,

@@ -1242,3 +1242,155 @@ def test_sector_handover_does_not_restart_the_total(gen):
     assert seq
     for sid, ft in seq.items():
         assert len(set(ft)) == 1, (sid, ft)
+
+
+# --------------------------------------------------------------------------
+# n 역 여정 — 임의 역에서 타서 n 역 뒤에 내린다 (2026-10-29)
+# --------------------------------------------------------------------------
+
+
+def _station_loop(gen, n_cells: int = 30, every: int = 3):
+    """역이 `every` 칸마다 있는 순환 노선. 셀이 인접할 필요는 없다 —
+    여기서 보는 것은 칸 번호의 움직임이다."""
+    from datagen import handover as _HO
+    cells = tuple(gen.cells[:n_cells])
+    st_of = tuple(f"S{i // every:02d}" for i in range(n_cells))
+    pos = {f"S{k:02d}": k * every for k in range(n_cells // every)}
+    return _HO.Route("T-LOOP", "test", cells, (60,) * n_cells, loop=True,
+                     station_of=st_of, stations={k: k for k in pos},
+                     station_pos=pos)
+
+
+def test_hop_journeys_do_not_march_together(gen):
+    """**단체 행진이 없다.** 전에는 `from`/`to` 고정 구간이라 전원이 같은
+    칸에서 같은 순간에 출발해, 한 칸이 이동 가입자 전부를 받았다
+    (실측: eNB 하나가 전체 호의 25%)."""
+    import collections
+    import random as _r
+    rng = _r.Random(7)
+    rt = _station_loop(gen)
+    gen.journeys = [{"route": rt.id, "stations": [2, 5], "share": 1.0}]
+    gen.off_sec = (300, 900)
+    try:
+        gen.seat_routes([rt], 1.0, rng)
+        mob = [s for s in gen.subs if s.route >= 0]
+        t0 = ANCHOR.timestamp()
+        for m in range(40):
+            gen.advance_routes(t0 + m * 60)
+            top = collections.Counter(s.route_pos for s in mob).most_common(1)[0][1]
+            # 30칸 균등이면 칸당 3.3% — 역 칸에 머무는 사람이 몰려도 15% 를 넘지 않는다
+            assert top / len(mob) < 0.15, (m, top, len(mob))
+    finally:
+        gen.journeys = []
+        gen.seat_routes([], 0.0, rng)
+
+
+def test_hop_journey_reboards_where_it_got_off(gen):
+    """내린 역에서 다시 탄다 — **순간이동이 없다.** 고정 구간은 하차 칸에서
+    승차 칸으로 돌아가 세션 추종을 회차로 끊어야 했다."""
+    import random as _r
+    rng = _r.Random(11)
+    rt = _station_loop(gen)
+    gen.journeys = [{"route": rt.id, "stations": [2, 4], "share": 1.0}]
+    gen.off_sec = (60, 120)
+    try:
+        gen.seat_routes([rt], 1.0, rng)
+        mob = [s for s in gen.subs if s.route >= 0][:200]
+        t0 = ANCHOR.timestamp()
+        prev = {id(s): s.route_pos for s in mob}
+        stations = set(rt.station_pos.values())
+        for m in range(60):
+            gen.advance_routes(t0 + m * 60)
+            for s in mob:
+                d = (s.route_pos - prev[id(s)]) % len(rt)
+                assert d in (0, 1), "한 틱에 한 칸보다 많이 움직였다 — 순간이동"
+                prev[id(s)] = s.route_pos
+                assert s.route_from in stations and s.route_to in stations
+                hops = ((s.route_to - s.route_from) % len(rt)) // 3
+                assert 2 <= hops <= 4
+    finally:
+        gen.journeys = []
+        gen.seat_routes([], 0.0, rng)
+
+
+def test_hop_spec_rejects_bad_ranges(gen):
+    import random as _r
+    rt = _station_loop(gen)
+    for spec in ({"route": rt.id, "stations": [0, 3], "share": 1.0},
+                 {"route": rt.id, "stations": [5, 2], "share": 1.0},
+                 {"route": rt.id, "stations": [2, 10], "share": 1.0},   # 역 10개
+                 {"route": rt.id, "stations": [2, 3], "from": 0, "share": 1.0}):
+        gen.journeys = [spec]
+        try:
+            with pytest.raises(RuntimeError):
+                gen.seat_routes([rt], 1.0, _r.Random(0))
+        finally:
+            gen.journeys = []
+            gen.seat_routes([], 0.0, _r.Random(0))
+
+
+# --------------------------------------------------------------------------
+# 그룹 — 고정 / 그냥 이동 / 지하철, 시간대별 (2026-10-29)
+# --------------------------------------------------------------------------
+
+HOURLY = [[0, 5, 90, 10, 0], [5, 7, 60, 40, 10], [7, 9, 30, 70, 50],
+          [9, 17, 10, 90, 30], [17, 20, 30, 70, 50], [20, 24, 60, 40, 10]]
+
+
+def test_groups_follow_the_table_and_subway_hours():
+    from datagen.generator import Groups
+    g = Groups(HOURLY, (6, 24), blend_min=60)
+    at = lambda h, m=0: g.shares(datetime(2026, 10, 29, h, m))
+    assert at(3) == (0.0, pytest.approx(0.10))             # 새벽 — 지하철 없음
+    assert at(8) == (pytest.approx(0.50), pytest.approx(0.20))
+    assert at(12) == (pytest.approx(0.30), pytest.approx(0.60))
+    # 운행 전(5시대)에는 지하철 몫이 그냥 이동으로 간다 — 이동 총량은 표대로
+    sw, wk = at(5, 40)
+    assert sw == 0.0 and wk == pytest.approx(0.40)
+    # 경계는 선형으로 넘어간다 — 9시 정각은 7–9 와 9–17 의 중간
+    sw, wk = at(9)
+    assert sw == pytest.approx(0.40) and wk == pytest.approx(0.40)
+
+
+def test_groups_reject_a_broken_table():
+    from datagen.generator import Groups
+    for rows in ([[0, 12, 50, 50, 0]],                          # 24시까지 안 덮는다
+                 [[0, 24, 60, 50, 0]],                          # 고정+이동 ≠ 100
+                 [[0, 24, 50, 50, 60]],                         # 지하철 > 이동
+                 [[0, 10, 50, 50, 0], [9, 24, 50, 50, 0]]):     # 겹친다
+        with pytest.raises(RuntimeError):
+            Groups(rows)
+
+
+def test_walkers_move_only_to_neighbours_and_slow_down_at_night(gen):
+    """걷는 사람은 **이웃 eNB 로 한 칸씩** 간다 — 순간이동이 없다. 새벽에는
+    그 시각 그냥 이동 몫만큼 천천히 걷는다(전에는 새벽 TAU 가 분당 300건)."""
+    import random as _r
+    from datagen import handover as _HO
+    from datagen.generator import Groups
+    gen.ho_topo = _HO.Topology(gen.cells)
+    gen.groups = Groups(HOURLY, (6, 24))
+    try:
+        gen.seat_routes([], 0.0, _r.Random(0))
+        gen.seat_walkers(0.5, _r.Random(3), (60, 60))
+        walkers = [gen.subs[i] for i in gen._walkers]
+        assert walkers and all(s.route < 0 for s in walkers)
+        assert not set(gen._walkers) & set(gen._fixed)
+
+        def run(hour: int) -> int:
+            t0 = datetime(2026, 10, 29, hour).timestamp()
+            n = 0
+            for m in range(20):
+                before = {id(s): s.walk_cell for s in walkers}
+                n += gen._advance_walkers(t0 + m * 60)
+                for s in walkers:
+                    b = before[id(s)]
+                    if s.walk_cell is not b:
+                        assert s.walk_cell in (gen.ho_topo.inter.get(b.cell_key) or
+                                               gen.ho_topo.intra.get(b.cell_key))
+            return n
+        day, night = run(12), run(3)
+        assert night < day * 0.35, (day, night)    # 몫 0.10 / 0.60 ≈ 1/6
+    finally:
+        gen.groups = None
+        gen.seat_walkers(0.0, _r.Random(0))

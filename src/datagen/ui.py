@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import hashlib
 import json
 import re
 from datetime import datetime, timedelta
@@ -32,7 +33,7 @@ from .generator import diurnal_factor
 from .pemdb1 import BLOCKABLE_SERIES, CPLANE_ROOT_DEFAULT, CPLANE_SERIES
 from .control import (FAULT_SELECT, KINDS, T_CONFIG, T_FAULT, T_HISTORY,
                       add_fault, cancel_fault, ensure_tables, get_config,
-                      list_faults, set_config)
+                      list_faults, list_scenarios, set_config)
 
 HERE = Path(__file__).resolve().parents[2]
 
@@ -58,6 +59,14 @@ KIND_LABELS = {
     "external_path_latency": "외부 경로 지연 (백본)",
     "nsa_policy_restrict": "DCNR 정책 제한",
     "anchor_saturation": "5G 체감 품질 저하 (앵커 경합)",
+    "son_param_change": "SON 변경 후 계단형 저하 (H/O)",
+    "ran_congestion": "무선 용량 혼잡 (활성 가입자 증가)",
+    "ho_interruption": "전환 직후 정체 (코리도 4G↔5G)",
+    "earthquake": "국지 다수 셀 정지 + 주변 부하 유입 (지진)",
+    "cdn_degradation": "동영상 CDN 서버측 열화",
+    "pay_dns_delay": "결제 앱 응답 지연 (DNS 기인)",
+    "event_crowd": "대형 이벤트 군중 혼잡 + 업링크",
+    "capacity_shift": "기지국 증설 후 부하 이동 (장애 아님)",
     # ── 신규 8종 ─────────────────────────────────────────────────────────
     "auc_no_response": "S6a 무응답 (TIMEOUT)",
     "dra_route_failure": "S6a 라우팅 계층 이상",
@@ -69,6 +78,10 @@ KIND_LABELS = {
     "dns_flap": "DNS 간헐 실패",
     "compound_causal_failure": "복합 장애 (전송→DNS)",
 }
+
+#: **주입 메뉴는 `CM_ERROR_SCENARIO` 를 읽는다** (2026-10-28). 전에는 여기
+#: `FAULT_MENU` 상수였는데, 지도·다른 화면도 같은 목록과 발생 장비를 봐야
+#: 해서 DB 로 옮겼다. 정본은 `control.SCENARIOS` 다.
 
 # ── MySQL 접속 ──────────────────────────────────────────────────────────────
 #
@@ -686,6 +699,21 @@ def api_targets():
         "sgg": [{"code": k, "name": "", "cells": n}
                 for k, n in sorted(sgg.items(), key=lambda kv: (-kv[1], kv[0]))],
     }
+
+
+@app.get("/api/scenarios")
+def api_scenarios():
+    """장애 시나리오 목록과 발생 장비 마스크 — `CM_ERROR_SCENARIO`.
+
+    화면은 이것을 그대로 그린다. 시나리오를 고르면 마스크가 `Y` 인 장비만
+    대상 후보로 보인다.
+    """
+    conn = _connect()
+    try:
+        ensure_tables(conn)  # 표가 아직 없는 DB 에서 UI 만 먼저 떠도 보이게
+        return list_scenarios(conn)
+    finally:
+        conn.close()
 
 
 @app.get("/api/faults")
@@ -1504,7 +1532,7 @@ _HTML = """<!doctype html>
 </style>
 </head>
 <body>
-<h1>probe-datagen 장애 주입 제어<small>생성 데몬이 1분 틱으로 반영한다 · <a href="/topo" style="color:var(--accent)">마스터 토폴로지</a></small></h1>
+<h1>probe-datagen 장애 주입 제어<small>생성 데몬이 1분 틱으로 반영한다 · <a href="/topo" style="color:var(--accent)">마스터 토폴로지</a> · <a href="/map" style="color:var(--accent)">장비 지도</a></small></h1>
 
 <!-- 상태바 — **오늘만 본다. 항상 실시간이다** (2026-10-15 사람 지시).
      날짜 이동과 실시간 토글을 뺐다: 과거를 볼 일이 없고, 끌 이유도 없다.
@@ -1677,7 +1705,7 @@ _HTML = """<!doctype html>
     <h3>장애 주입</h3>
     <form id="f" onsubmit="return inject(event)">
       <label>종류
-        <select id="kind"></select>
+        <select id="kind" onchange="renderTargets()"></select>
       </label>
       <label>대상
         <select id="target"><option value="">자동 선택</option></select>
@@ -1717,6 +1745,8 @@ _HTML = """<!doctype html>
 
 <script>
 const LABELS = __KIND_LABELS__;
+let SCN = [];          // CM_ERROR_SCENARIO — /api/scenarios
+let TGT = null;        // /api/targets
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -1727,23 +1757,43 @@ const DOW = ["일","월","화","수","목","금","토"];
 const dow = d => DOW[new Date(d + "T00:00:00").getDay()] || "";
 
 async function loadKinds() {
-  // kind 목록의 정본은 서버(control.KINDS) — 하드코딩하면 종류가 늘 때 UI 가 뒤처진다
-  const st = await (await fetch("/api/status")).json();
-  $("kind").innerHTML = st.kinds.map(k =>
-    `<option value="${k}">${esc(LABELS[k] || k)}</option>`).join("");
+  // 시나리오 목록·발생 장비의 정본은 `CM_ERROR_SCENARIO`(control.SCENARIOS).
+  // 서버가 받지 않는 kind 는 비활성이다 — 아직 주입 경로가 없는 시나리오다.
+  const [st, sc] = await Promise.all([
+    (await fetch("/api/status")).json(), (await fetch("/api/scenarios")).json()]);
+  const ok = new Set(st.kinds);
+  SCN = sc;
+  $("kind").innerHTML = SCN.map(s => {
+    const live = s.kind && ok.has(s.kind);
+    const eq = ["mme","sgw","pgw","enb"].filter(k => s[k] === "Y")
+                 .map(k => k.toUpperCase()).join("·");
+    // 증거 없음(NO_EVIDENCE)은 준비 중과 다르다 — 만들 근거가 데이터에 없다
+    const off = s.status === "NO_EVIDENCE" ? " — 증거 없음" : " — 준비 중";
+    return `<option value="${s.no}"${live ? "" : " disabled"} title="${esc(s.description || "")}">`
+         + `${s.no}. ${esc(s.name)}${live ? (eq ? ` [${eq}]` : "") : off}</option>`;
+  }).join("");
+  renderTargets();
 }
 
 async function loadTargets() {
-  const t = await (await fetch("/api/targets")).json();
+  TGT = await (await fetch("/api/targets")).json();
+  renderTargets();
+}
+
+// 고른 시나리오의 발생 장비(`*_YN`)만 대상 후보로 보인다.
+function renderTargets() {
+  if (!TGT) return;
+  const s = SCN.find(x => String(x.no) === $("kind").value);
+  const on = k => !s || s[k] === "Y";
   const og = (label, items) =>
     `<optgroup label="${label}">` + items.map(i =>
       `<option value="${esc(i.v)}">${esc(i.t)}</option>`).join("") + "</optgroup>";
-  $("target").innerHTML = '<option value="">자동 선택</option>'
-    + og("SGW", t.sgw.map(x => ({v:`SGW-${x.id}`, t:`SGW-${x.id} (셀 ${x.cells})`})))
-    + og("MME", t.mme.map(x => ({v:`MME-${x.id}`, t:`MME-${x.id} (셀 ${x.cells})`})))
-    + og("PGW", t.pgw.map(x => ({v:`PGW-${x.id}`, t:`PGW-${x.id} (셀 ${x.cells})`})))
-    + og("eNB (무호 전용)", (t.enb || []).map(x => ({v:`ENB:${x.id}`, t:`eNB-${x.id} (셀 ${x.cells})`})))
-    + og("시군구", t.sgg.map(x => ({v:`SGG:${x.code}`, t:`${x.name} (셀 ${x.cells})`})));
+  let h = '<option value="">자동 선택</option>';
+  if (on("sgw")) h += og("SGW", TGT.sgw.map(x => ({v:`SGW-${x.id}`, t:`SGW-${x.id} (셀 ${x.cells})`})));
+  if (on("mme")) h += og("MME", TGT.mme.map(x => ({v:`MME-${x.id}`, t:`MME-${x.id} (셀 ${x.cells})`})));
+  if (on("pgw")) h += og("PGW", TGT.pgw.map(x => ({v:`PGW-${x.id}`, t:`PGW-${x.id} (셀 ${x.cells})`})));
+  if (on("enb")) h += og("eNB", (TGT.enb || []).map(x => ({v:`ENB:${x.id}`, t:`eNB-${x.id} (셀 ${x.cells})`})));
+  $("target").innerHTML = h;
 }
 
 // ── 상태바 ──────────────────────────────────────────────────────────────
@@ -1852,11 +1902,12 @@ async function poll() {
 async function inject(ev) {
   ev.preventDefault();
   const body = {
-    kind: $("kind").value,
+    kind: (SCN.find(x => String(x.no) === $("kind").value) || {}).kind,
     target: $("target").value || null,
     duration_min: parseInt($("dur").value, 10) || 30,
     intensity: parseFloat($("intensity").value),
-    note: $("note").value || null,
+    // 어느 시나리오로 걸었는지 남긴다 — 같은 kind 를 여러 번호가 쓴다(1/18)
+    note: `#${$("kind").value} ` + ($("note").value || ""),
   };
   const m = $("msg");
   try {
@@ -2604,7 +2655,7 @@ _HTML_TOPO = """<!doctype html>
 </head>
 <body>
 <h1>마스터 토폴로지
-  <small>행정구역 · 장비 · 셀 — <a href="/">장애 주입 화면</a></small>
+  <small>행정구역 · 장비 · 셀 — <a href="/">장애 주입 화면</a> · <a href="/map">장비 지도</a></small>
   <!-- **로케일은 테이블 이름이다.** 어느 벌을 보고 있는지가 모든 조작의
        대상이므로 화면 맨 위에 둔다 — 아래에 묻어 두면 KR 을 보면서 JP 를
        고친다고 믿는 상태가 생긴다. -->
@@ -3423,6 +3474,317 @@ def api_map_layer(name: str):
             "source": source}
 
 
+#: 심각도 순위 — 한 장비에 여러 Incident 가 걸리면 **가장 심한 것**이
+#: 색을 정한다. graphio `AI_INCIDENT.SEVERITY` 의 값 집합이다.
+_SEV_RANK = {"INFO": 1, "WARN": 2, "WARNING": 2, "MINOR": 2,
+             "MAJOR": 3, "CRITICAL": 4}
+
+
+@app.get("/api/map/faults")
+def api_map_faults(minutes: int = 15):
+    """지도에 뿌릴 **장애 현황** — graphio 에서 HTTP 로 받는다.
+
+    ## 왜 DB 를 직접 읽지 않나
+
+    `AI_INCIDENT`·`AI_RCA_RESULT` 는 **graphio 소유**다(`pemdb1.py` 의
+    "분석 산출물은 넣지 않는다"). 같은 `pemdb6` 에 있어 SELECT 는 되지만,
+    그러면 두 저장소가 한 스키마를 공유하게 되고 graphio 가 컬럼을 바꿀 때
+    **에러 없이 빈 화면**이 된다. API 를 거치면 민감 필드 차단(불변규칙 13)도
+    그쪽 경계가 그대로 한다.
+
+    ## graphio 가 없어도 지도는 선다
+
+    `web` 컨테이너는 `profiles: ["svc"]` 라 안 떠 있을 수 있다. 닿지 않으면
+    `error` 를 담아 내리고 **화면은 장애 표시만 비운다** — 레이어 파일이
+    없을 때와 같은 방식이고, 빈 배열로 내리면 "장애가 없다"로 읽힌다
+    (불변규칙 17).
+
+    ## `ver` 는 **장비별 심각도**의 해시다
+
+    화면이 10초마다 부르는데 매번 다시 그리면 눌러 둔 선택이 풀리고 깜빡인다.
+    `ver` 가 같으면 화면은 아무것도 하지 않는다. Incident 본문이 아니라
+    **장비→심각도** 만 넣는다 — 서술이 L3 로 갱신돼도 지도 그림은 같다.
+    """
+    base = str(_pem_cfg().get("graphio_api") or "").rstrip("/")
+    if not base:
+        return {"error": "`pemdb1.graphio_api` 가 비어 있다 — graphio API "
+                         "주소를 설정에 적어야 한다", "incidents": []}
+
+    import urllib.error
+    import urllib.request
+
+    url = f"{base}/api/incidents?scope=1&limit=200"
+    try:
+        with urllib.request.urlopen(url, timeout=3) as r:
+            doc = json.loads(r.read())
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        # **무엇이 안 되는지 말한다.** "장애 0건"과 "물어볼 데가 없다"는
+        # 다른 사실이고, 전자로 보이면 아무도 이상하다고 생각하지 않는다
+        return {"error": f"graphio API 에 닿지 않는다 ({url}): {e}",
+                "incidents": []}
+
+    # ## "지금 장애"는 **마지막으로 관측된 시각**으로 가른다 (2026-10-28)
+    #
+    # graphio 는 Incident 를 닫지 않는다 — 주입이 끝나 이상이 사라져도
+    # `status` 는 OPEN 이고 `closed_ts` 는 비어 있다. 그래서 상태로 거르면
+    # **끝난 장애가 계속 장애로 남았다.** `updated_ts` 는 이상이 마지막으로
+    # 관측된 분이다(graphio 불변규칙 9 — 관측 사실). 그것이 창 안에 있는
+    # 것만 "지금"으로 본다.
+    #
+    # 전에는 `opened_time`·`updated_time` 을 읽고 있었는데 graphio 응답
+    # 키는 `*_ts` 다. **에러 없이 전부 None** 이라 시각 필터가 한 번도
+    # 돌지 않았다. 영향 가입자(`affected_subscribers`)도 같은 이유로 늘
+    # "산출 불가"였다
+    cutoff = datetime.now() - timedelta(minutes=minutes)
+    latest = None
+    out, enb, node, sgg = [], {}, {}, {}
+    # **장애 이력** — 창과 무관하게 graphio 가 준 것 전부(최근 연 순 200건).
+    # 지도 색은 "지금" 것만 칠하지만, 목록은 끝난 장애도 눌러서 **그때
+    # 어느 장비가 걸렸는지** 다시 볼 수 있어야 한다(사람 요청 2026-10-30).
+    # 건마다 걸린 eNB·코어를 미리 풀어 둔다 — 화면이 scopes 를 다시 해석하면
+    # 위 `mark` 규칙과 두 벌이 된다
+    hist = []
+    for i in doc.get("incidents", []):
+        ts = str(i.get("closed_ts") or i.get("updated_ts") or i.get("opened_ts") or "")[:19]
+        try:
+            at = datetime.fromisoformat(ts) if ts else None
+        except ValueError:
+            at = None
+        if at and (latest is None or at > latest):
+            latest = at
+        h_enb, h_node = set(), set()
+        for sc in i.get("scopes") or []:
+            kind, sid = sc.get("scope_type"), str(sc.get("scope_id") or "")
+            if kind == "CELL" and "-" in sid:
+                h_enb.add(sid.rsplit("-", 1)[0])
+        for ax in (i.get("detail") or {}).get("axis_ids") or []:
+            t, _, nid = str(ax).partition("-")
+            if t.lower() in ("sgw", "mme", "pgw") and nid:
+                h_node.add(f"{t.lower()}:{nid}")
+        # 시각을 모르면 **지금으로 본다** — 모르는 것을 "끝났다"로 읽지 않는다
+        live = not (at and at < cutoff)
+        # **지리 축** — 체감(XP) 장애는 장비가 아니라 구역(메시·행정구역)으로
+        # 온다(graphio `detector` 의 `detail.axis`·`axis_ids`). 장비 범위가
+        # 없다고 "지도에 없음"으로 두던 것을 면으로 그린다(사람 결정 2026-10-30)
+        det = i.get("detail") or {}
+        axis = str(det.get("axis") or "")
+        geo_ids = ([str(x) for x in det.get("axis_ids") or []]
+                   if axis in _GEO_AXES else [])
+        hist.append({**{k: i.get(k) for k in (
+            "incident_id", "severity", "status", "title", "trigger_kpi",
+            "opened_ts", "updated_ts", "closed_ts", "root_code", "root_label",
+            "centroid_lat", "centroid_lon", "cell_cnt", "rca_id")},
+            "live": live, "enbs": sorted(h_enb), "nodes": sorted(h_node),
+            "axis": axis if geo_ids else None, "geo_ids": geo_ids,
+            # 위치 없는 축도 **무슨 축인지는** 화면이 말해야 한다
+            "axis_raw": axis or None,
+            "axis_vals": [str(x) for x in det.get("axis_ids") or []][:GEO_LIST]})
+        if not live:
+            continue
+        iid, sev = i.get("incident_id"), (i.get("severity") or "")
+        out.append({k: i.get(k) for k in (
+            "incident_id", "severity", "status", "title", "trigger_kpi",
+            "opened_ts", "updated_ts", "closed_ts",
+            "root_code", "root_label", "statement_ko", "confidence",
+            "centroid_lat", "centroid_lon", "radius_km", "cell_cnt",
+            "affected_subscribers", "impact_ratio", "spread_trend")})
+
+        def mark(bucket: dict, key: str) -> None:
+            bucket.setdefault(key, {"sev": sev, "ids": []})
+            # 한 장비에 여러 건이면 **가장 심한 것**이 색을 정한다
+            if _SEV_RANK.get(sev, 0) > _SEV_RANK.get(bucket[key]["sev"], 0):
+                bucket[key]["sev"] = sev
+            bucket[key]["ids"].append(iid)
+
+        for sc in i.get("scopes") or []:
+            kind, sid = sc.get("scope_type"), str(sc.get("scope_id") or "")
+            if kind == "CELL" and "-" in sid:
+                mark(enb, sid.rsplit("-", 1)[0])    # 셀 → 그 자리(eNB)
+            elif kind == "SGG":
+                mark(sgg, sid)
+        # **코어는 `scopes` 에 없다.** 축이 NODE 인 Incident 는 장비 ID 를
+        # `detail.axis_ids` 에 `SGW-0032` 꼴로 담는다
+        # (`detector._node_key` = `node_type || '-' || node_id`)
+        for ax in (i.get("detail") or {}).get("axis_ids") or []:
+            t, _, nid = str(ax).partition("-")
+            if t.lower() in ("sgw", "mme", "pgw") and nid:
+                mark(node, f"{t.lower()}:{nid}")
+
+    _attach_dong(hist)
+    _attach_bias(base, hist)
+    for h in hist:
+        h.setdefault("egress", _is_egress(h)
+                     or any(n.startswith("pgw:") for n in h.get("nodes") or []))
+    # 장비→심각도만 해시한다 (위 docstring)
+    # 건 목록도 넣는다 — 범위 없는 Incident 가 들고 나도 건수는 바뀐다
+    stamp = json.dumps(
+        [{k: v["sev"] for k, v in sorted(b.items())} for b in (enb, node, sgg)]
+        + [sorted(str(o["incident_id"]) for o in out)]
+        + [[h["incident_id"] for h in hist]],
+        ensure_ascii=False, sort_keys=True)
+    return {"ver": hashlib.sha1(stamp.encode()).hexdigest()[:12],
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "minutes": minutes,
+            # graphio 가 마지막으로 이상을 본 시각 — 창이 비었을 때 "장애가
+            # 없다"와 "분석이 멈췄다"를 사람이 가를 수 있게
+            "latest": latest.isoformat(timespec="minutes") if latest else None,
+            "incidents": out, "enb": enb, "node": node, "sgg": sgg,
+            "history": hist}
+
+
+#: 지도에 면으로 그릴 수 있는 graphio 축. 메시는 코드만으로 칸이 계산되고
+#: (JIS X 0410 — 화면이 한다), ADM2 는 화면이 이미 든 행정경계 폴리곤의
+#: `N03_007` 과 같은 코드다. ADM3(丁目)은 폴리곤이 없어 중심점뿐이다
+_GEO_AXES = ("MESH1K", "MESH500", "MESH250", "ADM1", "ADM2", "ADM3", "GLOBAL")
+#: 위치 없는 축의 값(단말 기종·APN·도메인)은 선택 바에 적을 만큼만
+GEO_LIST = 10
+
+#: 편향 노드를 짚는 축 — 단말 기종·APN 장애는 위치가 없지만 graphio 가
+#: EV-12 로 "실패가 어느 코어 장비로 쏠렸나"를 판정해 둔다(사람 결정 2026-10-30)
+_BIAS_AXES = ("UE", "APN")
+#: **이 비중 이상일 때만 짚는다.** EV-12 `top_node` 는 편향이 없어도 늘
+#: 채워진다 — 도메인 장애가 `MME-1 · 실패 0 · 비중 0%` 로 왔다. 그것을 짚으면
+#: 지도가 없는 사실을 만든다(graphio 불변규칙 18)
+BIAS_MIN_SHARE = 50.0
+#: (incident_id, rca_id) → 편향 노드. RCA 가 다시 돌면 rca_id 가 바뀌어 새로 묻는다.
+#: 10초 폴링마다 건마다 상세를 부르면 N+1 이 된다
+_BIAS_CACHE: dict[tuple, dict | None] = {}
+
+
+def _is_egress(h: dict) -> bool:
+    """**망 밖으로 나가는 쪽** 장애인가 — 서비스 도메인 축이거나 DNS 지표(U-29).
+
+    이것들은 셀·구가 아니라 인터넷 출구(PGW 너머)의 일이라, 지도가 도코모
+    건물(PGW)에 붙인다. graphio 가 PGW 를 지목한 것은 **아니다** — 화면의 배치다.
+    """
+    kpis = {k.strip() for k in str(h.get("trigger_kpi") or "").split(",")}
+    return h.get("axis_raw") == "DOMAIN" or "U-29" in kpis
+
+
+def _attach_bias(base: str, hist: list[dict]) -> None:
+    """UE·APN 장애에 **EV-12 편향 노드**를 붙인다 — `/api/incidents/{id}` 의 증거.
+
+    목록 API 에는 증거가 없어 건마다 상세를 묻는다. 캐시 키에 `rca_id` 를
+    넣어 분석이 갱신되면 다시 묻는다. 닿지 않으면 그 건만 비운다 — 지도는 선다.
+    """
+    import urllib.error
+    import urllib.request
+
+    for h in hist:
+        dns_case = _is_egress(h)
+        if h.get("axis_raw") not in _BIAS_AXES and not dns_case:
+            continue
+        key = (h["incident_id"], h.get("rca_id"))
+        if key not in _BIAS_CACHE:
+            got = {"bias": None, "dns": None}
+            try:
+                with urllib.request.urlopen(
+                        f"{base}/api/incidents/{h['incident_id']}", timeout=3) as r:
+                    evs = (json.loads(r.read()).get("rca") or {}).get("evidence") or {}
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+                continue                    # 캐시하지 않는다 — 다음 폴링에 다시
+            ev = evs.get("EV-12") or {}
+            t = ev.get("top_node") or {}
+            share = float(t.get("failure_share") or 0)
+            if (h.get("axis_raw") in _BIAS_AXES
+                    and t.get("node_type") and t.get("node_id")
+                    and int(t.get("failures") or 0) > 0
+                    and share >= BIAS_MIN_SHARE):
+                got["bias"] = {"node": f"{str(t['node_type']).lower()}:{t['node_id']}",
+                               "share": share, "failures": int(t["failures"]),
+                               "verdict": ev.get("verdict"),
+                               "concentration": ev.get("concentration")}
+            # **망 밖 장애는 DNS 를 나란히 둔다**(EV-08b) — "이름 풀이가 안 되나,
+            # 서버·백본이 느리나"를 운영자가 가르게. 값은 증거를 옮길 뿐이다
+            if dns_case:
+                rows = [d for d in (evs.get("EV-08b") or {}).get("dns") or []
+                        if isinstance(d, dict)]
+                rows.sort(key=lambda d: (-float(d.get("share_of_failures") or 0),
+                                         -int(d.get("queries") or 0)))
+                got["dns"] = [{k: d.get(k) for k in (
+                    "host_site", "queries", "fail_rate", "response_ms", "slow",
+                    "baseline_fail_rate", "baseline_response_ms", "low_sample")}
+                    for d in rows[:3]]
+            _BIAS_CACHE[key] = got
+        h["bias"] = _BIAS_CACHE[key]["bias"]
+        h["dns"] = _BIAS_CACHE[key]["dns"]
+        h["egress"] = dns_case or any(n.startswith("pgw:") for n in h.get("nodes") or [])
+
+
+def _attach_dong(hist: list[dict]) -> None:
+    """ADM3(丁目) 축의 **중심점**을 붙인다 — `CM_DONG_JP` 는 이름·중심좌표뿐이다.
+
+    graphio 도 丁目 을 최근접 중심점으로 귀속한다(`geo_coverage` 머리말의
+    `CENTROID`). 경계가 아니므로 화면은 점선 원으로 그리고 "근사"라고 적는다.
+    DB 가 안 닿으면 **빈 채로** 둔다 — 지도는 서고, 그 장애만 "좌표 없음"이 된다.
+    """
+    ids = sorted({g for h in hist if h.get("axis") == "ADM3" for g in h["geo_ids"]})
+    if not ids:
+        return
+    at: dict[str, dict] = {}
+    try:
+        conn = _connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT DONG_ID, DONG_NAME, LATITUDE, LONGITUDE "
+                            "FROM CM_DONG_JP WHERE DONG_ID IN ("
+                            + ",".join(["%s"] * len(ids)) + ")", ids)
+                for d, name, lat, lon in cur.fetchall():
+                    if lat and lon:
+                        at[str(d)] = {"id": str(d), "name": name,
+                                      "lat": round(float(lat), 6),
+                                      "lon": round(float(lon), 6)}
+        finally:
+            conn.close()
+    except pymysql.MySQLError:
+        return
+    for h in hist:
+        if h.get("axis") == "ADM3":
+            h["dong"] = [at[g] for g in h["geo_ids"] if g in at]
+
+
+@app.get("/api/map/standby")
+def api_map_standby():
+    """**소등 eNB**(24번 B 후보)의 지금 상태 — 지도가 회색 / 켜짐으로 칠한다.
+
+    지도는 생성기와 같은 셀 목록(`_cells`)을 그리는데, 그 목록에는 소등
+    eNB 도 들어 있다(마스터에 있으므로). 상태를 따로 주지 않으면 **평소 호가
+    없는 eNB 가 평범한 기지국처럼** 보인다.
+
+    상태는 생성기와 **같은 함수**로 정한다(`scenarios.shift_pick`·국면 상수).
+    화면이 자기 규칙으로 B 를 고르면 지도가 켜졌다고 말하는 eNB 와 실제로
+    호를 받는 eNB 가 어긋나고, 에러는 나지 않는다.
+
+    `off` 평소 소등 · `next` 진행 중인 24번이 10분 시점에 켤 eNB · `on` 켜짐.
+    `faults` 와 따로 두는 이유: 그쪽은 graphio API 가 없으면 일찍 끝나는데,
+    이 상태는 생성기 것이라 graphio 와 무관하게 보여야 한다.
+    """
+    from . import scenarios as S
+    from .cli import _capacity_shift
+
+    cfg = S.ShiftCfg.from_cfg(_capacity_shift(_pem_cfg()))
+    st = {e: "off" for e in cfg.standby_enbs}
+    if st:
+        conn = _connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT START_TIME FROM {T_FAULT} "
+                            "WHERE FAULT_KIND='capacity_shift' AND STATUS='active'")
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        now = datetime.now()
+        for (start,) in rows:
+            b = S.shift_pick(int(start.timestamp() // 60), cfg.standby_enbs)
+            el = (now - start).total_seconds() / 60
+            if b is None or not 0 <= el < S.SHIFT_TOTAL:
+                continue
+            st[b] = "on" if el >= S.SHIFT_RISE else ("next" if st[b] == "off" else st[b])
+    stamp = json.dumps([cfg.from_enb, sorted(st.items())])
+    return {"ver": hashlib.sha1(stamp.encode()).hexdigest()[:12],
+            "from": cfg.from_enb, "enbs": st}
+
+
 @app.get("/api/map/all")
 def api_map_all():
     """**마스터 전량** — 생성 대상이 아닌 셀까지.
@@ -3553,6 +3915,15 @@ _HTML_MAP = """<!doctype html>
    background:#161b22;border-bottom:1px solid #2a313a}
  header>*{flex:none;white-space:nowrap}
  header b{font-size:14px} label{opacity:.85}
+ header .nav{font-size:12px;opacity:.8} header .nav a{color:#8ab4f8;text-decoration:none}
+ header .nav a:hover{text-decoration:underline}
+ /* 갱신 시각 + 새로고침 — **첫 줄 오른쪽 끝**. `.stat` 이 폭을 다 먹어 둘째
+    줄로 내려가므로 여기서 `margin-left:auto` 가 첫 줄 끝까지 민다 */
+ header .rt{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12px;
+   opacity:.85;font-variant-numeric:tabular-nums}
+ header .rt button{display:flex;align-items:center;padding:4px 6px;cursor:pointer}
+ header .rt button.spin svg{animation:spin .8s linear infinite}
+ @keyframes spin{to{transform:rotate(360deg)}}
  select,button{background:#222933;color:#d8dee9;border:1px solid #39414c;
    border-radius:4px;padding:3px 7px;font:inherit}
  /* 폭을 다 차지해 줄을 가른다. 넘치면 **자른다** — 줄을 늘리면 지도가
@@ -3586,7 +3957,7 @@ _HTML_MAP = """<!doctype html>
  /* **23,039개를 노드 하나로 그린다.** circle 을 그만큼 만들면 브라우저가
     버벅인다 — 길이 0 짜리 선분을 둥근 캡으로 찍으면 점이 된다 */
  /* 도쿄 바깥 eNB. 1.4 → 2.2px 로는 **여전히 안 보인다**는 말을 들어
-    3.4px 로 올렸다. 생성 대상(`#f6b3cd` 연분홍)과 색이 갈려 있으므로
+    3.4px 로 올렸다. 생성 대상(`#fbd6e4` 연분홍)과 색이 갈려 있으므로
     굵어져도 둘을 혼동하지 않는다 */
  .allpt{fill:none;stroke:#828d9c;stroke-width:3.4px;stroke-opacity:.8;
    stroke-linecap:round;vector-effect:non-scaling-stroke;pointer-events:none}
@@ -3665,6 +4036,126 @@ _HTML_MAP = """<!doctype html>
     집 모양을 그리던 때는 "알 수 없는 모양"으로 읽혔다. 면적 중앙값이
     한 변 34m 라 멀리서는 점만 하고, 당기면 역사 모양이 드러난다 */
  .stb{fill:#e2efc4;fill-opacity:.92;stroke:none}
+ /* 장애 — **평시 색(연분홍)과 또렷이 갈려야 한다.** 심각도로 나누되
+    셋 다 따뜻한 쪽이라 "이 장비에 뭔가 있다"가 먼저 읽힌다 */
+ /* **토글이 아니라 숨쉬기다**(사람 결정 2026-10-28). 장비가 나타났다
+    사라지는 것이 아니라 심각도 색과 그 밝은 쪽 사이를 천천히(3.2초) 오간다.
+
+    **지도 SVG 안에서는 아무것도 움직이지 않는다**(2026-10-28 실측).
+    장애 장비는 심각도 색으로 칠해 멈춰 두고, 숨쉬기와 네온은 그 위
+    `#fx` **HTML 층**의 원·사각형이 `opacity` 만으로 한다. SVG 로 효과
+    층을 따로 깔아 봤더니 드래그 12프레임 중 9~11프레임이 **헤더까지
+    통째로 빈 화면**이었다(애니메이션을 멈추면 0). HTML 요소의
+    `opacity` 애니메이션은 칠하기 없이 합성만 하므로 같은 측정에서 0이다 */
+ .ft{fill-opacity:1!important}
+ /* 소등 eNB(24번 B) — **크기는 그대로, 색만 회색**(사람 결정 2026-10-29).
+    마스터 전량 점(`.allpt`)보다 밝게 두고 테두리를 줘 "생성 대상이 아닌
+    기지국"과 갈린다. 켜지면 원래 색에 진한 테두리 — 새로 선 기지국이다 */
+ .sb-off{fill:#c9cdd4!important;fill-opacity:1!important;stroke:#8a929e;
+   stroke-width:1px;vector-effect:non-scaling-stroke}
+ .sb-on{stroke:#1f2937;stroke-width:2px;fill-opacity:1!important;
+   vector-effect:non-scaling-stroke}
+ /* ↑ **`non-scaling-stroke` 가 없으면 지도 절반이 회색이 된다**(2026-10-29
+    실제로 그랬다). 이 SVG 의 좌표 단위는 화면보다 훨씬 크게 확대돼 있어
+    `1px` 이 사용자 단위로 해석되면 테두리가 수십 km 굵기가 된다 */
+ /* **파스텔이다**(사람 결정 2026-10-28) — 원색 빨강은 지도 위에서 투박했다.
+    배경(도로·노선·역)과 같은 명도대에 두고, 숨쉬기와 후광으로 눈에 띄게 한다 */
+ /* **파스텔을 걷었다**(사람 요청 2026-10-30 — "장애가 눈에 안 띈다").
+    연분홍 평시 점과 산호색 장애 점이 명도가 같아 섞였다. 채도를 올리고
+    흰 테두리를 둘러 바탕(어두운 지도)과 평시 점 양쪽에서 갈리게 한다.
+    크기도 키운다(`applyFaults` 가 반지름을 1.8배로) */
+ .ft-CRITICAL{fill:#ff5b5b} .ft-MAJOR{fill:#ff9640}
+ .ft-WARN{fill:#ffd84a}     .ft-INFO{fill:#5cb6ff}
+ .ft{stroke:#fff;stroke-opacity:.95;stroke-width:1.5px;vector-effect:non-scaling-stroke}
+ /* 코어 장비 — 어두운 속 + 색 테두리(`draw` 의 MME·SGW). 테두리는 화면 px 고정 */
+ .nd{stroke-width:2px;vector-effect:non-scaling-stroke}
+ .ndi{pointer-events:none}
+ .ft + .ndi{display:none}
+ /* 장애를 켜면 **평시 eNB 가 물러난다** — 2천 개가 같은 세기로 깔린 채면
+    장애 몇 개는 그 속에 묻힌다. 고른 것이 있을 때는 `drawPick` 이 세기를
+    정하므로 걸지 않는다(`applyFaults`) */
+ svg.ftdim #gCell circle:not(.ft){fill-opacity:.28}
+ /* 체감 장애의 **구역**(메시 칸·구·丁目) — 장비 **아래층**이다. 칸 안의
+    기지국이 보여야 한다. 움직이지 않는다 — SVG 안 애니메이션은 드래그를
+    빈 화면으로 만들었다(`#fx` 머리말) */
+ .ga{fill-opacity:.26;stroke-width:2px;stroke-opacity:.95;
+   vector-effect:non-scaling-stroke}
+ .ga-approx{fill-opacity:.12;stroke-dasharray:6 4}
+ /* 구역 **숨쉬기** — 지도 SVG 밖의 겉층이다. 지도 SVG 안에서 움직이면
+    드래그가 빈 화면이 된다(`#fx` 머리말 · 2026-10-28 실측). 겉층 **요소째**
+    `opacity` 만 오가므로 칠하기 없이 합성만 한다. 박자는 장비와 같다 */
+ #geofx{position:absolute;inset:0;pointer-events:none;will-change:opacity;
+   animation:fxBreath 3.2s ease-in-out infinite}
+ #geofx .gp{fill-opacity:.38;stroke-width:3.5px;stroke-opacity:1;
+   vector-effect:non-scaling-stroke}
+ /* 전국 장애 — **지도를 칠하지 않고 화면 테두리가 빛난다.** 전부 칠하면
+    장비도 길도 안 보인다. 숨쉬기는 후광과 같은 박자(`fxHalo`)이고 HTML
+    층이라 드래그를 막지 않는다(`#fx` 머리말) */
+ /* ── 도코모 본사 · PGW (사람 결정 2026-10-30) ─────────────────────────
+    **위치에 뜻이 없다.** PGW 16대는 좌표가 없고, "PGW 가 있고 SGW 가
+    거기로 모인다"를 보이려고 본사 자리에 건물 하나로 세운다. 화면 크기
+    고정 HTML 이다 — 줌해도 같은 크기로 보인다. 공식 로고 파일은 쓰지
+    않는다(상표 이미지 · 외부 자원 금지) — 글자로 적는다 */
+ /* **작고 지도 톤으로**(사람 요청 2026-10-30 — 처음 판은 66px 흰 건물이라
+    지도를 압도했고 합성 티가 났다). MME·SGW 점과 같은 덩치의 어두운 건물
+    실루엣에, PGW 는 다른 코어처럼 색 도형(육각형)으로만 둔다.
+    `translate` 는 **건물 밑변**을 좌표에 맞춘다 — 이름 줄은 그 아래로 늘어지고,
+    SGW 에서 오는 선은 건물 발치로 모인다 */
+ #hq{position:absolute;z-index:3;transform:translate(-50%,-30px);cursor:pointer;
+   display:flex;flex-direction:column;align-items:center;--c:255,91,91}
+ #hq .bd{position:relative;width:22px;height:30px;border-radius:3px 3px 0 0;
+   background:#2c3644;border:1.5px solid #7fd1c7cc;box-sizing:border-box;
+   display:flex;align-items:center;justify-content:center}
+ #hq .bd::before{content:'';position:absolute;left:50%;top:-8px;width:1.5px;height:8px;
+   background:#7fd1c7cc}                                  /* 안테나 */
+ #hq .pg{width:13px;height:12px;background:#7fd1c7;
+   clip-path:polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%)}
+ #hq .cap{margin-top:3px;font-size:11px;font-weight:500;color:#c6d0dc;white-space:nowrap;
+   text-align:center;line-height:1.3;
+   letter-spacing:.02em;text-shadow:0 0 3px #0b0e12,0 0 3px #0b0e12}
+ #hq .cap b{color:#ff8aa0;font-weight:700}
+ #hq .msg{font-size:11px;color:#ffd0d0;white-space:nowrap;display:none;
+   text-shadow:0 0 3px #0b0e12,0 0 3px #0b0e12}
+ #hq .rg{position:absolute;left:50%;top:15px;width:52px;height:52px;margin:-26px 0 0 -26px;
+   border-radius:50%;pointer-events:none;display:none;animation:fxHalo 3.2s ease-in-out infinite;
+   box-shadow:0 0 0 2px rgba(var(--c),.95),0 0 18px 6px rgba(var(--c),.65)}
+ #hq.hot .rg,#hq.hot .msg{display:block}
+ #hq.fly{visibility:hidden}
+ /* SGW → PGW. **필요할 때만** 긋는다 — 상시 선은 10-27 에 지운 부채꼴과 같다 */
+ .eg{fill:none;stroke:#9ff0e4;stroke-width:2px;stroke-opacity:1;
+   stroke-dasharray:7 4;vector-effect:non-scaling-stroke}
+ #glob{position:absolute;inset:0;pointer-events:none;z-index:2;display:none;
+   animation:fxHalo 3.2s ease-in-out infinite}
+ #fx{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+ #fxin{position:absolute;inset:0}   /* 옮길 때 이것만 민다 — 잘라내기는 바깥 #fx 가 한다 */
+ /* **애니메이션은 층 둘에만 건다** — 후광 층(`#fxh`)과 숨쉬기 층(`#fxb`).
+    장애가 모두 같은 박자로 숨쉬므로 요소마다 걸 이유가 없다. 장애 eNB 가
+    2,147국일 때 요소마다 걸면 애니메이션이 4천 개를 넘었다. 층이 살아 있는
+    한 박자도 끊기지 않는다(장애가 바뀌어 속을 다시 채워도) */
+ #fxh,#fxb{position:absolute;inset:0;will-change:opacity}
+ #fxh{animation:fxHalo 3.2s ease-in-out infinite}
+ #fxb{animation:fxBreath 3.2s ease-in-out infinite}
+ #fx i{position:absolute;transform:translate(-50%,-50%);border-radius:50%}
+ #fx i.sq{border-radius:1px}
+ #fx i.rg{background:none!important;border:2px solid}
+ @keyframes fxHalo{0%,100%{opacity:.95}50%{opacity:.35}}
+ @keyframes fxBreath{0%,100%{opacity:0}50%{opacity:.85}}
+ /* 고른 장비에 걸린 장애 내역 — 선택 바 바로 아래 */
+ #incs{position:absolute;left:50%;transform:translateX(-50%);top:54px;z-index:4;
+   display:none;width:min(640px,86%);max-height:46%;overflow:auto;
+   background:#0b0e12f2;border:1px solid #39414c;border-radius:6px;
+   padding:6px 12px 10px;font-size:12px}
+ #incs .inc{border-left:3px solid #f4978e;padding:3px 0 5px 9px;margin:7px 0}
+ #incs .inc.Major,#incs .inc.MAJOR{border-left-color:#f6b98c}
+ #incs .inc.Minor,#incs .inc.Warning,#incs .inc.WARN,#incs .inc.MINOR{border-left-color:#efd28f}
+ #incs .inc.Info,#incs .inc.INFO{border-left-color:#9cc8ec}
+ #incs h5{margin:0 0 2px;font-size:12px;font-weight:700}
+ #incs p{margin:2px 0;line-height:1.5;opacity:.82}
+ #incs p.why{opacity:1;color:#e8eef7}
+ #incs p.code{opacity:.6;font-size:11px}
+ /* Shift+드래그 범위 — 화면 좌표의 사각형 */
+ #boxsel{position:absolute;display:none;pointer-events:none;z-index:4;
+   border:1px dashed #ff9ec4;background:#ff9ec41a}
  #tip{position:absolute;pointer-events:none;background:#0b0e12f2;
    border:1px solid #39414c;border-radius:4px;padding:5px 8px;font-size:12px;
    white-space:pre;display:none;z-index:5}
@@ -3676,12 +4167,55 @@ _HTML_MAP = """<!doctype html>
  #legend b{font-variant-numeric:tabular-nums}
  #legend s{width:10px;height:10px;border-radius:50%;display:inline-block;
    text-decoration:none;flex:none}
- #sel{position:absolute;left:50%;transform:translateX(-50%);top:10px;z-index:4;
-   display:none;gap:14px;align-items:center;background:#0b0e12f2;
+ /* **줄을 바꿔 아래로 잇는다**(사람 결정 2026-10-28). 한 줄로 두었더니
+    MME 를 고르면 TA목록·SGW 가 화면 밖까지 늘어나 **해제 버튼이 안 보였다.**
+    폭을 묶고, 해제는 첫 줄(제목 옆)에 둔다 — 내용이 길어도 늘 닿는다 */
+ /* 장애 바(`#fbar`)도 같은 모양이다. **둘은 따로 산다**(사람 결정 2026-10-30) —
+    장애를 고른 채 장비를 눌러 계통을 볼 수 있어야 한다. 둘 다 있으면 장애
+    바가 위, 선택 바가 그 아래(`placeBars`) */
+ #sel,#fbar{position:absolute;left:50%;transform:translateX(-50%);top:10px;z-index:4;
+   display:none;flex-wrap:wrap;column-gap:14px;row-gap:3px;align-items:baseline;
+   width:max-content;max-width:min(640px,86%);background:#0b0e12f2;
    border:1px solid #ff9ec466;border-radius:6px;padding:7px 12px;font-size:12px;
-   white-space:nowrap}
- #sel b{color:#ff9ec4;margin-right:2px} #sel span{opacity:.8;margin-right:12px}
- #sel button{margin-left:4px}
+   line-height:1.5}
+ #sel b,#fbar b{color:#ff9ec4;margin-right:2px;order:-2}
+ #sel span,#fbar span{opacity:.8;overflow-wrap:anywhere}
+ #sel button,#fbar button{margin-left:auto;order:-1}
+ #fbar{border-color:#ffb86b80}
+ /* 주입 줄 — 선택 바 맨 아래 한 줄을 통째로 쓴다. 해제 버튼 규칙
+    (`order:-1`·오른쪽 붙임)을 받지 않게 따로 맞춘다 */
+ #sel #inj{order:9;flex-basis:100%;display:flex;flex-wrap:wrap;gap:6px;
+   align-items:center;border-top:1px solid #2a313a;margin-top:4px;padding-top:6px}
+ #sel #inj button{margin-left:0;order:0}
+ #sel #inj select{max-width:340px}
+ #sel #inj input{width:46px;background:#222933;color:#d8dee9;
+   border:1px solid #39414c;border-radius:4px;padding:2px 4px}
+ #sel #inj .msg{opacity:.85;flex-basis:100%;font-size:11px}
+ #sel #inj .msg.err{color:#f4978e;opacity:1}
+ #sel i,#fbar i{order:-1;flex-basis:100%;height:0}   /* 제목·해제 줄 다음에서 끊는다 */
+ /* 장애 이력 — 오른쪽 위. 누르면 그 장애의 장비로 날아간다 */
+ #flist{position:absolute;right:10px;top:10px;z-index:4;width:320px;
+   max-height:calc(100% - 70px);display:flex;flex-direction:column;
+   background:#0b0e12f2;border:1px solid #39414c;border-radius:6px;font-size:12px}
+ #flist .hd{display:flex;align-items:center;gap:8px;padding:7px 10px;
+   border-bottom:1px solid #2a313a;cursor:pointer;user-select:none}
+ #flist .hd b{font-size:12px} #flist .hd span{opacity:.65}
+ #flist .hd em{margin-left:auto;font-style:normal;opacity:.6}
+ #flist .bd{overflow:auto}
+ #flist.fold .bd{display:none}
+ #flist .it{display:block;width:100%;text-align:left;border:0;border-radius:0;
+   border-left:4px solid #ff5b5b;border-bottom:1px solid #1d232b;
+   background:none;padding:6px 10px 6px 9px;cursor:pointer;line-height:1.45}
+ #flist .it:hover{background:#18202a} #flist .it.on{background:#24303f}
+ #flist .it.MAJOR{border-left-color:#ff9640} #flist .it.WARN{border-left-color:#ffd84a}
+ #flist .it.INFO{border-left-color:#5cb6ff}
+ #flist .it.old{opacity:.62}
+ #flist .it .t{font-weight:600;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ #flist .it .m{opacity:.7;font-size:11px;display:block}
+ #flist .lv{display:inline-block;font-size:10px;font-weight:700;padding:0 5px;
+   margin-right:5px;border-radius:3px;background:#ff5b5b;color:#0b0e12}
+ #flist .na{opacity:.5;font-style:italic}
+ #flist .empty{padding:10px;opacity:.6}
  #src{position:absolute;right:8px;bottom:6px;font-size:11px;opacity:.45}
  /* 축척 — 출처 줄 위에 둔다. 셀 간격이 수백 m 라 "지금 몇 m 를 보고
     있나"가 장비 밀도를 읽는 데 필요하다 */
@@ -3698,8 +4232,14 @@ _HTML_MAP = """<!doctype html>
     <option value=sgw>SGW</option>
     <option value=mme>MME</option>
   </select></label>
-  <button id=reload>새로고침</button>
   <button id=reset>전체 보기</button>
+  <span class=nav><a href="/">장애 주입 화면</a> · <a href="/topo">마스터 토폴로지</a></span>
+  <span class=nav title="전체 eNB·TA 보기에서 Shift 를 누른 채 끌면 사각형 안의 eNB 를 한 번에 고른다">Shift+드래그 = eNB 범위 선택</span>
+  <span class=rt><span id=upd title="장애 이력을 마지막으로 받아 화면에 반영한 시각 (10초마다 묻는다)">—</span>
+    <button id=reload title="새로고침 — 장비·장애를 지금 다시 받는다" aria-label="새로고침">
+      <svg viewBox="0 0 24 24" width=15 height=15 fill=none stroke=currentColor stroke-width=2.2
+        stroke-linecap=round stroke-linejoin=round><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
+    </button></span>
   <div class=stat>
     <span><i>셀</i><b id=ncell>0</b></span>
     <span><i>eNB</i><b id=nenb>0</b></span>
@@ -3707,6 +4247,7 @@ _HTML_MAP = """<!doctype html>
     <span><i>TA목록</i><b id=ntal>0</b></span>
     <span><i>SGW</i><b id=nsgw>0</b></span>
     <span><i>MME</i><b id=nmme>0</b></span>
+    <span><i>장애</i><b id=nfault>0</b></span>
     <span id=scope class=dimtag></span>
     <span id=note class=warn></span>
   </div>
@@ -3720,10 +4261,27 @@ _HTML_MAP = """<!doctype html>
       <filter id=kdeblur x="-25%" y="-25%" width="150%" height="150%">
         <feGaussianBlur stdDeviation="0.0022"/>
       </filter>
+      <!-- **점이 몇 개뿐인 묶음용.** 필터 영역은 그룹 bbox 의 비율이라, 점
+           하나짜리는 bbox 가 원 지름뿐이고 ±25% 로는 번짐이 **네모로 잘렸다.**
+           큰 묶음까지 넓히면 화면 밖까지 굽느라 무거워지므로 따로 둔다 -->
+      <filter id=kdeblurS x="-150%" y="-150%" width="400%" height="400%">
+        <feGaussianBlur stdDeviation="0.0022"/>
+      </filter>
     </defs>
-    <g id=gAdm></g><g id=gGreen></g><g id=gRoad></g><g id=gRiv></g><g id=gRail></g><g id=gYmt></g><g id=gAll></g><g id=gKde></g><g id=gCell></g>
+    <g id=gAdm></g><g id=gGreen></g><g id=gRoad></g><g id=gRiv></g><g id=gRail></g><g id=gYmt></g><g id=gAll></g><g id=gKde></g><g id=gGeo></g><g id=gCell></g>
     <g id=gPick></g><g id=gStn></g><g id=gNode></g></svg>
+  <svg id=geofx></svg>
+  <div id=fx><div id=fxin><div id=fxh></div><div id=fxb></div></div></div>
+  <div id=glob></div>
+  <div id=hq title="NTT docomo 本社 (千代田区永田町2-11-1)&#10;PGW 16대를 한 점으로 — 실제 PGW 위치가 아니다&#10;누르면 SGW 에서 모이는 선이 나온다">
+    <div class=rg></div><div class=bd><span class=pg></span></div>
+    <div class=cap><b>NTT docomo</b><br>本社</div><div class=msg></div></div>
+  <div id=boxsel></div>
+  <div id=fbar></div>
   <div id=sel></div>
+  <div id=incs></div>
+  <div id=flist class=fold><div class=hd><b>장애 이력</b><span id=fcnt></span><em id=ffold>펼치기</em></div>
+    <div class=bd id=fbody><div class=empty>graphio 에 묻는 중</div></div></div>
   <div id=labels></div>
   <div id=tip></div><div id=legend></div><div id=scale></div><div id=src></div>
 </div>
@@ -3733,8 +4291,591 @@ const R=180/Math.PI;
 const mx=(lon)=>lon, my=(lat)=>R*Math.log(Math.tan(Math.PI/4+lat*Math.PI/360));
 const el=(n)=>document.createElementNS('http://www.w3.org/2000/svg',n);
 const svg=document.getElementById('svg'), tip=document.getElementById('tip');
+const geofx=document.getElementById('geofx');
 let VB=null, HOME=null, D=null, GEO=null, ALL=null, RAIL=null, RIV=null;
 let ROAD=null, GREEN=null, STBL=null;
+
+// ── 장애 현황 — **10초마다 묻고, 바뀐 것만 건드린다** ──────────────────
+//
+// graphio 가 연 Incident 를 `/api/map/faults` 가 중계한다. 매번 `draw()` 를
+// 다시 부르면 눌러 둔 선택이 풀리고 화면이 통째로 깜빡인다. 그래서
+//
+//   ver 가 같다  →  **아무것도 하지 않는다**
+//   ver 가 다르다 →  장비마다 `ft-<심각도>` 클래스를 붙이거나 뗀다.
+//                   색이 천천히 오가는 것은 CSS 가 한다(`@keyframes ft*`)
+//
+// `ver` 는 서버가 **장비→심각도**만 해시한 값이다. L3 서술이 뒤늦게
+// 붙어도 지도 그림은 같으므로 화면을 건드릴 이유가 없다.
+let FAULT=null, FAULT_VER=null;
+const FAULT_POLL_MS=10000;
+
+//: 심각도 → 애니메이션 클래스. graphio 의 값 집합이 넓어서(`WARNING`·
+//: `MINOR`) 넷으로 접는다. 모르는 값은 가장 심한 쪽으로 — 못 알아본
+//: 장애를 약하게 보이는 것보다 낫다
+const SEV_CLASS={CRITICAL:'CRITICAL', MAJOR:'MAJOR', WARNING:'WARN',
+                 WARN:'WARN', MINOR:'WARN', INFO:'INFO'};
+const FT_CLASSES=['ft','ft-CRITICAL','ft-MAJOR','ft-WARN','ft-INFO'];
+
+// 한 장비의 장애 표시를 맞춘다. **클래스만 만진다** — `fill` 속성은 평시
+// 색 그대로 두므로, 장애가 풀리면 클래스를 떼는 것으로 원래 색이 돌아온다.
+// 전에는 `fill` 을 붉게 덮어써서 **장애가 끝나도 붉은 채 남았다**
+// (되돌릴 원래 색을 아무도 기억하지 않았다).
+function markFault(node, f){
+  const want = f ? 'ft-'+(SEV_CLASS[String(f.sev).toUpperCase()]||'CRITICAL') : null;
+  if(want && node.classList.contains(want)) return;   // 그대로면 손대지 않는다 —
+  node.classList.remove(...FT_CLASSES);               // 다시 붙이면 숨쉬기가 처음부터 돈다
+  if(want) node.classList.add('ft', want);
+}
+
+// 효과 층 — 심각도별 후광(번지는 빛)과 숨쉬기 겹(밝은 쪽 색)
+const FX_COLOR={CRITICAL:['255,91,91','#ffd0d0'], MAJOR:['255,150,64','#ffe0c4'],
+                WARN:['255,216,74','#fff2b8'], INFO:['92,182,255','#d3ebff']};
+let FX=[];        // [도형, 심각도, 후광 배율]
+let FX_AT=null;   // 효과를 깔 때의 화면 변환 — 옮기기만 했으면 이것과의 차이만큼 민다
+
+// 장비 중심·크기(SVG 좌표). 점은 원, MME 는 사각형이다
+function shapeAt(sh){
+  if(sh.tagName==='rect'){ const w=+sh.getAttribute('width');
+    return [+sh.getAttribute('x')+w/2, +sh.getAttribute('y')+w/2, w]; }
+  return [+sh.getAttribute('cx'), +sh.getAttribute('cy'), 2*+sh.getAttribute('r')];
+}
+
+// 효과를 **새로 깐다** — 장애가 바뀌었거나 다시 그렸을 때(확대 포함)만.
+// 장애 eNB 가 수백 개면 효과도 천 개가 넘는다. 옮길 때마다 지우고 새로
+// 만들었더니 드래그 한 프레임이 200ms 를 넘었다(680국 실측)
+function buildFx(){
+  const box=document.getElementById('fxin'); if(!box) return;
+  box.style.transform=''; FX_AT=null;
+  const m=svg.getScreenCTM();
+  const hb=document.getElementById('fxh'), bb=document.getElementById('fxb');
+  if(!FX.length||!m){ hb.replaceChildren(); bb.replaceChildren(); return; }
+  const w=document.getElementById('wrap').getBoundingClientRect();
+  const hs=[], bs=[];
+  for(const [sh, sev, grow] of FX){
+    const [cx,cy,sz]=shapeAt(sh); if(!isFinite(cx)||!sz) continue;
+    const x=cx*m.a+m.e-w.left, y=cy*m.d+m.f-w.top, px=sz*m.a;
+    const [rgb, light]=FX_COLOR[sev];
+    const h=document.createElement('i'), d=px*grow;
+    h.style.cssText=`left:${x}px;top:${y}px;width:${d}px;height:${d}px;`
+      + `background:radial-gradient(circle,rgba(${rgb},.9) 0,rgba(${rgb},.5) 30%,rgba(${rgb},0) 70%)`;
+    // **고리** — 후광은 바탕에 번져 경계가 흐리다. 또렷한 테두리 하나가
+    // 있어야 멀리서도 "여기"가 찍힌다. 후광 층에 넣어 같은 박자로 뛴다
+    const g=document.createElement('i'), gd=Math.max(px*grow*.62, px+10);
+    g.className='rg';
+    g.style.cssText=`left:${x}px;top:${y}px;width:${gd}px;height:${gd}px;border-color:rgba(${rgb},.95)`;
+    hs.push(g);
+    const q=document.createElement('i');
+    if(sh.tagName==='rect') q.className='sq';
+    q.style.cssText=`left:${x}px;top:${y}px;width:${px}px;height:${px}px;background:${light}`;
+    hs.push(h); bs.push(q);
+  }
+  hb.replaceChildren(...hs); bb.replaceChildren(...bs);
+  FX_AT={a:m.a, e:m.e, f:m.f};
+}
+
+// 지도를 **옮기기만** 했으면 층 전체를 그만큼 민다 — 요소 하나 건드리지 않는다.
+// 축척이 바뀌었으면 크기가 달라지므로 새로 깐다
+function placeFx(){
+  const box=document.getElementById('fxin'); if(!box) return;
+  const m=svg.getScreenCTM();
+  if(!FX_AT||!m||Math.abs(m.a-FX_AT.a)>1e-9*Math.abs(FX_AT.a)+1e-12){ buildFx(); return; }
+  box.style.transform=`translate(${m.e-FX_AT.e}px,${m.f-FX_AT.f}px)`;
+}
+
+// **장애는 켰을 때만, 지금 보기의 주인공에게만 보인다**(사람 결정 2026-10-28).
+// 전체 eNB → eNB, SGW → SGW, MME → MME. 지역 단위 장애(전국 S6a 거절 등)는
+// 그 지역 셀 전부를 범위로 가져와 지도를 통째로 덮는다 — 늘 켜 두면
+// 다른 것을 보러 와도 붉은 것밖에 안 보였다. TA 보기에는 주인공 장비가
+// 없어 끈다. 받아 오기(10초 폴링)는 계속한다 — 켜는 순간 바로 보이도록
+const FAULT_UNIT={enb:'enb', sgw:'sgw', mme:'mme'};
+// **토글을 걷었다**(사람 결정 2026-10-30). 장애는 이력 목록에서 골라 보는 것이
+// 주 경로가 됐고, 지도가 늘 칠해 두는 것은 그 앞을 가렸다. 자리를 남겨 두는
+// 것은 다시 켤 일이 생기면 여기 한 곳만 바꾸면 되게 하려는 것이다
+const SHOW_LIVE_FAULTS=false;
+const faultUnit=()=>SHOW_LIVE_FAULTS
+  ? FAULT_UNIT[document.getElementById('mode').value]||null : null;
+const faultsOn=()=>!!faultUnit();
+function syncFaultToggle(){}
+//: 목록의 `지금` 표시 — graphio 가 이 시간 안에 이상을 관측한 것. 창 선택을
+//: 걷어 15분으로 고정한다(걷기 전 기본값)
+const LIVE_WINDOW_MIN=15;
+
+// 장비 번호 — graphio 는 `0032` 처럼 0 을 채워 오고 마스터는 `32` 다.
+// 글자로 견주면 **에러 없이** 하나도 안 맞는다
+const nid=v=>String(v).replace(/^0+(?=[0-9])/,'');
+
+// **S6a 는 MME 의 구간이다.** 인증(AIR/AIA)은 MME 가 HSS 에 묻는 절차라
+// 인증 실패(`P-*`)는 그 셀을 맡은 MME 에 건다. graphio 는 인증 실패를
+// 전국·시도 단위로만 잡아 MME 를 지목하지 않는다 — 지도가 관할 셀로
+// 이어 준다. 지목이 아니라 **잇기**이므로 내역에 그렇게 적는다(`via`)
+function isS6a(i){
+  return String(i.trigger_kpi||'').split(',').some(k=>k.trim().startsWith('P-'));
+}
+let NODE_FT=null, NODE_FT_KEY=null;
+function nodeFaults(){
+  const key=FAULT_VER+'|'+(D?D.cells.length:0);
+  if(NODE_FT_KEY===key) return NODE_FT;
+  const out={};
+  const put=(k, sev, iid, via)=>{
+    const b=out[k]||(out[k]={sev, ids:[], via:new Set()});
+    if((_SEV_RANK[sev]||0)>(_SEV_RANK[b.sev]||0)) b.sev=sev;
+    if(!b.ids.includes(iid)) b.ids.push(iid);
+    if(via) b.via.add(iid);
+  };
+  for(const [k,f] of Object.entries((FAULT&&FAULT.node)||{})){
+    const [t,id]=k.split(':'); for(const iid of f.ids) put(t+':'+nid(id), f.sev, iid, false);
+  }
+  const inc={}; for(const i of (FAULT&&FAULT.incidents)||[]) inc[i.incident_id]=i;
+  const mmeOf={}; for(const c of (D?D.cells:[])) if(c.mme) (mmeOf[c.enb]=mmeOf[c.enb]||new Set()).add(nid(c.mme));
+  for(const [e,f] of Object.entries((FAULT&&FAULT.enb)||{})){
+    for(const iid of new Set(f.ids)){
+      const i=inc[iid]; if(!i||!isS6a(i)) continue;
+      for(const m of (mmeOf[e]||[])) put('mme:'+m, i.severity, iid, true);
+    }
+  }
+  NODE_FT=out; NODE_FT_KEY=key; return out;
+}
+const _SEV_RANK={Critical:4, CRITICAL:4, Major:3, MAJOR:3, Minor:2, MINOR:2,
+                 Warning:2, WARNING:2, WARN:2, Info:1, INFO:1};
+
+//: 장애 eNB 를 몇 배로 키우나. 평시 점이 1.5~2.4px 반지름이라 색만
+//: 바꿔서는 작아서 안 보였다(사람 요청 2026-10-30)
+const FT_GROW=1.8;
+function applyFaults(){
+  const cells=document.getElementById('gCell');
+  const nodes=document.getElementById('gNode');
+  if(!cells||!nodes) return;
+  const unit=faultUnit();
+  const fs=focusSets();
+  // **이력에서 고른 장애가 있으면 그것만 칠한다.** 끝난 장애도 그때 걸린
+  // 장비에 불을 넣는다 — 그러려고 고른 것이다. 다른 장애까지 같이 타오르면
+  // 무엇을 골랐는지 안 읽힌다. 장애 표시 체크와 보기 종류도 따지지 않는다
+  const enb=fs ? {} : (unit==='enb'&&FAULT&&FAULT.enb)||{};
+  const nd=fs ? {} : (unit==='sgw'||unit==='mme')&&FAULT ? nodeFaults() : {};
+  FX=[];
+  const sevOf=f=>SEV_CLASS[String(f.sev).toUpperCase()]||'CRITICAL';
+  for(const d of cells.children){
+    const f=fs ? (fs.E.has(String(d.dataset.enb)) ? {sev:fs.sev} : null) : enb[d.dataset.enb];
+    markFault(d, f);
+    if(d.dataset.r0===undefined) d.dataset.r0=d.getAttribute('r');
+    d.setAttribute('r', f ? +d.dataset.r0*FT_GROW : d.dataset.r0);
+    if(f) FX.push([d, sevOf(f), LOD===0?3.6:4.2]); }
+  // 코어는 **도형에만** 건다 — `<g>` 에 걸면 같은 그룹의 것까지 함께 변한다.
+  // 지금 보기의 종류만 — SGW 보기에서 MME 가 붉으면 무엇을 보는지 흐려진다
+  for(const g of nodes.children){
+    const sh=g.firstChild; if(!sh) continue;
+    const k=sh.dataset.kind+':'+nid(sh.dataset.id);
+    const f=fs ? (fs.N.has(k) ? {sev:fs.sev} : null)
+               : sh.dataset.kind===unit ? nd[k] : null;
+    markFault(sh, f); if(f) FX.push([sh, sevOf(f), 3]); }
+  svg.classList.toggle('ftdim', !!unit && !PICK && !fs && FX.length>0);
+  // 고른 장애가 없을 때 — 장애 표시가 켜져 있고 PGW 를 지목한 장애가 지금이면 켠다.
+  // 고른 장애가 있으면 `drawFocus` 가 정한다
+  if(!fs){ const pg=unit&&FAULT ? Object.entries(FAULT.node||{}).filter(([k])=>k.startsWith('pgw:')) : [];
+    let sev=null; for(const [,f] of pg) if(!sev||(_SEV_RANK[f.sev]||0)>(_SEV_RANK[sev]||0)) sev=f.sev;
+    hqHot(sev, sev?`PGW ${pg.map(([k])=>k.split(':')[1]).join(', ')} 장애`:''); }
+  buildFx();
+  const n=document.getElementById('nfault');
+  if(n){ n.textContent=(FAULT&&FAULT.incidents)?FAULT.incidents.length:0;
+    n.title = FAULT&&FAULT.latest ? `graphio 마지막 관측 ${FAULT.latest.replace('T',' ')}` : ''; }
+}
+
+// ── 소등 eNB (24번 B 후보) ─────────────────────────────────────────────
+// 상태는 생성기 규칙 그대로 서버가 정한다(`/api/map/standby`). 장애 표시와
+// 같은 점에 클래스로만 얹는다 — 다시 그리지 않으므로 고른 것이 풀리지 않는다
+let STBY=null, STBY_VER=null;
+function applyStandby(){
+  const cells=document.getElementById('gCell');
+  if(!cells||!STBY) return;
+  for(const d of cells.children){
+    const s=STBY.enbs[d.dataset.enb];
+    if(!s) continue;
+    if(d.dataset.t0===undefined) d.dataset.t0=d.dataset.t||'';
+    d.classList.toggle('sb-off', s!=='on');
+    d.classList.toggle('sb-on', s==='on');
+    d.dataset.t=d.dataset.t0+(s==='on'
+      ? `\n증설 eNB — 24번으로 켜짐 (eNB ${STBY.from} 의 부하를 받는다)`
+      : `\n소등 eNB — 평소 호 없음`+(s==='next'?' · 24번 진행 중, 10분 시점에 켜진다':''));
+  }
+}
+async function pollStandby(){
+  let doc;
+  try{ doc=await (await fetch('/api/map/standby')).json(); }catch(e){ return; }
+  if(doc.ver===STBY_VER) return;
+  STBY=doc; STBY_VER=doc.ver;
+  applyStandby();
+}
+
+async function pollFaults(){
+  let doc;
+  // 한 번 못 받아도 조용히 넘긴다 — 10초 뒤에 다시 묻는다
+  try{ doc=await (await fetch('/api/map/faults?minutes='+LIVE_WINDOW_MIN)).json(); }catch(e){ return; }
+  const note=document.getElementById('note');
+  if(doc.error){ if(note) note.textContent=doc.error; return; }
+  if(note && /graphio/.test(note.textContent)) note.textContent='';
+  // **받아서 반영한 시각** — 바뀐 것이 없어도 갱신한다. 멈춰 있으면 "장애가
+  // 없다"인지 "안 묻고 있다"인지 사람이 가를 수 있게(graphio 마지막 관측은 툴팁)
+  const up=document.getElementById('upd');
+  if(up){ up.textContent='갱신 '+String(doc.at||'').slice(11,19);
+    up.title=`장애 이력을 마지막으로 받아 반영한 시각 (10초마다)`
+      + (doc.latest?`\ngraphio 마지막 이상 관측 ${doc.latest.replace('T',' ')}`:''); }
+  if(doc.ver===FAULT_VER) return;        // **아무것도 하지 않는다**
+  FAULT=doc; FAULT_VER=doc.ver;
+  applyFaults();
+  if(PICK) drawPick();                   // 열려 있는 내역도 따라 바꾼다
+  if(FOCUS) drawFocus();
+  renderList();
+}
+
+// ── 장애 이력 — **누르면 그 장애의 장비로 간다** (사람 요청 2026-10-30) ──
+//
+// 지도 색은 "최근 N분" 창 안의 것만 칠한다. 창이 짧으면 방금 끝난 장애는
+// 아예 안 보였고, 길면 지도가 온통 붉었다. 목록은 창과 무관하게 graphio 가
+// 준 이력 전부를 보이고, 창 안의 것에 `지금` 표시를 단다.
+//
+// 걸린 장비는 서버가 푼 그대로(`history[].enbs`·`nodes`) 쓴다 — 화면이
+// scopes 를 다시 해석하면 지도 색 규칙과 두 벌이 된다.
+let FOCUS=null;
+const histOf=id=>((FAULT&&FAULT.history)||[]).find(h=>h.incident_id===id);
+function focusSets(){
+  if(!FOCUS) return null;
+  const h=histOf(FOCUS); if(!h) return null;
+  return {h, sev:h.severity,
+          E:new Set((h.enbs||[]).map(String)),
+          N:new Set([...(h.nodes||[]), ...(h.bias?[h.bias.node]:[])]
+                     .map(k=>{ const [t,i]=k.split(':'); return t+':'+nid(i); }))};
+}
+const hm=v=>String(v||'').slice(11,16);
+const md=v=>String(v||'').slice(5,10);
+//: 지도에 그릴 수 있는 코어 — PGW 는 레지스트리에 위치가 없다
+const coreOf=h=>(h.nodes||[]).filter(k=>!k.startsWith('pgw:'));
+
+// ── 체감 장애의 구역 (사람 결정 2026-10-30) ─────────────────────────────
+//
+// 체감(XP) 장애는 장비가 아니라 **구역**으로 온다. 단말 좌표가 있어서가
+// 아니다 — XDR 의 단말 위치는 "어느 셀에 붙었나"뿐이고, graphio 가 셀의
+// 추정 커버리지 원을 메시에 면적 비율로 나눈 것이다(`geo_coverage`).
+// 그래서 칸은 **"그 칸을 덮는 셀들의 체감이 나빴다"**이지 "단말이 그 칸에
+// 있었다"가 아니다. 선택 바에 그렇게 적는다.
+const GEO_NAME={MESH1K:'1km 메시', MESH500:'500m 메시', MESH250:'250m 메시',
+                ADM1:'광역', ADM2:'구·시', ADM3:'丁目', GLOBAL:'전국'};
+//: 위치 없는 축 — 무슨 축인지는 적는다. "범위 없음"만 적으면 "위치를
+//: 모른다"로 읽히는데, 이것들은 **애초에 지역이 아닌** 장애다
+const AXIS_NAME={UE:'단말 기종', APN:'APN', DOMAIN:'서비스 도메인'};
+//: graphio 가 `axis_ids` 를 **10개에서 자른다**(`detector` 나쁜 순 10개 ·
+//: `incremental` 병합 후 10개). 10개가 왔으면 더 있을 수 있다
+const GEO_CAP=10;
+//: 메시 코드 → [남, 서, 북, 동] (도). JIS X 0410 — graphio
+//: `geo_coverage.mesh_center` 와 같은 식이다. 1차 4자리 · 2차 6 · 3차(1km) 8 ·
+//: 500m 9 · 250m 10자리. 뒤 자리는 4분할 번호(1 남서 · 2 남동 · 3 북서 · 4 북동)
+function meshBox(code){
+  code=String(code); if(code.length<8) return null;
+  const n=i=>+code[i];
+  let lat=+code.slice(0,2)*2/3 + n(4)*5/60 + n(6)*30/3600;
+  let lon=100 + +code.slice(2,4) + n(5)*7.5/60 + n(7)*45/3600;
+  let dlat=30/3600, dlon=45/3600;
+  for(const ch of code.slice(8)){ const i=+ch-1;
+    dlat/=2; dlon/=2; lat+=dlat*(i>>1); lon+=dlon*(i&1); }
+  return [lat, lon, lat+dlat, lon+dlon];
+}
+//: 丁目 근사 원 반지름(도, 위도 기준) — 약 250m. 경계가 없어 **크기에
+//: 뜻이 없다.** 점 하나로는 안 보여 자리만 표시한다
+const DONG_R=0.00225;
+//: 구역의 그릴 모양 — {kind:'rect'|'ring'|'dot', ...}
+function geoShapes(h){
+  const out=[];
+  if(!h.axis) return out;
+  // **중괄호를 생략하지 않는다** — ADM2 안쪽의 `if` 에 아래 `else` 가 붙어
+  // 丁目 분기가 한 번도 돌지 않았다(dangling else)
+  if(h.axis.startsWith('MESH')){
+    for(const c of h.geo_ids){ const b=meshBox(c);
+      if(b) out.push({kind:'rect', id:c, b}); }
+  } else if(h.axis==='ADM2' || h.axis==='ADM1'){
+    // ADM1(도·현)은 **그 아래 구를 전부** 칠한다 — 구 코드 5자리의 앞 2자리가
+    // 도·현 코드다(東京都 `13` → `13101`~). 도·현 경계를 따로 들지 않는다
+    const hit=h.axis==='ADM1' ? (f,c)=>String(f.code).slice(0,2)===c
+                              : (f,c)=>String(f.code)===c;
+    for(const c of h.geo_ids) for(const f of ((GEO&&GEO.features)||[])){
+      if(!hit(f,c)) continue;
+      for(const ring of f.rings) out.push({kind:'ring', id:c, name:f.name, ring}); }
+  } else if(h.axis==='ADM3'){
+    for(const d of (h.dong||[]))
+      out.push({kind:'dot', id:d.id, name:d.name, lat:d.lat, lon:d.lon});
+  }
+  return out;
+}
+function geoPoints(h){
+  const pts=[];
+  for(const g of geoShapes(h)){
+    if(g.kind==='rect'){ pts.push([g.b[1],g.b[0]], [g.b[3],g.b[2]]); }
+    else if(g.kind==='ring'){ for(const p of g.ring) pts.push(p); }
+    else { pts.push([g.lon-DONG_R*1.25, g.lat-DONG_R], [g.lon+DONG_R*1.25, g.lat+DONG_R]); }
+  }
+  return pts;
+}
+const SEV_FILL={CRITICAL:'#ff5b5b', MAJOR:'#ff9640', WARN:'#ffd84a', INFO:'#5cb6ff'};
+function drawGeo(h){
+  const box=document.getElementById('gGeo'); box.replaceChildren();
+  geofx.replaceChildren();
+  if(!h||!h.axis) return;
+  const col=SEV_FILL[SEV_CLASS[String(h.severity).toUpperCase()]||'CRITICAL'];
+  const nm=GEO_NAME[h.axis]||h.axis;
+  for(const g of geoShapes(h)){
+    let q;
+    if(g.kind==='rect'){ const [s_,w_,n_,e_]=g.b;
+      q=el('path');
+      q.setAttribute('d',`M${mx(w_)} ${-my(s_)}L${mx(e_)} ${-my(s_)}L${mx(e_)} ${-my(n_)}L${mx(w_)} ${-my(n_)}Z`);
+      q.dataset.t=`${nm} ${g.id}\n그 칸을 덮는 셀들의 체감이 나빴다 — 단말 실제 위치가 아니다`; }
+    else if(g.kind==='ring'){ q=el('path');
+      q.setAttribute('d','M'+g.ring.map(p=>`${mx(p[0])} ${-my(p[1])}`).join('L')+'Z');
+      q.dataset.t=`${nm} ${g.name} (${g.id})`; }
+    else { q=el('ellipse');
+      // 메르카토르라 세로가 늘어난다 — 지상에서 원이 되게 가로를 1/cos 로 편다
+      const cy=-my(g.lat), ry=my(g.lat+DONG_R)-my(g.lat);
+      q.setAttribute('cx',mx(g.lon)); q.setAttribute('cy',cy);
+      q.setAttribute('rx',DONG_R/Math.cos(g.lat*Math.PI/180)); q.setAttribute('ry',ry);
+      q.dataset.t=`${nm} ${g.name}\n경계 없음 — 중심점 근사 (원 크기에 뜻이 없다)`; }
+    q.setAttribute('class','ga'+(g.kind==='dot'?' ga-approx':''));
+    q.setAttribute('fill',col); q.setAttribute('stroke',col);
+    box.appendChild(q);
+    // 겉층 — 바닥(장비 아래)은 가만히 두고, 같은 모양의 밝은 겹만 숨쉰다
+    const p=q.cloneNode(); p.setAttribute('class','gp'+(g.kind==='dot'?' ga-approx':''));
+    delete p.dataset.t; geofx.appendChild(p);
+  }
+}
+function renderList(){
+  const body=document.getElementById('fbody'); if(!body) return;
+  const H=(FAULT&&FAULT.history)||[];
+  const live=H.filter(h=>h.live).length;
+  document.getElementById('fcnt').textContent=H.length ? `${H.length}건 · 지금 ${live}` : '';
+  if(!H.length){ body.innerHTML='<div class=empty>graphio 가 연 장애가 없다</div>'; return; }
+  body.innerHTML=H.map(h=>{
+    const sev=SEV_CLASS[String(h.severity).toUpperCase()]||'CRITICAL';
+    const ne=(h.enbs||[]).length, core=coreOf(h);
+    const pg=(h.nodes||[]).filter(k=>k.startsWith('pgw:')).map(k=>k.split(':')[1]);
+    // **지도에 없는 것은 없다고 적는다** — 체감 메시·APN·단말 축 장애는
+    // 장비 범위가 없다. 눌러도 아무 일이 없으면 고장으로 읽힌다
+    const geo = h.axis==='GLOBAL' ? '전국'
+      : h.axis ? `${GEO_NAME[h.axis]||h.axis} ${h.geo_ids.length}${h.geo_ids.length>=GEO_CAP?'+':''}곳`
+      : h.bias ? `${AXIS_NAME[h.axis_raw]||h.axis_raw} · 편향 ${h.bias.node.replace(':',' ').toUpperCase()}`
+      : h.egress && !pg.length ? '망 밖 · docomo 本社'
+      : AXIS_NAME[h.axis_raw] ? `<span class=na>${AXIS_NAME[h.axis_raw]} 축 — 지역과 무관</span>` : '';
+    const where = ne||core.length||pg.length||geo
+      ? [ne?`eNB ${ne}`:'', core.length?`코어 ${esc(core.join(' ').toUpperCase())}`:'',
+         pg.length?`PGW ${esc(pg.join(' '))}`:'', geo].filter(Boolean).join(' · ')
+      : (h.centroid_lat!=null ? '중심 좌표만' : '<span class=na>지도에 범위 없음</span>');
+    return `<button class="it ${sev}${h.live?'':' old'}${h.incident_id===FOCUS?' on':''}" data-id="${esc(h.incident_id)}">`
+      + `<span class=t>${h.live?'<span class=lv>지금</span>':''}${esc(h.severity)} · ${esc(h.title)}</span>`
+      + `<span class=m>${esc(md(h.opened_ts))} ${esc(hm(h.opened_ts))}`
+      + (hm(h.updated_ts)&&hm(h.updated_ts)!==hm(h.opened_ts)?`~${esc(hm(h.updated_ts))}`:'')
+      + ` · ${esc(h.trigger_kpi)} · ${where}</span></button>`;
+  }).join('');
+}
+// 이력에서 하나를 누른다 — 같은 것을 다시 누르면 푼다
+function focusInc(id){
+  if(FOCUS===id){ FOCUS=null; renderList(); draw(); return; }
+  const h=histOf(id); if(!h) return;
+  FOCUS=id; PICK=null;   // 다른 장애로 넘어가면 앞서 고른 계통은 푼다
+  // TA 보기에는 코어가 없고 묶음 히트맵이 빛이라 장애가 묻힌다 — eNB 로 넘긴다
+  if(document.getElementById('mode').value==='ta'){
+    document.getElementById('mode').value='enb'; syncFaultToggle(); }
+  renderList(); draw();
+  // 전국은 **줌하지 않고 물러난다** — 어디를 당겨 봐도 그 장애의 일부다
+  // 단, 망 밖(전국 DNS 등)이면 건물과 SGW 로 맞춘다 — 전체로 빠지면 건물이
+  // 목록 패널 밑에 깔렸다
+  if(h.axis==='GLOBAL' && !h.egress){ document.getElementById('reset').onclick(); return; }
+  const pts=focusPoints(h);
+  // **그릴 위치가 없으면 전체로 물러난다.** 그대로 두면 앞서 보던 자리가
+  // 남아 "이 장애가 거기 있다"로 읽힌다(APN 을 눌렀는데 MME 4 확대가 남았다)
+  if(pts.length) flyTo(fitFor(h, pts)); else document.getElementById('reset').onclick();
+}
+//: 장애에 걸린 장비의 좌표 [lon, lat]. 장비가 없으면 graphio 의 중심 좌표
+function focusPoints(h){
+  const E=new Set((h.enbs||[]).map(String)), out=[];
+  for(const c of enbPoints()) if(E.has(String(c.enb))) out.push([c.lon, c.lat]);
+  for(const k of [...coreOf(h), ...(h.bias?[h.bias.node]:[])]){ const [t,i]=k.split(':');
+    const n=((D&&D.nodes[t])||[]).find(x=>nid(x.id)===nid(i));
+    if(n) out.push([n.lon, n.lat]); }
+  // 편향 노드는 **그 노드가 맡은 셀 범위**로 맞춘다. 노드 점 하나에 맞추면
+  // 1km 남짓으로 당겨져 "어디를 맡은 장비인가"가 안 보였다
+  if(h.bias){ const [t,i]=h.bias.node.split(':');
+    if(t==='mme'||t==='sgw') for(const c of enbPoints())
+      if(nid(c[t])===nid(i)) out.push([c.lon, c.lat]); }
+  out.push(...geoPoints(h));
+  // 망 밖 장애는 **건물이 곧 위치다** — 선이 SGW 전부로 뻗으므로 SGW 도 담는다
+  if(h.egress){ out.push([HQ.lon, HQ.lat]);
+    const sg=(h.nodes||[]).filter(k=>k.startsWith('sgw:')).map(k=>nid(k.split(':')[1]));
+    for(const n of (D&&D.nodes.sgw)||[]) if(!sg.length||sg.includes(nid(n.id))) out.push([n.lon,n.lat]); }
+  if(!out.length && h.centroid_lat!=null && h.centroid_lon!=null)
+    out.push([+h.centroid_lon, +h.centroid_lat]);
+  return out;
+}
+//: 점들을 담는 viewBox. **목록 패널이 오른쪽을 덮으므로** 그만큼 비우고
+//: 남은 자리 가운데에 놓는다. 한 점뿐이어도 1.2km 폭은 보인다
+const FIT_MIN_W=0.013;
+function fitBox(pts){
+  const r=wrap.getBoundingClientRect();
+  const fl=document.getElementById('flist').getBoundingClientRect();
+  const useW=Math.max(200, r.width-(fl.width+30));
+  //: 위쪽 선택 바(최대 4줄)와 건물 아이콘 높이 — 이만큼 비우지 않으면
+  //: 맨 위의 장비·건물이 바 밑에 깔렸다
+  const TOP=170, useH=Math.max(200, r.height-TOP);
+  let x0=1e9,x1=-1e9,y0=1e9,y1=-1e9;
+  for(const [lon,lat] of pts){ const x=mx(lon), y=-my(lat);
+    x0=Math.min(x0,x); x1=Math.max(x1,x); y0=Math.min(y0,y); y1=Math.max(y1,y); }
+  const w=Math.max(x1-x0, FIT_MIN_W)*1.3, h=Math.max(y1-y0, FIT_MIN_W*.8)*1.3;
+  // 화면 1px 당 단위 — 쓸 수 있는 폭(useW)에 w 가, 높이에 h 가 들어가게
+  const upp=Math.max(w/useW, h/useH);
+  const cx=(x0+x1)/2, cy=(y0+y1)/2;
+  // 내용의 가운데가 **왼쪽 `useW` × 아래쪽 `useH` 구간**의 가운데에 오도록
+  return {x:cx-upp*useW/2, y:cy-upp*(TOP+useH/2), w:upp*r.width, h:upp*r.height};
+}
+//: **구역 장애(메시·행정구역)는 축척 눈금 1km 보다 당기지 않는다**(사람 결정
+//: 2026-10-30). 丁目 하나·1km 메시 한 칸이 200m 눈금까지 당겨져 그것만 보이고
+//: 어디인지 알 수 없었다. 처음엔 ADM 에만 걸어 메시가 그대로 당겨졌다.
+//: 눈금은 140px 안에 드는 가장 큰 1·2·5 값이라(`drawScale`) 1km 가 되려면
+//: 1px ≥ 1000/140 m 여야 한다
+const ADM_MIN_MPP=1000/140;
+function fitFor(h, pts){
+  const v=fitBox(pts);
+  if(!h.axis || h.axis==='GLOBAL') return v;
+  const mpp=mppOf(v);
+  if(mpp>=ADM_MIN_MPP) return v;
+  // **내용의 가운데를 고정점으로** 넓힌다. 상자 가운데로 넓히면 fitBox 가
+  // 위쪽 바·오른쪽 목록을 피해 놓은 자리에서 내용이 밀려난다
+  let x0=1e9,x1=-1e9,y0=1e9,y1=-1e9;
+  for(const [lon,lat] of pts){ const x=mx(lon), y=-my(lat);
+    x0=Math.min(x0,x); x1=Math.max(x1,x); y0=Math.min(y0,y); y1=Math.max(y1,y); }
+  const f=ADM_MIN_MPP/mpp, px=(x0+x1)/2, py=(y0+y1)/2;
+  return {w:v.w*f, h:v.h*f, x:px-(px-v.x)*f, y:py-(py-v.y)*f};
+}
+//: 부드럽게 날아간다. 도중에는 viewBox 만 바꾸고 효과·라벨은 숨긴다 —
+//: 프레임마다 `draw` 를 부르면 2천 개를 매번 다시 만든다(드래그 측정과 같은 이유)
+let FLY=null;
+function flyTo(v, ms=700){
+  if(!VB) return;
+  const a={...VB};
+  // 축소 한계(`MAX_MPP`)는 도착점에서 `setVB` 가 지킨다 — 여기서 미리 맞춰
+  // 둬야 마지막 프레임에서 튀지 않는다
+  const mpp=mppOf(v);
+  if(mpp>MAX_MPP){ const f=MAX_MPP/mpp, cx=v.x+v.w/2, cy=v.y+v.h/2;
+    v={w:v.w*f, h:v.h*f, x:cx-v.w*f/2, y:cy-v.h*f/2}; }
+  const t0=performance.now(), fx=document.getElementById('fx'), lb=document.getElementById('labels');
+  fx.style.visibility='hidden'; lb.style.visibility='hidden';
+  document.getElementById('hq').classList.add('fly');
+  const id={};
+  FLY=id;
+  const step=now=>{
+    if(FLY!==id) return;              // 다른 이동이 끼어들었다
+    const t=Math.min(1,(now-t0)/ms), e=t<.5?2*t*t:1-Math.pow(-2*t+2,2)/2;
+    // 폭은 **비율로** 보간한다 — 선형이면 줌인할 때 끝에서 갑자기 당겨진다
+    const w=a.w*Math.pow(v.w/a.w,e), h=a.h*Math.pow(v.h/a.h,e);
+    const cx=(a.x+a.w/2)+((v.x+v.w/2)-(a.x+a.w/2))*e;
+    const cy=(a.y+a.h/2)+((v.y+v.h/2)-(a.y+a.h/2))*e;
+    VB={x:cx-w/2, y:cy-h/2, w, h};
+    svg.setAttribute('viewBox',`${VB.x} ${VB.y} ${VB.w} ${VB.h}`);
+    geofx.setAttribute('viewBox',`${VB.x} ${VB.y} ${VB.w} ${VB.h}`);
+    drawScale();
+    if(t<1){ requestAnimationFrame(step); return; }
+    FLY=null; fx.style.visibility=''; lb.style.visibility='';
+    document.getElementById('hq').classList.remove('fly');
+    setVB(v); draw();
+  };
+  requestAnimationFrame(step);
+}
+// 고른 장애를 선택 바에 적고, 걸린 장비만 남기고 물린다
+function drawFocus(){
+  const fs=focusSets();
+  const glob=document.getElementById('glob');
+  glob.style.display='none';
+  const fbar=document.getElementById('fbar');
+  if(!fs){ geofx.replaceChildren(); fbar.style.display='none'; placeBars();
+    if(FOCUS){ FOCUS=null; renderList(); } return; }
+  hqHot(null);
+  const h=fs.h;
+  drawGeo(h);
+  // 망 밖(도메인·DNS)·PGW 지목 — 건물에 불을 넣고 SGW 에서 선을 잇는다.
+  // 어느 SGW 를 거쳤는지 graphio 가 말하지 않으면 **전부** 잇는다
+  const pgws=(h.nodes||[]).filter(k=>k.startsWith('pgw:')).map(k=>k.split(':')[1]);
+  if(h.egress){
+    const dom=h.axis_raw==='DOMAIN' ? (h.axis_vals||[]).join(', ') : '';
+    hqHot(h.severity, dom ? `망 밖 · ${dom}` : pgws.length ? `PGW ${pgws.join(', ')}` : '망 밖 · DNS');
+    const sg=(h.nodes||[]).filter(k=>k.startsWith('sgw:')).map(k=>k.split(':')[1]);
+    egressLines(document.getElementById('gPick'), sg);
+  } else hqHot(null);
+  if(h.axis==='GLOBAL'){
+    const [rgb]=FX_COLOR[SEV_CLASS[String(h.severity).toUpperCase()]||'CRITICAL'];
+    glob.style.boxShadow=`inset 0 0 110px 40px rgba(${rgb},.85), inset 0 0 0 5px rgba(${rgb},1)`;
+    glob.style.display='block';
+  }
+  // 구역 장애는 **칸 안의 기지국이 보여야** 한다 — 장비 장애처럼 .12 로
+  // 눌러 두면 칸만 덩그러니 남는다
+  const rest = h.axis ? .45 : .12;
+  // 장비를 함께 골랐으면 **물리기는 선택이 정한다**(`drawPick` 이 먼저 돌았다).
+  // 여기서 또 물리면 계통이 사라진다 — 장애에 걸린 것만 다시 밝힌다
+  for(const d of document.getElementById('gCell').children){
+    if(fs.E.has(String(d.dataset.enb))) d.setAttribute('fill-opacity', 1);
+    else if(!PICK) d.setAttribute('fill-opacity', rest); }
+  for(const n of document.getElementById('gNode').children){
+    const sh=n.firstChild; if(!sh) continue;
+    if(fs.N.has(sh.dataset.kind+':'+nid(sh.dataset.id))) n.setAttribute('opacity', 1);
+    else if(!PICK) n.setAttribute('opacity', .18); }
+  const bar=fbar;
+  const core=coreOf(h).map(k=>k.toUpperCase().replace(':',' '));
+  const pts=focusPoints(h);
+  bar.style.display='flex';
+  bar.innerHTML=`<b>${esc(h.severity)} · ${esc(h.title)}</b>`
+    + `<button id=unfocus>해제</button><i></i>`
+    + `<span>${esc(md(h.opened_ts))} ${esc(hm(h.opened_ts))}`
+    + (hm(h.updated_ts)&&hm(h.updated_ts)!==hm(h.opened_ts)?`~${esc(hm(h.updated_ts))}`:'')
+    + (h.live?' · 지금 진행':' · 지난 장애')+`</span>`
+    + `<span>${esc(h.trigger_kpi)}</span>`
+    + `<span>eNB ${(h.enbs||[]).length}</span>`
+    + (core.length?`<span>코어 ${esc(core.join(', '))}</span>`:'')
+    + (h.root_code?`<span>원인 ${esc(h.root_code)}${h.root_label?' — '+esc(h.root_label):''}</span>`:'')
+    + (h.axis==='GLOBAL'?'<span class=warn>전국 장애 — 특정 지역이 아니다</span>'
+       : h.axis?`<span>${esc(GEO_NAME[h.axis]||h.axis)} ${h.geo_ids.length}곳</span>`:'')
+    + (!h.axis&&AXIS_NAME[h.axis_raw]?`<span>${esc(AXIS_NAME[h.axis_raw])} ${esc((h.axis_vals||[]).join(', '))}</span>`:'')
+    + (pgws.length?`<span>PGW ${esc(pgws.join(', '))}</span>`:'')
+    // 망 밖 — HTTP 와 DNS 를 나란히. "이름 풀이가 안 되나, 서버·백본이 느리나"
+    + (h.egress&&h.dns?h.dns.map(d=>`<span>DNS ${esc(d.host_site)} · `
+        // **판정을 짓지 않는다** — 값과 평시를 나란히 둘 뿐이다. "느림"만
+        // graphio 가 준 플래그(`slow`)다(불변규칙 18)
+        + (d.fail_rate==null?'—':`실패 ${Number(d.fail_rate).toFixed(1)}%`)
+        + (d.baseline_fail_rate==null?'':` (평시 ${Number(d.baseline_fail_rate).toFixed(1)}%)`)
+        + (d.response_ms==null?'':` · ${Number(d.response_ms).toFixed(0)}ms`)
+        + (d.slow?' <b class=warn>느림</b>':'')+`</span>`).join(''):'')
+    + (h.egress&&!pgws.length?'<span class=dimtag>망 밖 장애를 도코모 본사 PGW 에 붙였다 — graphio 가 PGW 를 지목한 것은 아니다</span>':'')
+    // 편향 노드는 **graphio EV-12 의 판정을 옮긴 것**이다 — 원인 확정이 아니다
+    + (h.bias?`<span class=warn>실패가 ${esc(h.bias.node.replace(':',' ').toUpperCase())} 로 쏠림`
+        + ` (실패 ${h.bias.failures.toLocaleString()}건 · 비중 ${h.bias.share.toFixed(0)}%)</span>`
+        + `<span class=dimtag>graphio EV-12 노드 편향${h.bias.verdict?' — '+esc(h.bias.verdict):''} · 원인 확정 아님</span>`
+      : !h.axis&&AXIS_NAME[h.axis_raw]?`<span class=dimtag>${esc(AXIS_NAME[h.axis_raw])} 축 — 지역과 무관`
+        + (h.axis_raw==='DOMAIN'?'':' · 특정 장비로 쏠리지 않았다')+`</span>`:'')
+    + (h.axis&&h.axis.startsWith('MESH')?'<span class=dimtag>칸 = 그 칸을 덮는 셀들의 체감 — 단말 실제 위치가 아니다</span>':'')
+    + (h.axis==='ADM3'?'<span class=dimtag>丁目 경계 없음 — 중심점 근사</span>':'')
+    + (h.axis&&h.axis!=='GLOBAL'&&h.geo_ids.length>=GEO_CAP?`<span class=warn>graphio 가 ${GEO_CAP}곳까지만 넘긴다 — 더 있을 수 있다</span>`:'')
+    + (h.axis&&h.axis!=='GLOBAL'&&geoShapes(h).length===0?'<span class=warn>구역 좌표를 찾지 못했다</span>':'')
+    + (!pts.length&&!h.axis&&!AXIS_NAME[h.axis_raw]?'<span class=warn>지도에 그릴 범위가 없다</span>'
+       : pts.length&&!(h.enbs||[]).length&&!core.length&&!h.axis&&!h.bias?'<span class=warn>장비 범위가 없어 graphio 중심 좌표로 옮겼다</span>':'')
+    // `#sel button` 규칙(해제 단추 자리 — 오른쪽 위)을 받지 않고 맨 끝에 선다
+    + (pts.length?'<button id=refly style="order:9;margin-left:0">다시 맞추기</button>':'');
+  document.getElementById('unfocus').onclick=()=>focusInc(FOCUS);
+  const rf=document.getElementById('refly');
+  if(rf) rf.onclick=()=>flyTo(fitFor(h, pts));
+  placeBars();
+}
+// 장애 바가 위, 선택 바가 그 아래, 장애 내역(`#incs`)이 맨 아래
+function placeBars(){
+  const fb=document.getElementById('fbar'), sb=document.getElementById('sel'),
+        ib=document.getElementById('incs');
+  const on=el=>el.style.display && el.style.display!=='none';
+  let y=10;
+  if(on(fb)){ fb.style.top=y+'px'; y=fb.offsetTop+fb.offsetHeight+6; }
+  sb.style.top=y+'px';
+  if(on(sb)) y=sb.offsetTop+sb.offsetHeight+6;
+  ib.style.top=y+'px';
+}
 
 // ── 보기 방식 — **무엇을 찍고 무엇으로 가를지** (사람 결정 2026-10-28) ──
 //
@@ -3790,7 +4931,8 @@ function drawKde(axis){
   for(const [v,pts] of Object.entries(grp)){
     const wrap=el('g');
     wrap.setAttribute('class','kde');
-    wrap.setAttribute('filter','url(#kdeblur)');
+    wrap.setAttribute('filter', pts.length<=8 ? 'url(#kdeblurS)' : 'url(#kdeblur)');
+    wrap.dataset.v=v;                 // 고르면 이 값으로 켜고 끈다(`drawPick`)
     for(const c of pts){
       const q=el('circle');
       q.setAttribute('cx',mx(c.lon)); q.setAttribute('cy',-my(c.lat));
@@ -3810,17 +4952,77 @@ function drawKde(axis){
 //
 // viewBox 단위는 **도(degree)** 다. 도쿄 위도에서 경도 1도는 약 90.4km.
 const kmSpan=()=>VB?VB.w*90.4:1e9;
+
+//: 도형 크기 단위 — **화면 1px 이 viewBox 로 몇 도인가**에 비례한다.
+//: 전에는 `VB.w/1000` 이었는데, viewBox 비율이 화면과 다르면
+//: (`preserveAspectRatio` 가 meet 이라) 남는 축이 생겨 같은 값이 다른
+//: 픽셀로 그려졌다. 처음 화면은 세로가 꽉 차 1단위 = 0.6px, "전체 보기"는
+//: 가로가 꽉 차 1.2px — **장비가 두 배로 커졌다.** 0.6 은 처음 화면의
+//: 크기를 기준으로 고정한 값이다(사람 결정 2026-10-28)
+function sizeK(){
+  if(!VB) return 1;
+  const r=document.getElementById('wrap').getBoundingClientRect();
+  if(!r.width||!r.height) return VB.w/1000;
+  return Math.max(VB.w/r.width, VB.h/r.height)*0.6;
+}
 const ROAD_LOD={motorway:1e9, trunk:1e9, primary:14, secondary:7, tertiary:3};
 //: 지금 화면이 몇 단계인지. 바뀔 때만 다시 그린다 — 줌할 때마다 17,708개를
 //: 다시 만들면 손이 멈춘다
 const lodOf=()=>{const k=kmSpan(); return k>14?0:k>7?1:k>3?2:3;};
 let LOD=-1;
 
-function setVB(v){VB=v; svg.setAttribute('viewBox',`${v.x} ${v.y} ${v.w} ${v.h}`);
+//: **축소 한계 — 축척 눈금이 10km 를 넘지 않는다**(사람 결정 2026-10-28).
+//: 눈금은 140px 안에 드는 가장 큰 1·2·5 값이라, 1px 이 142.9m 를 넘으면
+//: 20km 로 바뀐다. 그 앞에서 멈춘다. 이동은 막지 않는다
+const MAX_MPP=140;
+//: 화면 1px 이 몇 m 인가. `preserveAspectRatio` 가 meet 이라 **꽉 찬 축**이
+//: 정한다 — 가로만 보면 세로가 꽉 찬 화면에서 축척이 틀린다
+function mppOf(v){
+  const r=document.getElementById('wrap').getBoundingClientRect();
+  if(!v||!r.width||!r.height) return 0;
+  return Math.max(v.w/r.width, v.h/r.height)*90400;
+}
+function setVB(v){
+  // 넘치면 **가운데를 두고** 줄인다 — "전체 보기"·처음 화면이 여기로 온다
+  const mpp=mppOf(v);
+  if(mpp>MAX_MPP){ const f=MAX_MPP/mpp, cx=v.x+v.w/2, cy=v.y+v.h/2;
+    v={w:v.w*f, h:v.h*f, x:cx-v.w*f/2, y:cy-v.h*f/2}; }
+  VB=v; svg.setAttribute('viewBox',`${v.x} ${v.y} ${v.w} ${v.h}`);
+  geofx.setAttribute('viewBox',`${v.x} ${v.y} ${v.w} ${v.h}`);   // 구역 겉층도 같이
   drawScale();
   // **단계가 바뀌면 draw 가 placeLabels 까지 한다** — 여기서 또 부르면 두 번이다
   if(D && lodOf()!==LOD){ draw(); return; }
   placeLabels();}
+
+// ── 도코모 본사 · PGW ────────────────────────────────────────────────
+//: 국토지리원 주소검색 `永田町二丁目11番`(山王パークタワー). **위치에 뜻이
+//: 없다** — PGW 를 세울 자리일 뿐이다(`#hq` 머리말)
+const HQ={lat:35.673264, lon:139.740585};
+function placeHq(m, r){
+  const q=document.getElementById('hq'); if(!q||!m) return null;
+  const x=mx(HQ.lon)*m.a+m.e-r.left, y=-my(HQ.lat)*m.d+m.f-r.top;
+  q.style.left=x+'px'; q.style.top=y+'px';
+  // 라벨이 건물을 덮지 않게 자리를 비운다 (건물 + 이름 줄)
+  return [x-48, y-40, x+48, y+50];
+}
+// 건물에 불을 넣는다 — 망 밖 장애·PGW 지목 장애를 고른 동안
+function hqHot(sev, msg){
+  const q=document.getElementById('hq'); if(!q) return;
+  q.classList.toggle('hot', !!sev);
+  if(sev) q.style.setProperty('--c', FX_COLOR[SEV_CLASS[String(sev).toUpperCase()]||'CRITICAL'][0]);
+  q.querySelector('.msg').textContent=msg||'';
+}
+// SGW → PGW 선 (`ids` 가 비면 전부)
+function egressLines(g, ids){
+  const want=new Set((ids||[]).map(v=>nid(v)));
+  for(const n of D.nodes.sgw||[]){
+    if(want.size && !want.has(nid(n.id))) continue;
+    const l=el('line'); l.setAttribute('class','eg');
+    l.setAttribute('x1',mx(n.lon)); l.setAttribute('y1',-my(n.lat));
+    l.setAttribute('x2',mx(HQ.lon)); l.setAttribute('y2',-my(HQ.lat));
+    g.appendChild(l);
+  }
+}
 
 // ── 라벨 — 지도 좌표를 화면 픽셀로 옮겨 div 로 놓는다 ────────────────────
 //
@@ -3836,8 +5038,12 @@ function placeLabels(){
   // 곧 우선순위다(묶음 → MME → SGW)
   // 범례가 덮는 자리는 애초에 비운다 — 반쯤 가린 글자는 읽다가 틀린다
   const lgb=document.getElementById('legend').getBoundingClientRect();
-  const out=[], put=[[lgb.left-r.left-6, lgb.top-r.top-6,
-                      lgb.right-r.left+6, lgb.bottom-r.top+6]];
+  const flb=document.getElementById('flist').getBoundingClientRect();
+  const hqb=placeHq(m, r);
+  const out=[], put=[...(hqb?[hqb]:[]), [lgb.left-r.left-6, lgb.top-r.top-6,
+                      lgb.right-r.left+6, lgb.bottom-r.top+6],
+                     [flb.left-r.left-6, flb.top-r.top-6,
+                      flb.right-r.left+6, flb.bottom-r.top+6]];
   for(const L of LABELS){
     // 작아진 묶음은 라벨을 접는다 — 줌아웃하면 겹쳐서 못 읽는다
     if(L.w!==undefined && L.w*m.a < 46) continue;
@@ -3855,6 +5061,7 @@ function placeLabels(){
     d.textContent=L.t; out.push(d);
   }
   box.replaceChildren(...out);
+  placeFx();
 }
 
 //: 노선 색 — **이름 해시**로 판다. 129개 노선에 손으로 색표를 매기면
@@ -3877,7 +5084,7 @@ function drawScale(){
   if(!VB||!box) return;
   const w=document.getElementById('wrap').getBoundingClientRect().width;
   if(!w) return;
-  const mpp=VB.w*90400/w;
+  const mpp=mppOf(VB);
   // 1·2·5 계열에서 **140px 를 넘지 않는** 가장 큰 눈금을 고른다
   const nice=[10,20,50,100,200,500,1000,2000,5000,10000,20000,50000];
   let m=nice[0];
@@ -3974,11 +5181,13 @@ function markYamanote(){
   }
 }
 
+//: 코어 장비 색 — 파스텔 색상환 자리(eNB 연분홍 · 장애 산호와 갈린다)
+const NODE_COL={mme:'#b9a7e3', sgw:'#93bfe6'};
 function draw(){
   if(!D) return;
   LOD=lodOf();                       // 이 단계로 그린다 — `setVB` 가 비교한다
   svg.setAttribute('data-lod', LOD);  // 도로 굵기를 CSS 가 단계별로 집는다
-  for(const id of ['gAdm','gGreen','gRoad','gRiv','gRail','gYmt','gAll','gKde','gCell','gPick','gStn','gNode'])
+  for(const id of ['gAdm','gGreen','gRoad','gRiv','gRail','gYmt','gAll','gKde','gGeo','gCell','gPick','gStn','gNode'])
     document.getElementById(id).replaceChildren();
   LABELS=[];
   if(GEO) for(const f of GEO.features) for(const ring of f.rings){
@@ -4043,7 +5252,7 @@ function draw(){
   // 그림이다. `D.lines` 는 **야마노테 구간을 집는 자**로만 쓴다.
   const M=modeOf(), axis=M.axis;
   const vals=buildPal(axis); legend(axis, vals);
-  const k = VB ? VB.w/1000 : 1;        // 확대해도 점 크기가 유지되게
+  const k = sizeK();                  // 확대해도 점 크기가 유지되게
 
   // TA 묶음 — **선이 아니라 면이다**(사람 결정 2026-10-28).
   // 볼록껍질은 바깥쪽 몇 점만 이어 안이 비고, 두 묶음이 겹치면 어디까지가
@@ -4058,7 +5267,9 @@ function draw(){
   for(const c of (M.unit==='enb' ? enbPoints() : D.cells)){
     const d=el('circle');
     d.setAttribute('cx',mx(c.lon)); d.setAttribute('cy',-my(c.lat));
-    d.setAttribute('r',(M.unit==='enb'?4:4.5)*k);
+    // **멀리서는 작게** — 전체 보기에서 2천 개가 4px 로 찍히면 서로 붙어
+    // 덩어리가 됐다
+    d.setAttribute('r',(LOD===0?2.6:M.unit==='enb'?4:4.5)*k);
     // 축이 없을 때의 기본색은 **마스터 전량과 또렷이 갈려야 한다** —
     // 둘 다 회색이면 무엇이 생성 대상인지 안 보인다
     // **연분홍이 기본이다**(사람 결정 2026-10-28). 회색일 때는 도로에
@@ -4066,8 +5277,11 @@ function draw(){
     // (#e2efc4 연녹)과 명도·색상이 겹쳐 역 위의 기지국이 사라졌다.
     // 배경이 쓰지 않는 색상환 자리로 뺀다 — 색축이 있는 모드는
     // 팔레트가 이긴다
-    d.setAttribute('fill',PAL[c[axis]] || '#f6b3cd');
+    d.setAttribute('fill',PAL[c[axis]] || '#fbd6e4');
     d.setAttribute('fill-opacity',String(base));
+    // **주인공이 아니면 누를 수 없다**(사람 결정 2026-10-28). SGW·MME 보기에서
+    // 물러난 eNB 가 눌리면 선택이 엉뚱한 쪽으로 바뀌었다
+    if(M.focus) d.style.pointerEvents='none';
     d.dataset.kind=M.unit; d.dataset.id=c.key; d.dataset.enb=c.enb;
     d.dataset.t = (M.unit==='enb'
       ? `eNB ${c.enb}  (셀 ${c.n})`
@@ -4075,22 +5289,39 @@ function draw(){
       + `\nTAC ${c.tac} · TA목록 ${c.ta_list}\nSGW ${c.sgw} · MME ${c.mme}`;
     document.getElementById('gCell').appendChild(d);
   }
-  for(const kind of ['mme','sgw']) for(const n of D.nodes[kind]){
+  // **TA 보기에는 코어를 그리지 않는다**(사람 결정 2026-10-28) — 묶음의
+  // 경계를 보려는 화면에서 SGW·MME 가 히트맵 위에 얹혀 거슬리기만 했다
+  for(const kind of (M.kde ? [] : ['mme','sgw'])) for(const n of D.nodes[kind]){
     // 주인공은 키우고, 곁다리는 물린다. MME 모드에서 SGW 를 **지우지는
-    // 않는다** — 누르면 그 아래 SGW 까지 함께 진해지는 것이 보여야 한다
+    // 않는다** — 누르면 그 아래 SGW 까지 함께 진해지는 것이 보여야 한다.
+    // 대신 **누를 수는 없다** — 보이기만 하는 곁다리다
     const hot = M.focus===kind;
     const g=el('g'), r=(kind==='mme'?15:10)*(hot?1.45:1)*k;
-    if(M.focus && !hot) g.setAttribute('opacity','.3');
+    if(M.focus && !hot){ g.setAttribute('opacity','.3'); g.style.pointerEvents='none'; }
     const sh=el(kind==='mme'?'rect':'circle');
-    if(kind==='mme'){ sh.setAttribute('x',mx(n.lon)-r); sh.setAttribute('y',-my(n.lat)-r);
-      sh.setAttribute('width',2*r); sh.setAttribute('height',2*r); }
-    else { sh.setAttribute('cx',mx(n.lon)); sh.setAttribute('cy',-my(n.lat));
+    const cx=mx(n.lon), cy=-my(n.lat), col=NODE_COL[kind];
+    if(kind==='mme'){ sh.setAttribute('x',cx-r); sh.setAttribute('y',cy-r);
+      sh.setAttribute('width',2*r); sh.setAttribute('height',2*r);
+      sh.setAttribute('rx',r*.42); sh.setAttribute('ry',r*.42); }
+    else { sh.setAttribute('cx',cx); sh.setAttribute('cy',cy);
       sh.setAttribute('r',r); }
-    sh.setAttribute('fill', kind==='mme' ? '#c9797f' : '#5b8fbf');
+    // **꽉 찬 도형을 걷었다**(사람 요청 2026-10-30 — 커지니 투박했다).
+    // 어두운 속 + 장비 색 테두리 + 가운데 표식. 색상환 자리는 그대로다 —
+    // MME 연보라, SGW 하늘. 장애가 걸리면 `.ft-*` 가 속을 심각도 색으로
+    // 채우고 가운데 표식은 숨는다(`.ft + .ndi`) — 평시와 확실히 갈린다
+    sh.setAttribute('fill', '#141b26'); sh.setAttribute('stroke', col);
+    sh.setAttribute('class', 'nd');
 
     sh.dataset.kind=kind; sh.dataset.id=n.id;
     sh.dataset.t=`${kind.toUpperCase()} ${n.id}\n셀 ${n.cells} · eNB ${n.enb}\n(위치 = 맡은 셀의 중심)`;
-    g.appendChild(sh); document.getElementById('gNode').appendChild(g);
+    g.appendChild(sh);
+    // 가운데 표식 — SGW 는 점, MME 는 마름모. **도형 뒤에 붙인다** — 장애
+    // 표시(`markFault`)·효과(`shapeAt`)는 `g.firstChild` 를 본다
+    const ic=el(kind==='mme'?'path':'circle'), q=r*.42;
+    if(kind==='mme') ic.setAttribute('d',`M${cx} ${cy-q}L${cx+q} ${cy}L${cx} ${cy+q}L${cx-q} ${cy}Z`);
+    else { ic.setAttribute('cx',cx); ic.setAttribute('cy',cy); ic.setAttribute('r',r*.38); }
+    ic.setAttribute('fill', col); ic.setAttribute('class','ndi');
+    g.appendChild(ic); document.getElementById('gNode').appendChild(g);
     LABELS.push({x:mx(n.lon), y:-my(n.lat)-r*2.1,
                  t:`${kind.toUpperCase()} ${n.id}`, cls:'lb-n'});
   }
@@ -4126,10 +5357,14 @@ function draw(){
                    cls:'lb-a'});
     }
   }
-  placeLabels(); drawPick();
+  // 다시 그리면 새 요소라 장애 표시가 없다 — 지금 응답으로 되살린다
+  applyFaults();
+  applyStandby();
+  placeLabels(); drawPick(); drawFocus();
 }
 
 async function load(){
+  if(!SCN) loadScenarios().then(()=>{ INJ_EL=null; if(PICK) drawPick(); });
   D=await (await fetch('/api/map')).json();
   ENB=null;                           // 셀이 바뀌면 eNB 묶음도 다시 만든다
   const c=D.counts;
@@ -4208,8 +5443,9 @@ function drawPick(){
   const g=document.getElementById('gPick'); g.replaceChildren();
   const bar=document.getElementById('sel');
   // 고른 것이 없으면 `draw` 가 이미 모드별 기본 세기로 그려 뒀다
-  if(!PICK){ bar.style.display='none'; return; }
-  const k=VB?VB.w/1000:1;
+  if(!PICK){ bar.style.display='none';
+    document.getElementById('incs').style.display='none'; return; }
+  const k=sizeK();
   const by={}; for(const kind of ['sgw','mme']) for(const n of D.nodes[kind])
     by[kind+':'+n.id]=n;
   const seg=(a,b)=>{ if(!a||!b) return;
@@ -4229,30 +5465,48 @@ function drawPick(){
     q.setAttribute('cx',x); q.setAttribute('cy',y); q.setAttribute('r',r);
     q.setAttribute('fill','#ff8ebc'); q.setAttribute('fill-opacity','.5');
     lit.appendChild(q); };
+  // **TA 보기에서는 불을 넣지 않는다**(사람 결정 2026-10-28). 그 보기는
+  // 이미 묶음 히트맵이 빛이라, 고른 자리에만 분홍 빛이 하나 더 얹혀
+  // 색이 탁해지고 번짐이 네모로 잘려 보였다. 고른 묶음만 남기는 것으로 충분하다
+  const M0=modeOf();
   const seen=new Set();
-  for(const c of PICK.cells){
+  if(!M0.kde) for(const c of PICK.cells){
     // **한 자리는 한 번만** — 6섹터국에 여섯 번 쌓으면 그 국만 타오른다
     if(seen.has(c.enb)) continue; seen.add(c.enb);
     litAt(mx(c.lon), -my(c.lat), KDE_BW*.75);
   }
   // 코어도 같이 — MME 를 고르면 그 아래 SGW 까지 밝아져야 한다
-  for(const key of hotN){ const n=by[key]; if(n) litAt(mx(n.lon), -my(n.lat), KDE_BW*1.6); }
+  if(!M0.kde) for(const key of hotN){ const n=by[key]; if(n) litAt(mx(n.lon), -my(n.lat), KDE_BW*1.6); }
+  // 하나만 골랐으면(eNB) 넓은 필터 — 위 `kdeblurS` 와 같은 이유
+  if(lit.childNodes.length<=8) lit.setAttribute('filter','url(#kdeblurS)');
   g.appendChild(lit);
 
   // **셀은 자기 SGW 에만 잇는다.** 전에는 선택에 걸린 SGW 전부에 이어
   // MME 를 고르면 셀×SGW 개의 선이 나왔다 — 계통이 아니라 그물이었다
+  // **TA 보기에는 선이 없다** — 코어를 그리지 않으니 선이 허공으로 뻗었다
   const up=new Set();
-  for(const c of PICK.cells){
+  if(!M0.kde) for(const c of PICK.cells){
     seg(c, by['sgw:'+c.sgw]);
     if(c.sgw && c.mme) up.add(c.sgw+'>'+c.mme);
   }
-  for(const e of up){ const [a,b]=e.split('>');
+  if(!M0.kde) for(const e of up){ const [a,b]=e.split('>');
     seg(by['sgw:'+a], by['mme:'+b]); }
+  // 계통의 끝 — **SGW 에서 PGW 로 한 마디 더**. 고른 것이 있을 때만 긋는다
+  if(!M0.kde && PICK.sgw.length) egressLines(g, PICK.kind==='pgw' ? [] : PICK.sgw);
   // **eNB 로 견준다** — 모드에 따라 점이 셀이기도 eNB 이기도 한데, 어느
   // 쪽이든 한 자리는 한 eNB 다. 셀 키로 보면 eNB 모드에서 하나도 안 걸린다
   const inPick=new Set(PICK.enb.map(String));
+  // **TA 보기에서는 고른 eNB 의 TA 목록만 불을 켜 둔다**(사람 결정 2026-10-28).
+  // 열네 묶음이 다 켜진 채면 고른 것이 어느 묶음에 드는지, 그 묶음이
+  // 어디까지인지 읽히지 않았다. 다른 묶음은 끄고, 같은 묶음의 eNB 는
+  // 흐리게 남겨 묶음의 테두리를 점으로도 보인다
+  const M=modeOf(), inTa=new Set(M.kde ? PICK.ta.map(String) : []);
+  if(M.kde) for(const k of document.getElementById('gKde').children)
+    k.style.display = inTa.has(k.dataset.v) ? '' : 'none';
+  const enbTa={}; if(M.kde) for(const c of D.cells) enbTa[c.enb]=String(c.ta_list);
   for(const d of document.getElementById('gCell').children)
-    d.setAttribute('fill-opacity', inPick.has(d.dataset.enb)?1:.12);
+    d.setAttribute('fill-opacity', inPick.has(d.dataset.enb) ? 1
+      : inTa.has(enbTa[d.dataset.enb]) ? .45 : .12);
   // 코어도 함께 진해진다 — MME 를 고르면 **그 아래 SGW 까지**가
   // 사람이 보려던 것이다
   for(const n of document.getElementById('gNode').children){
@@ -4260,28 +5514,230 @@ function drawPick(){
     n.setAttribute('opacity',
       hotN.has(sh.dataset.kind+':'+sh.dataset.id) ? 1 : .18);
   }
-  const lbl={cell:'eNB', enb:'eNB', sgw:'SGW', mme:'MME'}[PICK.kind];
-  const head = (PICK.kind==='cell'||PICK.kind==='enb')
-    ? `eNB ${PICK.enb[0]}` : `${lbl} ${PICK.id}`;
+  const lbl={cell:'eNB', enb:'eNB', sgw:'SGW', mme:'MME', pgw:'PGW'}[PICK.kind];
+  const head = PICK.kind==='pgw' ? 'NTT docomo 本社 · PGW (대표)' : PICK.kind==='box' ? `드래그 범위 · eNB ${PICK.enb.length}국`
+    : (PICK.kind==='cell'||PICK.kind==='enb') ? `eNB ${PICK.enb[0]}` : `${lbl} ${PICK.id}`;
   bar.style.display='flex';   // CSS 기본이 none 이라 '' 로는 안 열린다
   bar.innerHTML=`<b>${head}</b>`
     + `<span>셀 ${PICK.cells.length}</span>`
-    + (PICK.kind==='cell'||PICK.kind==='enb'?'':`<span>eNB ${PICK.enb.length}</span>`)
+    + (PICK.kind==='cell'||PICK.kind==='enb'||PICK.kind==='box'?'':`<span>eNB ${PICK.enb.length}</span>`)
     + `<span>TAC ${PICK.tac.join(', ')||'—'}</span>`
     + `<span>TA목록 ${PICK.ta.join(', ')||'—'}</span>`
     + `<span>SGW ${PICK.sgw.join(', ')||'—'}</span>`
     + `<span>MME ${PICK.mme.join(', ')||'—'}</span>`
-    + `<button id=unpick>해제</button>`;
+    + `<button id=unpick>해제</button><i></i>`;
+  if(PICK.kind==='pgw') bar.insertAdjacentHTML('beforeend',
+    '<span class=dimtag>PGW 16대를 한 점으로 — 실제 PGW 위치가 아니다. 선은 SGW → PGW</span>');
+  else bar.appendChild(injRow());
   document.getElementById('unpick').onclick=()=>{PICK=null; draw();};
+  // 바가 여러 줄이 되면 아래 것들이 그 밑으로 내려가야 겹치지 않는다
+  placeBars();
+  drawIncidents();
+}
+
+// ── 고른 장비에 **장애를 건다** (사람 결정 2026-10-28) ────────────────
+//
+// 시나리오 목록과 "어느 장비에 걸 수 있나"는 `CM_ERROR_SCENARIO`
+// (`/api/scenarios`)가 정본이다 — 지도가 따로 표를 들지 않는다. 걸면
+// 장애 주입 화면과 **같은 API**(`POST /api/faults`)로 보낸다. 대상 표기는
+// 생성기(`faults._resolve_target`)가 읽는 모양 그대로다.
+let SCN=null, SCN_OK=null;
+async function loadScenarios(){
+  try{
+    const [st, sc]=await Promise.all([
+      (await fetch('/api/status')).json(), (await fetch('/api/scenarios')).json()]);
+    SCN=sc; SCN_OK=new Set(st.kinds||[]);
+  }catch(e){ SCN=[]; SCN_OK=new Set(); }
+}
+const INJ_UNIT={enb:'enb', cell:'enb', box:'enb', sgw:'sgw', mme:'mme'};
+//: **범위 주입 상한 — eNB 50국**(2026-10-28). 그 이상이면 eNB 장애가 아니라
+//: 지역 장애에 가깝고, 잘못 끈 사각형 하나가 도심 절반을 붉게 만든다
+const INJ_MAX_ENB=50;
+//: 고른 eNB 에서 넓힐 수 있는 범위 — `[값, 이름, 대상, eNB 수]`.
+//: 대상 표기는 생성기(`faults._resolve_target`)가 읽는 그대로다.
+//: `TAC:`·`BOX:` 는 이 기능과 함께 생겼다. TA목록은 넣지 않는다 — 큰 것은
+//: 2천 국이 넘어 eNB 장애가 아니다
+function injScopes(p){
+  if(p.kind==='box'){
+    const [s_,w_,n_,e_]=p.box.map(v=>v.toFixed(4));
+    return [['box', `드래그 범위 (eNB ${p.enb.length}국)`, `BOX:${s_},${w_},${n_},${e_}`, p.enb.length]];
+  }
+  const u=INJ_UNIT[p.kind];
+  if(u!=='enb') return [['one', `${u.toUpperCase()} ${p.id}`, `${u.toUpperCase()}-${p.id}`, 0]];
+  const e=String(p.enb[0]), c=p.cells[0]||{};
+  const nEnb=f=>new Set(D.cells.filter(f).map(x=>x.enb)).size;
+  const out=[['one', `이 eNB 만 (${e})`, `ENB:${e}`, 1]];
+  if(c.tac!=null) out.push(['tac', `같은 TAC ${c.tac}`, `TAC:${c.tac}`,
+    nEnb(x=>String(x.tac)===String(c.tac))]);
+  if(c.gu) out.push(['gu', `같은 구 ${c.gu}`, `SGG:${c.gu}`,
+    nEnb(x=>String(x.gu)===String(c.gu))]);
+  return out;
+}
+// 선택 바는 폴링·줌마다 다시 그려진다. 고르던 콤보가 그때마다 풀리면
+// 안 되므로 **같은 장비면 주입 줄을 떼었다 다시 붙인다**
+let INJ_EL=null, INJ_KEY=null;
+function injRow(){
+  const u=INJ_UNIT[PICK.kind], key=PICK.kind+':'+PICK.id;
+  if(INJ_EL && INJ_KEY===key) return INJ_EL;
+  const box=document.createElement('div'); box.id='inj';
+  const list=(SCN||[]).filter(s=>s[u]==='Y');
+  if(!SCN){ box.innerHTML='<span class=msg>시나리오 목록을 읽는 중</span>'; }
+  else if(!list.length){ box.innerHTML='<span class=msg>이 장비에 걸 수 있는 시나리오가 없다</span>'; }
+  else {
+    // 준비 중인 것도 **보인다**(비활성) — 숨기면 무엇이 남았는지 사라진다
+    const scopes=injScopes(PICK);
+    box.innerHTML='<span>장애 주입</span>'
+      + (scopes.length>1 || PICK.kind==='box'
+          ? '<select id=injScope>' + scopes.map(([v,name,,n])=>
+              `<option value="${v}"${n>INJ_MAX_ENB?' disabled':''}>${esc(name)}`
+              + (v!=='one'&&PICK.kind!=='box' ? ` · ${n}국` : '')
+              + (n>INJ_MAX_ENB ? ` — ${INJ_MAX_ENB}국 초과` : '') + '</option>').join('')
+            + '</select>' : '')
+      + '<select id=injScn>'
+      + list.map(s=>{ const live=s.kind && SCN_OK.has(s.kind);
+          return `<option value="${s.no}"${live?'':' disabled'} title="${esc(s.description||'')}">`
+            + `${s.no}. ${esc(s.name)}${live?'':(s.status==='NO_EVIDENCE'?' — 증거 없음':' — 준비 중')}</option>`; }).join('')
+      + '</select>'
+      + '<label>지속 <input id=injDur type=number min=1 max=180 value=10>분</label>'
+      + '<label>강도 <input id=injInt type=number min=0.1 max=1 step=0.1 value=1></label>'
+      + '<button id=injGo>주입</button><span class=msg id=injMsg></span>';
+    const first=list.find(s=>s.kind && SCN_OK.has(s.kind));
+    if(first) box.querySelector('#injScn').value=String(first.no);
+    box.querySelector('#injGo').onclick=injFire;
+  }
+  INJ_EL=box; INJ_KEY=key; return box;
+}
+async function injFire(){
+  const msg=document.getElementById('injMsg');
+  const no=+document.getElementById('injScn').value;
+  const s=(SCN||[]).find(x=>x.no===no);
+  const dur=Math.round(+document.getElementById('injDur').value);
+  const inten=+document.getElementById('injInt').value;
+  if(!s||!s.kind){ msg.className='msg err'; msg.textContent='준비 중인 시나리오다'; return; }
+  if(!(dur>=1&&dur<=180)){ msg.className='msg err'; msg.textContent='지속은 1~180분'; return; }
+  if(!(inten>0&&inten<=1)){ msg.className='msg err'; msg.textContent='강도는 0 초과 1 이하'; return; }
+  const scopes=injScopes(PICK), sv=document.getElementById('injScope');
+  const sc=scopes.find(x=>x[0]===(sv?sv.value:scopes[0][0]))||scopes[0];
+  if(sc[3]>INJ_MAX_ENB){ msg.className='msg err';
+    msg.textContent=`eNB ${sc[3]}국 — 한 번에 ${INJ_MAX_ENB}국까지다`; return; }
+  const target=sc[2];
+  // **한 번 더 묻는다** — 이 DB 가 곧 운영이고, 주입 이력이 정답(ground
+  // truth)이 된다. 잘못 누른 한 번이 채점을 흐린다
+  if(!confirm(`${target}${sc[3]>1?` (eNB ${sc[3]}국)`:''} 에 "${s.no}. ${s.name}" 을 ${dur}분 (강도 ${inten}) 주입한다.\n생성기가 다음 1분 틱부터 반영한다.`)) return;
+  const btn=document.getElementById('injGo'); btn.disabled=true;
+  try{
+    const r=await fetch('/api/faults',{method:'POST', headers:{'content-type':'application/json'},
+      body:JSON.stringify({kind:s.kind, target, duration_min:dur, intensity:inten,
+                           note:`지도 · 시나리오 ${s.no}`})});
+    const d=await r.json();
+    if(!r.ok) throw new Error(d.detail||r.status);
+    msg.className='msg';
+    msg.textContent=`주입 #${d.fault_id} 접수 — ${target} · ${s.name} · ${dur}분. 탐지되면 '장애 표시'에 뜬다`;
+  }catch(e){ msg.className='msg err'; msg.textContent='주입 실패 — '+e.message; }
+  finally{ btn.disabled=false; }
+}
+
+// ── 고른 장비에 **무슨 장애가, 왜** ──────────────────────────────────
+//
+// 계통을 다 그리지 않는다(사람 결정 2026-10-28) — 장비마다 어떤 장애가
+// 걸려 있고 왜 그렇게 판정됐는지만 적는다. "왜"는 graphio 의 RCA 서술
+// (`AI_RCA_RESULT.STATEMENT_KO`)을 **그대로 인용한다** — 화면이 문장을
+// 지어내면 L3 검증기를 통과시킨 의미가 없어진다(graphio 불변규칙 18).
+const esc=(v)=>String(v==null?'':v).replace(/[&<>"]/g,
+  c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function drawIncidents(){
+  const box=document.getElementById('incs');
+  if(!box) return;
+  if(!PICK || !FAULT || !faultsOn()){ box.style.display='none'; return; }
+  // 보기의 주인공 것만 — 칠한 것과 내역이 어긋나지 않게
+  const unit=faultUnit(), ids=new Set(), via=new Set();
+  if(unit==='enb'){
+    for(const e of PICK.enb){ const f=FAULT.enb&&FAULT.enb[String(e)];
+      if(f) f.ids.forEach(v=>ids.add(v)); }
+  } else {
+    const nd=nodeFaults();
+    for(const v of PICK[unit]){ const f=nd[unit+':'+nid(v)]; if(!f) continue;
+      f.ids.forEach(x=>ids.add(x)); f.via.forEach(x=>via.add(x)); }
+  }
+  const list=(FAULT.incidents||[]).filter(i=>ids.has(i.incident_id));
+  if(!list.length){ box.style.display='none'; return; }
+  box.style.display='block';
+  box.innerHTML=list.map(i=>{
+    // **"모름"을 0으로 적지 않는다**(graphio 불변규칙 17). 영향률이
+    // null 인 것은 "영향 없음"이 아니라 산출하지 못했다는 뜻이다
+    // `impact_ratio` 는 **이미 퍼센트다**(graphio `detector` 가 100 을 곱해
+    // 담고 `api.fmtRatio` 도 그대로 % 를 붙인다). 여기서 또 곱해 621.9% 가 떴다
+    const imp = i.impact_ratio==null ? '산출 불가'
+              : Number(i.impact_ratio).toFixed(1)+'%';
+    const subs = i.affected_subscribers==null ? '산출 불가'
+               : Number(i.affected_subscribers).toLocaleString();
+    const hm=v=>String(v||'').slice(11,16);
+    return `<div class="inc ${esc(i.severity)}">`
+      + `<h5>${esc(i.severity)} · ${esc(i.title)}</h5>`
+      + `<p>${esc(i.trigger_kpi)} · 셀 ${i.cell_cnt==null?'—':i.cell_cnt}`
+      + ` · 영향 ${esc(subs)} (${esc(imp)})`
+      + ` · ${esc(String(i.opened_ts||'').slice(5,10))} ${esc(hm(i.opened_ts))}`
+      + (i.updated_ts && hm(i.updated_ts)!==hm(i.opened_ts) ? `~${esc(hm(i.updated_ts))}` : '')
+      + (i.status?` · ${esc(i.status)}`:'') + `</p>`
+      + (i.statement_ko ? `<p class=why>${esc(i.statement_ko)}</p>` : '')
+      + (i.root_code
+          ? `<p class=code>${esc(i.root_code)}`
+            + (i.root_label?` — ${esc(i.root_label)}`:'')
+            + (i.confidence==null?'':` · 확신도 ${(i.confidence*100).toFixed(0)}%`)
+            + `</p>`
+          : '<p class=code>원인 분석 없음 — RCA 가 아직 돌지 않았다</p>')
+      + (via.has(i.incident_id)
+          ? '<p class=code>S6a(MME↔HSS) 인증 실패 — 이 MME 관할 셀에서 관측됐다. '
+            + 'graphio 가 이 MME 를 직접 지목한 것은 아니다</p>' : '')
+      + `</div>`;
+  }).join('');
 }
 
 // ── 이동·확대 ────────────────────────────────────────────────────────────
 const wrap=document.getElementById('wrap'); let drag=null;
 let moved=0;
-wrap.addEventListener('mousedown',e=>{drag={x:e.clientX,y:e.clientY,vb:{...VB}};
+// ── Shift+드래그 — 사각형 안의 eNB 를 한 번에 고른다 (사람 결정 2026-10-28) ──
+// eNB 하나는 호가 적어 장애를 넣어도 최소 표본에 못 미쳐 묻히기 쉽다.
+// 고른 범위는 `BOX:` 대상으로 **한 건**의 주입이 된다(이력·정답이 쪼개지지
+// 않는다). eNB 가 주인공인 보기(전체 eNB·TA)에서만 된다
+let BOXSEL=null;
+const unmy=(y)=>(Math.atan(Math.exp(y/R))-Math.PI/4)*360/Math.PI;
+function boxRect(e){
+  const r=wrap.getBoundingClientRect();
+  const x0=Math.min(BOXSEL.x,e.clientX)-r.left, y0=Math.min(BOXSEL.y,e.clientY)-r.top;
+  return [x0, y0, Math.abs(e.clientX-BOXSEL.x), Math.abs(e.clientY-BOXSEL.y)];
+}
+function finishBox(e){
+  const [x,y,w,h]=boxRect(e); const bx=document.getElementById('boxsel');
+  bx.style.display='none'; BOXSEL=null;
+  moved=99;                 // 뒤따르는 click 이 "빈 곳 누름"으로 선택을 풀지 않게
+  if(w<6||h<6) return;
+  const m=svg.getScreenCTM(), r=wrap.getBoundingClientRect();
+  const [la0,lo0]=[unmy(-(((y+h+r.top)-m.f)/m.d)), ((x+r.left)-m.e)/m.a];
+  const [la1,lo1]=[unmy(-(((y+r.top)-m.f)/m.d)), ((x+w+r.left)-m.e)/m.a];
+  const cells=D.cells.filter(c=>c.lat>=la0&&c.lat<=la1&&c.lon>=lo0&&c.lon<=lo1);
+  if(!cells.length){ PICK=null; draw(); return; }
+  const uniq=a=>[...new Set(a.filter(v=>v!=null&&v!==''))];
+  PICK={kind:'box', id:`${la0.toFixed(4)},${lo0.toFixed(4)},${la1.toFixed(4)},${lo1.toFixed(4)}`,
+        box:[la0,lo0,la1,lo1], cells,
+        enb:uniq(cells.map(c=>c.enb)), sgw:uniq(cells.map(c=>c.sgw)),
+        mme:uniq(cells.map(c=>c.mme)), tac:uniq(cells.map(c=>c.tac)),
+        ta:uniq(cells.map(c=>c.ta_list))};
+  draw();
+}
+wrap.addEventListener('mousedown',e=>{
+  const mode=document.getElementById('mode').value;
+  if(e.shiftKey && (mode==='enb'||mode==='ta') && D){
+    BOXSEL={x:e.clientX, y:e.clientY}; e.preventDefault(); return; }
+  drag={x:e.clientX,y:e.clientY,vb:{...VB}};
   moved=0; wrap.classList.add('drag');});
-addEventListener('mouseup',()=>{drag=null;wrap.classList.remove('drag');});
+addEventListener('mouseup',e=>{
+  if(BOXSEL){ finishBox(e); return; }
+  drag=null;wrap.classList.remove('drag');});
 addEventListener('mousemove',e=>{
+  if(BOXSEL){ const [x,y,w,h]=boxRect(e), bx=document.getElementById('boxsel');
+    bx.style.cssText=`display:block;left:${x}px;top:${y}px;width:${w}px;height:${h}px`; return; }
   if(drag){ const r=wrap.getBoundingClientRect();
     moved=Math.max(moved,Math.abs(e.clientX-drag.x)+Math.abs(e.clientY-drag.y));
     setVB({...drag.vb, x:drag.vb.x-(e.clientX-drag.x)*drag.vb.w/r.width,
@@ -4291,29 +5747,77 @@ addEventListener('mousemove',e=>{
     tip.style.left=(e.clientX+12)+'px'; tip.style.top=(e.clientY-10)+'px'; }
   else tip.style.display='none';
 });
+// 선택 바·장애 내역 안의 누름·휠은 **지도 조작이 아니다** — 콤보를 열거나
+// 숫자를 고치다 지도가 끌려가고, 내역을 굴리면 지도가 줌됐다
+for(const id of ['sel','fbar','incs','flist']){
+  const el=document.getElementById(id);
+  el.addEventListener('mousedown',e=>e.stopPropagation());
+  el.addEventListener('wheel',e=>e.stopPropagation());
+}
 wrap.addEventListener('wheel',e=>{
   e.preventDefault(); if(!VB) return;
   const r=wrap.getBoundingClientRect();
   const fx=(e.clientX-r.left)/r.width, fy=(e.clientY-r.top)/r.height;
-  const z=e.deltaY>0?1.15:1/1.15;
+  let z=e.deltaY>0?1.15:1/1.15;
+  // 한계에서는 **커서 자리를 지킨 채** 멈춘다. `setVB` 의 가운데 기준
+  // 보정에 맡기면 휠을 굴릴 때마다 화면이 조금씩 미끄러진다
+  if(z>1){ const cur=mppOf(VB); z=Math.min(z, MAX_MPP/cur); if(z<=1.0001) return; }
   setVB({w:VB.w*z,h:VB.h*z,x:VB.x+(VB.w-VB.w*z)*fx,y:VB.y+(VB.h-VB.h*z)*fy});
   draw();
 },{passive:false});
 
 wrap.addEventListener('click',e=>{
   if(moved>4) return;        // 끌고 놓은 것은 클릭이 아니다
+  // 선택 바·장애 내역·범례 안을 누른 것은 지도 클릭이 아니다
+  if(e.target.closest('#sel,#fbar,#incs,#legend,#flist')) return;
+  // 건물 — SGW 전부에서 PGW 로 모이는 선
+  if(e.target.closest('#hq')){
+    PICK = PICK&&PICK.kind==='pgw' ? null
+      : {kind:'pgw', id:'HQ', cells:[], enb:[], tac:[], ta:[], mme:[],
+         sgw:(D.nodes.sgw||[]).map(n=>n.id)};
+    if(document.getElementById('mode').value==='ta'){
+      document.getElementById('mode').value='enb'; syncFaultToggle(); }
+    draw(); return; }
   const t=e.target.dataset||{};
-  if(!t.kind){ return; }      // 빈 곳은 **해제하지 않는다** — 끌다 놓으면 지워진다
+  // **지도를 눌러도 고른 장애는 남는다**(사람 결정 2026-10-30). 장애를 본 채로
+  // 장비를 눌러 계통을 함께 본다. 장애를 끄는 길은 셋뿐이다 — 다른 장애를
+  // 누르거나, 같은 장애를 다시 누르거나, 장애 바의 `해제`
+  // **빈 곳을 누르면 푼다**(사람 결정 2026-10-28). 끌고 놓은 것은 위의
+  // `moved` 가 이미 걸러서, 지도를 옮기다 선택이 풀리는 일은 없다
+  if(!t.kind){ if(PICK){ PICK=null; draw(); } return; }
   const p=pickOf(t.kind,t.id);
   PICK = (PICK && PICK.kind===t.kind && String(PICK.id)===String(t.id)) ? null : p;
   // **다시 그린다.** 세기를 되돌리는 일을 `drawPick` 이 떠안으면 모드마다
   // 기본값이 달라 어긋난다 — 기본은 `draw` 한 곳이 정한다
   draw();
 });
-document.getElementById('reload').onclick=load;
+// 장비(`load`)와 장애(`pollFaults`)를 **둘 다** 다시 받는다. 전에는 장비만
+// 다시 받아, 눌러도 장애 목록은 다음 폴링(최대 10초)까지 그대로였다
+document.getElementById('reload').onclick=async()=>{
+  const b=document.getElementById('reload'); b.classList.add('spin');
+  try{ FAULT_VER=null; await Promise.all([load(), pollFaults()]); }
+  finally{ b.classList.remove('spin'); }
+};
+pollFaults();
+setInterval(pollFaults, FAULT_POLL_MS);
+pollStandby();
+setInterval(pollStandby, FAULT_POLL_MS);
 // 보기를 바꾸면 **고른 것을 푼다.** SGW 를 고른 채 MME 보기로 넘어가면
 // 바뀐 화면에 옛 선택의 테두리만 남아 무엇이 골라졌는지 안 읽힌다
-document.getElementById('mode').onchange=()=>{ PICK=null; draw(); };
+// 보기를 바꿔도 **장애는 남긴다** — 장비 선택만 푼다
+document.getElementById('mode').onchange=()=>{ PICK=null; syncFaultToggle(); draw(); };
+// **지도까지 올라가지 않게 막는다.** `focusInc` 가 목록을 다시 그려 누른
+// 단추가 문서에서 떨어지면, 지도의 click 처리기가 `closest('#flist')` 를
+// 못 찾아 "빈 곳 누름"으로 읽고 방금 고른 것을 풀었다
+document.getElementById('fbody').addEventListener('click',e=>{
+  e.stopPropagation();
+  const b=e.target.closest('.it'); if(b) focusInc(b.dataset.id); });
+document.getElementById('flist').querySelector('.hd').onclick=e=>{
+  e.stopPropagation();
+  const f=document.getElementById('flist'); f.classList.toggle('fold');
+  document.getElementById('ffold').textContent=f.classList.contains('fold')?'펼치기':'접기';
+  placeLabels(); };
+syncFaultToggle();
 // **보이는 것 전체**에 맞춘다 — 마스터까지. 생성 범위로만 맞추면
 // "전체 보기"가 전체를 안 보여준다
 document.getElementById('reset').onclick=()=>{

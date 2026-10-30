@@ -83,8 +83,41 @@ LOCALES: dict[str, dict[str, Any]] = {
                  "roaming": "4500503"},
         "pemdb1_locale": "jp",
         "geo_locale": "jp",
+        # **APN 변환표** — 실측 분포(`_distributions.json`, 한국 SKT 10종)의
+        # **비중은 그대로 두고 값만** 갈아 끼운다(2026-10-30 사람 결정). 분포를
+        # 버리고 새로 지으면 근거 없는 비중이 된다.
+        #
+        # 꼴은 3GPP TS 23.003 §9 `<NI>.mnc<MNC 3자>.mcc<MCC>.gprs` 이고 운영자
+        # 식별자는 docomo `44010` → `mnc010.mcc440` 이다. NI 는 docomo 가 공개한
+        # 실제 APN 이다 — spモード(`spmode.ne.jp`, 스마트폰 4G/5G 기본) · mopera U
+        # (`mopera.net`) · 비즈니스 mopera(`mpr2.bizho.net`) · 테더링
+        # (`dcmtrg.ne.jp`) · docomo 망 MVNO(IIJmio `iijmio.jp` · OCN `lte-d.ocn.ne.jp`).
+        # **한국 값 하나하나의 뜻과 짝지었다** — 5G 기본 → spモード, LTE 기본 →
+        # mopera, 인터넷 → 비즈니스, 다른 MNC → MVNO, 태블릿 → MVNO.
+        #
+        # 인바운드 로머(`sg1.super.mnc050.mcc234` — 영국)는 **한국 로머로** 옮긴다.
+        # JP 의 `roaming` 이 `4500503` 이라 로머 IMSI 가 한국이고, 로밍 APN 은
+        # **홈 운영자 식별자**를 쓴다(홈 라우팅). 그래서 이 한 줄만 KR 값이 맞다.
+        # 차량 IoT(볼보)는 라벨을 두고 운영자 식별자만 docomo 로 바꾼다.
+        # 빈 값(실측 4.9%)은 빈 값 그대로다 — 지어내지 않는다.
+        "apn": {
+            "5g.sktelecom.com.mnc005.mcc450.gprs": "spmode.ne.jp.mnc010.mcc440.gprs",
+            "lte.sktelecom.com.mnc005.mcc450.gprs": "mopera.net.mnc010.mcc440.gprs",
+            "lte-internet.sktelecom.com.mnc005.mcc450.gprs": "mpr2.bizho.net.mnc010.mcc440.gprs",
+            "sg1.super.mnc050.mcc234.gprs": "lte.sktelecom.com.mnc005.mcc450.gprs",
+            "tethering.sktelecom.com.mnc005.mcc450.gprs": "dcmtrg.ne.jp.mnc010.mcc440.gprs",
+            "lte.sktelecom.com.mnc011.mcc450.gprs": "iijmio.jp.mnc010.mcc440.gprs",
+            "b2c.volvocars.com.mnc005.mcc450.gprs": "b2c.volvocars.com.mnc010.mcc440.gprs",
+            "b2b.volvocars.com.mnc005.mcc450.gprs": "b2b.volvocars.com.mnc010.mcc440.gprs",
+            "ltetab.sktelecom.com.mnc005.mcc450.gprs": "lte-d.ocn.ne.jp.mnc010.mcc440.gprs",
+        },
     },
 }
+
+
+def apn_map(locale: str | None) -> dict[str, str]:
+    """그 나라의 APN 변환표. KR(현행)과 모르는 값은 빈 표 — 실측 그대로 쓴다."""
+    return dict((LOCALES.get(str(locale or DEFAULT)) or {}).get("apn") or {})
 
 #: `conflicts()` 가 검사하는 자리. (설명, 설정 경로, 유도 키)
 _CHECKS: tuple[tuple[str, tuple[str, ...], str], ...] = (

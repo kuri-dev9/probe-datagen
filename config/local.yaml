@@ -67,6 +67,8 @@ pemdb1:
   geo_roads: /app/data/geo/jp/roads.json        # 도로 OSM (배경)
   geo_green: /app/data/geo/jp/green.json        # 공원·수역 OSM (배경)
   geo_station_bldg: /app/data/geo/jp/station_bldg.json  # 역 건물 OSM (배경)
+  # 장애 현황을 받아 오는 graphio API. **컨테이너 안 이름이다**
+  graphio_api: http://web:8008
   # 장애 주입 정답 파일. **베이스값은 호스트 기준 상대경로**
   # (`../graphio-probe-rca/...`)라 컨테이너에서는 `/app/..` = `/` 로 풀려
   # `/graphio-probe-rca` 를 만들려다 `PermissionError` 로 **gen 이 죽는다**.

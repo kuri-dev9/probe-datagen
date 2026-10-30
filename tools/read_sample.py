@@ -65,8 +65,18 @@ def field_names(series: str = "lte_call") -> list[str]:
 def sample_files(series: str) -> list[Path]:
     """그 계열의 정답지 파일. C-Plane 은 `*.txt`, U-Plane 은 `summary/` 다."""
     if series == "lte_call":
-        return sorted(SAMPLE_DIR.glob("*.txt"))
+        # **실패 정답지 204호** — 원래 `sample/aa.txt`·`bb.txt` 였는데
+        # 2026-10-28 사용자가 `summary/lte-call/<날짜>/` 로 옮기며
+        # `*_FAIL_V1·V2.dat` 로 이름을 바꿨다(내용 동일). 실측에서 실패 조합마다
+        # 2호씩 뽑아 둔 **큐레이션 표본**이라 비율은 실측이 아니다 —
+        # 비율은 같은 폴더의 `R1`(상용 한 시점 10만 호, `r1_files()`)에서 본다.
+        return sorted(SUMMARY_DIR.glob("lte-call/*/*_FAIL_*.dat"))
     return sorted(SUMMARY_DIR.glob(f"{series}/*/*.dat"))
+
+
+def r1_files() -> list[Path]:
+    """C-Plane **상용 스냅숏** — 거르지 않은 10만 호. 실패 비율·조합의 실측."""
+    return sorted(SUMMARY_DIR.glob("lte-call/*/*_R1_*.dat"))
 
 
 def read(paths=None, series: str = "lte_call", limit: int | None = None

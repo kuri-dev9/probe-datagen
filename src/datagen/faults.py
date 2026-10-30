@@ -21,12 +21,15 @@ import random
 from datetime import datetime
 
 from .cells import Cell
+from . import scenarios as S
 from .scenarios import (
     KIND_SPECS,
     Scenario,
     Target,
     _cells_in_one_sgg,
     _node_eq,
+    area_cells,
+    busy_cluster,
     corridor_cells,
     place,
 )
@@ -45,9 +48,34 @@ _AUTO_NODE = {
     "mme_overload": "mme_id",
     "change_suspected": "mme_id",
     "nsa_policy_restrict": "mme_id",
+    # ── 발생 장비 고정(2026-10-28 · `control.SCENARIOS`) ──────────────────
+    # 전에는 전국(`Target()`)이었다. 지도에서 장비를 찍지 않았을 때도
+    # 시나리오 목록이 말하는 장비에 건다 — 가장 바쁜 것을 고른다.
+    "auth_failure": "mme_id",       # MME–HSS 구간
+    "dns_degradation": "sgw_id",    # 사용자 평면 경로
+    "external_server": "sgw_id",
+    "ue_model": "sgw_id",           # SGW 아래 여러 셀에 흩어진다(R-10)
+    "ims_pdn": "sgw_id",            # PGW 번호 = SGW 번호(구 SPGW)
+    "cdn_degradation": "sgw_id",    # 6번과 같은 자리
+    "pay_dns_delay": "sgw_id",      # 5번과 같은 자리
 }
 
 #: 한 시군구 전 셀을 범위로 잡는 kind — 지리적으로 뭉치는 열화다
+#: 셀 쌍을 대상으로 받는 kind — eNB 를 찍으면 이웃과 짝을 짓는다.
+_PAIR_KINDS = ("mobility", "son_param_change", "ho_interruption")
+
+#: 군중 혼잡 kind — **상위 트래픽 대역**의 가까운 셀 8개(`busy_cluster`).
+#: 시군구 전체로 잡으면 한산한 셀이 섞여 ×1.8 을 해도 분모를 못 채운다.
+_CROWD_KINDS = ("ran_congestion",)
+
+#: 한 지역 셀 25개를 범위로 잡는 kind — 지진(27번). 그중 40% 가 정지하고
+#: 나머지가 그 가입자를 받는다. eNB 하나로는 "받을 이웃"이 없다.
+_AREA_KINDS = ("earthquake",)
+
+#: 행사장 kind — 가까운 셀 8개(`area_cells`). 공연장은 한산한 셀일 수도
+#: 있다 — 3배면 분모 걱정이 적다(확정대장 §11.1).
+_VENUE_KINDS = ("event_crowd",)
+
 _AUTO_SGG = ("ran_radio", "transport_loss", "nsa_nr_leg",
              "compound_causal_failure")
 
@@ -114,7 +142,16 @@ def _auto_target(kind: str, cells: list[Cell], rng: random.Random) -> Target | N
         busy = _busiest(cells, "enb_id")
         return Target(cell_keys={c.cell_key for c in cells if c.enb_id == busy},
                       enb_id=busy)
-    if kind == "mobility":
+    if kind in _CROWD_KINDS:
+        keys = {c.cell_key for c in busy_cluster(cells, rng, want=8)}
+        return Target(cell_keys=keys) if keys else None
+    if kind in _AREA_KINDS:
+        keys = {c.cell_key for c in area_cells(cells, rng, want=25)}
+        return Target(cell_keys=keys) if keys else None
+    if kind in _VENUE_KINDS:
+        keys = {c.cell_key for c in area_cells(cells, rng, want=8)}
+        return Target(cell_keys=keys) if keys else None
+    if kind in _PAIR_KINDS:
         # **방위각 ±25° 제약**을 쓴다 — `build_scenarios` 와 같은 함수다.
         # GPS 최근접 N셀은 등방 분포가 되어 `CORRIDOR` 가 아니라 `CLUSTER` 로
         # 떨어진다(`detector.geo_pattern` 의 `elong > 3.2`).
@@ -152,10 +189,78 @@ def _resolve_target(raw: str | None, kind: str, cells: list[Cell],
         apn = text.split(":", 1)[1].strip()
         return Target(apn=apn) if apn else None
 
+    if text.upper().startswith("DOMAIN:"):
+        # 도메인 축 시나리오(SC-05~06b)는 운영자가 도메인을 직접 고를 수 있어야
+        # 한다(2026-10-30). 자동 선택만 있으면 소형 도메인이 걸렸을 때 다시 돌릴
+        # 방법이 없다 — SC-06b 가 그랬다. 범위는 전국이고 걸러지는 것은 그
+        # 도메인의 호다(`APN:` 과 같은 모양). 판정은 `scenarios._domain_hit` 의
+        # 부분 문자열 규칙이다.
+        dom = text.split(":", 1)[1].strip().lower()
+        return Target(domain=dom) if dom else None
+
     if text.upper().startswith("ENB:"):
         num = text.split(":", 1)[1].strip()
-        keys = {c.cell_key for c in cells if c.enb_id == num}
-        return Target(cell_keys=keys, enb_id=num) if keys else None
+        mine = [c for c in cells if c.enb_id == num]
+        if not mine:
+            return None
+        anchor0 = next((c for c in mine if c.geo_status == "MAPPED"), None)
+        if kind in _PAIR_KINDS and anchor0 is not None:
+            # 셀 쌍 장애(9·25번) — 그 eNB 의 셀을 앵커로 **이웃 셀과 짝을
+            # 짓는다.** eNB 셀만 넣으면 짝이 없어 "옮겨 간 쪽에서 끊긴다"
+            # (`_handover_failure` 의 Last 셀)가 서지 않는다.
+            anchor, band = corridor_cells(cells, rng, want=18, anchor=anchor0)
+            return Target(
+                cell_keys={c.cell_key for c in mine} | {c.cell_key for c in band[:14]},
+                enb_id=num,
+                cell_pairs=[(anchor.cell_key, c.cell_key) for c in band[:8]])
+        if kind in _VENUE_KINDS and anchor0 is not None:
+            near = area_cells(cells, rng, want=8, anchor=anchor0)
+            return Target(cell_keys={c.cell_key for c in mine}
+                          | {c.cell_key for c in near}, enb_id=num)
+        if kind in _AREA_KINDS and anchor0 is not None:
+            near = area_cells(cells, rng, want=25, anchor=anchor0)
+            return Target(cell_keys={c.cell_key for c in mine}
+                          | {c.cell_key for c in near}, enb_id=num)
+        if kind in _CROWD_KINDS and anchor0 is not None:
+            # 군중 혼잡(14번) — 그 eNB 를 중심으로 **주변 상위 대역 셀**까지.
+            # eNB 하나(3~6셀)로는 "역 일대"가 되지 않는다
+            near = busy_cluster(cells, rng, want=8, anchor=anchor0)
+            return Target(cell_keys={c.cell_key for c in mine}
+                          | {c.cell_key for c in near}, enb_id=num)
+        return Target(cell_keys={c.cell_key for c in mine}, enb_id=num)
+
+    # ── 여러 eNB 를 한 장애로 (지도의 범위 주입 · 2026-10-28) ──────────────
+    # eNB 하나는 호가 적어 최소 표본(분모 20)을 못 넘기고 묻히기 쉽다.
+    # 그렇다고 eNB 마다 주입을 나누면 이력·정답이 N 건으로 쪼개져 "한
+    # 장애"로 채점되지 않는다. `TARGET` 이 64자라 eNB 번호를 나열할 수도
+    # 없어 **범위를 한 줄로** 받는다.
+    #   TAC:<번호>                      그 TAC 의 셀 전부
+    #   BOX:<남위>,<서경>,<북위>,<동경>  좌표 사각형 안의 셀 (지도 드래그)
+    up = text.upper()
+    if up.startswith("TAC:") or up.startswith("BOX:"):
+        arg = text.split(":", 1)[1].strip()
+        if up.startswith("TAC:"):
+            if not arg.isdigit():
+                return None
+            mine = [c for c in cells if int(c.tac) == int(arg)]
+        else:
+            try:
+                s_, w_, n_, e_ = (float(v) for v in arg.split(","))
+            except ValueError:
+                return None
+            # 좌표가 없는 셀은 사각형 안팎을 말할 수 없다 — 넣지 않는다
+            mine = [c for c in cells if c.geo_status == "MAPPED"
+                    and s_ <= c.latitude <= n_ and w_ <= c.longitude <= e_]
+        if not mine:
+            return None
+        keys = {c.cell_key for c in mine}
+        anchor0 = next((c for c in mine if c.geo_status == "MAPPED"), None)
+        if kind in _PAIR_KINDS and anchor0 is not None:
+            # 셀 쌍 장애는 범위 안 앵커에서 이웃과 짝을 짓는다 — ENB: 와 같은 이유
+            anchor, band = corridor_cells(cells, rng, want=18, anchor=anchor0)
+            return Target(cell_keys=keys | {c.cell_key for c in band[:14]},
+                          cell_pairs=[(anchor.cell_key, c.cell_key) for c in band[:8]])
+        return Target(cell_keys=keys)
 
     head, _, num = text.partition("-")
     field = _NODE_FIELD.get(head.upper())
@@ -173,6 +278,25 @@ def _resolve_target(raw: str | None, kind: str, cells: list[Cell],
     return None  # 알 수 없는 형식 — 조용히 전국에 뿌리면 오히려 디버깅이 어려워진다
 
 
+def _shift_target(raw: str | None, start_ts: datetime,
+                  cells: list[Cell]) -> Target | None:
+    """`j-sc-24` 대상 — **설정이 정한다.** A 는 `from_enb`, B 는 순환.
+
+    화면에서 다른 eNB 를 골라 왔으면 받지 않는다(취소). 그 eNB 에 걸 수
+    있는 것처럼 보이고 실제로는 A 에 걸리면, 어디에 주입했는지를 화면과
+    데이터가 다르게 말한다.
+    """
+    a = S.SHIFT.from_enb
+    text = (raw or "").strip()
+    if text and text.upper() != f"ENB:{a}":
+        return None
+    mine = {c.cell_key for c in cells if c.enb_id == a}
+    b = S.shift_pick(int(start_ts.timestamp() // 60), S.SHIFT.standby_enbs)
+    if not mine or b is None:
+        return None
+    return Target(cell_keys=mine, enb_id=a, shift_to=b)
+
+
 def build(fault: dict, cells: list[Cell], anchor: datetime,
           rng: random.Random) -> Scenario | None:
     """CM_DATAGEN_FAULT 한 행을 Scenario 로 바꾼다.
@@ -188,7 +312,10 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
     spec = KIND_SPECS.get(fault["kind"])
     if spec is None:
         return None
-    target = _resolve_target(fault.get("target"), fault["kind"], cells, rng)
+    if fault["kind"] == "capacity_shift":
+        target = _shift_target(fault.get("target"), fault["start_ts"], cells)
+    else:
+        target = _resolve_target(fault.get("target"), fault["kind"], cells, rng)
     if target is None:
         return None
     s = dict(spec)
@@ -196,6 +323,10 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
     s["target"] = target
     s["peak"] = float(fault["intensity"])
     dur = int(fault["duration_min"])
+    if fault["kind"] == "capacity_shift":
+        # **길이는 시나리오가 정한다** — 상승·분산·분석 세 국면이 30분이다.
+        # 화면 기본값(10분)으로 자르면 B 가 켜지는 순간 창이 끝난다.
+        dur = S.SHIFT_TOTAL
     steps = s.get("steps") or ()
     if steps:
         dur = max(dur, steps[-1][0])

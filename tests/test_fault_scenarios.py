@@ -97,20 +97,30 @@ def _strict(rec: SC.Rec) -> StrictRec:
 # --------------------------------------------------------------------------
 
 ALLOWED_CAUSE = {
-    1: {900, 3002, 3004, 3005, 5012, 5030, 5420},          # S6a Diameter
-    2: {106, 110, 112, 121, 125, 126, 200, 201,            # S1AP
+    # `5003`·`15001`·`15420`·`14181` — 정답지 인증 거절 15호의 구성(Experimental
+    # Result-Code 는 +10000 으로 적힌다 · graphio `DIAMETER_EXPERIMENTAL_RANGE`)
+    1: {900, 3002, 3004, 3005, 5003, 5012, 5030, 5420,
+        14181, 15001, 15420},                              # S6a Diameter
+    # `100` — PathSwitch 실패의 First(실측 R1 PSF 1호 · SC-09/J-SC-25)
+    2: {100, 106, 110, 112, 121, 125, 126, 200, 201,       # S1AP
         301, 303, 304, 400, 401, 402, 403, 404, 405, 406,
         500, 501, 502, 503, 504},
-    3: {72, 73, 89, 93, 900},                              # S11 GTPv2-C
-    5: {17, 22, 26},                                       # EMM
-    6: {26, 27, 30, 96, 99},                               # ESM
+    # `68` — 서비스 미지원. 실측 6호 전부 한 APN 의 서비스 호(SC-11)
+    # `78` — Missing APN. ESM 27 의 실측 상류(정답지 Attach 4호 · SC-19)
+    3: {68, 72, 73, 78, 89, 93, 900},                      # S11 GTPv2-C
+    # `8`·`11`·`15` — S6a 거절의 하류(정답지 · callflow `downstream_map`)
+    5: {8, 11, 15, 17, 22, 26},                                       # EMM
+    # `33` — S11 93 의 실측 하류(정답지 Attach 3호 · 서비스 1호 · SC-19)
+    6: {26, 27, 30, 33, 96, 99},                           # ESM
 }
 
 ALLOWED_MESSAGE = {
     1: {318},                   # AIR/AIA
-    2: {9, 23},                 # InitialContextSetup · UEContextRelease
+    # `18` UEContextReleaseRequest — 절단의 First 다(실측 R1 절단 81호 전부).
+    # `3` PathSwitchRequest — PathSwitch 실패의 First 다(실측 R1 PSF 1호).
+    2: {3, 9, 18, 23},          # PathSwitch · InitialContextSetup · …ReleaseRequest · UEContextRelease
     3: {32, 33, 179},           # CreateSessionRequest/Response · PGW_RESTART
-    5: {68, 78},                # ATTACH_REJECT · SERVICE_REJECT
+    5: {68, 75, 78},            # ATTACH_REJECT · TAU_REJECT · SERVICE_REJECT
     6: {195, 209},              # ...BEARER...REJECT(IN) · PDN_CONNECTIVITY_REJECT(OUT)
 }
 
@@ -149,9 +159,16 @@ def test_every_kind_has_a_hook():
 def test_kind_specs_declare_scoring_meta():
     """채점 메타가 비면 그 시나리오는 Incident 와 짝지어지지 않는다."""
     for kind, s in SC.KIND_SPECS.items():
+        if not s.get("scored", True):
+            # 장애가 아닌 재현(`j-sc-24`) — 정답 원인이 `—` 라 비어 있어야 한다.
+            # 채우면 `write_truth` 의 제외와 어긋나 "원인이 있는 문항"처럼 읽힌다
+            assert not s["truth_code"], kind
+            continue
         assert s["truth_code"], kind
         assert s["truth_category"], kind
-        assert s["expect_rules"], kind
+        # `rule_pending` — 룰 번호가 아직 배정되지 않은 일본 시나리오
+        # (확정대장 §2.3 "번호는 구현 시점에"). 지어낸 번호를 적지 않는다
+        assert s["expect_rules"] or s.get("rule_pending"), kind
         assert s.get("scope_kind"), kind
         assert s.get("expect_kpi"), f"{kind}: expect_kpi 가 없으면 매칭이 시간만으로 돈다"
         assert s.get("grade", "TOP1") in ("TOP1", "TOP3", "LAYER", "UNDETERMINED"), kind
@@ -165,7 +182,10 @@ def test_supported_ids_cover_every_kind():
     cells = load_cells(DATA / "cells.json")
     scs = SC.build_scenarios(cells, 2000, rng, selected="all")
     assert {sc.id for sc in scs} == set(SUPPORTED)
-    assert {sc.kind for sc in scs} == set(SC.KIND_SPECS)
+    # 채점 문항이 아닌 재현(`j-sc-24`)은 배치에 없다 — 소등 eNB 설정이
+    # 있어야 성립하고, 정답 파일에 들어가지 않는다
+    assert {sc.kind for sc in scs} == {
+        k for k, s in SC.KIND_SPECS.items() if s.get("scored", True)}
 
 
 # --------------------------------------------------------------------------
@@ -472,7 +492,12 @@ def test_timeout_scenarios_leave_no_downstream_nas(gen):
         esm = int(rec.num("esm_error_Cause"))
         assert esm in (0, 30), f"하류는 ESM 30 만 — 받은 값 {esm}"
         assert int(rec.num("emm_error_Cause")) == 0, "EMM 은 만들지 않는다"
-        assert int(rec.num("s11_error_Message")) == 32, "요청 메시지여야 한다(OUT)"
+        # **구간은 결국 받은 거절 응답이다**(2026-10-28 정정) — 정답지 S11
+        # `900` 10호가 전부 `s11_error = (응답 Cause, msg 33)` 이다. 요청
+        # `32` 는 First 가 들고 있고, "응답을 못 받았다"는 First 의 `900` 이
+        # 말한다 — SC-01(First 가 `73`)과 가르는 축은 그대로다.
+        assert int(rec.num("s11_error_Message")) == 33, "구간은 응답(msg 33)이다"
+        assert int(rec.num("first_error_message")) == 32, "First 는 요청(msg 32)이다"
         assert int(rec.num("first_error_interface_protocol")) == 3, "구간을 적는다(C-1)"
         assert int(rec.num("first_error_cause")) == 900
         li, lc = (int(rec.num("last_error_interface_protocol")),
@@ -487,9 +512,12 @@ def test_timeout_scenarios_leave_no_downstream_nas(gen):
         else:
             without_esm += 1
             assert (li, lc) == (3, 900), "하류가 없으면 Last = First"
-        # T-2 — 대기한 시간이 지연에 반영돼야 한다
-        wait = SC.FAULT.timeout_wait_s11
-        assert rec.num("initial_core_duration") >= wait * 1e6 * 0.8
+        # T-2 — **실측 범위다**(2026-10-28 정정). 전에는 "5초 대기 이상" 을
+        # 봤는데 정답지 S11 `900` 에 그런 호가 없다 — core 는 Attach
+        # 0.7~3.0초 · 서비스 30~45ms 이고 이 검사는 서비스 호(ct3)다.
+        assert 2_000 <= rec.num("initial_core_duration") <= 150_000
+        assert (rec.num("first_error_time") <= rec.num("last_error_time")
+                <= rec.num("call_end_time"))
     assert seen >= 20
     assert with_esm > 0 and without_esm > 0, (
         f"두 갈래가 모두 나와야 한다 — esm {with_esm} / 없음 {without_esm}"
@@ -539,8 +567,11 @@ def test_s6a_timeout_leaves_stage_cause_empty(gen):
         assert int(rec.num("AuthenticationInformation_Cause")) == 900
         assert int(rec.num("s6a_error_Cause")) == 0
         assert int(rec.num("s6a_error_Message")) == 0
-        assert int(rec.num("first_error_cause")) == 900
-        assert int(rec.num("first_error_message")) == 318
+        # **First 는 하류 EMM 이 받는다**(2026-10-28 정정) — §3.2.6 이 S6a
+        # TIMEOUT 을 Call Error 에서 빼고, 정답지 `auth = 900` 3호가 전부
+        # `first_error = (5, 17)` 이다. 무응답은 절차 Cause(`900`)가 말한다
+        assert int(rec.num("first_error_interface_protocol")) == 5
+        assert int(rec.num("first_error_cause")) == 17
     assert seen >= 20
 
 
@@ -586,7 +617,9 @@ def test_ims_pdn_does_not_plant_first_error(gen):
         assert rec.get("data_success_flag") == "1"
         assert rec.get("ims_success_flag") == "0"
         assert int(rec.num("first_error_interface_protocol")) == 0
-        assert int(rec.num("last_error_interface_protocol")) == 0
+        # Last 는 적는다 — 실측 "호 성공 · 부가 PDN 거절" 38건이 전부 그렇다
+        assert int(rec.num("last_error_interface_protocol")) == 6
+        assert rec.get("last_error_time") == rec.get("esm_error_Time")
         assert int(rec.num("esm_error_Cause")) == 26
     assert seen >= 20
 
@@ -606,9 +639,15 @@ def test_ue_model_rejects_with_in_direction(gen):
         if not SC.MUTATORS["ue_model"](rec, sc, 1.0, rng, cell):
             continue
         seen += 1
-        assert int(rec.num("esm_error_Message")) == 195
-        assert int(rec.num("esm_error_Cause")) in (96, 99)
         assert rec.get("success_flag") == "0"
+        if rec.get("call_type") == "1":
+            assert int(rec.num("esm_error_Message")) == 195
+            assert int(rec.num("esm_error_Cause")) in (96, 99)
+        else:
+            # 서비스 호는 단말 ESM 거절이 호 실패가 되지 않는다(실측 4호) —
+            # 단말이 무선 절차를 끝내지 못한 Context Setup 실패로 둔다
+            assert int(rec.num("first_error_interface_protocol")) == 2
+            assert int(rec.num("first_error_cause")) == 126
     assert seen >= 20
 
 
@@ -626,8 +665,10 @@ def test_apn_failure_uses_only_apn_counters(gen):
         if not SC.MUTATORS["apn_pdn_failure"](rec, sc, 1.0, rng, cell):
             continue
         esm, s11 = int(rec.num("esm_error_Cause")), int(rec.num("s11_error_Cause"))
-        assert (esm, s11) in ((27, 0), (0, 93)), (esm, s11)
-        seen[27 if esm else 93] += 1
+        # 카운터는 **구간 Cause** 를 센다. ESM 27 은 S11 78 의 하류로만
+        # 나온다(정답지 Attach 4호) — 2026-10-28 정정
+        assert (esm, s11) in ((27, 78), (33, 93)), (esm, s11)
+        seen[27 if esm == 27 else 93] += 1
         assert rec.get("success_flag") == "0", "R-07 의 분모가 움직여야 한다"
     assert seen[27] > 0 and seen[93] > 0, f"두 갈래가 다 나와야 한다: {seen}"
 
@@ -764,11 +805,16 @@ def test_plan_mutator_keeps_quantity_invariants(gen, kind):
                   for n in TRAFFIC_PAIRS}
         totals.update({n: rec.num(n) for n in CUM_PLAIN})
         before = dict(totals)
-        const = {"ClientHelloDomain": ".example.com", "APN": "apn"}
+        # `App_Group_Code` — 앱으로 고르는 장애(22번 결제)가 발동할 자리
+        const = {"ClientHelloDomain": ".example.com", "APN": "apn",
+                 "App_Group_Code": "PAY"}
         plan = SC.Plan(totals, const, "normal", 3)
         sc = _sc(kind, target=SC.Target(cell_keys={cell.cell_key},
                                         pgw_id=cell.pgw_id, domain=""))
         sc.active_cells_cache = {cell.cell_key}
+        # `capacity_shift` 는 강도를 인자가 아니라 **국면**에서 읽는다 — 시작
+        # 분(강도 0.1)이면 거의 발동하지 않으니 혼잡이 최고인 분을 준다
+        sc._minute = SC.SHIFT_RISE - 1
         if not SC.PLAN_MUTATORS[kind](plan, sc, 1.0, rng, cell):
             continue
         hit += 1

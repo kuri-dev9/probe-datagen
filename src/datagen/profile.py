@@ -294,6 +294,26 @@ class Sampler:
         keys, weights = self._cat_cache[field_name]
         return self.rng.choices(keys, weights=weights, k=1)[0]
 
+    def categorical_without(self, field_name: str, drop: frozenset[str],
+                            default: str = "0") -> str:
+        """``drop`` 값을 뺀 **조건부 분포**에서 뽑는다 (나머지를 다시 정규화).
+
+        프로파일은 주변분포라서 성격이 다른 모집단이 한 분포에 섞여 있을 때
+        쓴다 — HTTP 의 `StatusCode = 0`·`Method = ''` 는 대부분 URL 이 없는
+        레코드(80·8080 포트의 비 HTTP 트래픽)에서 온다(`Generator.uplane_rec` 참조).
+        """
+        dist = self.p.categorical.get(field_name)
+        if not dist:
+            return default
+        key = f"{field_name}\x00{','.join(sorted(drop))}"
+        if key not in self._cat_cache:
+            keys = [k for k in dist if k != "__other__" and k not in drop]
+            self._cat_cache[key] = (keys, [dist[k] for k in keys])
+        keys, weights = self._cat_cache[key]
+        if not keys:
+            return default
+        return self.rng.choices(keys, weights=weights, k=1)[0]
+
     #: 마지막 구간(p90~p100)의 꼬리 가중. **1 이면 균등(구 동작)이고 클수록
     #: p90 쪽에 몰린다.** 4 는 실측으로 정했다 — 아래 근거.
     TAIL_K = 4.0

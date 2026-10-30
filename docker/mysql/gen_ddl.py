@@ -7,7 +7,8 @@
   2) MAXVALUE 파티션 추가 — 상용엔 없다. 없으면 범위를 벗어난 분이
      조용히 거부되는 게 아니라 INSERT 가 에러로 죽는다.
   3) `GP_COLUMNS`·`GP_PRIMARY_KEY` — **쓰기 주체가 graphio 로 바뀐 테이블**이
-     요구하는 컬럼과 키. 아래 절 참조.
+     요구하는 컬럼과 키. 아래 절 참조. `GP_INDEXES` 는 생성기가 매분 쓰는
+     테이블의 `EVENT_TIME` 인덱스다(2026-10-29).
 
 컬럼·타입·collation(utf8mb3_general_ci)은 **건드리지 않는다.** 상용이 정본이고,
 여기서 utf8mb4 로 바꾸면 조인할 때 Illegal mix of collations 가 난다.
@@ -62,8 +63,10 @@ TABLES = [
     # 1분 집계 — 생성기가 XDR 에서 집계해 채운다
     "PM_ENB_KPI_1M", "PM_EPC_KPI_1M_ORG", "PM_ENB_CAUSE_1M", "PM_EPC_CAUSE_1M",
     "PM_ENB_ROOT_CAUSE_1M", "PM_LINK_ENB_KPI_1M", "PM_LINK_EPC_KPI_1M",
-    "PM_DNS_TOT_1M", "PM_APP_TCP_TOT_1M", "PM_APP_HTTP_TOT_1M",
-    "PM_APP_THR_TOT_1M", "PM_ENB_TOTAL_KPI_1M",
+    # `PM_DNS_TOT_1M`·`PM_APP_TCP/HTTP/THR_TOT_1M` 은 뺐다(2026-10-28) — 0행·
+    # 미사용이었고 graphio 의 앱 축 `PM_COR_APP_1M`·`PM_COR_APP_GRP_1M` 로
+    # 통폐합해 pemdb6 에서 DROP 했다. 여기 남기면 다음 생성에서 되살아난다
+    "PM_ENB_TOTAL_KPI_1M",
     # 마스터 — 상용에서 받아 적재한다
     "CL_CELL_MAP", "CM_CELL_REP_RU_LOC", "CM_CITY", "CM_GU", "CM_DONG",
     "CM_EPC_INFO", "CL_MME", "CL_PGW",
@@ -108,12 +111,29 @@ GP_PRIMARY_KEY: dict[str, tuple[str, ...]] = {
     ),
 }
 
+#: 상용에 없는 보조 인덱스 — `{테이블: ((이름, 컬럼들), ...)}` (2026-10-29).
+#:
+#: 생성기가 1분마다 `_wipe_insert` 로 **그 분을 지우고 넣는다.** 상용 원본에
+#: 키가 하나도 없어서 1분짜리 DELETE 가 그날 파티션 전체를 훑었다 — 정오에
+#: `PM_ENB_KPI_1M` 하나가 틱당 66만 행이었고 자정까지 계속 커진다. 1분
+#: 집계에는 백필이 없으므로 지울 행은 늘 0행인데 읽기만 그만큼 했다.
+#:
+#: PK 가 아니라 보조 인덱스인 이유 — 이 테이블들은 유일 조합이 실측된 적이
+#: 없고, DELETE 가 그 분을 찾아가는 것만 필요하다. 유일성을 거는 것은
+#: 따로 판단할 일이다(`PM_LINK_EPC_KPI_1M` 은 실측 후 PK 로 갔다).
+GP_INDEXES: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
+    "PM_ENB_KPI_1M": (("IX_PM_ENB_KPI_1M_TIME", ("EVENT_TIME",)),),
+    "PM_ENB_CAUSE_1M": (("IX_PM_ENB_CAUSE_1M_TIME", ("EVENT_TIME",)),),
+    "PM_EPC_KPI_1M_ORG": (("IX_PM_EPC_KPI_1M_ORG_TIME", ("EVENT_TIME",)),),
+}
+
 
 def patch(name: str, ddl: str) -> str:
-    """`GP_COLUMNS`·`GP_PRIMARY_KEY` 를 컬럼 목록 끝에 더한다."""
+    """`GP_COLUMNS`·`GP_PRIMARY_KEY`·`GP_INDEXES` 를 컬럼 목록 끝에 더한다."""
     cols = GP_COLUMNS.get(name, ())
     pk = GP_PRIMARY_KEY.get(name, ())
-    if not cols and not pk:
+    idx = GP_INDEXES.get(name, ())
+    if not cols and not pk and not idx:
         return ddl
     # **PK 컬럼은 NOT NULL 로 바꿔 둔다.** 그냥 두면 MySQL 이 PK 를 만들면서
     # 조용히 NOT NULL 로 고치고 NULL 값을 타입 기본값으로 채운다 — datetime
@@ -124,6 +144,8 @@ def patch(name: str, ddl: str) -> str:
     add = list(cols)
     if pk:
         add.append("PRIMARY KEY (" + ", ".join(f"`{c}`" for c in pk) + ")")
+    for iname, icols in idx:
+        add.append(f"KEY `{iname}` (" + ", ".join(f"`{c}`" for c in icols) + ")")
     body = "".join(f",\n  {line}" for line in add)
     # 컬럼 목록을 닫는 괄호는 `\n) ENGINE=...` 꼴이다. 파티션 절은 아직
     # 손대지 않은 상태이므로 `repartition` 보다 **먼저** 부른다.
