@@ -245,6 +245,12 @@ pemdb1:
   geo_roads: ../graphio-probe-rca/data/geo/jp/roads.json        # 도로 OSM (배경)
   geo_green: ../graphio-probe-rca/data/geo/jp/green.json        # 공원·수역 OSM (배경)
   geo_station_bldg: ../graphio-probe-rca/data/geo/jp/station_bldg.json  # 역 건물 OSM (배경)
+  # 상세 배경 (2026-10-30) — graphio `tools/build_jp_geo_layers.py --only-detail` 가 굽는다.
+  # `geo_boundary_map` 은 **지도 전용**이다. `geo_boundary` 는 graphio 의 셀 귀속과
+  # 같은 파일이라 그대로 두고, 지도만 상세본을 읽는다 — 비우면 `geo_boundary` 로 간다
+  geo_boundary_map: ../graphio-probe-rca/data/geo/jp/N03_map.json   # 행정경계 상세 N03-2025
+  geo_water: ../graphio-probe-rca/data/geo/jp/water.json            # 수역 relation OSM
+  geo_chome: ../graphio-probe-rca/data/geo/jp/chome.json            # 丁目 경계 e-Stat
   # 장애 현황을 받아 오는 graphio API — 호스트에서 돌릴 때의 주소
   graphio_api: http://127.0.0.1:8008
   rates:

@@ -3434,6 +3434,9 @@ _LAYER = {
     "roads":  ("geo_roads",  "© OpenStreetMap contributors"),
     "green":  ("geo_green",  "© OpenStreetMap contributors"),
     "station_bldg": ("geo_station_bldg", "© OpenStreetMap contributors"),
+    # 상세 배경 (2026-10-30) — 굽는 자리는 graphio `tools/build_jp_geo_layers.py`
+    "water":  ("geo_water",  "© OpenStreetMap contributors"),
+    "chome":  ("geo_chome",  "e-Stat 境界データ (令和2年国勢調査 小地域)"),
 }
 
 
@@ -3842,7 +3845,9 @@ def api_map_geo(bbox: str = ""):
     # 그 키가 로케일별로 다른 디렉터리를 가리켜(`data/geo/` vs
     # `data/geo/jp/`) 컨테이너에서 **파일을 못 찾았다** — 두 값이 늘 같은
     # 디렉터리에 있으리라는 가정이 틀렸다. 경로는 경로대로 받는다.
-    raw = str(_pem_cfg().get("geo_boundary") or "")
+    # **지도 전용 상세본이 먼저다**(`geo_boundary_map`, 2026-10-30). `geo_boundary`
+    # 는 graphio 의 셀 귀속과 같은 파일이라 갈아 끼울 수 없다 — 비우면 그쪽으로 간다
+    raw = str(_pem_cfg().get("geo_boundary_map") or _pem_cfg().get("geo_boundary") or "")
     if not raw:
         return {"error": "`pemdb1.geo_boundary` 가 비어 있다 — 행정경계 파일 "
                          "경로를 설정에 적어야 한다", "features": []}
@@ -3976,6 +3981,10 @@ _HTML_MAP = """<!doctype html>
  .gr{stroke:none;pointer-events:none}
  .gr-park{fill:#27402f}
  .gr-water{fill:#19354a}
+ /* 丁目 경계 — 구 경계(`.adm` #4a5c72)보다 **한참 옅고 가늘게.** 동네 결만
+    보이면 된다. 면은 칠하지 않는다 — 행정구역 면 위에 또 면을 얹으면 탁해진다 */
+ .ch{fill:none;stroke:#3a4a5e;stroke-width:.7px;stroke-opacity:.8;
+   vector-effect:non-scaling-stroke;pointer-events:none}
  /* 도로 — **가장 아래 배경이다.** 철도(`.rl`)보다 어둡게 둬야 뼈대가
     철도 쪽으로 읽힌다. 등급마다 굵기를 달리하지 않으면 가로망이
     회색 덩어리가 된다 */
@@ -4268,7 +4277,7 @@ _HTML_MAP = """<!doctype html>
         <feGaussianBlur stdDeviation="0.0022"/>
       </filter>
     </defs>
-    <g id=gAdm></g><g id=gGreen></g><g id=gRoad></g><g id=gRiv></g><g id=gRail></g><g id=gYmt></g><g id=gAll></g><g id=gKde></g><g id=gGeo></g><g id=gCell></g>
+    <g id=gAdm></g><g id=gGreen></g><g id=gChome></g><g id=gRoad></g><g id=gRiv></g><g id=gRail></g><g id=gYmt></g><g id=gAll></g><g id=gKde></g><g id=gGeo></g><g id=gCell></g>
     <g id=gPick></g><g id=gStn></g><g id=gNode></g></svg>
   <svg id=geofx></svg>
   <div id=fx><div id=fxin><div id=fxh></div><div id=fxb></div></div></div>
@@ -4293,7 +4302,7 @@ const el=(n)=>document.createElementNS('http://www.w3.org/2000/svg',n);
 const svg=document.getElementById('svg'), tip=document.getElementById('tip');
 const geofx=document.getElementById('geofx');
 let VB=null, HOME=null, D=null, GEO=null, ALL=null, RAIL=null, RIV=null;
-let ROAD=null, GREEN=null, STBL=null;
+let ROAD=null, GREEN=null, STBL=null, WATER=null, CHOME=null;
 
 // ── 장애 현황 — **10초마다 묻고, 바뀐 것만 건드린다** ──────────────────
 //
@@ -5187,7 +5196,7 @@ function draw(){
   if(!D) return;
   LOD=lodOf();                       // 이 단계로 그린다 — `setVB` 가 비교한다
   svg.setAttribute('data-lod', LOD);  // 도로 굵기를 CSS 가 단계별로 집는다
-  for(const id of ['gAdm','gGreen','gRoad','gRiv','gRail','gYmt','gAll','gKde','gGeo','gCell','gPick','gStn','gNode'])
+  for(const id of ['gAdm','gGreen','gChome','gRoad','gRiv','gRail','gYmt','gAll','gKde','gGeo','gCell','gPick','gStn','gNode'])
     document.getElementById(id).replaceChildren();
   LABELS=[];
   if(GEO) for(const f of GEO.features) for(const ring of f.rings){
@@ -5208,12 +5217,22 @@ function draw(){
     };
     // 공원·수역 — **면이라 축척을 안 탄다.** 368개뿐이고, 멀리서도
     // 녹지·물은 "거기가 어디인지"를 알려주는 표식이다
-    for(const g of (GREEN||[])){
+    for(const g of [...(GREEN||[]), ...(WATER||[])]){
       const d=(g.rings||[]).map(r=>'M'+r.map(p=>`${mx(p[0])} ${-my(p[1])}`)
         .join('L')+'Z').join('');
       if(!d) continue;
       const q=el('path'); q.setAttribute('class','gr gr-'+g.kind);
       q.setAttribute('d',d); document.getElementById('gGreen').appendChild(q);
+    }
+    // 丁目 경계 — **확대했을 때만**(LOD 2 이상 = 화면 폭 7km 이하). 멀리서
+    // 2,969개를 그리면 구 경계가 묻히고 회색 그물이 된다. 이름은 그리지 않는다 —
+    // 라벨로 깔면 역·장비 이름과 다툰다. **배경일 뿐이다** — 丁目 장애는
+    // graphio 마스터가 합성 이름이라 이 경계와 이어지지 않는다(그쪽은 근사 원)
+    if(CHOME && LOD>=2){
+      const d=CHOME.map(c=>c.r.map(r=>'M'+r.map(p=>`${mx(p[0])} ${-my(p[1])}`)
+        .join('L')+'Z').join('')).join('');
+      if(d){ const q=el('path'); q.setAttribute('class','ch'); q.setAttribute('d',d);
+        document.getElementById('gChome').appendChild(q); }
     }
     // 도로 — 등급마다 보이기 시작하는 축척이 다르다(`ROAD_LOD`)
     const km=kmSpan();
@@ -5392,7 +5411,8 @@ async function load(){
     const src=[g.source||g.error||''];
     for(const [nm,set] of [['rail',v=>RAIL=v],['rivers',v=>RIV=v],
                           ['roads',v=>ROAD=v],['green',v=>GREEN=v],
-                          ['station_bldg',v=>STBL=v]]){
+                          ['station_bldg',v=>STBL=v],
+                          ['water',v=>WATER=v],['chome',v=>CHOME=v]]){
       const r=await (await fetch(`/api/map/layer/${nm}`)).json();
       set(r.items||[]);
       if(r.source && !src.includes(r.source)) src.push(r.source);

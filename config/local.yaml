@@ -67,6 +67,9 @@ pemdb1:
   geo_roads: /app/data/geo/jp/roads.json        # 도로 OSM (배경)
   geo_green: /app/data/geo/jp/green.json        # 공원·수역 OSM (배경)
   geo_station_bldg: /app/data/geo/jp/station_bldg.json  # 역 건물 OSM (배경)
+  geo_boundary_map: /app/data/geo/jp/N03_map.json   # 행정경계 상세 (지도 전용)
+  geo_water: /app/data/geo/jp/water.json            # 수역 relation OSM
+  geo_chome: /app/data/geo/jp/chome.json            # 丁目 경계 e-Stat
   # 장애 현황을 받아 오는 graphio API. **컨테이너 안 이름이다**
   graphio_api: http://web:8008
   # 장애 주입 정답 파일. **베이스값은 호스트 기준 상대경로**
