@@ -2064,7 +2064,8 @@ class PemdbGen:
             # 결정과 APN 을 묶으면 APN 만 바꾸려 해도 IMSI 가 함께 바뀐다.
             apn_map=apn_map(locale),
         )
-        profiles = load_profiles(data_dir / "profile.json")
+        # 도메인 표본도 **같은 나라축**이다 — 위 `apn_map` 과 같은 `locale`
+        profiles = load_profiles(data_dir / "profile.json", locale=locale)
         # **`lte_call` 이 반드시 첫 자리여야 한다.** `Generator.__init__` 이
         # `enumerate(profiles.items())` 로 계열별 샘플러 시드를 `seed + i` 로
         # 준다. 순서가 바뀌면 lte_call 의 시드가 달라져 **같은 seed 로 돌려도

@@ -60,10 +60,17 @@ def test_config_has_no_seven_digit_slot():
     변경이 없애려던 상태다.
     """
     doc = yaml.safe_load((HERE / "config" / "datagen.yaml").read_text(encoding="utf-8"))
-    assert set(doc["plmn"]) == {"home", "imsi_msin_head", "roaming"}
-    # 기본값이 지금 동작이어야 한다 — 설정을 안 고친 환경이 바뀌면 안 된다
-    p = Plmn.from_cfg(doc["plmn"])
-    assert (p.home, p.imsi_prefix, p.roaming) == ("45005", "4500503", "2340500")
+    assert "imsi_mcc_mnc_info" not in (doc.get("plmn") or {})
+    # **기본 설정은 `plmn:` 을 적지 않는다** (2026-10-30 사용자 결정) — 적으면
+    # `locale` 을 바꿔도 IMSI 가 따라오지 않는다(10-28 의 `jp` + `450…` 상태).
+    assert "plmn" not in doc
+    from datagen import region
+    for loc in ("kr", "jp"):
+        cfg = region.derive({"locale": loc})
+        p = Plmn.from_cfg(cfg["plmn"])
+        want = region.LOCALES[loc]["plmn"]
+        assert p.home == want["home"]
+        assert p.imsi_prefix == want["home"] + want["imsi_msin_head"]
 
 
 def test_bad_width_is_refused_at_load_time():

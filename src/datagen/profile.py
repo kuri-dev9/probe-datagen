@@ -258,8 +258,33 @@ def save(profiles: dict[str, SeriesProfile], path: Path) -> Path:
     return path
 
 
-def load(path: Path) -> dict[str, SeriesProfile]:
+#: 나라별 벌을 담은 파일의 최상위 키. `region.LOCALES` 와 같아야 한다
+LOCALE_KEYS = ("kr", "jp")
+
+
+def load(path: Path, locale: str = "kr") -> dict[str, SeriesProfile]:
+    """프로파일을 읽는다. 파일 하나에 **나라별 벌**이 함께 있다 (2026-10-30).
+
+        {"kr": {"dns": …, "http": …, …}, "jp": {…}}
+
+    `kr` 은 한국 실측 표본이고 `jp` 는 그 사본에서 **도메인만** 일본 상위
+    도메인(graphio `docs/jp/SOURCE_JP_TOP160_NETAPI_*.csv`)으로 바꾼 것이다.
+    수치 분포는 일본 실측이 없어 한국 것이다. 만드는 길은 `with_domains`.
+
+    **최상위가 계열 이름인 옛 파일은 한국판으로 읽는다** — 그 파일이
+    한국 실측이었다. 그 파일로 `jp` 를 달라면 **멈춘다**: 조용히 한국판을
+    주면 일본 생성에 카카오·네이버 도메인이 실리고 에러가 나지 않는다
+    (10-30 C-4 가 바로 그 상태였다).
+    """
     raw = json.loads(path.read_text(encoding="utf-8"))
+    if set(raw) <= set(LOCALE_KEYS):
+        if locale not in raw:
+            raise ValueError(f"{path} 에 {locale!r} 프로파일이 없다 "
+                             f"(있는 것: {', '.join(raw)})")
+        raw = raw[locale]
+    elif locale != "kr":
+        raise ValueError(f"{path} 는 나라 구분이 없는 옛 형식(한국판)이다 — "
+                         f"{locale!r} 를 줄 수 없다. `with_domains` 로 만든다")
     return {
         s: SeriesProfile(
             records=v["records"],
@@ -270,6 +295,35 @@ def load(path: Path) -> dict[str, SeriesProfile]:
         )
         for s, v in raw.items()
     }
+
+
+def with_domains(profiles: dict[str, SeriesProfile],
+                 domains: list[str]) -> dict[str, SeriesProfile]:
+    """도메인 표본만 갈아 끼운 사본 — 다른 나라 벌을 만드는 길.
+
+    도메인이 있던 계열(dns·http·transport)만 바꾼다. `lte_call` 은 원래
+    비어 있다. 순서가 곧 트래픽 순위다(`Sampler.domain` 의 Zipf 가중).
+    """
+    out: dict[str, SeriesProfile] = {}
+    for s, p in profiles.items():
+        out[s] = SeriesProfile(
+            records=p.records, categorical=p.categorical, numeric=p.numeric,
+            domains=list(domains[:MAX_DOMAINS]) if p.domains else [],
+            extras=p.extras)
+    return out
+
+
+def save_locales(by_locale: dict[str, dict[str, SeriesProfile]],
+                 path: Path) -> Path:
+    """나라별 벌을 한 파일로 쓴다(`load` 의 짝)."""
+    payload = {
+        loc: {s: {"records": p.records, "categorical": p.categorical,
+                  "numeric": p.numeric, "domains": p.domains,
+                  "extras": p.extras} for s, p in profs.items()}
+        for loc, profs in by_locale.items()
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    return path
 
 
 class Sampler:

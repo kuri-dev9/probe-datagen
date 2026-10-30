@@ -1450,7 +1450,8 @@ def _fixtures(cfg: dict, data_dir: Path, seed: int):
     from .profile import load as load_profiles
 
     cells = load_cells(data_dir / "cells.json")
-    profiles = load_profiles(data_dir / "profile.json")
+    profiles = load_profiles(data_dir / "profile.json",
+                             locale=(cfg.get("pemdb1") or {}).get("locale", "kr"))
     keep = ("lte_call", "transport", "dns", "http")
     gen = Generator(cells=cells,
                     profiles={s: profiles[s] for s in keep if s in profiles},

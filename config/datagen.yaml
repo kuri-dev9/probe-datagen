@@ -40,24 +40,16 @@ paths:
 # 배경·전수 조사: `graphio-probe-rca/docs/jp/지역축-KR-JP.md`
 locale: jp
 
-# 일본 — docomo `44010`/`01` · SoftBank `44020` · KDDI `44050`.
-# MCC 3 + MNC 2 가 한국과 같은 모양이라 IMSI 15자리 구성이 그대로 성립한다.
+# ── PLMN · IMSI — **적지 않는다. `locale` 에서 유도된다** (2026-10-30 사용자 결정)
 #
-# ⚠ **지금 이 블록이 `locale: jp` 와 어긋나 있다** (실측 2026-10-28).
-#    셀·마스터는 도쿄인데 가입자 IMSI 는 `450…`(한국)이고, graphio 쪽
-#    `geo.locale` 도 `kr` 이라 지도는 한국 번들이다. **에러가 나지 않는다** —
-#    `identity.py` 가 예고한 로밍 판정을 넣는 순간 전 가입자가 외국 로머가
-#    되고, 도쿄 셀은 한국 시군구에 못 붙어 전부 `UNMAPPED` 로 간다.
+# 전에는 여기에 `plmn:` 블록(`45005`/`03`/`2340500`)이 있어 `locale: jp` 인데
+# IMSI 가 한국 `450…` 으로 나갔다(2026-10-28 실측 · 일부러 남겨 둔 상태였다).
+# 지워서 위 표대로 따라가게 했다 — gen-ui 가 지역을 바꾸면 `region.reapply` 가
+# 이 값도 함께 바꾼다. 다른 사업자(SoftBank `44020` 등)가 필요할 때만
+# `plmn:` 을 다시 적는다 — 적은 값이 이기고 `region.conflict_text` 가 경고한다.
 #
-#    **일부러 남겼다.** 지우면 다음 생성부터 IMSI 가 `440…` 으로 바뀌어 이미
-#    쌓인 Parquet 와 섞인다 — 재생성 범위는 사람이 판단한다(지역축 문서 §5 L-4).
-#    기동할 때마다 `region.conflict_text` 가 이 어긋남을 찍는다.
-#
-#    **해소하려면 이 세 줄을 지운다.** 그러면 `locale` 에서 유도된다.
-plmn:
-  home: "45005"              # 셀 PLMN · 5자 (MCC 3 + MNC 2)
-  imsi_msin_head: "03"       # IMSI 접두 7자 = home + 이것
-  roaming: "2340500"         # 인바운드 로머 · 7자 (MCC 234 = 영국, APN 분포 2.6%)
+# **대가:** 지운 뒤 처음 생성하는 분부터 IMSI 앞자리가 바뀐다. 그 전에 쌓인
+# Parquet 와 같은 가입자로 이어지지 않는다(지역축 문서 §5 L-4).
 
 generate:
   start: "2026-08-27 09:00:00"  # 백필 시작 (실시간 틱 단계에서는 now-N 으로)
@@ -133,8 +125,7 @@ pemdb1:
   subscriber_pool: 20000        # 가입자 풀
   # 생성 대상 eNB 수. 마스터 전량(eNB 32,121 · 셀 571,801)에 분당 수천 호를
   # 흘리면 eNB 당 표본이 1건 미만이 되어 어떤 창에서도 판정이 서지 않는다
-  # (최소 표본 20 · 불변규칙 5). 0 이면 전량.
-  enb_limit: 0
+  # (최소 표본 20 · 불변규칙 5). 0 이면 전량. **나라별 값은 아래 `by_locale`.**
   # ── 도쿄 대상 세트 (2026-10-27) ──────────────────────────────────────
   #
   # **기본은 KR 이다.** 바꾸는 것은 사람의 결정이고, 바꾸면 셀 세트가 통째로
@@ -159,9 +150,7 @@ pemdb1:
   # 거의 걸리지 않는다(23,039 → 17,188셀). 그래도 두는 이유는 일부 eNB 가
   # 섹터를 수십 개 들고 있어서다. **번호가 작은 쪽을 남긴다** — 노선 빌더도
   # 같은 규칙을 쓰므로 다르게 고르면 `load_routes` 가 멈춘다.
-  locale: jp
-  tac_only: false
-  sectors_per_enb: 6
+  # → 위 셋은 아래 `by_locale.jp` 에 있다(2026-10-30).
 
   # ── 생성 범위 — **분당 호를 어느 지역에 흘리나** ──────────────────────
   #
@@ -197,18 +186,54 @@ pemdb1:
   #
   # **모르는 노선 id 는 멈춘다** — 조용히 전량으로 넘어가면 좁혔다고 믿는
   # 채로 전 도쿄에 호가 흩어지고 탐지가 서지 않는다.
-  scope:
-    # 야마노테선 통과 12구 — 노선 순서(시나가와→시부야→신주쿠→이케부쿠로
-    # →우에노→도쿄). `CM_GU_JP.GU_ID`
-    gu: [11305, 11170, 11320, 11410, 11200, 11500,
-         11530, 11545, 11215, 11230, 11110, 11140]
-    #    品川   港    目黒   渋谷   新宿   豊島
-    #    北     荒川   文京   台東   千代田 中央
-    dong: []                # CM_DONG_JP.DONG_ID (11200011 신주쿠 11丁目)
-    route: YMT-OUTER        # 노선 id — data/lines/*.json 의 `id` (YMT-OUTER · YMT-INNER)
-    route_radius_m: 0       # >0 이면 노선 주변까지. 0 이면 노선 셀만 —
-                            # 그때는 **이동 가입자밖에 없어** 역 주변 체류가 없다
-    lines_dir: data/lines
+  # ── 나라별 생성 범위 — **`locale` 이 고른다** (2026-10-30 사용자 결정) ──
+  #
+  # 전에는 위 값들(`enb_limit`·`locale`·`tac_only`·`sectors_per_enb`·`scope`)
+  # 이 `pemdb1` 에 직접 적혀 있어서, gen-ui 로 지역을 바꾸면 IMSI 만 바뀌고
+  # **셀 마스터는 도쿄에 남았다**(셀 도쿄 · IMSI 한국 — 10-28 의 그 상태가 거꾸로).
+  # `region.derive` 가 이 표에서 그 나라 칸을 `pemdb1` 에 채운다. `pemdb1`
+  # 에 직접 적은 칸이 이긴다(규칙 ②) — 한 번만 다르게 돌릴 때 쓴다.
+  #
+  # `pemdb1.locale`(마스터 테이블 벌)은 여기 없다 — 최상위 `locale` 에서
+  # 바로 유도된다(`region.LOCALES[*].pemdb1_locale`).
+  by_locale:
+    kr:
+      enb_limit: 60           # 10-28 전 값. 한국 셀 확충은 OpenCellID(MCC 450) 로 나중에
+      # 한국 벌 — `southkorea-maps kostat 2018 → pemdb1 행정표준코드`(아래 crosswalk 설명)
+      geo_crosswalk: ../graphio-probe-rca/data/geo/code_crosswalk.json
+      geo_boundary: ../graphio-probe-rca/data/geo/skorea-submunicipalities-2018-geo.json
+    jp:
+      enb_limit: 0            # **반드시 0** — 위 "도쿄 대상 세트" 설명
+      tac_only: false
+      sectors_per_enb: 6
+      geo_crosswalk: ../graphio-probe-rca/data/geo/jp/code_crosswalk.json
+      # 지도 화면이 그리는 **행정경계**. crosswalk 의 형제에서 찾지 않는다 —
+      # 두 값이 늘 같은 디렉터리에 있으리라는 가정이 틀렸다(컨테이너에서
+      # `jp/` 가 빠져 파일을 못 찾았다). 경로는 경로대로 받는다.
+      geo_boundary: ../graphio-probe-rca/data/geo/jp/N03-21_210101.json
+      geo_rail: ../graphio-probe-rca/data/geo/jp/rail.json          # 철도 N02 (배경)
+      geo_rivers: ../graphio-probe-rca/data/geo/jp/rivers.json      # 하천 W05 (배경)
+      geo_roads: ../graphio-probe-rca/data/geo/jp/roads.json        # 도로 OSM (배경)
+      geo_green: ../graphio-probe-rca/data/geo/jp/green.json        # 공원·수역 OSM (배경)
+      geo_station_bldg: ../graphio-probe-rca/data/geo/jp/station_bldg.json  # 역 건물 OSM (배경)
+      # 상세 배경 (2026-10-30) — graphio `tools/build_jp_geo_layers.py --only-detail` 가 굽는다.
+      # `geo_boundary_map` 은 **지도 전용**이다. `geo_boundary` 는 graphio 의 셀 귀속과
+      # 같은 파일이라 그대로 두고, 지도만 상세본을 읽는다 — 비우면 `geo_boundary` 로 간다
+      geo_boundary_map: ../graphio-probe-rca/data/geo/jp/N03_map.json   # 행정경계 상세 N03-2025
+      geo_water: ../graphio-probe-rca/data/geo/jp/water.json            # 수역 relation OSM
+      geo_chome: ../graphio-probe-rca/data/geo/jp/chome.json            # 丁目 경계 e-Stat
+      scope:
+        # 야마노테선 통과 12구 — 노선 순서(시나가와→시부야→신주쿠→이케부쿠로
+        # →우에노→도쿄). `CM_GU_JP.GU_ID`
+        gu: [11305, 11170, 11320, 11410, 11200, 11500,
+             11530, 11545, 11215, 11230, 11110, 11140]
+        #    品川   港    目黒   渋谷   新宿   豊島
+        #    北     荒川   文京   台東   千代田 中央
+        dong: []                # CM_DONG_JP.DONG_ID (11200011 신주쿠 11丁目)
+        route: YMT-OUTER        # 노선 id — data/lines/*.json 의 `id` (YMT-OUTER · YMT-INNER)
+        route_radius_m: 0       # >0 이면 노선 주변까지. 0 이면 노선 셀만 —
+                                # 그때는 **이동 가입자밖에 없어** 역 주변 체류가 없다
+        lines_dir: data/lines
   success_only: true            # 평시 전부 녹색 — 실패는 fault 주입으로만 만든다
   # 희소 Call Type 의 **최소 비율**. 실측 그대로 뽑으면 분당 20,000호에서도
   # Attach MT(0.0024%)가 0.5건/분, Detach MO 가 2.8건/분이라 **최소 표본 20**
@@ -235,22 +260,7 @@ pemdb1:
   #
   # 지도 경계도 이 파일의 **형제**에서 찾는다(`ui.api_map_geo`) — JP 를
   # 가리켜야 `jp/N03-21_210101.json`(국토수치정보 행정구역)이 잡힌다.
-  geo_crosswalk: ../graphio-probe-rca/data/geo/jp/code_crosswalk.json
-  # 지도 화면이 그리는 **행정경계**. crosswalk 의 형제에서 찾지 않는다 —
-  # 두 값이 늘 같은 디렉터리에 있으리라는 가정이 틀렸다(컨테이너에서
-  # `jp/` 가 빠져 파일을 못 찾았다). 경로는 경로대로 받는다.
-  geo_boundary: ../graphio-probe-rca/data/geo/jp/N03-21_210101.json
-  geo_rail: ../graphio-probe-rca/data/geo/jp/rail.json          # 철도 N02 (배경)
-  geo_rivers: ../graphio-probe-rca/data/geo/jp/rivers.json      # 하천 W05 (배경)
-  geo_roads: ../graphio-probe-rca/data/geo/jp/roads.json        # 도로 OSM (배경)
-  geo_green: ../graphio-probe-rca/data/geo/jp/green.json        # 공원·수역 OSM (배경)
-  geo_station_bldg: ../graphio-probe-rca/data/geo/jp/station_bldg.json  # 역 건물 OSM (배경)
-  # 상세 배경 (2026-10-30) — graphio `tools/build_jp_geo_layers.py --only-detail` 가 굽는다.
-  # `geo_boundary_map` 은 **지도 전용**이다. `geo_boundary` 는 graphio 의 셀 귀속과
-  # 같은 파일이라 그대로 두고, 지도만 상세본을 읽는다 — 비우면 `geo_boundary` 로 간다
-  geo_boundary_map: ../graphio-probe-rca/data/geo/jp/N03_map.json   # 행정경계 상세 N03-2025
-  geo_water: ../graphio-probe-rca/data/geo/jp/water.json            # 수역 relation OSM
-  geo_chome: ../graphio-probe-rca/data/geo/jp/chome.json            # 丁目 경계 e-Stat
+  # → 지도 경로(`geo_*`)는 나라마다 다르다 — 위 `by_locale` 에 있다(2026-10-30).
   # 장애 현황을 받아 오는 graphio API — 호스트에서 돌릴 때의 주소
   graphio_api: http://127.0.0.1:8008
   rates:

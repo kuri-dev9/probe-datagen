@@ -52,6 +52,7 @@ IMSI 와 일본 IMSI 가 함께 들어가고, 그 분은 **어느 쪽으로도 �
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 #: 지역축 기본값. **`kr` 이다** — 규칙 ①.
@@ -245,6 +246,15 @@ def derive(cfg: dict, locale: str | None = None) -> dict:
     if isinstance(pem, dict) and "locale" not in pem:
         pem["locale"] = spec["pemdb1_locale"]
         filled.append("pemdb1.locale")
+    # 나라별 생성 범위(`pemdb1.by_locale.<지역>` · 2026-10-30). 이것이 없으면
+    # 지역을 바꿔도 `enb_limit`·`scope` 가 앞 나라 값으로 남아 **셀 세트가
+    # 따라오지 않는다** — 도쿄 구 번호로 한국 마스터를 거르면 0셀이 되거나
+    # 엉뚱한 구가 걸리고 에러는 나지 않는다.
+    by = (pem.get("by_locale") or {}).get(loc) if isinstance(pem, dict) else None
+    for k, v in (by or {}).items():
+        if k not in pem:
+            pem[k] = copy.deepcopy(v)
+            filled.append(f"pemdb1.{k}")
     cfg[DERIVED_KEY] = filled
     return cfg
 

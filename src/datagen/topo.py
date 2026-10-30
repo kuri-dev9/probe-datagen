@@ -3191,6 +3191,8 @@ def org_names(conn, locale: str = "jp", dry_run: bool = True,
             "바뀌고, 그 세 테이블은 복귀 사본(`DUMP_TABLES`)에도 없다.\n"
             "  지역 테이블만 나라별 벌을 만드는 것이 지금 범위다 "
             "(CM_CITY_JP · CM_GU_JP · CM_DONG_JP · CM_CELL_REP_RU_LOC_JP).\n"
+            "  조직 세 테이블은 **일본 행을 2000번대로 함께 둔다**(2026-10-30) — "
+            "graphio `tools/jp_org.py` 가 넣고 도쿄 장비·eNB 가 그 번호를 본다.\n"
             "  그래도 바꿔야 한다면 그것이 사람의 결정이다 — allow_shared 를 켠다")
 
     # ── CM_BRANCH — 상수 표

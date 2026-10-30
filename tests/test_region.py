@@ -188,3 +188,42 @@ def test_load_cfg_derives_without_touching_call_sites():
     assert cfg.get("plmn", {}).get("home")        # 비어 있지 않다
     assert cfg.get("pemdb1", {}).get("locale") in region.LOCALES
     assert region.DERIVED_KEY in cfg              # 무엇을 채웠는지 남는다
+
+
+# --------------------------------------------------------------------------
+# 나라별 생성 범위 — `pemdb1.by_locale` (2026-10-30)
+# --------------------------------------------------------------------------
+
+_BY = {"kr": {"enb_limit": 60},
+       "jp": {"enb_limit": 0, "sectors_per_enb": 6, "scope": {"gu": [11200]}}}
+
+
+def test_generation_scope_follows_the_locale():
+    """지역을 바꾸면 **셀 세트도 따라간다** — 전에는 IMSI 만 바뀌고 도쿄에 남았다."""
+    cfg = region.derive({"locale": "jp", "pemdb1": {"by_locale": _BY}})
+    pem = cfg["pemdb1"]
+    assert (pem["locale"], pem["enb_limit"], pem["scope"]) == ("jp", 0, {"gu": [11200]})
+    region.reapply(cfg, "kr")
+    pem = cfg["pemdb1"]
+    assert (pem["locale"], pem["enb_limit"]) == ("kr", 60)
+    # 도쿄 구 번호가 한국 마스터를 거르면 안 된다
+    assert "scope" not in pem and "sectors_per_enb" not in pem
+    region.reapply(cfg, "jp")
+    assert cfg["pemdb1"]["scope"] == {"gu": [11200]}
+
+
+def test_written_scope_value_wins_over_by_locale():
+    cfg = region.derive({"locale": "jp",
+                         "pemdb1": {"enb_limit": 5, "by_locale": _BY}})
+    region.reapply(cfg, "kr")
+    assert cfg["pemdb1"]["enb_limit"] == 5            # 사람이 적은 값(규칙 ②)
+
+
+def test_shipped_config_keeps_scope_only_in_by_locale():
+    """기본 설정에 나라 값이 **직접** 적혀 있으면 전환이 다시 반쪽이 된다."""
+    doc = yaml.safe_load((HERE / "config" / "datagen.yaml").read_text(encoding="utf-8"))
+    pem = doc["pemdb1"]
+    for k in ("locale", "enb_limit", "tac_only", "sectors_per_enb", "scope",
+              "geo_crosswalk", "geo_boundary"):
+        assert k not in pem, k
+    assert set(pem["by_locale"]) == set(region.LOCALES)
