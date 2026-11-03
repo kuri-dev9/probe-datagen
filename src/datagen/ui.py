@@ -6802,6 +6802,12 @@ _SHELL_NAV = (
      '<circle cx="19" cy="19" r="2.2"/><path d="M12 7.2v4.3M12 11.5 6.4 17.2M12 11.5l5.6 5.7"/>'),
 )
 
+#: 레일에 **보이지 않는** 화면 — 주소로만 들어간다(2026-11-03 사람 결정).
+#: 토폴로지는 xDR 생성이 아니라 마스터를 영구히 바꾸는 화면이고(gen 은 XDR 만
+#: 만든다), 시연 화면 옆에 파괴적 조작이 있으면 실수로 누른다. 일본 마스터
+#: 구성이 끝나 쓸 일도 드물다. 코드와 `/topo` 는 남긴다 — 다시 필요하면 주소로
+_RAIL_HIDDEN = {"topo"}
+
 
 def _shell_html(page: str) -> str:
     title = {k: t for k, _, _, t, _ in _SHELL_NAV}[page]
@@ -6809,7 +6815,8 @@ def _shell_html(page: str) -> str:
         f'<a class="gp-rbtn{" on" if k == page else ""}" href="{href}" title="{tip}"'
         f'{" aria-current=\"page\"" if k == page else ""}>'
         f'<svg viewBox="0 0 24 24">{icon}</svg>{label}</a>'
-        for k, href, label, tip, icon in _SHELL_NAV)
+        for k, href, label, tip, icon in _SHELL_NAV
+        if k not in _RAIL_HIDDEN or k == page)
     return (
         '<nav class="gp-rail" aria-label="화면"><div class="gp-logo">PD</div>'
         + btns + '</nav>'
