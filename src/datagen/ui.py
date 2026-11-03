@@ -17,6 +17,7 @@ import argparse
 import collections
 import hashlib
 import json
+import math
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1396,11 +1397,51 @@ _HTML = """<!doctype html>
           --dim:#8a94a3; --accent:#4e9af1; --red:#e5534b; --yellow:#d8a22a;
           --green:#4caf7d; }
   * { box-sizing:border-box; }
-  body { margin:0; padding:20px; background:var(--bg); color:var(--fg);
+  /* 위 44px 상단 바 · 왼쪽 60px 레일(`_SHELL_CSS`) 자리를 비운다 */
+  body { margin:0; padding:64px 20px 20px 80px; background:var(--bg); color:var(--fg);
          font:14px/1.5 "Pretendard","Apple SD Gothic Neo","Malgun Gothic",sans-serif; }
   h1 { font-size:17px; margin:0 0 14px; }
   h1 small { color:var(--dim); font-weight:normal; margin-left:8px; }
   .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  /* 열마다 카드를 세로로 쌓고 **마지막 카드가 남은 높이를 채운다** — 두 열의
+     아래 끝이 맞는다(2026-11-03 사람 지시) */
+  .col { display:flex; flex-direction:column; min-width:0; }
+  .col > .panel:last-child { flex:1; }
+  /* 왼쪽(설정)을 줄이고 오른쪽(장애 주입·목록)을 넓힌다(2026-11-03) */
+  .grid2.split { grid-template-columns:minmax(0,5fr) minmax(0,7fr); }
+  @media (max-width:980px) { .grid2.split { grid-template-columns:1fr; } }
+  /* 장애 목록 — **칸 폭 고정 · 한 줄 · 넘치면 …** (전체는 툴팁). 줄이 접히면
+     쪽마다 높이가 달라져 카드 아래 끝이 흔들렸다 */
+  #ftab { table-layout:fixed; }
+  #ftab td, #ftab th { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #ftab tr.pad td { border-bottom-color:transparent; }
+  /* 행 높이 고정 — 메모가 있는 행(두 줄)과 없는 행이 같은 높이여야 쪽마다
+     카드 높이가 같다 */
+  #ftab tbody tr { height:38px; }
+  #ftab td { padding:3px 8px; }
+  #ftab .nm, #ftab .memo { overflow:hidden; text-overflow:ellipsis; }
+  #ftab .nm { line-height:17px; }
+  #ftab .memo { font-size:11px; line-height:14px; color:var(--dim); }
+  #ftab .st { font-size:11px; padding:1px 6px; }
+  #ftab button.cancel { padding:1px 6px; font-size:11px; }
+  #ftab td:last-child { padding:3px 4px; text-overflow:clip; }
+  /* 툴팁 — 브라우저 기본(title)은 1초쯤 늦게 뜨고 늦출 수 없다. 바로 띄운다 */
+  #ftip { position:fixed; z-index:50; display:none; max-width:440px;
+          background:#0b0e12; color:var(--fg); border:1px solid var(--line);
+          border-radius:6px; padding:6px 9px; font-size:12px; line-height:1.5;
+          white-space:pre-wrap; pointer-events:none;
+          box-shadow:0 4px 14px rgba(0,0,0,.35); }
+  #ftab th.sort { cursor:pointer; user-select:none; }
+  #ftab th.sort:hover, #ftab th.sort.on { color:var(--fg); }
+  #ftab th i { font-style:normal; font-size:10px; margin-left:3px; }
+  /* 장애 주입 — 종류(시나리오 이름)가 길어 두 칸을 준다 */
+  #f { grid-template-columns:repeat(7,minmax(0,1fr)); }
+  #f > label:first-child { grid-column:span 2; }
+  .pager { display:flex; flex-wrap:wrap; gap:4px; margin-top:10px; }
+  /* 전역 button 이 파랑으로 채워져 있어 지금 쪽이 안 보였다 — 나머지는 비운다 */
+  .pager button { min-width:30px; padding:3px 8px; font-size:12px; background:transparent;
+                  color:var(--fg); border:1px solid var(--line); }
+  .pager button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
   @media (max-width:980px) { .grid2 { grid-template-columns:1fr; } }
   .kv { display:flex; justify-content:space-between; padding:5px 0;
         border-bottom:1px solid var(--line); }
@@ -1410,6 +1451,22 @@ _HTML = """<!doctype html>
         user-select:none; }
   .sw input { accent-color:var(--accent); }
   .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  /* 생성할 xDR — 계열마다 타일 하나. **켜짐이 기본 모양**이고 끈 것은 흐리게 +
+     노랑 테두리. 체크박스 넷보다 "무엇이 지금 만들어지고 있나"가 한눈에 읽힌다 */
+  .xdrs { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; }
+  .xdr { text-align:left; background:#111620; color:var(--fg); border:1px solid var(--line);
+         border-radius:8px; padding:9px 10px; font-weight:normal; display:flex;
+         flex-direction:column; gap:2px; }
+  .xdr .hd { display:flex; align-items:center; gap:6px; font-weight:600; font-size:13px; }
+  .xdr .hd i { width:8px; height:8px; border-radius:50%; background:var(--green); flex:none; }
+  .xdr .ds { font-size:11px; color:var(--dim); }
+  .xdr .rt { font-size:12px; font-variant-numeric:tabular-nums; margin-top:4px; }
+  .xdr .rt small { color:var(--dim); }
+  .xdr.off { border-color:rgba(216,162,42,.55); background:transparent; }
+  .xdr.off .hd i { background:transparent; border:1.5px solid var(--yellow); }
+  .xdr.off .hd, .xdr.off .rt { color:var(--dim); }
+  .xdr.dep { border-style:dashed; }
+  .xdr:disabled { opacity:.6; cursor:wait; }
   /* 한 카드 안의 소제목. 카드를 더 쪼개지 않고 두 조작을 담으려면 이게 필요하다
      — 재배정과 장애 주입은 같은 카드이지만 **다른 일**이다. */
   .panel h3 { margin:0 0 8px; font-size:13px; font-weight:600; color:var(--fg);
@@ -1532,7 +1589,7 @@ _HTML = """<!doctype html>
 </style>
 </head>
 <body>
-<h1>probe-datagen 장애 주입 제어<small>생성 데몬이 1분 틱으로 반영한다 · <a href="/topo" style="color:var(--accent)">마스터 토폴로지</a> · <a href="/map" style="color:var(--accent)">장비 지도</a></small></h1>
+<h1>probe-datagen 장애 주입 제어<small>생성 데몬이 1분 틱으로 반영한다</small></h1>
 
 <!-- 상태바 — **오늘만 본다. 항상 실시간이다** (2026-10-15 사람 지시).
      날짜 이동과 실시간 토글을 뺐다: 과거를 볼 일이 없고, 끌 이유도 없다.
@@ -1565,8 +1622,11 @@ _HTML = """<!doctype html>
   <div class="lg" id="legend"></div>
 </div>
 
-<!-- 설정 두 장을 나란히 — 생성량과 장애를 한 눈에 놓고 조절한다 -->
-<div class="grid2">
+<!-- 설정 두 장을 나란히 — 생성량과 장애를 한 눈에 놓고 조절한다.
+     결과(인입 현황·장애 목록)는 **각 설정 바로 밑에** 붙인다(2026-11-03) —
+     전에는 아래 줄에 따로 있어 두 열 높이가 달라 빈자리가 컸다 -->
+<div class="grid2 split">
+ <div class="col">
   <div class="panel">
     <h2>생성 설정 <small class="dim">스위치는 즉시 · 나머지는 다음 틱부터</small></h2>
     <!-- ── 지역축 ──────────────────────────────────────────────────────
@@ -1659,11 +1719,15 @@ _HTML = """<!doctype html>
     <div class="dim" id="topo" style="margin-top:10px; font-size:12px"></div>
   </div>
   <div class="panel">
-    <!-- 한 카드에 둘을 담는다(2026-10-15 사람 지시) — 둘 다 "망을 건드려
-         무슨 일이 나는지 본다"이고, 재배정이 위다. **같은 일이 아니라는 것은
-         소제목이 말한다**: 재배정은 총량을 유지하는 쏠림이고 장애는 품질을
-         떨어뜨린다. 섞어 읽으면 "쏠림을 넣었는데 왜 장애 목록에 없나"가 된다. -->
-    <h2>망 조작 <small class="dim">재배정은 장애가 아니다 — 아래와 구분한다</small></h2>
+    <h2>인입 현황 <small class="dim" id="ing-range">최근 60분</small></h2>
+    <div id="ingest" class="dim">불러오는 중…</div>
+  </div>
+  <div class="panel">
+    <!-- 재배정·계열 차단 — **장애가 아니다.** 재배정은 총량을 유지하는 쏠림이고
+         차단은 미연동이다. 전에는 장애 주입과 한 카드였는데(2026-10-15) 오른쪽을
+         장애 주입·목록만 두려고 왼쪽으로 뗐다(2026-11-03 사람 지시). 섞어 읽으면
+         "쏠림을 넣었는데 왜 장애 목록에 없나"가 된다 -->
+    <h2>망 조작 <small class="dim">재배정·차단은 장애가 아니다 — 장애 목록에 남지 않는다</small></h2>
 
     <!-- 장비 재배정 — 호 수는 그대로 두고 셀이 어느 노드를 거쳤다고
          기록하는지만 바꾼다. 비운 쪽이 0 이 되고 받은 쪽으로 몰린다.
@@ -1695,14 +1759,16 @@ _HTML = """<!doctype html>
          요율 0 으로 눌러도 비슷해 보이지만 **다른 상태다** — 그쪽은 "이 환경은
          원래 안 만든다"이고, 비율을 바꾸면 되살아난다. -->
     <div class="sect">
-      <h3>계열 차단 <small>— 그 xDR 을 아예 안 만든다. 즉시 반영</small></h3>
-      <div class="row" id="blk"></div>
+      <h3>생성할 xDR <small>— 누르면 켜고 끈다 · 즉시 반영</small></h3>
+      <div class="xdrs" id="blk"></div>
       <div class="dim" id="blk-note" style="margin-top:8px; font-size:12px;
            line-height:1.6"></div>
     </div>
-
-    <div class="sect">
-    <h3>장애 주입</h3>
+  </div>
+ </div>
+ <div class="col">
+  <div class="panel">
+    <h2>장애 주입</h2>
     <form id="f" onsubmit="return inject(event)">
       <label>종류
         <select id="kind" onchange="renderTargets()"></select>
@@ -1723,37 +1789,36 @@ _HTML = """<!doctype html>
       <button type="submit">주입</button>
     </form>
     <div id="msg"></div>
-    </div>
-  </div>
-</div>
-
-<!-- 결과 두 장 — 같은 레벨이어야 "설정 → 결과"로 읽힌다 -->
-<div class="grid2">
-  <div class="panel">
-    <h2>인입 현황 <small class="dim" id="ing-range">최근 60분</small></h2>
-    <div id="ingest" class="dim">불러오는 중…</div>
   </div>
   <div class="panel">
-    <h2>장애 목록</h2>
-    <table>
-      <thead><tr><th>ID</th><th>종류</th><th>대상</th><th>시작</th>
+    <h2>장애 목록 <small class="dim" id="f-range"></small></h2>
+    <table id="ftab">
+      <colgroup><col style="width:46px"><col><col style="width:92px">
+        <col style="width:100px"><col style="width:52px"><col style="width:70px">
+        <col style="width:50px"></colgroup>
+      <thead><tr id="fhead"><th>ID</th><th>종류</th><th>대상</th><th>시작</th>
                  <th>지속</th><th>상태</th><th></th></tr></thead>
       <tbody id="rows"><tr><td colspan="7" class="dim">불러오는 중…</td></tr></tbody>
     </table>
+    <div class="pager" id="pager"></div>
+    <div id="ftip"></div>
   </div>
+ </div>
 </div>
 
 <script>
+/*__I18N__*/
 const LABELS = __KIND_LABELS__;
 let SCN = [];          // CM_ERROR_SCENARIO — /api/scenarios
 let TGT = null;        // /api/targets
 const $ = id => document.getElementById(id);
+applyLang();
 const esc = s => String(s ?? "").replace(/[&<>"]/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const ts = s => s ? String(s).replace("T"," ").slice(0,16) : "—";
 // 날짜 구분 행이 날짜를 들고 있으므로 각 행은 시각만 보인다
 const hm = s => s ? String(s).replace("T"," ").slice(11,16) : "—";
-const DOW = ["일","월","화","수","목","금","토"];
+const DOW = ["일","월","화","수","목","금","토"].map(d => T(d));
 const dow = d => DOW[new Date(d + "T00:00:00").getDay()] || "";
 
 async function loadKinds() {
@@ -1768,9 +1833,9 @@ async function loadKinds() {
     const eq = ["mme","sgw","pgw","enb"].filter(k => s[k] === "Y")
                  .map(k => k.toUpperCase()).join("·");
     // 증거 없음(NO_EVIDENCE)은 준비 중과 다르다 — 만들 근거가 데이터에 없다
-    const off = s.status === "NO_EVIDENCE" ? " — 증거 없음" : " — 준비 중";
-    return `<option value="${s.no}"${live ? "" : " disabled"} title="${esc(s.description || "")}">`
-         + `${s.no}. ${esc(s.name)}${live ? (eq ? ` [${eq}]` : "") : off}</option>`;
+    const off = s.status === "NO_EVIDENCE" ? T(" — 증거 없음") : T(" — 준비 중");
+    return `<option value="${s.no}"${live ? "" : " disabled"} title="${esc(T(s.description || ""))}">`
+         + `${s.no}. ${esc(T(s.name))}${live ? (eq ? ` [${eq}]` : "") : off}</option>`;
   }).join("");
   renderTargets();
 }
@@ -1788,11 +1853,12 @@ function renderTargets() {
   const og = (label, items) =>
     `<optgroup label="${label}">` + items.map(i =>
       `<option value="${esc(i.v)}">${esc(i.t)}</option>`).join("") + "</optgroup>";
-  let h = '<option value="">자동 선택</option>';
-  if (on("sgw")) h += og("SGW", TGT.sgw.map(x => ({v:`SGW-${x.id}`, t:`SGW-${x.id} (셀 ${x.cells})`})));
-  if (on("mme")) h += og("MME", TGT.mme.map(x => ({v:`MME-${x.id}`, t:`MME-${x.id} (셀 ${x.cells})`})));
-  if (on("pgw")) h += og("PGW", TGT.pgw.map(x => ({v:`PGW-${x.id}`, t:`PGW-${x.id} (셀 ${x.cells})`})));
-  if (on("enb")) h += og("eNB", (TGT.enb || []).map(x => ({v:`ENB:${x.id}`, t:`eNB-${x.id} (셀 ${x.cells})`})));
+  let h = `<option value="">${T("자동 선택")}</option>`;
+  const lab = (n, c) => T("{n} (셀 {c})", {n, c});
+  if (on("sgw")) h += og("SGW", TGT.sgw.map(x => ({v:`SGW-${x.id}`, t:lab(`SGW-${x.id}`, x.cells)})));
+  if (on("mme")) h += og("MME", TGT.mme.map(x => ({v:`MME-${x.id}`, t:lab(`MME-${x.id}`, x.cells)})));
+  if (on("pgw")) h += og("PGW", TGT.pgw.map(x => ({v:`PGW-${x.id}`, t:lab(`PGW-${x.id}`, x.cells)})));
+  if (on("enb")) h += og("eNB", (TGT.enb || []).map(x => ({v:`ENB:${x.id}`, t:lab(`eNB-${x.id}`, x.cells)})));
   $("target").innerHTML = h;
 }
 
@@ -1818,7 +1884,7 @@ function renderBar(st) {
   const sw = $("gen-on");
   if (!sw.disabled && sw.checked !== on) {
     sw.checked = on;
-    $("gen-on-label").textContent = on ? "가동" : "정지";
+    $("gen-on-label").textContent = on ? T("가동") : T("정지");
     $("gen-on-label").style.color = on ? "var(--green)" : "var(--dim)";
   }
   //
@@ -1831,15 +1897,15 @@ function renderBar(st) {
   lamp.className = "lamp" + kind;
   // 색만으로 말하지 않는다 — 옆 글자가 같은 내용을 적는다(색각 이상).
   const parts = [];
-  if (nf) parts.push(`장애 ${nf}`);
-  if (bl.length) parts.push(`끊김 ${bl.join("·")}`);
-  if (st.diurnal === false) parts.push("곡선 off");
+  if (nf) parts.push(T("장애 {n}", {n: nf}));
+  if (bl.length) parts.push(T("{b} 멈춤", {b: bl.join("·")}));
+  if (st.diurnal === false) parts.push(T("곡선 off"));
   // 이름을 `b` 로 두면 아래 `const b = st.base_rates` 와 **같은 함수 스코프에서
   // 중복 선언**이 되고, 그러면 `<script>` 전체가 파싱되지 않아 화면이 통째로
   // 빈다. 전에 그렇게 한 번 비었다(2026-10-15) — `node --check` 가 잡았다.
   const lbl = $("st-gen").querySelector("b");
-  lbl.textContent = !on ? "정지"
-    : "생성 중" + (parts.length ? " · " + parts.join(" · ") : "");
+  lbl.textContent = !on ? T("정지")
+    : T("생성 중") + (parts.length ? " · " + parts.join(" · ") : "");
   lbl.style.color = !on ? "var(--dim)" : nf ? "var(--red)"
                   : bl.length ? "var(--yellow)" : "var(--green)";
   $("last-slot").textContent = ts(st.last_slot);
@@ -1848,55 +1914,152 @@ function renderBar(st) {
   if (st.last_slot && st.now) {
     const age = Math.round((new Date(st.now.replace(" ", "T"))
                           - new Date(String(st.last_slot).replace(" ", "T"))) / 60000);
-    $("slot-age").textContent = age <= 1 ? "(방금)" : `(${age}분 전)`;
+    $("slot-age").textContent = age <= 1 ? T("(방금)") : T("({n}분 전)", {n: age});
     // **`var(--warn)` 은 정의된 적이 없다**(`:root` 에 없다). 그래서 슬롯이
     // 세 분을 넘겨도 색이 바뀌지 않았다 — 조용히 아무 일도 안 하는 종류다.
     $("slot-age").style.color = age > 3 ? "var(--yellow)" : "";
   } else { $("slot-age").textContent = ""; }
   $("st-pct").textContent = `${(st.volume_pct ?? 100).toFixed(0)}%`;
   const r = st.rates || {}, b = st.base_rates || {};
+  RATES = r;
+  if (BLOCKABLE.length) renderBlocked();
   $("st-rate").textContent = b.lte_call
-    ? `(${(r.lte_call ?? 0).toLocaleString()} / ${b.lte_call.toLocaleString()} 호·분)` : "";
+    ? T("({a} / {b} 호·분)", {a: (r.lte_call ?? 0).toLocaleString(), b: b.lte_call.toLocaleString()}) : "";
   $("st-last-n").textContent =
-    LAST_TICK_N == null ? "—" : LAST_TICK_N.toLocaleString() + " 건";
+    LAST_TICK_N == null ? "—" : T("{n} 건", {n: LAST_TICK_N.toLocaleString()});
 }
 
 async function poll() {
   try {
     const [st, faults] = await Promise.all([
       (await fetch("/api/status")).json(),
-      (await fetch("/api/faults" + q({limit:50}))).json(),
+      (await fetch("/api/faults" + q({limit:FAULT_MAX}))).json(),
     ]);
     renderBar(st);
     $("active-cnt").textContent = st.active.length;
     $("poll-err").textContent = "";
     // 날짜가 바뀌는 자리에 구분 행을 넣는다. 목록이 하루를 넘기면 "16:01" 만
     // 보고는 어제 것인지 오늘 것인지 알 수 없다.
-    let prevDay = null;
-    const html = faults.map(f => {
-      const day = String(f.start_ts || "").slice(0, 10);
-      let sep = "";
-      if (day && day !== prevDay) {
-        sep = `<tr class="daysep"><td colspan="7">${esc(day)} (${dow(day)})</td></tr>`;
-        prevDay = day;
-      }
-      return sep + `
+    FAULTS = faults;
+    renderFaults();
+  } catch (e) {
+    $("poll-err").textContent = T("서버 응답 없음");
+  }
+}
+
+// ── 장애 목록 — 30건씩 번호로 넘긴다 ────────────────────────────────────
+// 서버에서 최근 `FAULT_MAX` 건을 받아 화면에서 자른다. 5초마다 다시 받아도
+// 보던 쪽은 유지한다(새 장애가 들어오면 1쪽 맨 위에 붙는다)
+const FAULT_MAX = 1000, FAULT_PAGE = 30;
+let FAULTS = [], FPAGE = 0;
+
+// **주입 칸과 같은 이름을 쓴다** — 주입 칸은 시나리오("2. 무선 구간 열화")로
+// 고르는데 목록은 kind 라벨로 적어서, 같은 kind 를 여러 번호가 쓰면(1/18)
+// 무엇을 걸었는지 목록에서 알 수 없었다. 번호는 주입할 때 메모에 남는다 —
+// 이 화면은 `#N`, 지도는 `지도 · 시나리오 N`
+function faultName(f) {
+  const m = /^#(\\d+)\\b|시나리오 (\\d+)/.exec(f.note || "");
+  const no = m ? (m[1] || m[2]) : null;
+  let s = no ? SCN.find(x => String(x.no) === no) : null;
+  if (!s) {
+    // 메모가 없는 것(외부 API·옛 주입)은 그 kind 를 쓰는 시나리오가 하나일 때만 잇는다
+    const c = SCN.filter(x => x.kind === f.kind);
+    if (c.length === 1) s = c[0];
+  }
+  // 번호를 `[25]` 로 감싼다 — 바로 앞 칸이 장애 ID 라 `25.` 로 두면 둘이 섞여 읽혔다
+  return s ? `[${s.no}] ${T(s.name)}` : T(LABELS[f.kind] || f.kind);
+}
+
+// 사람이 적은 메모만 — 주입 경로가 붙인 시나리오 번호(`#25`)는 이름 칸이 이미 말한다
+function memoOf(f) {
+  const n = String(f.note || "").replace(/^#\\d+\\s*/, "").trim();
+  return /^지도 · 시나리오 \\d+$/.test(n) ? T("지도에서 주입") : n;
+}
+
+function goPage(i) { FPAGE = i; renderFaults(); }
+
+// 툴팁 — 잘린 칸이나 화면과 내용이 다른 칸(시작의 연도·메모)에만 뜬다
+(() => {
+  const tip = () => $("ftip");
+  const cut = el => [el, ...el.children].some(e => e.scrollWidth > e.clientWidth + 1);
+  document.addEventListener("mouseover", ev => {
+    const td = ev.target.closest && ev.target.closest("#ftab td[data-tip]");
+    if (!td) { tip().style.display = "none"; return; }
+    const t = td.dataset.tip;
+    if (!cut(td) && t === td.innerText.trim()) { tip().style.display = "none"; return; }
+    tip().textContent = t;
+    const r = td.getBoundingClientRect();
+    Object.assign(tip().style, {display: "block", left: r.left + "px", top: (r.bottom + 4) + "px"});
+  });
+})();
+
+// ── 정렬 — 머리글을 누르면 그 열로, 다시 누르면 반대로 ─────────────────
+// 기본은 ID 내림차순(최근 것이 위). 정렬을 바꾸면 1쪽으로 간다
+let FSORT = {k: "id", dir: -1};
+const FCOLS = [
+  {k: "id",     h: "ID",   v: f => f.fault_id},
+  {k: "name",   h: "종류", v: f => faultName(f)},
+  {k: "target", h: "대상", v: f => f.target || ""},
+  {k: "start",  h: "시작", v: f => String(f.start_ts || "")},
+  {k: "dur",    h: "지속", v: f => f.duration_min},
+  {k: "status", h: "상태", v: f => f.status},
+];
+function sortBy(k) {
+  FSORT = FSORT.k === k ? {k, dir: -FSORT.dir} : {k, dir: k === "id" || k === "start" ? -1 : 1};
+  FPAGE = 0; renderFaults();
+}
+function renderHead() {
+  $("fhead").innerHTML = FCOLS.map(c =>
+    `<th class="sort${FSORT.k === c.k ? " on" : ""}" onclick="sortBy('${c.k}')">${T(c.h)}`
+    + `<i>${FSORT.k === c.k ? (FSORT.dir < 0 ? "▼" : "▲") : ""}</i></th>`).join("") + "<th></th>";
+}
+
+// 날짜를 시각과 함께 적는다 — 정렬을 바꾸면 날짜 구분 행이 뜻을 잃으므로
+// 행마다 날짜를 들고 있게 했다. 연도는 툴팁에 있다
+const mdhm = s => s ? String(s).replace("T", " ").slice(5, 16) : "—";
+
+function renderFaults() {
+  renderHead();
+  const col = FCOLS.find(c => c.k === FSORT.k);
+  const faults = FAULTS.slice().sort((a, b) => {
+    const x = col.v(a), y = col.v(b);
+    const r = typeof x === "number" && typeof y === "number" ? x - y
+            : String(x).localeCompare(String(y), undefined, {numeric: true});
+    return (r || a.fault_id - b.fault_id) * FSORT.dir;
+  });
+  const pages = Math.max(1, Math.ceil(faults.length / FAULT_PAGE));
+  if (FPAGE >= pages) FPAGE = pages - 1;
+  const view = faults.slice(FPAGE * FAULT_PAGE, (FPAGE + 1) * FAULT_PAGE);
+  $("f-range").textContent = faults.length
+    ? T("{n}건 · {a}–{b}", {n: faults.length + (faults.length >= FAULT_MAX ? "+" : ""),
+        a: FPAGE * FAULT_PAGE + 1, b: FPAGE * FAULT_PAGE + view.length}) : "";
+  $("pager").innerHTML = pages > 1 ? Array.from({length: pages}, (_, i) =>
+    `<button type="button"${i === FPAGE ? ' class="on"' : ""} onclick="goPage(${i})">${i + 1}</button>`
+  ).join("") : "";
+  // 칸은 한 줄로 자르고(`…`) 전체는 툴팁으로 — 줄이 접히면 쪽마다 높이가 달라진다
+  const td = (t, tip = t) => `<td data-tip="${esc(tip)}">${esc(t)}</td>`;
+  // 종류 칸은 이름 밑에 메모 — 없으면 한 줄
+  const nameTd = f => {
+    const nm = faultName(f), mm = memoOf(f);
+    return `<td data-tip="${esc(mm ? nm + "\\n" + mm : nm)}"><div class="nm">${esc(nm)}</div>`
+         + (mm ? `<div class="memo">${esc(mm)}</div>` : "") + "</td>";
+  };
+  let html = view.map(f => `
       <tr class="${f.status}">
-        <td>${f.fault_id}</td>
-        <td>${esc(LABELS[f.kind] || f.kind)}</td>
-        <td>${esc(f.target || "자동")}</td>
-        <td>${hm(f.start_ts)}</td>
-        <td>${f.duration_min}분</td>
+        ${td(f.fault_id)}
+        ${nameTd(f)}
+        ${td(f.target || T("자동"))}
+        ${td(mdhm(f.start_ts), ts(f.start_ts))}
+        ${td(T("{n}분", {n: f.duration_min}))}
         <td><span class="st st-${f.status}">${f.status}</span></td>
         <td>${["pending","active"].includes(f.status)
-              ? `<button class="cancel" onclick="cancelFault(${f.fault_id})">취소</button>` : ""}</td>
-      </tr>`;
-    }).join("");
-    $("rows").innerHTML = html ||
-      '<tr><td colspan="7" class="dim">장애 이력이 없다</td></tr>';
-  } catch (e) {
-    $("poll-err").textContent = "서버 응답 없음";
-  }
+              ? `<button class="cancel" onclick="cancelFault(${f.fault_id})">${T("취소")}</button>` : ""}</td>
+      </tr>`).join("");
+  if (!html) html = `<tr><td colspan="7" class="dim">${T("장애 이력이 없다")}</td></tr>`;
+  // **마지막 쪽도 20줄 높이** — 빈 줄로 채워 카드 높이가 쪽마다 같다
+  const fill = FAULT_PAGE - Math.max(view.length, 1);
+  html += `<tr class="pad"><td colspan="7">&nbsp;</td></tr>`.repeat(Math.max(0, fill));
+  $("rows").innerHTML = html;
 }
 
 async function inject(ev) {
@@ -1917,11 +2080,11 @@ async function inject(ev) {
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.detail || r.status);
-    m.className = ""; m.textContent = `주입됨 — fault #${j.fault_id} (다음 틱부터 반영)`;
+    m.className = ""; m.textContent = T("주입됨 — fault #{id} (다음 틱부터 반영)", {id: j.fault_id});
     $("note").value = "";
     poll();
   } catch (e) {
-    m.className = "err"; m.textContent = "주입 실패: " + e.message;
+    m.className = "err"; m.textContent = T("주입 실패: ") + e.message;
   }
   return false;
 }
@@ -1930,7 +2093,7 @@ async function cancelFault(id) {
   const r = await fetch(`/api/faults/${id}/cancel`, {method: "POST"});
   if (!r.ok) {
     const j = await r.json().catch(() => ({}));
-    alert("취소 실패: " + (j.detail || r.status));
+    alert(T("취소 실패: ") + (j.detail || r.status));
   }
   poll();
 }
@@ -1960,18 +2123,18 @@ function renderIngest(d) {
   // 0 으로 적으면 "0바이트를 날랐다"로 읽힌다.
   const rows = (d.series || []).map(r =>
     `<div class="kv"><span>${esc(r.series)}</span>
-       <b>${(r.recs ?? 0).toLocaleString()} <span class="dim">건 ·
-       ${r.per_min}/분</span></b></div>`).join("");
+       <b>${(r.recs ?? 0).toLocaleString()} <span class="dim">${T("건")} ·
+       ${r.per_min}/${T("분")}</span></b></div>`).join("");
   const today = (d.by_day || [])[0];
   const cum = (d.by_day || []).reduce((a, x) => a + (x.slots || 0), 0);
   $("ingest").innerHTML = rows +
     `<div class="kv" style="margin-top:6px; border-top:1px solid var(--line)">
-       <span>합계</span><b>${(tot.records ?? 0).toLocaleString()} 건 ·
-       ${tot.per_min ?? 0}/분</b></div>` +
+       <span>${T("합계")}</span><b>${(tot.records ?? 0).toLocaleString()} ${T("건")} ·
+       ${tot.per_min ?? 0}/${T("분")}</b></div>` +
     `<div class="dim" style="margin-top:8px; font-size:12px">
-       오늘 ${today ? today.slots : 0}분 · 누적 ${cum}분
-       ${(d.by_day || []).length > 1 ? "(" + d.by_day.length + "일)" : ""}</div>`;
-  $("ing-range").textContent = d.date ? `${d.date} 하루` : `최근 ${d.minutes}분`;
+       ${T("오늘 {a}분 · 누적 {b}분", {a: today ? today.slots : 0, b: cum})}
+       ${(d.by_day || []).length > 1 ? T("({n}일)", {n: d.by_day.length}) : ""}</div>`;
+  $("ing-range").textContent = d.date ? T("{d} 하루", {d: d.date}) : T("최근 {n}분", {n: d.minutes});
   // 데이터가 있는 날짜는 여기서만 알 수 있다 — 별도 조회를 만들지 않는다.
   const days = (d.by_day || []).map(x => String(x.d).slice(0, 10));
   if (days.length && days.join() !== DAYS.join()) DAYS = days;
@@ -1989,9 +2152,9 @@ function renderIngest(d) {
   const ymd = `${lx.getFullYear()}-${String(lx.getMonth()+1).padStart(2,"0")}`
             + `-${String(lx.getDate()).padStart(2,"0")}`;
   const isToday = t0 && String(t0.d).slice(0, 10) === ymd;
-  $("st-today").textContent = isToday ? `${t0.slots}분` : "0분";
+  $("st-today").textContent = T("{n}분", {n: isToday ? t0.slots : 0});
   $("st-today-n").textContent =
-    isToday ? `(${Number(t0.recs || 0).toLocaleString()}건)` : "";
+    isToday ? T("({n}건)", {n: Number(t0.recs || 0).toLocaleString()}) : "";
 }
 
 // ── 시계열 (인라인 SVG — 폐쇄망이라 외부 라이브러리를 쓰지 않는다) ─────
@@ -2121,13 +2284,13 @@ function renderChart(d) {
            text-anchor="end">now</text>`;
   out += `<text x="4" y="${PAD_T+10}" fill="#8a94a3" font-size="11">${max.toLocaleString()}</text>`;
   if (!P.length) out += `<text x="${(W/2).toFixed(0)}" y="95" fill="#8a94a3" text-anchor="middle"
-                          font-size="12">데이터 없음</text>`;
+                          font-size="12">${T("데이터 없음")}</text>`;
   svg.innerHTML = out;
 
   CHART_SLOTS = { slots, t0, bw, byIdx, names };
   $("legend").innerHTML = names.map(n =>
     `<span><i style="background:${COLORS[n] || "#6b7684"}"></i>${esc(n)}</span>`).join("")
-    + '<span><i style="background:#e5534b;opacity:.35"></i>장애 주입 구간</span>';
+    + `<span><i style="background:#e5534b;opacity:.35"></i>${T("장애 주입 구간")}</span>`;
 }
 
 // ── 툴팁 ────────────────────────────────────────────────────────────────
@@ -2150,7 +2313,7 @@ function chartHover(ev) {
   let html = `<div class="t-ts">${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}`
            + `-${String(t.getDate()).padStart(2,"0")} ${hh}:${mm}</div>`;
   if (!p) {
-    html += '<div class="dim">생성 기록 없음</div>';
+    html += `<div class="dim">${T("생성 기록 없음")}</div>`;
   } else {
     const bytes = p.bytes || {};
     names.forEach(n => {
@@ -2159,14 +2322,14 @@ function chartHover(ev) {
       // "안 흘렀다"로 읽힌다(불변규칙 17).
       const b = fmtBytes(bytes[n]);
       html += `<div class="t-row"><span><i style="background:${COLORS[n]||"#6b7684"}"></i>`
-            + `${esc(n)}</span><span><b>${v.toLocaleString()}</b> 건`
+            + `${esc(n)}</span><span><b>${v.toLocaleString()}</b> ${T("건")}`
             + (b ? ` · ${b}` : "") + `</span></div>`;
     });
-    html += `<div class="t-row t-sum"><span>합계</span><span><b>`
-          + `${(p.total||0).toLocaleString()}</b> 건`
+    html += `<div class="t-row t-sum"><span>${T("합계")}</span><span><b>`
+          + `${(p.total||0).toLocaleString()}</b> ${T("건")}`
           + (p.total_bytes ? ` · ${fmtBytes(p.total_bytes)}` : "") + `</span></div>`;
     if (p.faults && p.faults.length)
-      html += `<div class="t-f">장애 주입 #${p.faults.join(", #")}</div>`;
+      html += `<div class="t-f">${T("장애 주입 #{ids}", {ids: p.faults.join(", #")})}</div>`;
   }
   tip.innerHTML = html;
   tip.style.opacity = 1;
@@ -2190,7 +2353,7 @@ async function loadRegion() {
   // 지역이 늘 때 한쪽만 고쳐지고, 그때 "선택지가 없다"가 아니라
   // **선택해도 안 먹는다**가 된다.
   sel.innerHTML = (REGION.locales || []).map(l =>
-    `<option value="${esc(l.value)}">${esc(l.label)}</option>`).join("");
+    `<option value="${esc(l.value)}">${esc(T(l.label))}</option>`).join("");
   sel.value = REGION.pending || REGION.file;
   renderRegionNote();
 }
@@ -2199,47 +2362,48 @@ function renderRegionNote() {
   const sel = $("region-sel").value;
   const file = REGION.file, saved = REGION.saved, pend = REGION.pending;
   const L = {};
-  (REGION.locales || []).forEach(l => { L[l.value] = l.label; });
+  (REGION.locales || []).forEach(l => { L[l.value] = T(l.label); });
   const out = [];
   // ① 지금 이 프로세스가 들고 있는 값 — 데몬과 같을 수도 다를 수도 있다
-  out.push(`설정 파일 <b>${esc(L[file] || file)}</b>`
-         + (saved ? ` · UI 저장값 <b>${esc(L[saved] || saved)}</b>` : "")
-         + ` → 재시작하면 <b>${esc(L[pend] || pend)}</b>`);
+  out.push(T("설정 파일 {a}", {a: `<b>${esc(L[file] || file)}</b>`})
+         + (saved ? T(" · UI 저장값 {a}", {a: `<b>${esc(L[saved] || saved)}</b>`}) : "")
+         + T(" → 재시작하면 {a}", {a: `<b>${esc(L[pend] || pend)}</b>`}));
   out.push(`PLMN <code>${esc(REGION.plmn.home || "?")}</code>`
-         + ` · IMSI 접두 <code>${esc((REGION.plmn.home||"") + (REGION.plmn.imsi_msin_head||""))}</code>`
-         + ` · 마스터 <code>${esc(REGION.pemdb1_locale || "?")}</code>`);
+         + T(" · IMSI 접두 {a}", {a: `<code>${esc((REGION.plmn.home||"") + (REGION.plmn.imsi_msin_head||""))}</code>`})
+         + T(" · 마스터 {a}", {a: `<code>${esc(REGION.pemdb1_locale || "?")}</code>`}));
   // ② 고르기만 하고 아직 저장 안 한 상태를 구분해 적는다
   if (sel !== pend)
-    out.push(`<span style="color:var(--warn,#e8a33d)">고른 값 <b>${esc(L[sel]||sel)}</b>`
-           + ` — 아직 저장하지 않았다</span>`);
+    out.push(`<span style="color:var(--warn,#e8a33d)">`
+           + T("고른 값 {a} — 아직 저장하지 않았다", {a: `<b>${esc(L[sel]||sel)}</b>`}) + `</span>`);
   // ③ **어긋남을 숨기지 않는다.** 사람이 yaml 에 적은 칸은 지역을 바꿔도
   //    따라오지 않는다 — 그걸 모르면 "바꿨는데 왜 그대로냐"가 된다.
   const cf = REGION.conflicts || [];
   if (cf.length) {
-    out.push(`<span style="color:var(--warn,#e8a33d)">⚠ 설정 파일에 적힌 값이`
-           + ` 있어 지역을 바꿔도 따라오지 않는다 —</span>`);
+    out.push(`<span style="color:var(--warn,#e8a33d)">`
+           + T("⚠ 설정 파일에 적힌 값이 있어 지역을 바꿔도 따라오지 않는다 —") + `</span>`);
     cf.forEach(c => out.push(`&nbsp;&nbsp;<code>${esc(c.path)}</code> = `
-      + `<b>${esc(c.configured)}</b> (${esc(c.locale)} 이면 ${esc(c.expected)})`));
-    out.push(`&nbsp;&nbsp;<span class="dim">따라오게 하려면 datagen.yaml 의 그 칸을 지운다</span>`);
+      + `<b>${esc(c.configured)}</b> ` + T("({l} 이면 {e})", {l: esc(c.locale), e: esc(c.expected)})));
+    out.push(`&nbsp;&nbsp;<span class="dim">${T("따라오게 하려면 datagen.yaml 의 그 칸을 지운다")}</span>`);
   }
-  out.push(`<span class="dim">운영 중에는 바꾸지 않는다 — 같은 분에 두 나라`
-         + ` IMSI 가 섞이면 그 분은 어느 쪽으로도 집계되지 않는다</span>`);
+  out.push(`<span class="dim">`
+         + T("운영 중에는 바꾸지 않는다 — 같은 분에 두 나라 IMSI 가 섞이면 그 분은 어느 쪽으로도 집계되지 않는다")
+         + `</span>`);
   $("region-note").innerHTML = out.join("<br>");
 }
 async function saveRegion() {
   const loc = $("region-sel").value;
   const msg = $("region-msg");
-  msg.textContent = "저장 중…";
+  msg.textContent = T("저장 중…");
   try {
     const r = await fetch("/api/region", { method:"POST",
       headers:{"Content-Type":"application/json"},
       body: JSON.stringify({ locale: loc }) });
-    if (!r.ok) { msg.textContent = "실패 — " + (await r.text()).slice(0, 120); return; }
+    if (!r.ok) { msg.textContent = T("실패 — ") + (await r.text()).slice(0, 120); return; }
     // **"저장됨" 으로 끝내지 않는다.** 반영 시점을 함께 적는다.
-    msg.innerHTML = `<span style="color:var(--warn,#e8a33d)">저장됨 —`
-                  + ` <b>재시작해야 반영된다</b></span>`;
+    msg.innerHTML = `<span style="color:var(--warn,#e8a33d)">${T("저장됨 —")}`
+                  + ` <b>${T("재시작해야 반영된다")}</b></span>`;
     await loadRegion();
-  } catch (e) { msg.textContent = "실패 — " + e; }
+  } catch (e) { msg.textContent = T("실패 — ") + e; }
 }
 
 // ── 생성 설정 ───────────────────────────────────────────────────────────
@@ -2251,7 +2415,7 @@ function renderApplied(pct) {
   $("rates").innerHTML = keys.map(k => {
     const base = BASE_RATES[k] || 0;
     const now = Math.max(0, Math.round(base * pct / 100));
-    return `<div><label>${esc(k)} (분당)</label>
+    return `<div><label>${T("{k} (분당)", {k: esc(k)})}</label>
       <div style="font-variant-numeric:tabular-nums">
         <b>${now.toLocaleString()}</b>
         <span class="dim" style="font-size:11px"> / ${base.toLocaleString()}</span>
@@ -2265,7 +2429,7 @@ function renderSettings(d) {
   $("pct-label").textContent = pct;
   renderApplied(pct);
   $("gen-on").checked = !!d.enabled;
-  $("gen-on-label").textContent = d.enabled ? "가동" : "정지";
+  $("gen-on-label").textContent = d.enabled ? T("가동") : T("정지");
   $("gen-on-label").style.color = d.enabled ? "var(--green)" : "var(--dim)";
   $("ret").value = d.retention_hours;
   $("ret-on").checked = !!d.retention_on;
@@ -2281,7 +2445,7 @@ function renderSettings(d) {
   NODES = { MME: t.MME_IDS || [], SGW: t.SGW_IDS || [], PGW: t.PGW_IDS || [] };
   renderReassign();
   $("topo").textContent =
-    `토폴로지 — 셀 ${t.cells} · SGW ${t.SGW} · MME ${t.MME} · PGW ${t.PGW}` +
+    T("토폴로지 — 셀 {c} · SGW {s} · MME {m} · PGW {p}", {c: t.cells, s: t.SGW, m: t.MME, p: t.PGW}) +
     (d.note ? ` · ${d.note}` : "");
 }
 // ── 생성 가동 스위치 — **누르는 순간 반영한다** ─────────────────────────
@@ -2298,14 +2462,14 @@ async function toggleGen(el) {
     const r = await fetch("/api/settings", { method:"POST",
       headers:{"content-type":"application/json"},
       body: JSON.stringify({ enabled: want }) });
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "실패");
-    $("set-msg").textContent = want ? "생성 가동" : "생성 정지";
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || T("실패"));
+    $("set-msg").textContent = want ? T("생성 가동") : T("생성 정지");
   } catch (e) {
     el.checked = !want;
-    $("set-msg").textContent = "실패 — " + e.message;
+    $("set-msg").textContent = T("실패 — ") + e.message;
   } finally {
     el.disabled = false;
-    $("gen-on-label").textContent = el.checked ? "가동" : "정지";
+    $("gen-on-label").textContent = el.checked ? T("가동") : T("정지");
     $("gen-on-label").style.color = el.checked ? "var(--green)" : "var(--dim)";
     setTimeout(() => { $("set-msg").textContent = ""; }, 4000);
   }
@@ -2319,18 +2483,19 @@ function renderRetNote() {
   const el = $("ret-note");
   $("ret").disabled = !on;
   if (!on) {
-    el.innerHTML = '<b style="color:var(--yellow)">정리하지 않는다</b> — '
-                 + '파티션이 계속 쌓인다. 디스크를 직접 봐야 한다';
+    el.innerHTML = `<b style="color:var(--yellow)">${T("정리하지 않는다")}</b> — `
+                 + T("파티션이 계속 쌓인다. 디스크를 직접 봐야 한다");
     return;
   }
   const d = h / 24;
   el.innerHTML =
-    `원시 xDR(시간 파티션) <b>${h}시간</b>치만 남는다<br>`
-    + `집계 <code>PM_*_1M</code>(일 파티션)은 <b>하루 입도</b>로만 떨어진다 — `
-    + (d < 1 ? `${h}시간을 줘도 최대 하루치가 남는다`
-             : `약 ${d.toFixed(d < 10 ? 1 : 0)}일치`)
-    + `<br><span style="color:var(--dim)">원시 Parquet 는 이 값과 별개다 — `
-    + `생성 설정의 <code>retain_minutes</code>(U-Plane 10분 · C-Plane 1440분)</span>`;
+    T("원시 xDR(시간 파티션) <b>{h}시간</b>치만 남는다<br>", {h})
+    + T("집계 <code>PM_*_1M</code>(일 파티션)은 <b>하루 입도</b>로만 떨어진다 — ")
+    + (d < 1 ? T("{h}시간을 줘도 최대 하루치가 남는다", {h})
+             : T("약 {d}일치", {d: d.toFixed(d < 10 ? 1 : 0)}))
+    + `<br><span style="color:var(--dim)">`
+    + T("원시 Parquet 는 이 값과 별개다 — 생성 설정의 <code>retain_minutes</code>(U-Plane 10분 · C-Plane 1440분)")
+    + `</span>`;
 }
 
 // ── 시간대 곡선 ─────────────────────────────────────────────────────────
@@ -2345,7 +2510,7 @@ async function toggleDiurnal(el) {
     const r = await fetch("/api/settings", { method:"POST",
       headers:{"content-type":"application/json"},
       body: JSON.stringify({ diurnal: want }) });
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "실패");
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || T("실패"));
   } catch (e) { el.checked = !want; }
   finally { el.disabled = false; renderDiurnal(); }
 }
@@ -2356,7 +2521,7 @@ async function toggleDiurnal(el) {
 // 시계열이 멀쩡했던 건 축 재계산 타이머가 따로 있었기 때문이다.
 function renderDiurnal() {
   const on = $("diurnal").checked;
-  $("diurnal-label").textContent = on ? "켜짐" : "평탄";
+  $("diurnal-label").textContent = on ? T("켜짐") : T("평탄");
   $("diurnal-label").style.color = on ? "var(--green)" : "var(--dim)";
   const h = new Date().getHours();
   const c = DCURVE[h];
@@ -2366,8 +2531,7 @@ function renderDiurnal() {
   const W = Math.max(Math.round(svg.clientWidth || 0), 240), H = 64;
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   if (!on) {
-    note.innerHTML = '모든 시각이 <b>피크(19시)</b> 수준이다 — '
-                   + '야간에도 주간만큼 만든다';
+    note.innerHTML = T("모든 시각이 <b>피크(19시)</b> 수준이다 — 야간에도 주간만큼 만든다");
     svg.innerHTML = `<line x1="5" y1="${(H-16+8)/2}" x2="${W-5}" y2="${(H-16+8)/2}"
       stroke="var(--dim)" stroke-width="1.5" stroke-dasharray="3 3"/>`;
     return;
@@ -2375,11 +2539,11 @@ function renderDiurnal() {
   // 세 자리에 나눠 걸린 곡선을 다 적는다 — 하나만 보여 주면 "왜 호 수는
   // 거의 안 변하나"의 답이 화면에 없다.
   note.innerHTML = c
-    ? `지금 <b>${h}시</b> — 호 <b>${c.call}</b> · 호당 세션 <b>${c.sess}</b> `
-      + `· 세션 바이트 <b>${c.byte}</b> → 총 트래픽 `
-      + `<b>${(c.call * c.sess * c.byte).toFixed(3)}</b> (19시 = 1.000)<br>`
-      + `<span style="color:var(--dim)">호 수의 진폭은 일부러 작다(04↔19시 `
-      + `1.14배) — 야간에 셀 표본이 마르면 탐지가 통째로 선다(불변규칙 5)</span>`
+    ? T("지금 <b>{h}시</b> — 호 <b>{call}</b> · 호당 세션 <b>{sess}</b> · 세션 바이트 <b>{byte}</b> → 총 트래픽 <b>{tot}</b> (19시 = 1.000)<br>",
+        {h, call: c.call, sess: c.sess, byte: c.byte, tot: (c.call * c.sess * c.byte).toFixed(3)})
+      + `<span style="color:var(--dim)">`
+      + T("호 수의 진폭은 일부러 작다(04↔19시 1.14배) — 야간에 셀 표본이 마르면 탐지가 통째로 선다(불변규칙 5)")
+      + `</span>`
     : "";
   if (!DCURVE.length) { svg.innerHTML = ""; return; }
   // 총 트래픽 곡선 한 줄. **하루는 24칸이다** — 전에는 `i/23` 으로 펴서
@@ -2406,45 +2570,57 @@ function renderDiurnal() {
          fill="var(--yellow)"/>`
     + [0, 6, 12, 18].map(t =>
         `<text x="${px(t).toFixed(1)}" y="${H - 3}" fill="#6b7684"
-           font-size="10">${t}시</text>`).join("");
+           font-size="10">${T("{t}시", {t})}</text>`).join("");
 }
 
 // ── 계열 차단 ───────────────────────────────────────────────────────────
 // **체크가 곧 반영이다.** 상태등이 1초 안에 노랑으로 바뀌는 것이 이 조작의
 // 확인 수단이다 — 저장 버튼을 거치면 "눌렀는데 아무 일도 안 보인다"가 된다.
-let BLOCKABLE = [], BLOCKED = new Set();
+let BLOCKABLE = [], BLOCKED = new Set(), RATES = {};
+//: 타일의 설명 — 계열 이름만으로는 무엇인지 모른다
+const XDR_DESC = {lte_call: "C-Plane · 호 절차", transport: "U-Plane · TCP 전송",
+                  dns: "U-Plane · DNS 질의", http: "U-Plane · HTTP 요청"};
 function renderBlocked() {
-  $("blk").innerHTML = BLOCKABLE.map(s2 =>
-    `<label class="sw"><input type="checkbox" value="${esc(s2)}"
-       ${BLOCKED.has(s2) ? "checked" : ""} onchange="toggleBlock(this)">
-       <span style="${BLOCKED.has(s2) ? "color:var(--yellow)" : ""}">${esc(s2)}</span>
-     </label>`).join("");
+  // **lte_call 을 끄면 U-Plane 도 멈춘다** — 세션이 성공 호에서 파생된다.
+  // 켜져 있어도 실제로는 안 만들어지므로 타일이 그것을 말한다(점선)
+  const callOff = BLOCKED.has("lte_call");
+  $("blk").innerHTML = BLOCKABLE.map(x => {
+    const off = BLOCKED.has(x), dep = !off && callOff && x !== "lte_call";
+    const state = off ? T("멈춤") : dep ? T("멈춤 · lte_call 종속") : T("생성 중");
+    const rate = RATES[x] != null && !off && !dep
+      ? `${Number(RATES[x]).toLocaleString()} <small>${T("건/분")}</small>` : `<small>${state}</small>`;
+    return `<button type="button" class="xdr${off ? " off" : ""}${dep ? " off dep" : ""}"
+       data-x="${esc(x)}" aria-pressed="${!off}" onclick="toggleBlock(this)"
+       title="${esc(off ? T("눌러서 다시 생성") : T("눌러서 생성 멈춤"))}">
+       <span class="hd"><i></i>${esc(x)}</span>
+       <span class="ds">${esc(T(XDR_DESC[x] || ""))}</span>
+       <span class="rt">${rate}</span></button>`;
+  }).join("");
   const note = $("blk-note");
-  if (!BLOCKED.size) { note.textContent = "없음 — 네 계열 모두 생성한다"; return; }
-  // **lte_call 차단의 연쇄를 숨기지 않는다.** U-Plane 세션이 성공 호에서
-  // 파생되므로 호를 끊으면 넷이 다 빈다 — 적지 않으면 "생성기가 죽었다"로
-  // 읽히고, 그 다음에 하는 일은 컨테이너를 재시작하는 것이다.
+  if (!BLOCKED.size) { note.textContent = T("넷 모두 생성 중 — 끄면 그 xDR 은 파일 자체를 만들지 않는다(0 건이 아니라 없음)"); return; }
   note.innerHTML =
-    `<b style="color:var(--yellow)">${[...BLOCKED].sort().join(" · ")}</b> 끊김 — `
-    + "그 분에 파일을 만들지 않는다(0 건이 아니라 <b>없음</b>)"
-    + (BLOCKED.has("lte_call")
-       ? '<br><b style="color:var(--red)">lte_call 을 끊으면 U-Plane 도 멈춘다</b>'
-         + ' — 세션이 성공 호에서 파생된다'
+    `<b style="color:var(--yellow)">${[...BLOCKED].sort().join(" · ")}</b>` + T(" 멈춤 — ")
+    + T("그 분에 파일을 만들지 않는다(0 건이 아니라 <b>없음</b>)")
+    + (callOff
+       ? `<br><b style="color:var(--red)">${T("lte_call 을 끄면 U-Plane 도 멈춘다")}</b>`
+         + T(" — 세션이 성공 호에서 파생된다")
        : "");
 }
+// **누르는 것이 곧 반영이다.** 상태등이 1초 안에 노랑으로 바뀌는 것이 이 조작의
+// 확인 수단이다 — 저장 버튼을 거치면 "눌렀는데 아무 일도 안 보인다"가 된다.
+// 서버 계약은 그대로 "끊을 목록"(`blocked`)이다 — 화면만 "만들 것"으로 보인다
 async function toggleBlock(el) {
-  const v = el.value, want = new Set(BLOCKED);
-  el.checked ? want.add(v) : want.delete(v);
-  const box = $("blk").querySelectorAll("input");
-  box.forEach(b => b.disabled = true);
+  const v = el.dataset.x, want = new Set(BLOCKED);
+  want.has(v) ? want.delete(v) : want.add(v);
+  $("blk").querySelectorAll("button").forEach(b => b.disabled = true);
   try {
     const r = await fetch("/api/settings", { method:"POST",
       headers:{"content-type":"application/json"},
       body: JSON.stringify({ blocked: [...want] }) });
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "실패");
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || T("실패"));
     BLOCKED = want;
-  } catch (e) { el.checked = !el.checked; }
-  finally { box.forEach(b => b.disabled = false); renderBlocked(); }
+  } catch (e) { /* 실패하면 원래 상태로 다시 그린다 */ }
+  finally { renderBlocked(); }
 }
 
 // ── 장비 재배정 ─────────────────────────────────────────────────────────
@@ -2460,7 +2636,7 @@ function renderReassign() {
         <a href="#" onclick="dropReassign('${esc(kind)}','${esc(src)}');return false"
            style="margin-left:6px">✕</a></span>`);
   $("ra-list").innerHTML = items.length ? items.join(" ")
-    : '<span class="dim">없음 — 모든 셀이 원래 장비를 쓴다</span>';
+    : `<span class="dim">${T("없음 — 모든 셀이 원래 장비를 쓴다")}</span>`;
   // 드롭다운은 현재 종류의 노드 목록으로
   const kind = $("ra-kind").value;
   const opts = (NODES[kind] || []).map(n => `<option>${esc(n)}</option>`).join("");
@@ -2487,8 +2663,8 @@ async function saveReassign() {
     headers:{"content-type":"application/json"},
     body: JSON.stringify({ reassign: REASSIGN }) });
   const j = await r.json().catch(() => ({}));
-  $("ra-msg").textContent = r.ok ? "저장됨 — 다음 틱부터" : (j.detail || "실패");
-  setTimeout(() => { $("ra-msg").textContent = "다음 틱부터 반영된다"; }, 4000);
+  $("ra-msg").textContent = r.ok ? T("저장됨 — 다음 틱부터") : (j.detail || T("실패"));
+  setTimeout(() => { $("ra-msg").textContent = T("다음 틱부터 반영된다"); }, 4000);
 }
 
 // **슬라이더가 스스로 저장한다**(2026-10-27). 전에는 `oninput` 이 라벨과
@@ -2510,10 +2686,10 @@ async function savePct(v) {
       headers:{"content-type":"application/json"},
       body: JSON.stringify({ volume_pct: v }) });
     const j = await r.json().catch(() => ({}));
-    el.textContent = r.ok ? "저장됨 — 다음 틱부터" : ("실패 — " + (j.detail || r.status));
+    el.textContent = r.ok ? T("저장됨 — 다음 틱부터") : (T("실패 — ") + (j.detail || r.status));
     el.style.color = r.ok ? "" : "var(--red)";
   } catch (e) {
-    el.textContent = "실패 — " + e;
+    el.textContent = T("실패 — ") + e;
     el.style.color = "var(--red)";
   }
   setTimeout(() => { el.textContent = ""; el.style.color = ""; }, 4000);
@@ -2528,7 +2704,7 @@ async function saveSettings() {
   const r = await fetch("/api/settings", { method:"POST",
     headers:{"content-type":"application/json"}, body: JSON.stringify(body) });
   const j = await r.json().catch(() => ({}));
-  $("set-msg").textContent = r.ok ? "저장됨 — 다음 틱부터" : (j.detail || "실패");
+  $("set-msg").textContent = r.ok ? T("저장됨 — 다음 틱부터") : (j.detail || T("실패"));
   setTimeout(() => { $("set-msg").textContent = ""; }, 4000);
 }
 
@@ -2620,7 +2796,8 @@ _HTML_TOPO = """<!doctype html>
           --dim:#8a94a3; --accent:#4e9af1; --red:#e5534b; --yellow:#d8a22a;
           --green:#4caf7d; }
   * { box-sizing:border-box; }
-  body { margin:0; padding:20px; background:var(--bg); color:var(--fg);
+  /* 위 44px 상단 바 · 왼쪽 60px 레일(`_SHELL_CSS`) 자리를 비운다 */
+  body { margin:0; padding:64px 20px 20px 80px; background:var(--bg); color:var(--fg);
          font:14px/1.5 "Pretendard","Apple SD Gothic Neo","Malgun Gothic",sans-serif; }
   a { color:var(--accent); }
   h1 { font-size:17px; margin:0 0 14px; }
@@ -2655,7 +2832,7 @@ _HTML_TOPO = """<!doctype html>
 </head>
 <body>
 <h1>마스터 토폴로지
-  <small>행정구역 · 장비 · 셀 — <a href="/">장애 주입 화면</a> · <a href="/map">장비 지도</a></small>
+  <small>행정구역 · 장비 · 셀</small>
   <!-- **로케일은 테이블 이름이다.** 어느 벌을 보고 있는지가 모든 조작의
        대상이므로 화면 맨 위에 둔다 — 아래에 묻어 두면 KR 을 보면서 JP 를
        고친다고 믿는 상태가 생긴다. -->
@@ -2872,6 +3049,8 @@ _HTML_TOPO = """<!doctype html>
 </div>
 
 <script>
+/*__I18N__*/
+applyLang();
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -3910,7 +4089,7 @@ def api_map_geo(bbox: str = "", cover: int = 0):
 
     `cover=1` 이면 **레이어(철도·하천…)가 덮는 범위까지 넓힌다**(2026-11-03).
     기지국 범위만 받으면 간토 전역에 걸친 철도가 바다 위에 떴다. 넓힌 쪽은
-    **점을 솎는다**(`_GEO_THIN`) — 상세본 그대로 넓혔더니 점이 9.1만 개 중
+    **점을 줄인다**(`_GEO_FAR_M`) — 상세본 그대로 넓혔더니 점이 9.1만 개 중
     2.1만 개가 늘어 `draw` 가 +10ms, 날아가는 동안 매 프레임 그리는 양도
     30% 늘었다. 그쪽은 철도 밑에 깔리는 바탕일 뿐이다
     """
@@ -3953,13 +4132,11 @@ def api_map_geo(bbox: str = "", cover: int = 0):
     out = []
     for pr, rings in _geo_doc(src):
         keep = []
-        for ring, b in rings:
+        for ring, b, far in rings:
             if not hit(b, want):
                 continue
-            # 기지국 범위에 걸치지 않는 고리만 솎는다 — 첫 점·끝 점은 남겨 닫힌다
-            if not hit(b, core) and len(ring) > 3 * _GEO_THIN:
-                ring = ring[:-1:_GEO_THIN] + [ring[-1]]
-            keep.append(ring)
+            # 기지국 범위에 걸치지 않는 고리는 줄인 쪽을 쓴다
+            keep.append(ring if hit(b, core) else far)
         if keep:
             # 이름을 놓을 자리 — **가장 큰 고리**의 가운데. 섬이 딸린 구는
             # 작은 고리에 이름이 붙으면 엉뚱한 바다 위에 뜬다
@@ -3977,14 +4154,54 @@ def api_map_geo(bbox: str = "", cover: int = 0):
     return {"features": out, "source": "国土数値情報 行政区域 · CC BY 4.0"}
 
 
-#: 넓힌 쪽 경계는 점 N 개 중 하나만 — 4 면 2.1만 → 약 5천(2026-11-03 실측)
-_GEO_THIN = 4
+#: 넓힌 쪽 경계의 단순화 허용오차(m). **처음엔 점 4개 중 1개를 골랐는데**
+#: (`_GEO_THIN=4`) 이미 점 20개인 시가 삼각형이 되고, 맞닿은 두 시가 같은 선을
+#: 다른 점으로 솎아 사이에 틈이 났다. 더글라스-포이커는 꺾이는 점을 남기므로
+#: 모양이 서고 이웃의 선도 허용오차 안에서 겹친다
+_GEO_FAR_M = 50.0
+
+
+def _simplify(pts, tol_m: float):
+    """더글라스-포이커 — `graphio-probe-rca/tools/build_jp_geo_layers.py` 와 같은 식.
+
+    좌표는 도, 허용오차는 m(첫 점 위도에서 환산). 닫힌 고리는 첫 점·끝 점이
+    같아 그대로 닫힌다
+    """
+    n = len(pts)
+    if n < 5:
+        return pts
+    kx = 111320 * math.cos(math.radians(pts[0][1]))
+    P = [(x * kx, y * 110574) for x, y in pts]
+    keep = [False] * n
+    keep[0] = keep[-1] = True
+    stack = [(0, n - 1)]
+    while stack:
+        a, b = stack.pop()
+        ax, ay = P[a]
+        bx, by = P[b]
+        dx, dy = bx - ax, by - ay
+        L = dx * dx + dy * dy
+        best, bi = 0.0, -1
+        for i in range(a + 1, b):
+            px, py = P[i]
+            t = 0.0 if L == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L))
+            d = math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+            if d > best:
+                best, bi = d, i
+        if best > tol_m:
+            keep[bi] = True
+            stack += [(a, bi), (bi, b)]
+    out = [pts[i] for i in range(n) if keep[i]]
+    # 닫힌 고리는 첫 점과 끝 점이 같아 한 변의 양 끝이 겹친다 — 그 자리에서
+    # 가운데 점이 하나도 안 남으면 고리가 선이 된다. 그때는 원래대로 둔다
+    return out if len(out) >= 4 else pts
 
 
 def _geo_doc(src: Path):
-    """경계 파일 → [(properties, [(ring, (lat0, lon0, lat1, lon1)), ...]), ...].
+    """경계 파일 → [(properties, [(ring, (lat0, lon0, lat1, lon1), far), ...]), ...].
 
-    3.7MB 를 요청마다 `json.loads` 하고 고리마다 범위를 다시 쟀다. 한 번 읽어 둔다
+    3.7MB 를 요청마다 `json.loads` 하고 고리마다 범위를 다시 쟀다. 한 번 읽어 둔다.
+    `far` 는 넓힌 쪽에 쓸 단순화본(`_GEO_FAR_M`) — 읽을 때 한 번 만든다
     """
     def make(p: Path):
         doc = json.loads(p.read_text(encoding="utf-8"))
@@ -4000,7 +4217,8 @@ def _geo_doc(src: Path):
                 ring = poly[0]
                 xs = [c[0] for c in ring]
                 ys = [c[1] for c in ring]
-                rings.append((ring, (min(ys), min(xs), max(ys), max(xs))))
+                rings.append((ring, (min(ys), min(xs), max(ys), max(xs)),
+                              _simplify(ring, _GEO_FAR_M)))
             out.append((f.get("properties") or {}, rings))
         return out
     return _cached(src, "geo", make)
@@ -4018,6 +4236,8 @@ _HTML_MAP = """<!doctype html>
     `.stat` 혼자 856px 를 먹어 라벨이 "철\n도·하천" 으로 접히고 숫자는
     헤더 밖으로 삐져나갔다. 줄바꿈 자리를 브라우저에 맡기지 않는다 —
     `.stat` 이 폭 전부를 차지해 **반드시 둘째 줄로 내려간다** */
+ /* 껍데기(`_SHELL`) 자리 — 위 44px 상단 바 · 왼쪽 60px 레일 */
+ body{padding:44px 0 0 60px;box-sizing:border-box}
  header{height:70px;display:flex;flex-wrap:wrap;align-content:center;
    align-items:center;gap:5px 14px;padding:0 14px;
    background:#161b22;border-bottom:1px solid #2a313a}
@@ -4101,7 +4321,7 @@ _HTML_MAP = """<!doctype html>
  }
  /* 바다색 바탕 위에 육지를 얹는다 — 전에는 둘 다 거의 같은 검정이라
     경계가 나와도 "지도가 안 나온다"로 보였다 */
- #wrap{position:absolute;inset:70px 0 0 0;overflow:hidden;cursor:grab;
+ #wrap{position:absolute;inset:114px 0 0 60px;overflow:hidden;cursor:grab;
    background:var(--sea)}
  #wrap.drag{cursor:grabbing}
  svg{width:100%;height:100%;display:block}
@@ -4419,7 +4639,6 @@ _HTML_MAP = """<!doctype html>
     <option value=dark>어두운</option>
     <option value=light>밝은</option>
   </select></label>
-  <span class=nav><a href="/">장애 주입 화면</a> · <a href="/topo">마스터 토폴로지</a></span>
   <span class=nav title="전체 eNB·TA 보기에서 Shift 를 누른 채 끌면 사각형 안의 eNB 를 한 번에 고른다">Shift+드래그 = eNB 범위 선택</span>
   <span class=rt><span id=upd title="장애 이력을 마지막으로 받아 화면에 반영한 시각 (10초마다 묻는다)">—</span>
     <button id=reload title="새로고침 — 장비·장애를 지금 다시 받는다" aria-label="새로고침">
@@ -4469,14 +4688,16 @@ _HTML_MAP = """<!doctype html>
   <div id=flist class=fold><div class=hd><b>장애 이력</b><span id=fcnt></span><em id=ffold>펼치기</em></div>
     <div class=bd id=fbody><div class=empty>graphio 에 묻는 중</div></div></div>
   <div id=labels></div>
-  <div id=loading>地図を読み込み中…</div>
+  <div id=loading>지도 불러오는 중…</div>
   <div id=tip></div><div id=legend></div><div id=scale></div><div id=src></div>
 </div>
 <script>
+/*__I18N__*/
 // ── 투영 — 웹 메르카토르. 도시 축척이라 간단한 식으로 충분하다 ──────────
 const R=180/Math.PI;
 const mx=(lon)=>lon, my=(lat)=>R*Math.log(Math.tan(Math.PI/4+lat*Math.PI/360));
 const el=(n)=>document.createElementNS('http://www.w3.org/2000/svg',n);
+applyLang();
 const svg=document.getElementById('svg'), tip=document.getElementById('tip');
 const geofx=document.getElementById('geofx');
 let VB=null, HOME=null, D=null, GEO=null, ALL=null, RAIL=null, RIV=null;
@@ -4683,11 +4904,11 @@ function applyFaults(){
   // 고른 장애가 있으면 `drawFocus` 가 정한다
   if(!fs){ const pg=unit&&FAULT ? Object.entries(FAULT.node||{}).filter(([k])=>k.startsWith('pgw:')) : [];
     let sev=null; for(const [,f] of pg) if(!sev||(_SEV_RANK[f.sev]||0)>(_SEV_RANK[sev]||0)) sev=f.sev;
-    hqHot(sev, sev?`PGW ${pg.map(([k])=>k.split(':')[1]).join(', ')} 장애`:''); }
+    hqHot(sev, sev?T('PGW {p} 장애',{p:pg.map(([k])=>k.split(':')[1]).join(', ')}):''); }
   buildFx();
   const n=document.getElementById('nfault');
   if(n){ n.textContent=(FAULT&&FAULT.incidents)?FAULT.incidents.length:0;
-    n.title = FAULT&&FAULT.latest ? `graphio 마지막 관측 ${FAULT.latest.replace('T',' ')}` : ''; }
+    n.title = FAULT&&FAULT.latest ? T('graphio 마지막 관측 {t}',{t:FAULT.latest.replace('T',' ')}) : ''; }
 }
 
 // ── 소등 eNB (24번 B 후보) ─────────────────────────────────────────────
@@ -4704,8 +4925,8 @@ function applyStandby(){
     d.classList.toggle('sb-off', s!=='on');
     d.classList.toggle('sb-on', s==='on');
     d.dataset.t=d.dataset.t0+(s==='on'
-      ? `\n증설 eNB — 24번으로 켜짐 (eNB ${STBY.from} 의 부하를 받는다)`
-      : `\n소등 eNB — 평소 호 없음`+(s==='next'?' · 24번 진행 중, 10분 시점에 켜진다':''));
+      ? T('\\n증설 eNB — 24번으로 켜짐 (eNB {f} 의 부하를 받는다)',{f:STBY.from})
+      : T('\\n소등 eNB — 평소 호 없음')+(s==='next'?T(' · 24번 진행 중, 10분 시점에 켜진다'):''));
   }
 }
 async function pollStandby(){
@@ -4726,9 +4947,9 @@ async function pollFaults(){
   // **받아서 반영한 시각** — 바뀐 것이 없어도 갱신한다. 멈춰 있으면 "장애가
   // 없다"인지 "안 묻고 있다"인지 사람이 가를 수 있게(graphio 마지막 관측은 툴팁)
   const up=document.getElementById('upd');
-  if(up){ up.textContent='갱신 '+String(doc.at||'').slice(11,19);
-    up.title=`장애 이력을 마지막으로 받아 반영한 시각 (10초마다)`
-      + (doc.latest?`\ngraphio 마지막 이상 관측 ${doc.latest.replace('T',' ')}`:''); }
+  if(up){ up.textContent=T('갱신 {t}',{t:String(doc.at||'').slice(11,19)});
+    up.title=T('장애 이력을 마지막으로 받아 반영한 시각 (10초마다)')
+      + (doc.latest?T('\\ngraphio 마지막 이상 관측 {t}',{t:doc.latest.replace('T',' ')}):''); }
   if(doc.ver===FAULT_VER) return;        // **아무것도 하지 않는다**
   FAULT=doc; FAULT_VER=doc.ver;
   applyFaults();
@@ -4767,11 +4988,11 @@ const coreOf=h=>(h.nodes||[]).filter(k=>!k.startsWith('pgw:'));
 // 추정 커버리지 원을 메시에 면적 비율로 나눈 것이다(`geo_coverage`).
 // 그래서 칸은 **"그 칸을 덮는 셀들의 체감이 나빴다"**이지 "단말이 그 칸에
 // 있었다"가 아니다. 선택 바에 그렇게 적는다.
-const GEO_NAME={MESH1K:'1km 메시', MESH500:'500m 메시', MESH250:'250m 메시',
-                ADM1:'광역', ADM2:'구·시', ADM3:'丁目', GLOBAL:'전국'};
+const GEO_NAME={MESH1K:T('1km 메시'), MESH500:T('500m 메시'), MESH250:T('250m 메시'),
+                ADM1:T('광역'), ADM2:T('구·시'), ADM3:'丁目', GLOBAL:T('전국')};
 //: 위치 없는 축 — 무슨 축인지는 적는다. "범위 없음"만 적으면 "위치를
 //: 모른다"로 읽히는데, 이것들은 **애초에 지역이 아닌** 장애다
-const AXIS_NAME={UE:'단말 기종', APN:'APN', DOMAIN:'서비스 도메인'};
+const AXIS_NAME={UE:T('단말 기종'), APN:'APN', DOMAIN:T('서비스 도메인')};
 //: graphio 가 `axis_ids` 를 **10개에서 자른다**(`detector` 나쁜 순 10개 ·
 //: `incremental` 병합 후 10개). 10개가 왔으면 더 있을 수 있다
 const GEO_CAP=10;
@@ -4835,7 +5056,7 @@ function drawGeo(h){
     if(g.kind==='rect'){ const [s_,w_,n_,e_]=g.b;
       q=el('path');
       q.setAttribute('d',`M${mx(w_)} ${-my(s_)}L${mx(e_)} ${-my(s_)}L${mx(e_)} ${-my(n_)}L${mx(w_)} ${-my(n_)}Z`);
-      q.dataset.t=`${nm} ${g.id}\n그 칸을 덮는 셀들의 체감이 나빴다 — 단말 실제 위치가 아니다`; }
+      q.dataset.t=T('{nm} {id}\\n그 칸을 덮는 셀들의 체감이 나빴다 — 단말 실제 위치가 아니다',{nm,id:g.id}); }
     else if(g.kind==='ring'){ q=el('path');
       q.setAttribute('d','M'+g.ring.map(p=>`${mx(p[0])} ${-my(p[1])}`).join('L')+'Z');
       q.dataset.t=`${nm} ${g.name} (${g.id})`; }
@@ -4844,7 +5065,7 @@ function drawGeo(h){
       const cy=-my(g.lat), ry=my(g.lat+DONG_R)-my(g.lat);
       q.setAttribute('cx',mx(g.lon)); q.setAttribute('cy',cy);
       q.setAttribute('rx',DONG_R/Math.cos(g.lat*Math.PI/180)); q.setAttribute('ry',ry);
-      q.dataset.t=`${nm} ${g.name}\n경계 없음 — 중심점 근사 (원 크기에 뜻이 없다)`; }
+      q.dataset.t=T('{nm} {name}\\n경계 없음 — 중심점 근사 (원 크기에 뜻이 없다)',{nm,name:g.name}); }
     q.setAttribute('class','ga'+(g.kind==='dot'?' ga-approx':''));
     q.setAttribute('fill',col); q.setAttribute('stroke',col);
     box.appendChild(q);
@@ -4857,25 +5078,25 @@ function renderList(){
   const body=document.getElementById('fbody'); if(!body) return;
   const H=(FAULT&&FAULT.history)||[];
   const live=H.filter(h=>h.live).length;
-  document.getElementById('fcnt').textContent=H.length ? `${H.length}건 · 지금 ${live}` : '';
-  if(!H.length){ body.innerHTML='<div class=empty>graphio 가 연 장애가 없다</div>'; return; }
+  document.getElementById('fcnt').textContent=H.length ? T('{n}건 · 지금 {live}',{n:H.length,live}) : '';
+  if(!H.length){ body.innerHTML='<div class=empty>'+T('graphio 가 연 장애가 없다')+'</div>'; return; }
   body.innerHTML=H.map(h=>{
     const sev=SEV_CLASS[String(h.severity).toUpperCase()]||'CRITICAL';
     const ne=(h.enbs||[]).length, core=coreOf(h);
     const pg=(h.nodes||[]).filter(k=>k.startsWith('pgw:')).map(k=>k.split(':')[1]);
     // **지도에 없는 것은 없다고 적는다** — 체감 메시·APN·단말 축 장애는
     // 장비 범위가 없다. 눌러도 아무 일이 없으면 고장으로 읽힌다
-    const geo = h.axis==='GLOBAL' ? '전국'
-      : h.axis ? `${GEO_NAME[h.axis]||h.axis} ${h.geo_ids.length}${h.geo_ids.length>=GEO_CAP?'+':''}곳`
-      : h.bias ? `${AXIS_NAME[h.axis_raw]||h.axis_raw} · 편향 ${h.bias.node.replace(':',' ').toUpperCase()}`
-      : h.egress && !pg.length ? '망 밖 · docomo 本社'
-      : AXIS_NAME[h.axis_raw] ? `<span class=na>${AXIS_NAME[h.axis_raw]} 축 — 지역과 무관</span>` : '';
+    const geo = h.axis==='GLOBAL' ? T('전국')
+      : h.axis ? T('{geo} {n}곳',{geo:GEO_NAME[h.axis]||h.axis, n:h.geo_ids.length+(h.geo_ids.length>=GEO_CAP?'+':'')})
+      : h.bias ? T('{ax} · 편향 {node}',{ax:AXIS_NAME[h.axis_raw]||h.axis_raw, node:h.bias.node.replace(':',' ').toUpperCase()})
+      : h.egress && !pg.length ? T('망 밖 · docomo 本社')
+      : AXIS_NAME[h.axis_raw] ? `<span class=na>${T('{ax} 축 — 지역과 무관',{ax:AXIS_NAME[h.axis_raw]})}</span>` : '';
     const where = ne||core.length||pg.length||geo
-      ? [ne?`eNB ${ne}`:'', core.length?`코어 ${esc(core.join(' ').toUpperCase())}`:'',
+      ? [ne?`eNB ${ne}`:'', core.length?T('코어 {c}',{c:esc(core.join(' ').toUpperCase())}):'',
          pg.length?`PGW ${esc(pg.join(' '))}`:'', geo].filter(Boolean).join(' · ')
-      : (h.centroid_lat!=null ? '중심 좌표만' : '<span class=na>지도에 범위 없음</span>');
+      : (h.centroid_lat!=null ? T('중심 좌표만') : `<span class=na>${T('지도에 범위 없음')}</span>`);
     return `<button class="it ${sev}${h.live?'':' old'}${h.incident_id===FOCUS?' on':''}" data-id="${esc(h.incident_id)}">`
-      + `<span class=t>${h.live?'<span class=lv>지금</span>':''}${esc(h.severity)} · ${esc(h.title)}</span>`
+      + `<span class=t>${h.live?`<span class=lv>${T('지금')}</span>`:''}${esc(h.severity)} · ${esc(h.title)}</span>`
       + `<span class=m>${esc(md(h.opened_ts))} ${esc(hm(h.opened_ts))}`
       + (hm(h.updated_ts)&&hm(h.updated_ts)!==hm(h.opened_ts)?`~${esc(hm(h.updated_ts))}`:'')
       + ` · ${esc(h.trigger_kpi)} · ${where}</span></button>`;
@@ -5020,7 +5241,7 @@ function drawFocus(){
   const pgws=(h.nodes||[]).filter(k=>k.startsWith('pgw:')).map(k=>k.split(':')[1]);
   if(h.egress){
     const dom=h.axis_raw==='DOMAIN' ? (h.axis_vals||[]).join(', ') : '';
-    hqHot(h.severity, dom ? `망 밖 · ${dom}` : pgws.length ? `PGW ${pgws.join(', ')}` : '망 밖 · DNS');
+    hqHot(h.severity, dom ? T('망 밖 · {d}',{d:dom}) : pgws.length ? `PGW ${pgws.join(', ')}` : T('망 밖 · DNS'));
     const sg=(h.nodes||[]).filter(k=>k.startsWith('sgw:')).map(k=>k.split(':')[1]);
     egressLines(document.getElementById('gPick'), sg);
   } else hqHot(null);
@@ -5046,41 +5267,41 @@ function drawFocus(){
   const pts=focusPoints(h);
   bar.style.display='flex';
   bar.innerHTML=`<b>${esc(h.severity)} · ${esc(h.title)}</b>`
-    + `<button id=unfocus>해제</button><i></i>`
+    + `<button id=unfocus>${T('해제')}</button><i></i>`
     + `<span>${esc(md(h.opened_ts))} ${esc(hm(h.opened_ts))}`
     + (hm(h.updated_ts)&&hm(h.updated_ts)!==hm(h.opened_ts)?`~${esc(hm(h.updated_ts))}`:'')
-    + (h.live?' · 지금 진행':' · 지난 장애')+`</span>`
+    + (h.live?T(' · 지금 진행'):T(' · 지난 장애'))+`</span>`
     + `<span>${esc(h.trigger_kpi)}</span>`
     + `<span>eNB ${(h.enbs||[]).length}</span>`
-    + (core.length?`<span>코어 ${esc(core.join(', '))}</span>`:'')
-    + (h.root_code?`<span>원인 ${esc(h.root_code)}${h.root_label?' — '+esc(h.root_label):''}</span>`:'')
-    + (h.axis==='GLOBAL'?'<span class=warn>전국 장애 — 특정 지역이 아니다</span>'
-       : h.axis?`<span>${esc(GEO_NAME[h.axis]||h.axis)} ${h.geo_ids.length}곳</span>`:'')
+    + (core.length?`<span>${T('코어 {c}',{c:esc(core.join(', '))})}</span>`:'')
+    + (h.root_code?`<span>${T('원인 {c}',{c:esc(h.root_code)})}${h.root_label?' — '+esc(h.root_label):''}</span>`:'')
+    + (h.axis==='GLOBAL'?`<span class=warn>${T('전국 장애 — 특정 지역이 아니다')}</span>`
+       : h.axis?`<span>${T('{geo} {n}곳',{geo:esc(GEO_NAME[h.axis]||h.axis), n:h.geo_ids.length})}</span>`:'')
     + (!h.axis&&AXIS_NAME[h.axis_raw]?`<span>${esc(AXIS_NAME[h.axis_raw])} ${esc((h.axis_vals||[]).join(', '))}</span>`:'')
     + (pgws.length?`<span>PGW ${esc(pgws.join(', '))}</span>`:'')
     // 망 밖 — HTTP 와 DNS 를 나란히. "이름 풀이가 안 되나, 서버·백본이 느리나"
     + (h.egress&&h.dns?h.dns.map(d=>`<span>DNS ${esc(d.host_site)} · `
         // **판정을 짓지 않는다** — 값과 평시를 나란히 둘 뿐이다. "느림"만
         // graphio 가 준 플래그(`slow`)다(불변규칙 18)
-        + (d.fail_rate==null?'—':`실패 ${Number(d.fail_rate).toFixed(1)}%`)
-        + (d.baseline_fail_rate==null?'':` (평시 ${Number(d.baseline_fail_rate).toFixed(1)}%)`)
+        + (d.fail_rate==null?'—':T('실패 {p}%',{p:Number(d.fail_rate).toFixed(1)}))
+        + (d.baseline_fail_rate==null?'':T(' (평시 {p}%)',{p:Number(d.baseline_fail_rate).toFixed(1)}))
         + (d.response_ms==null?'':` · ${Number(d.response_ms).toFixed(0)}ms`)
-        + (d.slow?' <b class=warn>느림</b>':'')+`</span>`).join(''):'')
-    + (h.egress&&!pgws.length?'<span class=dimtag>망 밖 장애를 도코모 본사 PGW 에 붙였다 — graphio 가 PGW 를 지목한 것은 아니다</span>':'')
+        + (d.slow?` <b class=warn>${T('느림')}</b>`:'')+`</span>`).join(''):'')
+    + (h.egress&&!pgws.length?`<span class=dimtag>${T('망 밖 장애를 도코모 본사 PGW 에 붙였다 — graphio 가 PGW 를 지목한 것은 아니다')}</span>`:'')
     // 편향 노드는 **graphio EV-12 의 판정을 옮긴 것**이다 — 원인 확정이 아니다
-    + (h.bias?`<span class=warn>실패가 ${esc(h.bias.node.replace(':',' ').toUpperCase())} 로 쏠림`
-        + ` (실패 ${h.bias.failures.toLocaleString()}건 · 비중 ${h.bias.share.toFixed(0)}%)</span>`
-        + `<span class=dimtag>graphio EV-12 노드 편향${h.bias.verdict?' — '+esc(h.bias.verdict):''} · 원인 확정 아님</span>`
-      : !h.axis&&AXIS_NAME[h.axis_raw]?`<span class=dimtag>${esc(AXIS_NAME[h.axis_raw])} 축 — 지역과 무관`
-        + (h.axis_raw==='DOMAIN'?'':' · 특정 장비로 쏠리지 않았다')+`</span>`:'')
-    + (h.axis&&h.axis.startsWith('MESH')?'<span class=dimtag>칸 = 그 칸을 덮는 셀들의 체감 — 단말 실제 위치가 아니다</span>':'')
-    + (h.axis==='ADM3'?'<span class=dimtag>丁目 경계 없음 — 중심점 근사</span>':'')
-    + (h.axis&&h.axis!=='GLOBAL'&&h.geo_ids.length>=GEO_CAP?`<span class=warn>graphio 가 ${GEO_CAP}곳까지만 넘긴다 — 더 있을 수 있다</span>`:'')
-    + (h.axis&&h.axis!=='GLOBAL'&&geoShapes(h).length===0?'<span class=warn>구역 좌표를 찾지 못했다</span>':'')
-    + (!pts.length&&!h.axis&&!AXIS_NAME[h.axis_raw]?'<span class=warn>지도에 그릴 범위가 없다</span>'
-       : pts.length&&!(h.enbs||[]).length&&!core.length&&!h.axis&&!h.bias?'<span class=warn>장비 범위가 없어 graphio 중심 좌표로 옮겼다</span>':'')
+    + (h.bias?`<span class=warn>${T('실패가 {n} 로 쏠림',{n:esc(h.bias.node.replace(':',' ').toUpperCase())})}`
+        + T(' (실패 {f}건 · 비중 {s}%)',{f:h.bias.failures.toLocaleString(), s:h.bias.share.toFixed(0)})+`</span>`
+        + `<span class=dimtag>${T('graphio EV-12 노드 편향')}${h.bias.verdict?' — '+esc(h.bias.verdict):''}${T(' · 원인 확정 아님')}</span>`
+      : !h.axis&&AXIS_NAME[h.axis_raw]?`<span class=dimtag>${T('{ax} 축 — 지역과 무관',{ax:esc(AXIS_NAME[h.axis_raw])})}`
+        + (h.axis_raw==='DOMAIN'?'':T(' · 특정 장비로 쏠리지 않았다'))+`</span>`:'')
+    + (h.axis&&h.axis.startsWith('MESH')?`<span class=dimtag>${T('칸 = 그 칸을 덮는 셀들의 체감 — 단말 실제 위치가 아니다')}</span>`:'')
+    + (h.axis==='ADM3'?`<span class=dimtag>${T('丁目 경계 없음 — 중심점 근사')}</span>`:'')
+    + (h.axis&&h.axis!=='GLOBAL'&&h.geo_ids.length>=GEO_CAP?`<span class=warn>${T('graphio 가 {n}곳까지만 넘긴다 — 더 있을 수 있다',{n:GEO_CAP})}</span>`:'')
+    + (h.axis&&h.axis!=='GLOBAL'&&geoShapes(h).length===0?`<span class=warn>${T('구역 좌표를 찾지 못했다')}</span>`:'')
+    + (!pts.length&&!h.axis&&!AXIS_NAME[h.axis_raw]?`<span class=warn>${T('지도에 그릴 범위가 없다')}</span>`
+       : pts.length&&!(h.enbs||[]).length&&!core.length&&!h.axis&&!h.bias?`<span class=warn>${T('장비 범위가 없어 graphio 중심 좌표로 옮겼다')}</span>`:'')
     // `#sel button` 규칙(해제 단추 자리 — 오른쪽 위)을 받지 않고 맨 끝에 선다
-    + (pts.length?'<button id=refly style="order:9;margin-left:0">다시 맞추기</button>':'');
+    + (pts.length?`<button id=refly style="order:9;margin-left:0">${T('다시 맞추기')}</button>`:'');
   document.getElementById('unfocus').onclick=()=>focusInc(FOCUS);
   const rf=document.getElementById('refly');
   if(rf) rf.onclick=()=>flyTo(fitFor(h, pts));
@@ -5358,14 +5579,14 @@ function legend(axis, vals){
   // 색표를 띄우면 뜻이 있는 것처럼 읽힌다
   if(axis==='none'){ L.style.display='none'; return; }
   L.style.display='';
-  const label={ta_list:'TA 목록', tac:'TAC', sgw:'SGW', mme:'MME'}[axis];
+  const label={ta_list:T('TA 목록'), tac:'TAC', sgw:'SGW', mme:'MME'}[axis];
   // **몇 개인지가 아니라 얼마나 쏠렸는지가 중요하다.** 색만 9개 보이면
   // 고르게 나뉜 것처럼 읽히는데, 실제로는 한 값이 89% 를 먹고 있었다
   const cnt={}; for(const c of D.cells){ const v=c[axis];
     if(v!==null&&v!=='') cnt[v]=(cnt[v]||0)+1; }
   const tot=Object.values(cnt).reduce((a,b)=>a+b,0)||1;
   const ord=[...vals].sort((a,b)=>(cnt[b]||0)-(cnt[a]||0));
-  const head=`<h4>${label} · ${vals.length}개</h4>`;
+  const head=`<h4>${T('{l} · {n}개',{l:label,n:vals.length})}</h4>`;
   // 많으면 상위만 — 다 적으면 범례가 화면을 덮는다. **자른 사실을 말한다**
   const top=ord.slice(0,18);
   L.innerHTML = head + top.map(v=>{
@@ -5374,7 +5595,7 @@ function legend(axis, vals){
       + `<b style="margin-left:auto;opacity:${pc>=50?'.95':'.5'};font-weight:${pc>=50?700:400}">`
       + `${cnt[v]||0}${pc>=10?` · ${pc}%`:''}</b></div>`;
   }).join('')
-    + (vals.length>top.length ? `<div style="opacity:.55">… 외 ${vals.length-top.length}개</div>` : '');
+    + (vals.length>top.length ? `<div style="opacity:.55">${T('… 외 {n}개',{n:vals.length-top.length})}</div>` : '');
 }
 
 // ── 야마노테선 집기 ─────────────────────────────────────────────────────
@@ -5546,9 +5767,9 @@ function draw(){
     if(M.focus) d.style.pointerEvents='none';
     d.dataset.kind=M.unit; d.dataset.id=c.key; d.dataset.enb=c.enb;
     d.dataset.t = (M.unit==='enb'
-      ? `eNB ${c.enb}  (셀 ${c.n})`
+      ? T('eNB {e}  (셀 {n})',{e:c.enb,n:c.n})
       : `${c.key}  (${c.name})`)
-      + `\nTAC ${c.tac} · TA목록 ${c.ta_list}\nSGW ${c.sgw} · MME ${c.mme}`;
+      + T('\\nTAC {tac} · TA목록 {ta}\\nSGW {sgw} · MME {mme}',{tac:c.tac,ta:c.ta_list,sgw:c.sgw,mme:c.mme});
     document.getElementById('gCell').appendChild(d);
   }
   // **TA 보기에는 코어를 그리지 않는다**(사람 결정 2026-10-28) — 묶음의
@@ -5575,7 +5796,7 @@ function draw(){
     sh.setAttribute('class', 'nd');
 
     sh.dataset.kind=kind; sh.dataset.id=n.id;
-    sh.dataset.t=`${kind.toUpperCase()} ${n.id}\n셀 ${n.cells} · eNB ${n.enb}\n(위치 = 맡은 셀의 중심)`;
+    sh.dataset.t=T('{k} {id}\\n셀 {c} · eNB {e}\\n(위치 = 맡은 셀의 중심)',{k:kind.toUpperCase(),id:n.id,c:n.cells,e:n.enb});
     g.appendChild(sh);
     // 가운데 표식 — SGW 는 점, MME 는 마름모. **도형 뒤에 붙인다** — 장애
     // 표시(`markFault`)·효과(`shapeAt`)는 `g.firstChild` 를 본다
@@ -5607,7 +5828,7 @@ function draw(){
       // 점이 왼쪽으로 밀렸다** — 좌표가 틀린 것처럼 보인 원인이다
       // 점·심볼을 그리지 않는다 — 건물 윤곽은 아래에서 통째로 깐다
       // 글자는 점 **오른쪽**에 — 왼쪽 끝을 점에 맞춘다
-      LABELS.push({x:mx(st.lon), y:-my(st.lat), t:st.name, cls:'lb-s',
+      LABELS.push({x:mx(st.lon), y:-my(st.lat), t:T(st.name), cls:'lb-s',
                    dx:11*k});
     }
   }
@@ -5637,7 +5858,7 @@ async function load(){
   document.getElementById('nsgw').textContent=c.sgw;
   document.getElementById('nmme').textContent=c.mme;
   document.getElementById('note').textContent =
-    D.unmapped ? `좌표 없는 셀 ${D.unmapped}` : '';
+    D.unmapped ? T('좌표 없는 셀 {n}',{n:D.unmapped}) : '';
   if(!HOME && D.cells.length){
     const xs=D.cells.map(c=>mx(c.lon)), ys=D.cells.map(c=>-my(c.lat));
     const x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
@@ -5680,15 +5901,14 @@ async function load(){
     // 출처 표기는 **약관 의무다.** 레이어를 늘리면 여기도 늘어야 한다
     document.getElementById('src').textContent=src.filter(Boolean).join('  ·  ');
     markYamanote();
-    }catch(e){ document.getElementById('note').textContent=`지도 바탕을 받지 못했다 — ${e}`; }
+    }catch(e){ document.getElementById('note').textContent=T('지도 바탕을 받지 못했다 — {e}',{e}); }
   }
   // **점 하나는 셀이 아니라 자리(eNB)다.** 셀 수만 적으면 "2만 개가 왜
   // 이것밖에 안 보이나"가 된다 — 겹친 섹터는 한 점이다
   document.getElementById('scope').textContent =
-    `생성 범위 ${D.scope} — ` +
-    (ALL ? `마스터 ${ALL.enb.toLocaleString()} eNB / `
-         + `${ALL.cells.toLocaleString()}셀 중 ` : '')
-    + `${D.counts.enb} eNB / ${D.cells.length}셀`;
+    T('생성 범위 {s} — ',{s:LANG==='ja' ? D.scope.replace(/ 외 (\\d+)곳/,' 他 $1か所').replace(/^동 (\\d+)곳|(\\+ )동 (\\d+)곳/,(m,a,p,b)=>(p||'')+'丁目 '+(a||b)+'か所').replace(/^전량$/,'全量') : D.scope}) +
+    (ALL ? T('마스터 {e} eNB / {c}셀 중 ',{e:ALL.enb.toLocaleString(), c:ALL.cells.toLocaleString()}) : '')
+    + T('{e} eNB / {c}셀',{e:D.counts.enb, c:D.cells.length});
   MAP_READY=true;                     // 바탕이 다 왔다 — 이제 장비까지 한 번에
   document.body.classList.add('mapready');
   draw();
@@ -5794,19 +6014,19 @@ function drawPick(){
       hotN.has(sh.dataset.kind+':'+sh.dataset.id) ? 1 : .18);
   }
   const lbl={cell:'eNB', enb:'eNB', sgw:'SGW', mme:'MME', pgw:'PGW'}[PICK.kind];
-  const head = PICK.kind==='pgw' ? 'NTT docomo 本社 · PGW (대표)' : PICK.kind==='box' ? `드래그 범위 · eNB ${PICK.enb.length}국`
+  const head = PICK.kind==='pgw' ? T('NTT docomo 本社 · PGW (대표)') : PICK.kind==='box' ? T('드래그 범위 · eNB {n}국',{n:PICK.enb.length})
     : (PICK.kind==='cell'||PICK.kind==='enb') ? `eNB ${PICK.enb[0]}` : `${lbl} ${PICK.id}`;
   bar.style.display='flex';   // CSS 기본이 none 이라 '' 로는 안 열린다
   bar.innerHTML=`<b>${head}</b>`
-    + `<span>셀 ${PICK.cells.length}</span>`
+    + `<span>${T('셀 {n}',{n:PICK.cells.length})}</span>`
     + (PICK.kind==='cell'||PICK.kind==='enb'||PICK.kind==='box'?'':`<span>eNB ${PICK.enb.length}</span>`)
     + `<span>TAC ${PICK.tac.join(', ')||'—'}</span>`
-    + `<span>TA목록 ${PICK.ta.join(', ')||'—'}</span>`
+    + `<span>${T('TA목록 {t}',{t:PICK.ta.join(', ')||'—'})}</span>`
     + `<span>SGW ${PICK.sgw.join(', ')||'—'}</span>`
     + `<span>MME ${PICK.mme.join(', ')||'—'}</span>`
-    + `<button id=unpick>해제</button><i></i>`;
+    + `<button id=unpick>${T('해제')}</button><i></i>`;
   if(PICK.kind==='pgw') bar.insertAdjacentHTML('beforeend',
-    '<span class=dimtag>PGW 16대를 한 점으로 — 실제 PGW 위치가 아니다. 선은 SGW → PGW</span>');
+    `<span class=dimtag>${T('PGW 16대를 한 점으로 — 실제 PGW 위치가 아니다. 선은 SGW → PGW')}</span>`);
   else bar.appendChild(injRow());
   document.getElementById('unpick').onclick=()=>{PICK=null; draw();};
   // 바가 여러 줄이 되면 아래 것들이 그 밑으로 내려가야 겹치지 않는다
@@ -5839,16 +6059,16 @@ const INJ_MAX_ENB=50;
 function injScopes(p){
   if(p.kind==='box'){
     const [s_,w_,n_,e_]=p.box.map(v=>v.toFixed(4));
-    return [['box', `드래그 범위 (eNB ${p.enb.length}국)`, `BOX:${s_},${w_},${n_},${e_}`, p.enb.length]];
+    return [['box', T('드래그 범위 (eNB {n}국)',{n:p.enb.length}), `BOX:${s_},${w_},${n_},${e_}`, p.enb.length]];
   }
   const u=INJ_UNIT[p.kind];
   if(u!=='enb') return [['one', `${u.toUpperCase()} ${p.id}`, `${u.toUpperCase()}-${p.id}`, 0]];
   const e=String(p.enb[0]), c=p.cells[0]||{};
   const nEnb=f=>new Set(D.cells.filter(f).map(x=>x.enb)).size;
-  const out=[['one', `이 eNB 만 (${e})`, `ENB:${e}`, 1]];
-  if(c.tac!=null) out.push(['tac', `같은 TAC ${c.tac}`, `TAC:${c.tac}`,
+  const out=[['one', T('이 eNB 만 ({e})',{e}), `ENB:${e}`, 1]];
+  if(c.tac!=null) out.push(['tac', T('같은 TAC {t}',{t:c.tac}), `TAC:${c.tac}`,
     nEnb(x=>String(x.tac)===String(c.tac))]);
-  if(c.gu) out.push(['gu', `같은 구 ${c.gu}`, `SGG:${c.gu}`,
+  if(c.gu) out.push(['gu', T('같은 구 {g}',{g:c.gu}), `SGG:${c.gu}`,
     nEnb(x=>String(x.gu)===String(c.gu))]);
   return out;
 }
@@ -5860,26 +6080,26 @@ function injRow(){
   if(INJ_EL && INJ_KEY===key) return INJ_EL;
   const box=document.createElement('div'); box.id='inj';
   const list=(SCN||[]).filter(s=>s[u]==='Y');
-  if(!SCN){ box.innerHTML='<span class=msg>시나리오 목록을 읽는 중</span>'; }
-  else if(!list.length){ box.innerHTML='<span class=msg>이 장비에 걸 수 있는 시나리오가 없다</span>'; }
+  if(!SCN){ box.innerHTML='<span class=msg>'+T('시나리오 목록을 읽는 중')+'</span>'; }
+  else if(!list.length){ box.innerHTML='<span class=msg>'+T('이 장비에 걸 수 있는 시나리오가 없다')+'</span>'; }
   else {
     // 준비 중인 것도 **보인다**(비활성) — 숨기면 무엇이 남았는지 사라진다
     const scopes=injScopes(PICK);
-    box.innerHTML='<span>장애 주입</span>'
+    box.innerHTML='<span>'+T('장애 주입')+'</span>'
       + (scopes.length>1 || PICK.kind==='box'
           ? '<select id=injScope>' + scopes.map(([v,name,,n])=>
               `<option value="${v}"${n>INJ_MAX_ENB?' disabled':''}>${esc(name)}`
-              + (v!=='one'&&PICK.kind!=='box' ? ` · ${n}국` : '')
-              + (n>INJ_MAX_ENB ? ` — ${INJ_MAX_ENB}국 초과` : '') + '</option>').join('')
+              + (v!=='one'&&PICK.kind!=='box' ? T(' · {n}국',{n}) : '')
+              + (n>INJ_MAX_ENB ? T(' — {n}국 초과',{n:INJ_MAX_ENB}) : '') + '</option>').join('')
             + '</select>' : '')
       + '<select id=injScn>'
       + list.map(s=>{ const live=s.kind && SCN_OK.has(s.kind);
-          return `<option value="${s.no}"${live?'':' disabled'} title="${esc(s.description||'')}">`
-            + `${s.no}. ${esc(s.name)}${live?'':(s.status==='NO_EVIDENCE'?' — 증거 없음':' — 준비 중')}</option>`; }).join('')
+          return `<option value="${s.no}"${live?'':' disabled'} title="${esc(T(s.description||''))}">`
+            + `${s.no}. ${esc(T(s.name))}${live?'':(s.status==='NO_EVIDENCE'?T(' — 증거 없음'):T(' — 준비 중'))}</option>`; }).join('')
       + '</select>'
-      + '<label>지속 <input id=injDur type=number min=1 max=180 value=10>분</label>'
-      + '<label>강도 <input id=injInt type=number min=0.1 max=1 step=0.1 value=1></label>'
-      + '<button id=injGo>주입</button><span class=msg id=injMsg></span>';
+      + '<label>'+T('지속')+' <input id=injDur type=number min=1 max=180 value=10>'+T('분')+'</label>'
+      + '<label>'+T('강도')+' <input id=injInt type=number min=0.1 max=1 step=0.1 value=1></label>'
+      + '<button id=injGo>'+T('주입')+'</button><span class=msg id=injMsg></span>';
     const first=list.find(s=>s.kind && SCN_OK.has(s.kind));
     if(first) box.querySelector('#injScn').value=String(first.no);
     box.querySelector('#injGo').onclick=injFire;
@@ -5892,17 +6112,18 @@ async function injFire(){
   const s=(SCN||[]).find(x=>x.no===no);
   const dur=Math.round(+document.getElementById('injDur').value);
   const inten=+document.getElementById('injInt').value;
-  if(!s||!s.kind){ msg.className='msg err'; msg.textContent='준비 중인 시나리오다'; return; }
-  if(!(dur>=1&&dur<=180)){ msg.className='msg err'; msg.textContent='지속은 1~180분'; return; }
-  if(!(inten>0&&inten<=1)){ msg.className='msg err'; msg.textContent='강도는 0 초과 1 이하'; return; }
+  if(!s||!s.kind){ msg.className='msg err'; msg.textContent=T('준비 중인 시나리오다'); return; }
+  if(!(dur>=1&&dur<=180)){ msg.className='msg err'; msg.textContent=T('지속은 1~180분'); return; }
+  if(!(inten>0&&inten<=1)){ msg.className='msg err'; msg.textContent=T('강도는 0 초과 1 이하'); return; }
   const scopes=injScopes(PICK), sv=document.getElementById('injScope');
   const sc=scopes.find(x=>x[0]===(sv?sv.value:scopes[0][0]))||scopes[0];
   if(sc[3]>INJ_MAX_ENB){ msg.className='msg err';
-    msg.textContent=`eNB ${sc[3]}국 — 한 번에 ${INJ_MAX_ENB}국까지다`; return; }
+    msg.textContent=T('eNB {n}국 — 한 번에 {m}국까지다',{n:sc[3],m:INJ_MAX_ENB}); return; }
   const target=sc[2];
   // **한 번 더 묻는다** — 이 DB 가 곧 운영이고, 주입 이력이 정답(ground
   // truth)이 된다. 잘못 누른 한 번이 채점을 흐린다
-  if(!confirm(`${target}${sc[3]>1?` (eNB ${sc[3]}국)`:''} 에 "${s.no}. ${s.name}" 을 ${dur}분 (강도 ${inten}) 주입한다.\n생성기가 다음 1분 틱부터 반영한다.`)) return;
+  if(!confirm(T('{target} 에 "{no}. {name}" 을 {dur}분 (강도 {int}) 주입한다.\\n생성기가 다음 1분 틱부터 반영한다.',
+      {target:target+(sc[3]>1?T(' (eNB {n}국)',{n:sc[3]}):''), no:s.no, name:s.name, dur, int:inten}))) return;
   const btn=document.getElementById('injGo'); btn.disabled=true;
   try{
     const r=await fetch('/api/faults',{method:'POST', headers:{'content-type':'application/json'},
@@ -5911,8 +6132,8 @@ async function injFire(){
     const d=await r.json();
     if(!r.ok) throw new Error(d.detail||r.status);
     msg.className='msg';
-    msg.textContent=`주입 #${d.fault_id} 접수 — ${target} · ${s.name} · ${dur}분. 탐지되면 '장애 표시'에 뜬다`;
-  }catch(e){ msg.className='msg err'; msg.textContent='주입 실패 — '+e.message; }
+    msg.textContent=T("주입 #{id} 접수 — {t} · {name} · {dur}분. 탐지되면 '장애 표시'에 뜬다",{id:d.fault_id,t:target,name:s.name,dur});
+  }catch(e){ msg.className='msg err'; msg.textContent=T('주입 실패 — ')+e.message; }
   finally{ btn.disabled=false; }
 }
 
@@ -5947,15 +6168,15 @@ function drawIncidents(){
     // null 인 것은 "영향 없음"이 아니라 산출하지 못했다는 뜻이다
     // `impact_ratio` 는 **이미 퍼센트다**(graphio `detector` 가 100 을 곱해
     // 담고 `api.fmtRatio` 도 그대로 % 를 붙인다). 여기서 또 곱해 621.9% 가 떴다
-    const imp = i.impact_ratio==null ? '산출 불가'
+    const imp = i.impact_ratio==null ? T('산출 불가')
               : Number(i.impact_ratio).toFixed(1)+'%';
-    const subs = i.affected_subscribers==null ? '산출 불가'
+    const subs = i.affected_subscribers==null ? T('산출 불가')
                : Number(i.affected_subscribers).toLocaleString();
     const hm=v=>String(v||'').slice(11,16);
     return `<div class="inc ${esc(i.severity)}">`
       + `<h5>${esc(i.severity)} · ${esc(i.title)}</h5>`
-      + `<p>${esc(i.trigger_kpi)} · 셀 ${i.cell_cnt==null?'—':i.cell_cnt}`
-      + ` · 영향 ${esc(subs)} (${esc(imp)})`
+      + `<p>${esc(i.trigger_kpi)}`+T(' · 셀 {n}',{n:i.cell_cnt==null?'—':i.cell_cnt})
+      + T(' · 영향 {s} ({i})',{s:esc(subs), i:esc(imp)})
       + ` · ${esc(String(i.opened_ts||'').slice(5,10))} ${esc(hm(i.opened_ts))}`
       + (i.updated_ts && hm(i.updated_ts)!==hm(i.opened_ts) ? `~${esc(hm(i.updated_ts))}` : '')
       + (i.status?` · ${esc(i.status)}`:'') + `</p>`
@@ -5963,12 +6184,11 @@ function drawIncidents(){
       + (i.root_code
           ? `<p class=code>${esc(i.root_code)}`
             + (i.root_label?` — ${esc(i.root_label)}`:'')
-            + (i.confidence==null?'':` · 확신도 ${(i.confidence*100).toFixed(0)}%`)
+            + (i.confidence==null?'':T(' · 확신도 {p}%',{p:(i.confidence*100).toFixed(0)}))
             + `</p>`
-          : '<p class=code>원인 분석 없음 — RCA 가 아직 돌지 않았다</p>')
+          : '<p class=code>'+T('원인 분석 없음 — RCA 가 아직 돌지 않았다')+'</p>')
       + (via.has(i.incident_id)
-          ? '<p class=code>S6a(MME↔HSS) 인증 실패 — 이 MME 관할 셀에서 관측됐다. '
-            + 'graphio 가 이 MME 를 직접 지목한 것은 아니다</p>' : '')
+          ? '<p class=code>'+T('S6a(MME↔HSS) 인증 실패 — 이 MME 관할 셀에서 관측됐다. graphio 가 이 MME 를 직접 지목한 것은 아니다')+'</p>' : '')
       + `</div>`;
   }).join('');
 }
@@ -6134,7 +6354,7 @@ document.getElementById('fbody').addEventListener('click',e=>{
 document.getElementById('flist').querySelector('.hd').onclick=e=>{
   e.stopPropagation();
   const f=document.getElementById('flist'); f.classList.toggle('fold');
-  document.getElementById('ffold').textContent=f.classList.contains('fold')?'펼치기':'접기';
+  document.getElementById('ffold').textContent=f.classList.contains('fold')?T('펼치기'):T('접기');
   placeLabels(); };
 syncFaultToggle();
 // **보이는 것 전체**에 맞춘다 — 마스터까지. 생성 범위로만 맞추면
@@ -6161,11 +6381,528 @@ document.getElementById('reset').onclick=()=>{
   const px=(x1-x0)*.06+.002, py=(y1-y0)*.06+.002;
   setVB({x:x0-px,y:y0-py,w:(x1-x0)+2*px,h:(y1-y0)+2*py}); draw();
   document.getElementById('note').textContent =
-    out ? `화면 밖 ${out}셀 — 동떨어져 있어 범위에서 뺐다` : '';
+    out ? T('화면 밖 {n}셀 — 동떨어져 있어 범위에서 뺐다',{n:out}) : '';
 };
 load();
 </script></body></html>
 """
+
+
+# ── 화면 언어 — 한국어 / 日本語 (사람 결정 2026-11-03) ─────────────────────
+#
+# **나라(`locale`)와 따로 고른다.** 일본 PoC 를 한국 쪽 사람이 한국어로 볼 수
+# 있어야 한다. 고른 값은 브라우저에 두고(`localStorage`) 바꾸면 페이지를
+# 새로 연다 — 지도가 1초 남짓에 뜨므로 그리던 것을 다 되돌리는 것보다 낫다.
+#
+# **사전의 키는 한국어 원문이다.** 원문이 곧 코드에 적힌 문구라 키를 따로
+# 지어 두 벌을 맞출 일이 없고, 사전에 없는 문구는 **원문 그대로** 나온다 —
+# 빠뜨린 것이 깨지지 않고 한국어로 보여 눈에 띈다.
+#
+# * 정적 HTML — `applyLang` 이 글자 마디와 `title`·`placeholder`·`aria-label`
+#   을 **통째로 같을 때만** 바꾼다(앞뒤 공백 무시)
+# * JS 가 만드는 문구 — `T('셀 {n}', {n})`. 자리표시는 `{이름}`
+# * graphio 가 내려 준 문구(장애 제목·원인 설명·`statement_ko`)는 **바꾸지
+#   않는다** — 그쪽 데이터다
+
+_I18N_JS = r"""
+const LANG_KEY='gp-ui-lang';
+const LANG=localStorage.getItem(LANG_KEY)==='ja'?'ja':'ko';
+document.documentElement.lang=LANG;
+function T(ko, a){
+  let s=(LANG==='ja' && JA[ko]!=null) ? JA[ko] : ko;
+  return a ? s.replace(/\{(\w+)\}/g,(m,k)=>(k in a ? a[k] : m)) : s;
+}
+function applyLang(root){
+  if(LANG!=='ja') return;
+  root=root||document.body;
+  const w=document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for(let n=w.nextNode(); n; n=w.nextNode()){
+    const t=n.nodeValue.trim();
+    if(t && JA[t]!=null) n.nodeValue=n.nodeValue.replace(t, JA[t]);
+  }
+  for(const e of root.querySelectorAll('[title],[placeholder],[aria-label]'))
+    for(const a of ['title','placeholder','aria-label']){
+      const v=e.getAttribute(a); if(v && JA[v]!=null) e.setAttribute(a, JA[v]); }
+  if(JA[document.title]!=null) document.title=JA[document.title];
+}
+function langSelect(id){
+  const s=document.getElementById(id); if(!s) return;
+  s.value=LANG;
+  s.onchange=()=>{ localStorage.setItem(LANG_KEY, s.value); location.reload(); };
+}
+"""
+
+
+def _with_i18n(html: str, ja: dict) -> str:
+    """`/*__I18N__*/` 자리에 번역 함수와 사전을 넣는다."""
+    js = "const JA=" + json.dumps(ja, ensure_ascii=False) + ";\n" + _I18N_JS
+    assert "/*__I18N__*/" in html
+    return html.replace("/*__I18N__*/", js, 1)
+
+
+#: 지도 화면 — 한국어 원문 → 日本語
+_JA_MAP = {
+    # 역 이름 — `data/lines/yamanote.json` 의 `stations` 가 한글로만 들고 있다
+    "도쿄": "東京", "간다": "神田", "아키하바라": "秋葉原", "오카치마치": "御徒町",
+    "우에노": "上野", "우구이스다니": "鶯谷", "닙포리": "日暮里",
+    "니시닙포리": "西日暮里", "다바타": "田端", "고마고메": "駒込", "스가모": "巣鴨",
+    "오쓰카": "大塚", "이케부쿠로": "池袋", "메지로": "目白",
+    "다카다노바바": "高田馬場", "신오쿠보": "新大久保", "신주쿠": "新宿",
+    "요요기": "代々木", "하라주쿠": "原宿", "시부야": "渋谷", "에비스": "恵比寿",
+    "메구로": "目黒", "고탄다": "五反田", "오사키": "大崎", "시나가와": "品川",
+    "다카나와": "高輪ゲートウェイ", "다마치": "田町", "하마마쓰초": "浜松町",
+    "신바시": "新橋", "유라쿠초": "有楽町",
+    # 머리·정적
+    "지도 · 장비 위치": "地図・装置位置", "장비 위치": "装置位置", "보기": "表示",
+    "전체 eNB": "全eNB", "TA 목록": "TAリスト", "전체 보기": "全体表示",
+    "지도 색상셋 — 고른 것은 이 브라우저에 기억한다": "地図の配色 — 選択はこのブラウザに保存される",
+    "색상": "配色", "어두운": "ダーク", "밝은": "ライト",
+    "화면 언어 — 고른 것은 이 브라우저에 기억한다": "表示言語 — 選択はこのブラウザに保存される",
+    "언어": "言語",
+    "장애 주입 화면": "障害注入画面", "마스터 토폴로지": "マスタトポロジ",
+    "전체 eNB·TA 보기에서 Shift 를 누른 채 끌면 사각형 안의 eNB 를 한 번에 고른다":
+        "全eNB・TA表示でShiftを押しながらドラッグすると、矩形内のeNBをまとめて選択する",
+    "Shift+드래그 = eNB 범위 선택": "Shift+ドラッグ = eNB範囲選択",
+    "장애 이력을 마지막으로 받아 화면에 반영한 시각 (10초마다 묻는다)":
+        "障害履歴を最後に取得して画面に反映した時刻(10秒ごとに確認)",
+    "새로고침 — 장비·장애를 지금 다시 받는다": "再読み込み — 装置・障害を今すぐ取得し直す",
+    "새로고침": "再読み込み",
+    "셀": "セル", "TA목록": "TAリスト", "장애": "障害",
+    "NTT docomo 本社 (千代田区永田町2-11-1)\nPGW 16대를 한 점으로 — 실제 PGW 위치가 아니다\n누르면 SGW 에서 모이는 선이 나온다":
+        "NTT docomo 本社 (千代田区永田町2-11-1)\nPGW 16台を1点に集約 — 実際のPGW位置ではない\nクリックするとSGWから集まる線が出る",
+    "장애 이력": "障害履歴", "펼치기": "展開", "접기": "折りたたむ",
+    "graphio 에 묻는 중": "graphioに問い合わせ中",
+    "지도 불러오는 중…": "地図を読み込み中…",
+    # 장애 표시
+    "PGW {p} 장애": "PGW {p} 障害",
+    "graphio 마지막 관측 {t}": "graphio 最終観測 {t}",
+    "\n증설 eNB — 24번으로 켜짐 (eNB {f} 의 부하를 받는다)": "\n増設eNB — 24番で点灯(eNB {f} の負荷を引き受ける)",
+    "\n소등 eNB — 평소 호 없음": "\n消灯eNB — 平常時は呼なし",
+    " · 24번 진행 중, 10분 시점에 켜진다": " · 24番実行中、10分時点で点灯する",
+    "갱신 {t}": "更新 {t}",
+    "장애 이력을 마지막으로 받아 반영한 시각 (10초마다)": "障害履歴を最後に取得して反映した時刻(10秒ごと)",
+    "\ngraphio 마지막 이상 관측 {t}": "\ngraphio 最終異常観測 {t}",
+    "1km 메시": "1kmメッシュ", "500m 메시": "500mメッシュ", "250m 메시": "250mメッシュ",
+    "광역": "都道府県", "구·시": "区・市", "전국": "全国",
+    "단말 기종": "端末機種", "서비스 도메인": "サービスドメイン",
+    "{nm} {id}\n그 칸을 덮는 셀들의 체감이 나빴다 — 단말 실제 위치가 아니다":
+        "{nm} {id}\nこのメッシュを覆うセルの体感が悪化 — 端末の実位置ではない",
+    "{nm} {name}\n경계 없음 — 중심점 근사 (원 크기에 뜻이 없다)":
+        "{nm} {name}\n境界なし — 中心点で近似(円の大きさに意味はない)",
+    # 장애 이력
+    "{n}건 · 지금 {live}": "{n}件 · 発生中 {live}",
+    "graphio 가 연 장애가 없다": "graphioが開いた障害はない",
+    "{geo} {n}곳": "{geo} {n}か所",
+    "{ax} · 편향 {node}": "{ax} · 偏り {node}",
+    "망 밖 · docomo 本社": "網外 · docomo 本社",
+    "{ax} 축 — 지역과 무관": "{ax}軸 — 地域とは無関係",
+    "코어 {c}": "コア {c}",
+    "중심 좌표만": "中心座標のみ", "지도에 범위 없음": "地図上の範囲なし",
+    "지금": "発生中",
+    # 장애 바
+    "망 밖 · {d}": "網外 · {d}", "망 밖 · DNS": "網外 · DNS",
+    "해제": "解除", " · 지금 진행": " · 発生中", " · 지난 장애": " · 終了した障害",
+    "원인 {c}": "原因 {c}",
+    "전국 장애 — 특정 지역이 아니다": "全国障害 — 特定地域ではない",
+    "실패 {p}%": "失敗 {p}%", " (평시 {p}%)": " (平常時 {p}%)", "느림": "遅延",
+    "망 밖 장애를 도코모 본사 PGW 에 붙였다 — graphio 가 PGW 를 지목한 것은 아니다":
+        "網外障害をドコモ本社PGWに表示 — graphioがPGWを特定したわけではない",
+    "실패가 {n} 로 쏠림": "失敗が {n} に集中",
+    " (실패 {f}건 · 비중 {s}%)": " (失敗 {f}件 · 比率 {s}%)",
+    "graphio EV-12 노드 편향": "graphio EV-12 ノード偏り",
+    " · 원인 확정 아님": " · 原因確定ではない",
+    " · 특정 장비로 쏠리지 않았다": " · 特定装置への集中なし",
+    "칸 = 그 칸을 덮는 셀들의 체감 — 단말 실제 위치가 아니다":
+        "メッシュ = そのメッシュを覆うセルの体感 — 端末の実位置ではない",
+    "丁目 경계 없음 — 중심점 근사": "丁目境界なし — 中心点で近似",
+    "graphio 가 {n}곳까지만 넘긴다 — 더 있을 수 있다": "graphioは{n}か所までしか渡さない — さらにある可能性がある",
+    "구역 좌표를 찾지 못했다": "区域の座標が見つからない",
+    "지도에 그릴 범위가 없다": "地図に描く範囲がない",
+    "장비 범위가 없어 graphio 중심 좌표로 옮겼다": "装置範囲がないためgraphioの中心座標へ移動した",
+    "다시 맞추기": "再フィット",
+    # 범례·툴팁·머리 줄
+    "{l} · {n}개": "{l} · {n}個", "… 외 {n}개": "… 他 {n}個",
+    "eNB {e}  (셀 {n})": "eNB {e}  (セル {n})",
+    "\nTAC {tac} · TA목록 {ta}\nSGW {sgw} · MME {mme}": "\nTAC {tac} · TAリスト {ta}\nSGW {sgw} · MME {mme}",
+    "{k} {id}\n셀 {c} · eNB {e}\n(위치 = 맡은 셀의 중심)": "{k} {id}\nセル {c} · eNB {e}\n(位置 = 担当セルの中心)",
+    "좌표 없는 셀 {n}": "座標なしセル {n}",
+    "지도 바탕을 받지 못했다 — {e}": "地図背景を取得できなかった — {e}",
+    "생성 범위 {s} — ": "生成範囲 {s} — ",
+    "마스터 {e} eNB / {c}셀 중 ": "マスタ {e} eNB / {c}セル中 ",
+    "{e} eNB / {c}셀": "{e} eNB / {c}セル",
+    "화면 밖 {n}셀 — 동떨어져 있어 범위에서 뺐다": "画面外 {n}セル — 離れているため範囲から除外した",
+    # 선택 바·주입
+    "NTT docomo 本社 · PGW (대표)": "NTT docomo 本社 · PGW (代表)",
+    "드래그 범위 · eNB {n}국": "ドラッグ範囲 · eNB {n}局",
+    "셀 {n}": "セル {n}", "TA목록 {t}": "TAリスト {t}",
+    "PGW 16대를 한 점으로 — 실제 PGW 위치가 아니다. 선은 SGW → PGW":
+        "PGW 16台を1点に集約 — 実際のPGW位置ではない。線は SGW → PGW",
+    "드래그 범위 (eNB {n}국)": "ドラッグ範囲 (eNB {n}局)",
+    "이 eNB 만 ({e})": "このeNBのみ ({e})",
+    "같은 TAC {t}": "同じTAC {t}", "같은 구 {g}": "同じ区 {g}",
+    "시나리오 목록을 읽는 중": "シナリオ一覧を読み込み中",
+    "이 장비에 걸 수 있는 시나리오가 없다": "この装置に適用できるシナリオはない",
+    "장애 주입": "障害注入",
+    " · {n}국": " · {n}局", " — {n}국 초과": " — {n}局超過",
+    " — 증거 없음": " — 根拠なし", " — 준비 중": " — 準備中",
+    "지속": "継続", "분": "分", "강도": "強度", "주입": "注入",
+    "준비 중인 시나리오다": "準備中のシナリオ",
+    "지속은 1~180분": "継続は1〜180分",
+    "강도는 0 초과 1 이하": "強度は0より大きく1以下",
+    "eNB {n}국 — 한 번에 {m}국까지다": "eNB {n}局 — 一度に{m}局まで",
+    " (eNB {n}국)": " (eNB {n}局)",
+    "{target} 에 \"{no}. {name}\" 을 {dur}분 (강도 {int}) 주입한다.\n생성기가 다음 1분 틱부터 반영한다.":
+        "{target} に「{no}. {name}」を{dur}分(強度 {int})注入する。\n生成器は次の1分ティックから反映する。",
+    "주입 #{id} 접수 — {t} · {name} · {dur}분. 탐지되면 '장애 표시'에 뜬다":
+        "注入 #{id} 受付 — {t} · {name} · {dur}分。検知されると「障害表示」に出る",
+    "주입 실패 — ": "注入失敗 — ",
+    # 고른 장비의 장애
+    "산출 불가": "算出不可",
+    " · 셀 {n}": " · セル {n}", " · 영향 {s} ({i})": " · 影響 {s} ({i})",
+    " · 확신도 {p}%": " · 確信度 {p}%",
+    "원인 분석 없음 — RCA 가 아직 돌지 않았다": "原因分析なし — RCAが未実行",
+    "S6a(MME↔HSS) 인증 실패 — 이 MME 관할 셀에서 관측됐다. graphio 가 이 MME 를 직접 지목한 것은 아니다":
+        "S6a(MME↔HSS)認証失敗 — このMME管轄セルで観測された。graphioがこのMMEを直接特定したわけではない",
+}
+
+
+#: 두 화면이 함께 쓰는 것 — 시나리오(`control.SCENARIOS` 이름·설명),
+#: 장애 종류(`KIND_LABELS`), 지역 이름(`region.LOCALES`). **원문은 서버 상수다** —
+#: 그쪽 문구를 고치면 여기 키도 따라 고쳐야 하고, 못 따라오면 한국어로 보인다
+_JA_COMMON = {
+    # 시나리오 이름
+    "SGW 자원 소진": "SGWリソース枯渇", "무선 구간 열화": "無線区間劣化",
+    "SGW 노드 무응답": "SGWノード無応答", "인증(S6a) 거절": "認証(S6a)拒否",
+    "DNS 열화": "DNS劣化", "외부 서버 5xx": "外部サーバ5xx", "전송망 손실": "伝送網損失",
+    "특정 단말 기종": "特定端末機種", "핸드오버 이상": "ハンドオーバ異常",
+    "MME 과부하": "MME過負荷", "작업/변경 의심 (MME×APN)": "作業/変更の疑い (MME×APN)",
+    "IMS PDN 이상": "IMS PDN異常", "NSA NR leg 실패": "NSA NR leg失敗",
+    "도심 역 저녁 러시 Sub6 혼잡": "都心駅の夕方ラッシュ Sub6混雑",
+    "야마노테선 구간 4G↔5G 전환 정체": "山手線区間 4G↔5G切替時の停滞",
+    "앵커 고착 — 안테나는 서는데 느리다": "アンカー固着 — アンテナは立つが遅い",
+    "SA→LTE 폴백 급증": "SA→LTEフォールバック急増",
+    "SA UPF 자원 소진 → EPC 재현": "SA UPFリソース枯渇 → EPCで再現",
+    "AMF 과부하 확산 → EPC 재현": "AMF過負荷の拡散 → EPCで再現",
+    "VoNR / EPS Fallback 음성 접속 → IMS 접속 장애 재현": "VoNR / EPS Fallback音声接続 → IMS接続障害で再現",
+    "동영상 CDN 서버측 열화": "動画CDNサーバ側劣化",
+    "결제 앱 응답 지연 (DNS 기인)": "決済アプリ応答遅延 (DNS起因)",
+    "대형 이벤트 일시 군중 혼잡 + 업링크": "大型イベント一時群衆混雑 + アップリンク",
+    "기지국 증설 후 부하 이동": "基地局増設後の負荷移動",
+    "SON 파라미터 변경 후 계단형 저하": "SONパラメータ変更後の階段状劣化",
+    "특정 단말 SW 업데이트 후 등록 실패 → 기종 장애 재현": "特定端末SW更新後の登録失敗 → 機種障害で再現",
+    "지진 — 국지 다수 셀 정지 + 주변 부하 유입": "地震 — 局地的な多数セル停止 + 周辺への負荷流入",
+    # 시나리오 설명
+    "S11 Create Session 이 73(No resources)으로 거절된다 — 하류 ESM 26":
+        "S11 Create Sessionが73(No resources)で拒否される — 下流ESM 26",
+    "접속 지연 증가 + Context Setup 실패(125/126) + 무선 절단(121)":
+        "接続遅延増加 + Context Setup失敗(125/126) + 無線切断(121)",
+    "S11 재전송 타임아웃(First 900) — 결국 거절 응답, 하류 ESM 30":
+        "S11再送タイムアウト(First 900) — 最終的に拒否応答、下流ESM 30",
+    "MME–HSS 구간 인증 거절 — 정답지 Result-Code 구성비, 해제 301":
+        "MME–HSS区間の認証拒否 — 正解データのResult-Code構成比、解放301",
+    "DNS 응답 지연·실패 증가 — 도메인 자동 선택": "DNS応答遅延・失敗の増加 — ドメイン自動選択",
+    "특정 도메인 HTTP 5xx 증가 — 망 지표는 정상": "特定ドメインのHTTP 5xx増加 — 網指標は正常",
+    "down 재전송·RTT 증가 — C-Plane 은 정상": "down再送・RTT増加 — C-Planeは正常",
+    "한 기종만 접속 실패 — SGW 아래 여러 셀에 흩어져 난다": "1機種のみ接続失敗 — SGW配下の複数セルに散在して発生",
+    "셀 쌍 Path Switch 실패 + 핸드오버 절단(106)": "セルペアのPath Switch失敗 + ハンドオーバ切断(106)",
+    "지연 증가 + Context Setup 실패·절단(500) — 확산형": "遅延増加 + Context Setup失敗・切断(500) — 拡散型",
+    "그 MME 의 한 APN 만 S11 68 → ESM 30 — 계단형": "そのMMEの1 APNのみ S11 68 → ESM 30 — 階段状",
+    "IMS 접속만 실패, 데이터는 정상": "IMS接続のみ失敗、データは正常",
+    "5G NSA 단말의 NR 레그 미성립": "5G NSA端末のNRレグ不成立",
+    "상위 트래픽 셀 8개 활성 가입자 최대 1.8배 + 처리율·RTT 악화·정체 — CP 정상":
+        "上位トラフィックセル8個でアクティブ加入者最大1.8倍 + スループット・RTT悪化・停滞 — CP正常",
+    "코리도 셀 쌍에서 전환 직후 3–8초 down 정체 + NR 레그 해제 — CP 정상":
+        "コリドーのセルペアで切替直後3–8秒のdown停滞 + NRレグ解放 — CP正常",
+    "LTE 앵커 경합으로 5G 체감 저하": "LTEアンカー競合による5G体感低下",
+    "보류 — XDR 에 SA 판정 근거가 없다": "保留 — XDRにSA判定の根拠がない",
+    "1번과 같은 데이터 — UPF 라고 주장하지 않는다": "1番と同じデータ — UPFとは主張しない",
+    "10번과 같은 데이터 — AMF 라고 주장하지 않는다": "10番と同じデータ — AMFとは主張しない",
+    "12번과 같은 데이터 — 음성 분기를 주장하지 않는다": "12番と同じデータ — 音声分岐とは主張しない",
+    "동영상 CDN 호스트 사이트 하나가 느리게 답한다 — HTTP 응답 지연·처리율 하락, 망은 정상":
+        "動画CDNのホストサイト1つが遅く応答 — HTTP応答遅延・スループット低下、網は正常",
+    "결제 등급 도메인만 DNS 응답시간 상승(일부 실패) — 도메인 패턴으로 등급 판정":
+        "決済クラスのドメインのみDNS応答時間上昇(一部失敗) — ドメインパターンでクラス判定",
+    "행사장 셀 8개 활성 가입자 3배·2시간 + 업로드 급증으로 업링크 처리율·RTT 악화":
+        "会場セル8個でアクティブ加入者3倍・2時間 + アップロード急増でアップリンクのスループット・RTT悪化",
+    "30분 고정 — A eNB 에 10분간 호가 몰려 혼잡 → 소등 eNB(B) 개통, A 40 · B 60 으로 나뉘며 A 회복 → 10분 분석 뒤 B 소등. 채점 제외":
+        "30分固定 — A eNBに10分間呼が集中して混雑 → 消灯eNB(B)開通、A 40 · B 60に分かれてA回復 → 10分の分析後にB消灯。採点対象外",
+    "그 eNB 의 셀 쌍 핸드오버 실패가 계단으로 선다": "そのeNBのセルペアでハンドオーバ失敗が階段状に立つ",
+    "8번과 같은 데이터 — SW 버전 필드가 XDR 에 없다": "8番と同じデータ — SWバージョン項目がXDRにない",
+    "지역 셀 25개 중 40% 정지 — 그 가입자가 이웃 셀로 옮겨 붙고 주변이 혼잡해진다":
+        "地域セル25個のうち40%停止 — その加入者が隣接セルへ移り、周辺が混雑する",
+    # 장애 종류 (`KIND_LABELS`)
+    "SGW 노드 다운 (무응답)": "SGWノードダウン (無応答)", "무선 구간 열화": "無線区間劣化",
+    "핸드오버 이상": "ハンドオーバ異常",
+    "PGW 재기동 통보": "PGW再起動通知", "외부 경로 지연 (백본)": "外部経路遅延 (バックボーン)",
+    "DCNR 정책 제한": "DCNRポリシー制限", "5G 체감 품질 저하 (앵커 경합)": "5G体感品質低下 (アンカー競合)",
+    "SON 변경 후 계단형 저하 (H/O)": "SON変更後の階段状劣化 (H/O)",
+    "무선 용량 혼잡 (활성 가입자 증가)": "無線容量混雑 (アクティブ加入者増加)",
+    "전환 직후 정체 (코리도 4G↔5G)": "切替直後の停滞 (コリドー 4G↔5G)",
+    "국지 다수 셀 정지 + 주변 부하 유입 (지진)": "局地的な多数セル停止 + 周辺への負荷流入 (地震)",
+    "대형 이벤트 군중 혼잡 + 업링크": "大型イベント群衆混雑 + アップリンク",
+    "기지국 증설 후 부하 이동 (장애 아님)": "基地局増設後の負荷移動 (障害ではない)",
+    "S6a 무응답 (TIMEOUT)": "S6a無応答 (TIMEOUT)", "S6a 라우팅 계층 이상": "S6aルーティング層異常",
+    "S6a 무응답 (장비 미특정)": "S6a無応答 (装置未特定)", "PGW 사용자평면 저하": "PGWユーザプレーン劣化",
+    "eNB 전송 단절 (무호)": "eNB伝送断 (呼なし)", "부분 복구 (단계적 회복)": "部分復旧 (段階的回復)",
+    "APN 접속 실패": "APN接続失敗", "DNS 간헐 실패": "DNS間欠失敗",
+    "복합 장애 (전송→DNS)": "複合障害 (伝送→DNS)",
+    # 지역
+    "한국 (KR)": "韓国 (KR)",
+}
+
+#: 장애 주입 화면(`/`) — 한국어 원문 → 日本語
+_JA_MAIN = {
+    # 정적
+    "probe-datagen 제어": "probe-datagen 制御",
+    "probe-datagen 장애 주입 제어": "probe-datagen 障害注入制御",
+    "생성 데몬이 1분 틱으로 반영한다": "生成デーモンが1分ティックで反映する",
+    "장비 지도": "装置地図",
+    "마지막 슬롯": "最終スロット", "생성량": "生成量", "직전 틱": "直前ティック",
+    "활성 장애": "アクティブ障害", "건": "件", "오늘 생성": "本日生成",
+    "생성 시계열": "生成時系列", "분당 건수 · 최근 3시간 · 오른쪽 끝이 현재": "分あたり件数 · 直近3時間 · 右端が現在",
+    "생성 설정": "生成設定", "스위치는 즉시 · 나머지는 다음 틱부터": "スイッチは即時 · その他は次ティックから",
+    "지역": "地域", "— 재시작 후 반영": "— 再起動後に反映", "지역 저장": "地域を保存",
+    "생성 가동/정지 — 즉시 반영": "生成の稼働/停止 — 即時反映",
+    "끄면 그 분은 비어 있다 — 0 으로 채우지 않는다": "オフにするとその分は空になる — 0では埋めない",
+    "시간대 곡선": "時間帯カーブ", "— 04시 최저 · 19시 최고": "— 4時最低 · 19時最高",
+    "시간대 곡선 on/off — 즉시 반영": "時間帯カーブ on/off — 即時反映",
+    "끄면 모든 시각이 피크 수준으로 평탄": "オフにすると全時刻がピーク水準で平坦",
+    "데이터 보존": "データ保持", "— 지난 파티션을 떨어뜨린다": "— 古いパーティションを削除する",
+    "보존 정리 on/off": "保持整理 on/off", "보존": "保持", "시간": "時間", "설정 저장": "設定を保存",
+    "망 조작": "網操作", "재배정·차단은 장애가 아니다 — 장애 목록에 남지 않는다": "再割当・遮断は障害ではない — 障害一覧に残らない",
+    "장비 재배정": "装置再割当", "— 한쪽으로 몰아 본다. 총량은 그대로": "— 片側に寄せてみる。総量はそのまま",
+    "추가": "追加", "재배정 저장": "再割当を保存", "다음 틱부터 반영된다": "次ティックから反映される",
+    "생성할 xDR": "生成するxDR", "— 누르면 켜고 끈다 · 즉시 반영": "— 押すとオン/オフ · 即時反映",
+    "C-Plane · 호 절차": "C-Plane · 呼手順", "U-Plane · TCP 전송": "U-Plane · TCP転送",
+    "U-Plane · DNS 질의": "U-Plane · DNS問合せ", "U-Plane · HTTP 요청": "U-Plane · HTTPリクエスト",
+    "멈춤": "停止中", "멈춤 · lte_call 종속": "停止中 · lte_call依存", "건/분": "件/分",
+    "눌러서 다시 생성": "押すと生成再開", "눌러서 생성 멈춤": "押すと生成停止",
+    "넷 모두 생성 중 — 끄면 그 xDR 은 파일 자체를 만들지 않는다(0 건이 아니라 없음)":
+        "4つとも生成中 — オフにするとそのxDRはファイル自体を作らない(0件ではなく無し)",
+    " 멈춤 — ": " 停止 — ", "{b} 멈춤": "{b} 停止", "지도에서 주입": "地図から注入",
+    "종류": "種類", "대상": "対象", "자동 선택": "自動選択", "지속시간(분)": "継続時間(分)",
+    "메모": "メモ", "(옵션)": "(任意)",
+    "인입 현황": "取込状況", "최근 60분": "直近60分", "불러오는 중…": "読み込み中…",
+    "장애 목록": "障害一覧", "{n}건 · {a}–{b}": "{n}件 · {a}–{b}", "시작": "開始", "상태": "状態",
+    # 요일
+    "일": "日", "월": "月", "화": "火", "수": "水", "목": "木", "금": "金", "토": "土",
+    # 상태 줄
+    "{n} (셀 {c})": "{n} (セル {c})",
+    "가동": "稼働", "정지": "停止", "장애 {n}": "障害 {n}", 
+    "곡선 off": "カーブ off", "생성 중": "生成中",
+    "(방금)": "(たった今)", "({n}분 전)": "({n}分前)",
+    "({a} / {b} 호·분)": "({a} / {b} 呼・分)", "{n} 건": "{n} 件",
+    # 장애 목록·주입
+    "자동": "自動", "{n}분": "{n}分", "취소": "取消", "장애 이력이 없다": "障害履歴はない",
+    "서버 응답 없음": "サーバ応答なし",
+    "주입됨 — fault #{id} (다음 틱부터 반영)": "注入済み — fault #{id}(次ティックから反映)",
+    "주입 실패: ": "注入失敗: ", "취소 실패: ": "取消失敗: ",
+    # 인입·차트
+    "합계": "合計", "오늘 {a}분 · 누적 {b}분": "本日 {a}分 · 累計 {b}分", "({n}일)": "({n}日)",
+    "{d} 하루": "{d} 1日分", "최근 {n}분": "直近{n}分", "({n}건)": "({n}件)",
+    "데이터 없음": "データなし", "장애 주입 구간": "障害注入区間",
+    "생성 기록 없음": "生成記録なし", "장애 주입 #{ids}": "障害注入 #{ids}",
+    # 지역
+    "설정 파일 {a}": "設定ファイル {a}", " · UI 저장값 {a}": " · UI保存値 {a}",
+    " → 재시작하면 {a}": " → 再起動すると {a}",
+    " · IMSI 접두 {a}": " · IMSIプレフィックス {a}", " · 마스터 {a}": " · マスタ {a}",
+    "고른 값 {a} — 아직 저장하지 않았다": "選択値 {a} — まだ保存していない",
+    "⚠ 설정 파일에 적힌 값이 있어 지역을 바꿔도 따라오지 않는다 —":
+        "⚠ 設定ファイルに値が書かれているため、地域を変えても追従しない —",
+    "({l} 이면 {e})": "({l} なら {e})",
+    "따라오게 하려면 datagen.yaml 의 그 칸을 지운다": "追従させるには datagen.yaml のその項目を削除する",
+    "운영 중에는 바꾸지 않는다 — 같은 분에 두 나라 IMSI 가 섞이면 그 분은 어느 쪽으로도 집계되지 않는다":
+        "運用中は変更しない — 同じ分に2か国のIMSIが混ざると、その分はどちらにも集計されない",
+    "저장 중…": "保存中…", "실패 — ": "失敗 — ", "실패": "失敗",
+    "저장됨 —": "保存済み —", "재시작해야 반영된다": "再起動しないと反映されない",
+    # 설정
+    "{k} (분당)": "{k} (分あたり)",
+    "토폴로지 — 셀 {c} · SGW {s} · MME {m} · PGW {p}": "トポロジ — セル {c} · SGW {s} · MME {m} · PGW {p}",
+    "생성 가동": "生成稼働", "생성 정지": "生成停止",
+    "정리하지 않는다": "整理しない",
+    "파티션이 계속 쌓인다. 디스크를 직접 봐야 한다": "パーティションが溜まり続ける。ディスクを直接確認する必要がある",
+    "원시 xDR(시간 파티션) <b>{h}시간</b>치만 남는다<br>": "生xDR(時間パーティション)は <b>{h}時間</b>分だけ残る<br>",
+    "집계 <code>PM_*_1M</code>(일 파티션)은 <b>하루 입도</b>로만 떨어진다 — ":
+        "集計 <code>PM_*_1M</code>(日パーティション)は <b>1日単位</b>でしか削除されない — ",
+    "{h}시간을 줘도 최대 하루치가 남는다": "{h}時間を指定しても最大1日分が残る",
+    "약 {d}일치": "約{d}日分",
+    "원시 Parquet 는 이 값과 별개다 — 생성 설정의 <code>retain_minutes</code>(U-Plane 10분 · C-Plane 1440분)":
+        "生Parquetはこの値とは別 — 生成設定の <code>retain_minutes</code>(U-Plane 10分 · C-Plane 1440分)",
+    "켜짐": "オン", "평탄": "平坦",
+    "모든 시각이 <b>피크(19시)</b> 수준이다 — 야간에도 주간만큼 만든다":
+        "全時刻が<b>ピーク(19時)</b>水準 — 夜間も昼間と同じだけ生成する",
+    "지금 <b>{h}시</b> — 호 <b>{call}</b> · 호당 세션 <b>{sess}</b> · 세션 바이트 <b>{byte}</b> → 총 트래픽 <b>{tot}</b> (19시 = 1.000)<br>":
+        "現在 <b>{h}時</b> — 呼 <b>{call}</b> · 呼あたりセッション <b>{sess}</b> · セッションバイト <b>{byte}</b> → 総トラフィック <b>{tot}</b> (19時 = 1.000)<br>",
+    "호 수의 진폭은 일부러 작다(04↔19시 1.14배) — 야간에 셀 표본이 마르면 탐지가 통째로 선다(불변규칙 5)":
+        "呼数の振幅は意図的に小さい(4↔19時で1.14倍) — 夜間にセルの標本が枯れると検知が丸ごと止まる(不変ルール5)",
+    "{t}시": "{t}時",
+    "없음 — 네 계열 모두 생성한다": "なし — 4系列すべて生成する",
+    " 끊김 — ": " 遮断 — ",
+    "그 분에 파일을 만들지 않는다(0 건이 아니라 <b>없음</b>)": "その分のファイルを作らない(0件ではなく<b>なし</b>)",
+    "lte_call 을 끊으면 U-Plane 도 멈춘다": "lte_callを遮断するとU-Planeも止まる",
+    " — 세션이 성공 호에서 파생된다": " — セッションは成功呼から派生する",
+    "없음 — 모든 셀이 원래 장비를 쓴다": "なし — すべてのセルが元の装置を使う",
+    "저장됨 — 다음 틱부터": "保存済み — 次ティックから",
+}
+# ── 껍데기 — 좌측 레일 + 상단 바 (사람 결정 2026-11-03) ───────────────────
+#
+# graphio 콘솔(`web/src/App.tsx` 의 `rail`·`TopBar`)과 같은 모양이다. 세 화면이
+# 따로 된 HTML 이라 **한 벌을 만들어 셋에 끼운다** — 화면마다 손으로 적으면
+# 메뉴가 하나 늘 때 한 화면만 고쳐진다.
+#
+# * 레일 — 화면 이동. 지금 화면에 불이 들어온다
+# * 상단 바 — 생성기 상태(`/api/status`, 5초) · 생성 지역 · 시계 · **언어**.
+#   지도·토폴로지에서도 "생성이 돌고 있나"가 보이게 한다
+# * 각 화면은 위 44px · 왼쪽 60px 를 비운다(화면마다 배치가 달라 그쪽 CSS 에)
+#
+# CSS 는 `gp-` 로 시작하는 이름만 쓴다. 장애 주입 화면의 `select{width:100%}`
+# 같은 전역 규칙이 상단 바까지 늘어나 언어 선택이 한 줄을 다 먹었다
+
+_SHELL_CSS = """
+ .gp-rail{position:fixed;left:0;top:0;bottom:0;width:60px;z-index:60;box-sizing:border-box;
+   background:#161b22;border-right:1px solid #2a313a;display:flex;flex-direction:column;
+   align-items:center;gap:4px;padding:10px 0}
+ .gp-logo{width:34px;height:34px;border-radius:8px;background:#4e9af1;color:#0c1017;
+   display:grid;place-items:center;font:700 12px/1 sans-serif;margin-bottom:10px;letter-spacing:-.02em}
+ .gp-rbtn{width:48px;height:52px;border-radius:8px;color:#8a94a3;display:flex;flex-direction:column;
+   align-items:center;justify-content:center;gap:4px;font:10px/1.15 -apple-system,BlinkMacSystemFont,
+   "Hiragino Sans","Apple SD Gothic Neo","Noto Sans JP",sans-serif;text-decoration:none;text-align:center}
+ .gp-rbtn:hover{background:#1d242e;color:#c6cedb}
+ .gp-rbtn.on{background:rgba(78,154,241,.15);color:#4e9af1;font-weight:600}
+ .gp-rbtn svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;
+   stroke-linecap:round;stroke-linejoin:round}
+ .gp-top{position:fixed;left:60px;right:0;top:0;height:44px;z-index:59;box-sizing:border-box;
+   background:#161b22;border-bottom:1px solid #2a313a;display:flex;align-items:center;gap:14px;
+   padding:0 14px;color:#d8dee9;font:12px/1.4 -apple-system,BlinkMacSystemFont,
+   "Hiragino Sans","Apple SD Gothic Neo","Noto Sans JP",sans-serif;white-space:nowrap}
+ .gp-brand{font-size:13.5px;font-weight:600}
+ .gp-brand em{font-style:normal;color:#8a94a3;font-weight:400;font-size:11px;margin-left:6px}
+ .gp-sums{display:flex;border:1px solid #2a313a;border-radius:7px;overflow:hidden}
+ .gp-sum{padding:2px 11px;border-right:1px solid #2a313a;display:flex;flex-direction:column}
+ .gp-sum:last-child{border-right:0}
+ .gp-sum i{font-style:normal;font-size:9.5px;color:#8a94a3;letter-spacing:.03em}
+ .gp-sum b{font-size:12.5px;font-weight:600;font-variant-numeric:tabular-nums;
+   display:flex;align-items:center;gap:5px}
+ .gp-dot{width:7px;height:7px;border-radius:50%;background:#6b7684;display:inline-block}
+ .gp-top-r{margin-left:auto;display:flex;align-items:center;gap:10px}
+ .gp-badge{padding:1px 8px;border-radius:999px;border:1px solid #2a313a;font-size:11px;color:#c6cedb}
+ .gp-clock{color:#98a1ae;font-variant-numeric:tabular-nums}
+ .gp-top select{width:auto!important;margin:0!important;background:#222933;color:#d8dee9;
+   border:1px solid #39414c;border-radius:5px;padding:2px 6px;font:inherit;font-size:12px}
+"""
+
+#: 레일 아이콘 — 외부 자원을 쓰지 않으므로 SVG 를 직접 적는다
+_SHELL_NAV = (
+    ("main", "/", "주입", "장애 주입 제어",
+     '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>'),
+    ("map", "/map", "지도", "장비 지도",
+     '<path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2z"/><path d="M9 4v14M15 6v14"/>'),
+    ("topo", "/topo", "토폴로지", "마스터 토폴로지",
+     '<circle cx="12" cy="5" r="2.2"/><circle cx="5" cy="19" r="2.2"/>'
+     '<circle cx="19" cy="19" r="2.2"/><path d="M12 7.2v4.3M12 11.5 6.4 17.2M12 11.5l5.6 5.7"/>'),
+)
+
+
+def _shell_html(page: str) -> str:
+    title = {k: t for k, _, _, t, _ in _SHELL_NAV}[page]
+    btns = "".join(
+        f'<a class="gp-rbtn{" on" if k == page else ""}" href="{href}" title="{tip}"'
+        f'{" aria-current=\"page\"" if k == page else ""}>'
+        f'<svg viewBox="0 0 24 24">{icon}</svg>{label}</a>'
+        for k, href, label, tip, icon in _SHELL_NAV)
+    return (
+        '<nav class="gp-rail" aria-label="화면"><div class="gp-logo">PD</div>'
+        + btns + '</nav>'
+        '<div class="gp-top" role="banner">'
+        f'<div class="gp-brand">probe-datagen<em>{title}</em></div>'
+        '<div class="gp-sums">'
+        '<div class="gp-sum"><i>생성</i><b id="gp-gen"><span class="gp-dot" id="gp-dot"></span>'
+        '<span id="gp-gen-t">—</span></b></div>'
+        '<div class="gp-sum"><i>마지막 슬롯</i><b id="gp-slot">—</b></div>'
+        '<div class="gp-sum"><i>생성량</i><b id="gp-pct">—</b></div>'
+        '<div class="gp-sum"><i>활성 장애</i><b id="gp-act">—</b></div>'
+        '</div>'
+        '<div class="gp-top-r">'
+        '<span class="gp-badge" id="gp-loc" title="생성 지역 — gen-ui 의 지역 설정">—</span>'
+        '<span class="gp-clock" id="gp-clock">—</span>'
+        '<select id="gp-lang" title="화면 언어 — 고른 것은 이 브라우저에 기억한다">'
+        '<option value="ko">한국어</option><option value="ja">日本語</option></select>'
+        '</div></div>'
+    )
+
+
+_SHELL_JS = r"""
+(function(){
+  const g=id=>document.getElementById(id);
+  langSelect('gp-lang');
+  const pad=n=>String(n).padStart(2,'0');
+  const clock=()=>{ const d=new Date(); g('gp-clock').textContent=
+    `${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
+  clock(); setInterval(clock, 1000);
+  // **장애 주입 화면의 1초 폴링과 별개다** — 그 화면만의 상태줄이고, 이쪽은
+  // 세 화면 공통이라 가볍게 5초다
+  const tick=async()=>{
+    try{
+      const st=await (await fetch('/api/status')).json();
+      const on=st.gen_enabled!==false, act=(st.active||[]).length;
+      g('gp-gen-t').textContent=on ? T('생성 중') : T('정지');
+      g('gp-gen-t').style.color=on ? '#4caf7d' : '#8a94a3';
+      g('gp-dot').style.background=!on ? '#6b7684' : act ? '#e5534b'
+        : (st.blocked||[]).length ? '#d8a22a' : '#4caf7d';
+      let slot='—', age=null;
+      if(st.last_slot){ slot=String(st.last_slot).replace('T',' ').slice(11,16);
+        if(st.now) age=Math.round((new Date(String(st.now).replace(' ','T'))
+          - new Date(String(st.last_slot).replace(' ','T')))/60000); }
+      g('gp-slot').textContent=slot;
+      // 멈춘 것을 정상으로 읽는 쪽이 가장 위험하다 — 3분 넘으면 노랗게
+      g('gp-slot').style.color=age!=null&&age>3 ? '#d8a22a' : '';
+      g('gp-slot').title=age==null ? '' : T('({n}분 전)',{n:age});
+      g('gp-pct').textContent=st.volume_pct==null ? '—' : Math.round(st.volume_pct)+'%';
+      g('gp-act').textContent=act;
+      g('gp-act').style.color=act ? '#e5534b' : '';
+    }catch(e){ g('gp-gen-t').textContent=T('서버 응답 없음'); g('gp-dot').style.background='#e5534b'; }
+  };
+  tick(); setInterval(tick, 5000);
+  // 생성 지역 — 저장값이 정본이다(graphio 상단 바도 같은 키를 본다)
+  fetch('/api/region').then(r=>r.json()).then(r=>{
+    const v=r.saved||r.file||''; const L={};
+    (r.locales||[]).forEach(l=>{ L[l.value]=T(l.label); });
+    g('gp-loc').textContent=String(v).toUpperCase()||'—';
+    g('gp-loc').title=T('생성 지역 — gen-ui 의 지역 설정')+(L[v]?' · '+L[v]:'')
+      +(r.pending&&r.pending!==v?' → '+(L[r.pending]||r.pending):'');
+  }).catch(()=>{});
+})();
+"""
+
+#: 껍데기 문구 — 세 화면 공통
+_JA_SHELL = {
+    "화면": "画面", "주입": "注入", "지도": "地図", "토폴로지": "トポロジ",
+    "장애 주입 제어": "障害注入制御", "장비 지도": "装置地図", "마스터 토폴로지": "マスタトポロジ",
+    "생성": "生成", "마지막 슬롯": "最終スロット", "생성량": "生成量", "활성 장애": "アクティブ障害",
+    "생성 중": "生成中", "정지": "停止", "서버 응답 없음": "サーバ応答なし", "({n}분 전)": "({n}分前)",
+    "생성 지역 — gen-ui 의 지역 설정": "生成地域 — gen-uiの地域設定",
+    "화면 언어 — 고른 것은 이 브라우저에 기억한다": "表示言語 — 選択はこのブラウザに保存される",
+    # 토폴로지는 본문을 옮기지 않는다 — 제목만
+    "probe-datagen 마스터 토폴로지": "probe-datagen マスタトポロジ",
+    "행정구역 · 장비 · 셀": "行政区域 · 装置 · セル",
+}
+
+
+def _page(html: str, page: str, ja: dict) -> str:
+    """껍데기(CSS·레일·상단 바)와 번역을 끼운다."""
+    assert html.count("</style>") >= 1 and "<body>" in html
+    html = html.replace("</style>", _SHELL_CSS + "</style>", 1)
+    html = html.replace("<body>", "<body>\n" + _shell_html(page), 1)
+    html = _with_i18n(html, {**_JA_COMMON, **ja, **_JA_SHELL})
+    # 껍데기 동작은 번역 함수 바로 뒤 — 페이지 스크립트보다 먼저 선다
+    return html.replace("function langSelect(", _SHELL_JS_HOOK + "function langSelect(", 1)
+
+
+_SHELL_JS_HOOK = "window.addEventListener('DOMContentLoaded',()=>{" + _SHELL_JS + "});\n"
+
+_HTML = _page(_HTML, "main", {**_JA_MAP, **_JA_MAIN})
+_HTML_MAP = _page(_HTML_MAP, "map", _JA_MAP)
+_HTML_TOPO = _page(_HTML_TOPO, "topo", {})
 
 
 @app.get("/map", response_class=HTMLResponse)
