@@ -24,7 +24,7 @@ from pathlib import Path
 import pymysql
 import yaml
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 
 from . import raw_parquet, topo
@@ -3463,18 +3463,85 @@ def api_map_layer(name: str):
     if not hit:
         raise HTTPException(404, f"그런 레이어가 없다: {name}")
     key, source = hit
+    src, err = _layer_path(key)
+    if err:
+        # 빈 배열을 돌려주지 않는다 — "데이터가 없다"와 "파일이 없다"는
+        # 다른 사실이고, 전자로 보이면 왜 비었는지 알 수 없다
+        return {"error": err, "items": []}
+    # **파싱하지 않고 그대로 싼다**(2026-11-03 실측). 전에는 `json.loads` 로
+    # 읽어 FastAPI 가 다시 직렬화했다 — 일곱 개를 동시에 받으면 서로 GIL 을
+    # 다퉈 철도 1MB 하나에 1초가 걸렸다. 파일이 이미 JSON 배열이다
+    body = b'{"items":' + _file_bytes(src) + b',"source":' \
+        + json.dumps(source, ensure_ascii=False).encode() + b'}'
+    return Response(body, media_type="application/json")
+
+
+def _layer_path(key: str):
+    """설정 키 → (경로, 오류). 상대 경로는 이 파일 기준이다."""
     raw = str(_pem_cfg().get(key) or "")
     if not raw:
-        return {"error": f"`pemdb1.{key}` 가 비어 있다", "items": []}
+        return None, f"`pemdb1.{key}` 가 비어 있다"
     src = Path(raw)
     if not src.is_absolute():
         src = (HERE / src).resolve()
     if not src.exists():
-        # 빈 배열을 돌려주지 않는다 — "데이터가 없다"와 "파일이 없다"는
-        # 다른 사실이고, 전자로 보이면 왜 비었는지 알 수 없다
-        return {"error": f"레이어 파일이 없다: {src}", "items": []}
-    return {"items": json.loads(src.read_text(encoding="utf-8")),
-            "source": source}
+        return None, f"레이어 파일이 없다: {src}"
+    return src, None
+
+
+#: 지도 배경 파일 캐시 — (경로, mtime) 가 같으면 다시 읽지 않는다. 파일을
+#: 다시 구우면 mtime 이 바뀌어 저절로 새로 읽는다
+_FILE_CACHE: dict = {}
+
+
+def _cached(src: Path, tag: str, make):
+    k = (str(src), tag)
+    mt = src.stat().st_mtime
+    hit = _FILE_CACHE.get(k)
+    if hit and hit[0] == mt:
+        return hit[1]
+    v = make(src)
+    _FILE_CACHE[k] = (mt, v)
+    return v
+
+
+def _file_bytes(src: Path) -> bytes:
+    return _cached(src, "bytes", lambda p: p.read_bytes())
+
+
+def _layer_extent():
+    """레이어 전부의 좌표 범위 (lat0, lon0, lat1, lon1) — 없으면 None.
+
+    땅(행정경계)은 그 위에 얹힌 레이어를 다 덮어야 한다(`/api/map/geo` 의
+    `cover`). 화면이 레이어를 다 받은 뒤 범위를 재서 다시 묻던 때는 경계가
+    레이어 뒤에 줄을 서 0.4초가 늦었다 — 서버가 파일에서 직접 잰다
+    """
+    box = [1e9, 1e9, -1e9, -1e9]
+
+    def ext(p: Path):
+        b = [1e9, 1e9, -1e9, -1e9]
+
+        def walk(o):
+            if isinstance(o, list):
+                if len(o) == 2 and all(isinstance(v, (int, float)) for v in o):
+                    b[0] = min(b[0], o[1]); b[2] = max(b[2], o[1])
+                    b[1] = min(b[1], o[0]); b[3] = max(b[3], o[0])
+                else:
+                    for v in o:
+                        walk(v)
+            elif isinstance(o, dict):
+                for v in o.values():
+                    walk(v)
+        walk(json.loads(p.read_text(encoding="utf-8")))
+        return b
+
+    for key, _ in _LAYER.values():
+        src, err = _layer_path(key)
+        if err:
+            continue
+        b = _cached(src, "extent", ext)
+        box = [min(box[0], b[0]), min(box[1], b[1]), max(box[2], b[2]), max(box[3], b[3])]
+    return None if box[0] > box[2] else box
 
 
 #: 심각도 순위 — 한 장비에 여러 Incident 가 걸리면 **가장 심한 것**이
@@ -3825,7 +3892,7 @@ def api_map_all():
 
 
 @app.get("/api/map/geo")
-def api_map_geo(bbox: str = ""):
+def api_map_geo(bbox: str = "", cover: int = 0):
     """행정경계 GeoJSON — **로컬 파일이다. 외부 타일을 쓰지 않는다.**
 
     처음에 CARTO 타일 CDN 으로 배경을 깔았는데 셋이 걸렸다 —
@@ -3840,6 +3907,12 @@ def api_map_geo(bbox: str = ""):
 
     `bbox` 는 `"lat0,lon0,lat1,lon1"` 이다. 전국 1,897개를 다 내리면 브라우저가
     느려진다 — 보는 자리만 내린다.
+
+    `cover=1` 이면 **레이어(철도·하천…)가 덮는 범위까지 넓힌다**(2026-11-03).
+    기지국 범위만 받으면 간토 전역에 걸친 철도가 바다 위에 떴다. 넓힌 쪽은
+    **점을 솎는다**(`_GEO_THIN`) — 상세본 그대로 넓혔더니 점이 9.1만 개 중
+    2.1만 개가 늘어 `draw` 가 +10ms, 날아가는 동안 매 프레임 그리는 양도
+    30% 늘었다. 그쪽은 철도 밑에 깔리는 바탕일 뿐이다
     """
     # **자기 설정 키를 쓴다.** 처음엔 `geo_crosswalk` 의 형제에서 찾았는데,
     # 그 키가 로케일별로 다른 디렉터리를 가리켜(`data/geo/` vs
@@ -3867,26 +3940,27 @@ def api_map_geo(bbox: str = ""):
         except ValueError:
             lo_la = lo_lo = -1e9
             hi_la = hi_lo = 1e9
+    core = (lo_la, lo_lo, hi_la, hi_lo)
+    want = core
+    ext = _layer_extent() if cover else None
+    if ext:
+        want = (min(lo_la, ext[0] - .05), min(lo_lo, ext[1] - .05),
+                max(hi_la, ext[2] + .05), max(hi_lo, ext[3] + .05))
 
-    doc = json.loads(src.read_text(encoding="utf-8"))
+    def hit(b, box):
+        return not (b[2] < box[0] or b[0] > box[2] or b[3] < box[1] or b[1] > box[3])
+
     out = []
-    for f in doc.get("features", []):
-        g = f.get("geometry") or {}
-        rings = ([g.get("coordinates")] if g.get("type") == "Polygon"
-                 else g.get("coordinates") or [])
+    for pr, rings in _geo_doc(src):
         keep = []
-        for poly in rings:
-            if not poly:
+        for ring, b in rings:
+            if not hit(b, want):
                 continue
-            ring = poly[0]
-            xs = [c[0] for c in ring]
-            ys = [c[1] for c in ring]
-            if (max(ys) < lo_la or min(ys) > hi_la
-                    or max(xs) < lo_lo or min(xs) > hi_lo):
-                continue
+            # 기지국 범위에 걸치지 않는 고리만 솎는다 — 첫 점·끝 점은 남겨 닫힌다
+            if not hit(b, core) and len(ring) > 3 * _GEO_THIN:
+                ring = ring[:-1:_GEO_THIN] + [ring[-1]]
             keep.append(ring)
         if keep:
-            pr = f.get("properties") or {}
             # 이름을 놓을 자리 — **가장 큰 고리**의 가운데. 섬이 딸린 구는
             # 작은 고리에 이름이 붙으면 엉뚱한 바다 위에 뜬다
             big = max(keep, key=len)
@@ -3901,6 +3975,35 @@ def api_map_geo(bbox: str = ""):
                 "rings": keep,
             })
     return {"features": out, "source": "国土数値情報 行政区域 · CC BY 4.0"}
+
+
+#: 넓힌 쪽 경계는 점 N 개 중 하나만 — 4 면 2.1만 → 약 5천(2026-11-03 실측)
+_GEO_THIN = 4
+
+
+def _geo_doc(src: Path):
+    """경계 파일 → [(properties, [(ring, (lat0, lon0, lat1, lon1)), ...]), ...].
+
+    3.7MB 를 요청마다 `json.loads` 하고 고리마다 범위를 다시 쟀다. 한 번 읽어 둔다
+    """
+    def make(p: Path):
+        doc = json.loads(p.read_text(encoding="utf-8"))
+        out = []
+        for f in doc.get("features", []):
+            g = f.get("geometry") or {}
+            polys = ([g.get("coordinates")] if g.get("type") == "Polygon"
+                     else g.get("coordinates") or [])
+            rings = []
+            for poly in polys:
+                if not poly:
+                    continue
+                ring = poly[0]
+                xs = [c[0] for c in ring]
+                ys = [c[1] for c in ring]
+                rings.append((ring, (min(ys), min(xs), max(ys), max(xs))))
+            out.append((f.get("properties") or {}, rings))
+        return out
+    return _cached(src, "geo", make)
 
 
 _HTML_MAP = """<!doctype html>
@@ -3941,18 +4044,73 @@ _HTML_MAP = """<!doctype html>
  .stat i{font-style:normal;opacity:.55;margin-right:4px}
  .warn{color:#e0a458}
  .dimtag{opacity:.55;font-size:12px}
+ /* ── 색상셋 (사람 결정 2026-11-03) ────────────────────────────────────
+    **지도에 쓰는 색은 전부 여기 변수로 둔다.** `dark` 는 11-03 까지의 색을
+    그대로 옮긴 것이고, `light` 는 카카오맵 계열의 밝은 지도다. 바탕만 밝게
+    바꾸면 연분홍 기지국·흰 라벨·`screen` 합성 빛이 전부 사라지므로 **한 벌로
+    같이 바꾼다.** 패널(선택 바·장애 이력·범례)은 두 셋 모두 어두운 상자다.
+    JS 가 칠하는 색(장애·코어·기지국·노선 채도)도 여기서 읽는다(`loadTheme`) */
+ body,body[data-theme=dark]{
+   --sea:#0d1a26; --land:#223040; --land-line:#4a5c72;
+   --allpt:#828d9c; --river:#2d5f7a; --park:#27402f; --water:#19354a;
+   --chome:#3a4a5e;
+   --rd-motorway:#5a6574; --rd-trunk:#4f5968; --rd-primary:#464f5d;
+   --rd-secondary:#3e4654; --rd-tertiary:#38404d;
+   --ymt:#9acd32; --pick:#ff9ec4;
+   --lb:#fff; --lb-halo:#0b0e12; --lb-a:#7d8fa6; --lb-s:#d6ecaa; --stb:#e2efc4;
+   --sb-off:#c9cdd4; --sb-off-line:#8a929e; --sb-on-line:#1f2937;
+   --ft-line:#fff; --eg:#9ff0e4;
+   --hq-body:#2c3644; --hq-line:#7fd1c7cc; --hq-pg:#7fd1c7; --hq-cap:#c6d0dc;
+   --hq-brand:#ff8aa0; --hq-msg:#ffd0d0;
+   --map-fg:#d8dee9; --scale-line:#c6cedb;
+   --blend:screen;
+   --cell:#fbd6e4; --node-in:#141b26; --node-mme:#b9a7e3; --node-sgw:#93bfe6;
+   --glow:#ff8ebc;
+   --line-s:32%; --line-l:64%; --pal-s:42%; --pal-l:62%;
+   /* 장애 — 칠하는 색 · 후광 rgb · 숨쉬기 밝은 쪽 */
+   --sev-CRITICAL:#ff5b5b; --sev-CRITICAL-rgb:255,91,91;  --sev-CRITICAL-lt:#ffd0d0;
+   --sev-MAJOR:#ff9640;    --sev-MAJOR-rgb:255,150,64;    --sev-MAJOR-lt:#ffe0c4;
+   --sev-WARN:#ffd84a;     --sev-WARN-rgb:255,216,74;     --sev-WARN-lt:#fff2b8;
+   --sev-INFO:#5cb6ff;     --sev-INFO-rgb:92,182,255;     --sev-INFO-lt:#d3ebff;
+ }
+ /* 밝은 셋 — 카카오맵 계열. **합성이 `multiply` 다** — 밝은 바탕에서
+    `screen` 은 겹칠수록 하얘져 히트맵·계통 빛이 바탕에 녹는다. 기지국은
+    연분홍(#fbd6e4)이 바탕과 명도가 같아 진한 분홍으로, 라벨은 어두운 글자에
+    흰 테두리로 뒤집는다. 도로는 바탕보다 밝은 흰 선이다(카카오맵과 같다) */
+ body[data-theme=light]{
+   --sea:#aad3f2; --land:#eeebe4; --land-line:#b4abc4;
+   --allpt:#9aa3ae; --river:#7db7e4; --park:#cde6bf; --water:#aad3f2;
+   --chome:#d9d4ca;
+   --rd-motorway:#f5b25c; --rd-trunk:#f8cd7a; --rd-primary:#ffffff;
+   --rd-secondary:#ffffff; --rd-tertiary:#faf8f4;
+   --ymt:#6aa317; --pick:#d63384;
+   --lb:#1f2933; --lb-halo:#ffffff; --lb-a:#6b7787; --lb-s:#3d6b0a; --stb:#bcd690;
+   --sb-off:#c3c8cf; --sb-off-line:#7c8592; --sb-on-line:#1f2937;
+   --ft-line:#fff; --eg:#0ca678;
+   --hq-body:#ffffff; --hq-line:#12b886cc; --hq-pg:#12b886; --hq-cap:#37414f;
+   --hq-brand:#d6336c; --hq-msg:#c92a2a;
+   --map-fg:#37414f; --scale-line:#4a5563;
+   --blend:multiply;
+   --cell:#f19cbb; --node-in:#ffffff; --node-mme:#7048e8; --node-sgw:#0b7285;
+   --glow:#e64980;
+   --line-s:45%; --line-l:52%; --pal-s:58%; --pal-l:50%;
+   --sev-CRITICAL:#e03131; --sev-CRITICAL-rgb:224,49,49;  --sev-CRITICAL-lt:#ffc9c9;
+   --sev-MAJOR:#f76707;    --sev-MAJOR-rgb:247,103,7;     --sev-MAJOR-lt:#ffd8a8;
+   --sev-WARN:#e6a700;     --sev-WARN-rgb:230,167,0;      --sev-WARN-lt:#fff3bf;
+   --sev-INFO:#1c7ed6;     --sev-INFO-rgb:28,126,214;     --sev-INFO-lt:#d0ebff;
+ }
  /* 바다색 바탕 위에 육지를 얹는다 — 전에는 둘 다 거의 같은 검정이라
     경계가 나와도 "지도가 안 나온다"로 보였다 */
  #wrap{position:absolute;inset:70px 0 0 0;overflow:hidden;cursor:grab;
-   background:#0d1a26}
+   background:var(--sea)}
  #wrap.drag{cursor:grabbing}
  svg{width:100%;height:100%;display:block}
- .adm{fill:#223040;stroke:#4a5c72;stroke-width:1px;
+ .adm{fill:var(--land);stroke:var(--land-line);stroke-width:1px;
    vector-effect:non-scaling-stroke}
  /* TA 묶음 히트맵 — `screen` 이라 **겹칠수록 밝아진다.** 어두운 바탕에서
     밀도를 읽는 방식이고, 두 묶음이 맞닿는 자리는 색이 섞여 경계가 보인다.
     볼록껍질이 바깥쪽 몇 점만 이어 안쪽을 비워 두던 것과 다르다 */
- .kde{mix-blend-mode:screen;pointer-events:none}
+ .kde{mix-blend-mode:var(--blend);pointer-events:none}
  /* **라벨은 SVG 밖 div 다** — 툴팁과 같은 이유이고, 한 번 더 데였다.
     이 viewBox 의 단위는 **도(degree)** 라서 SVG 안에서 `stroke-width:3px`
     는 3px 가 아니라 **3도 ≈ 330km** 가 된다. 그 검은 테두리가 지도를
@@ -3964,7 +4122,7 @@ _HTML_MAP = """<!doctype html>
  /* 도쿄 바깥 eNB. 1.4 → 2.2px 로는 **여전히 안 보인다**는 말을 들어
     3.4px 로 올렸다. 생성 대상(`#fbd6e4` 연분홍)과 색이 갈려 있으므로
     굵어져도 둘을 혼동하지 않는다 */
- .allpt{fill:none;stroke:#828d9c;stroke-width:3.4px;stroke-opacity:.8;
+ .allpt{fill:none;stroke:var(--allpt);stroke-width:3.4px;stroke-opacity:.8;
    stroke-linecap:round;vector-effect:non-scaling-stroke;pointer-events:none}
  /* 실제 선로 — **배경이다.** 장비를 읽는 데 방해가 되면 안 되므로
     가늘고 흐리게. JR 만 조금 밝게 해 뼈대가 보이게 한다 */
@@ -3974,16 +4132,16 @@ _HTML_MAP = """<!doctype html>
     장비를 이기지 않는다 */
  .rl{fill:none;stroke-width:1.4px;stroke-opacity:.85;
    stroke-linecap:round;vector-effect:non-scaling-stroke;pointer-events:none}
- .rv{fill:none;stroke:#2d5f7a;stroke-width:1.6px;stroke-opacity:.8;
+ .rv{fill:none;stroke:var(--river);stroke-width:1.6px;stroke-opacity:.8;
    stroke-linecap:round;vector-effect:non-scaling-stroke;pointer-events:none}
  /* 공원·수역 — **면이다.** 육지(`.adm` 의 #223040) 위에 색만 얹는다.
     테두리를 주면 작은 공원이 점처럼 보여 장비와 섞인다 */
  .gr{stroke:none;pointer-events:none}
- .gr-park{fill:#27402f}
- .gr-water{fill:#19354a}
+ .gr-park{fill:var(--park)}
+ .gr-water{fill:var(--water)}
  /* 丁目 경계 — 구 경계(`.adm` #4a5c72)보다 **한참 옅고 가늘게.** 동네 결만
     보이면 된다. 면은 칠하지 않는다 — 행정구역 면 위에 또 면을 얹으면 탁해진다 */
- .ch{fill:none;stroke:#3a4a5e;stroke-width:.7px;stroke-opacity:.8;
+ .ch{fill:none;stroke:var(--chome);stroke-width:.7px;stroke-opacity:.8;
    vector-effect:non-scaling-stroke;pointer-events:none}
  /* 도로 — **가장 아래 배경이다.** 철도(`.rl`)보다 어둡게 둬야 뼈대가
     철도 쪽으로 읽힌다. 등급마다 굵기를 달리하지 않으면 가로망이
@@ -3994,11 +4152,11 @@ _HTML_MAP = """<!doctype html>
     (`.allpt` #555e6b)과 명도가 겹쳐 어디까지가 도로인지 모호했다 */
  /* **철도보다 연해야 한다.** 노선이 색을 얻으면서 도로까지 눈에
     들어오면 둘이 다툰다 — 도로는 자리를 알려주는 바탕이다 */
- .rd-motorway{stroke:#5a6574;stroke-width:2.2px}
- .rd-trunk{stroke:#4f5968;stroke-width:1.8px}
- .rd-primary{stroke:#464f5d;stroke-width:1.4px}
- .rd-secondary{stroke:#3e4654;stroke-width:1.1px}
- .rd-tertiary{stroke:#38404d;stroke-width:.9px}
+ .rd-motorway{stroke:var(--rd-motorway);stroke-width:2.2px}
+ .rd-trunk{stroke:var(--rd-trunk);stroke-width:1.8px}
+ .rd-primary{stroke:var(--rd-primary);stroke-width:1.4px}
+ .rd-secondary{stroke:var(--rd-secondary);stroke-width:1.1px}
+ .rd-tertiary{stroke:var(--rd-tertiary);stroke-width:.9px}
  /* **확대하면 굵어진다.** `non-scaling-stroke` 라 굵기가 화면 px 로
     고정인데, 1km 폭 화면에서 1px 짜리 간선은 실제 도로폭(20m ≈ 24px)과
     너무 달라 "가느다란 실"로 보였다. LOD 단계를 그대로 굵기 단계로 쓴다 */
@@ -4014,19 +4172,19 @@ _HTML_MAP = """<!doctype html>
  svg[data-lod="3"] .rd-tertiary{stroke-width:1.6px}
  /* 야마노테선 — JR 라인컬러(黄緑). 이 화면의 주인공 노선이다.
     **`.rl` 뒤에 와야 이긴다** — 특이도가 같아 순서가 정한다 */
- .rl-ymt{stroke:#9acd32;stroke-width:2.6px;stroke-opacity:.95}
+ .rl-ymt{stroke:var(--ymt);stroke-width:2.6px;stroke-opacity:.95}
  /* 고른 계통 — **기지국과 같은 계열이다.** 노란 계통선은 역 이름·건물과
     섞여 "무엇이 골라졌나"가 색으로 안 갈렸다 */
- .pick{fill:none;stroke:#ff9ec4;stroke-width:.9px;stroke-opacity:.85;
+ .pick{fill:none;stroke:var(--pick);stroke-width:.9px;stroke-opacity:.85;
    vector-effect:non-scaling-stroke}
  /* 고른 계통에 **불이 들어온다.** 전에는 노란 테두리 원만 그려 어느
     장비가 걸렸는지 세어야 했다 — TA 히트맵과 같은 방식으로 영역째
     밝힌다(사람 결정 2026-10-28) */
- .glow{mix-blend-mode:screen;pointer-events:none}
+ .glow{mix-blend-mode:var(--blend);pointer-events:none}
  #labels{position:absolute;inset:0;pointer-events:none;overflow:hidden}
  .lb{position:absolute;transform:translate(-50%,-50%);white-space:nowrap;
-   font-weight:700;color:#fff;text-shadow:0 0 3px #0b0e12,0 0 3px #0b0e12,
-   0 1px 2px #0b0e12}
+   font-weight:700;color:var(--lb);text-shadow:0 0 3px var(--lb-halo),0 0 3px var(--lb-halo),
+   0 1px 2px var(--lb-halo)}
  .lb-h{font-size:13px;opacity:.9}
  /* **상자를 없앴다**(2026-10-28). 검은 배경에 테두리까지 두르니 장비
     번호가 역 이름보다 튀어, 배경이어야 할 것이 주인공이 됐다. 글자
@@ -4034,17 +4192,17 @@ _HTML_MAP = """<!doctype html>
  /* **두껍게를 푼다.** `.lb` 가 700 이라 장비 번호가 역 이름을 눌렀다 */
  .lb-n{font-size:12px;font-weight:400}
  /* 지명은 **배경이다** — 장비를 읽는 데 방해가 되면 안 된다 */
- .lb-a{font-size:12px;font-weight:500;color:#7d8fa6;letter-spacing:.04em}
+ .lb-a{font-size:12px;font-weight:500;color:var(--lb-a);letter-spacing:.04em}
  /* 점은 SVG 가 찍는다 — 여기서는 글자만. 왼쪽 끝을 점에 맞춘다 */
  /* 역은 **어디인지 읽는 수단**이라 장비 다음으로 또렷해야 한다.
     11px 흐린 회색일 때는 장비 번호 상자에 묻혔다 */
  /* 역 이름도 야마노테선 계열이다 — 선(#9acd32)을 흰색 쪽으로 당겼다.
     흰색일 때는 지명·장비와 섞여 "이게 역인지" 가 색으로 안 갈렸다 */
- .lb-s{font-size:13px;font-weight:600;color:#d6ecaa;transform:translateY(-50%)}
+ .lb-s{font-size:13px;font-weight:600;color:var(--lb-s);transform:translateY(-50%)}
  /* 역 건물 — **심볼이 아니라 실제 윤곽이다**(사람 결정 2026-10-28).
     집 모양을 그리던 때는 "알 수 없는 모양"으로 읽혔다. 면적 중앙값이
     한 변 34m 라 멀리서는 점만 하고, 당기면 역사 모양이 드러난다 */
- .stb{fill:#e2efc4;fill-opacity:.92;stroke:none}
+ .stb{fill:var(--stb);fill-opacity:.92;stroke:none}
  /* 장애 — **평시 색(연분홍)과 또렷이 갈려야 한다.** 심각도로 나누되
     셋 다 따뜻한 쪽이라 "이 장비에 뭔가 있다"가 먼저 읽힌다 */
  /* **토글이 아니라 숨쉬기다**(사람 결정 2026-10-28). 장비가 나타났다
@@ -4057,12 +4215,19 @@ _HTML_MAP = """<!doctype html>
     통째로 빈 화면**이었다(애니메이션을 멈추면 0). HTML 요소의
     `opacity` 애니메이션은 칠하기 없이 합성만 하므로 같은 측정에서 0이다 */
  .ft{fill-opacity:1!important}
+ /* **날아가는 동안에도 장비 크기가 화면 px 로 유지된다**(2026-11-03).
+    점 반지름은 `draw` 가 그 시점 축척으로 정하는데(`sizeK`), 날아가는 동안은
+    `draw` 를 부르지 않고 viewBox 만 바꾸므로 점이 지도와 함께 2~2.5배로
+    부풀었다가 도착해서 줄었다. 점마다 반지름을 다시 쓰는 대신 **변수 하나**
+    (`--ks`, `syncKs`)로 각자 자기 중심에서 되돌린다 */
+ #gCell circle,#gNode>g{transform-box:fill-box;transform-origin:center;
+   transform:scale(var(--ks,1))}
  /* 소등 eNB(24번 B) — **크기는 그대로, 색만 회색**(사람 결정 2026-10-29).
     마스터 전량 점(`.allpt`)보다 밝게 두고 테두리를 줘 "생성 대상이 아닌
     기지국"과 갈린다. 켜지면 원래 색에 진한 테두리 — 새로 선 기지국이다 */
- .sb-off{fill:#c9cdd4!important;fill-opacity:1!important;stroke:#8a929e;
+ .sb-off{fill:var(--sb-off)!important;fill-opacity:1!important;stroke:var(--sb-off-line);
    stroke-width:1px;vector-effect:non-scaling-stroke}
- .sb-on{stroke:#1f2937;stroke-width:2px;fill-opacity:1!important;
+ .sb-on{stroke:var(--sb-on-line);stroke-width:2px;fill-opacity:1!important;
    vector-effect:non-scaling-stroke}
  /* ↑ **`non-scaling-stroke` 가 없으면 지도 절반이 회색이 된다**(2026-10-29
     실제로 그랬다). 이 SVG 의 좌표 단위는 화면보다 훨씬 크게 확대돼 있어
@@ -4073,9 +4238,9 @@ _HTML_MAP = """<!doctype html>
     연분홍 평시 점과 산호색 장애 점이 명도가 같아 섞였다. 채도를 올리고
     흰 테두리를 둘러 바탕(어두운 지도)과 평시 점 양쪽에서 갈리게 한다.
     크기도 키운다(`applyFaults` 가 반지름을 1.8배로) */
- .ft-CRITICAL{fill:#ff5b5b} .ft-MAJOR{fill:#ff9640}
- .ft-WARN{fill:#ffd84a}     .ft-INFO{fill:#5cb6ff}
- .ft{stroke:#fff;stroke-opacity:.95;stroke-width:1.5px;vector-effect:non-scaling-stroke}
+ .ft-CRITICAL{fill:var(--sev-CRITICAL)} .ft-MAJOR{fill:var(--sev-MAJOR)}
+ .ft-WARN{fill:var(--sev-WARN)}         .ft-INFO{fill:var(--sev-INFO)}
+ .ft{stroke:var(--ft-line);stroke-opacity:.95;stroke-width:1.5px;vector-effect:non-scaling-stroke}
  /* 코어 장비 — 어두운 속 + 색 테두리(`draw` 의 MME·SGW). 테두리는 화면 px 고정 */
  .nd{stroke-width:2px;vector-effect:non-scaling-stroke}
  .ndi{pointer-events:none}
@@ -4113,25 +4278,32 @@ _HTML_MAP = """<!doctype html>
  #hq{position:absolute;z-index:3;transform:translate(-50%,-30px);cursor:pointer;
    display:flex;flex-direction:column;align-items:center;--c:255,91,91}
  #hq .bd{position:relative;width:22px;height:30px;border-radius:3px 3px 0 0;
-   background:#2c3644;border:1.5px solid #7fd1c7cc;box-sizing:border-box;
+   background:var(--hq-body);border:1.5px solid var(--hq-line);box-sizing:border-box;
    display:flex;align-items:center;justify-content:center}
  #hq .bd::before{content:'';position:absolute;left:50%;top:-8px;width:1.5px;height:8px;
-   background:#7fd1c7cc}                                  /* 안테나 */
- #hq .pg{width:13px;height:12px;background:#7fd1c7;
+   background:var(--hq-line)}                             /* 안테나 */
+ #hq .pg{width:13px;height:12px;background:var(--hq-pg);
    clip-path:polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%)}
- #hq .cap{margin-top:3px;font-size:11px;font-weight:500;color:#c6d0dc;white-space:nowrap;
+ #hq .cap{margin-top:3px;font-size:11px;font-weight:500;color:var(--hq-cap);white-space:nowrap;
    text-align:center;line-height:1.3;
-   letter-spacing:.02em;text-shadow:0 0 3px #0b0e12,0 0 3px #0b0e12}
- #hq .cap b{color:#ff8aa0;font-weight:700}
- #hq .msg{font-size:11px;color:#ffd0d0;white-space:nowrap;display:none;
-   text-shadow:0 0 3px #0b0e12,0 0 3px #0b0e12}
+   letter-spacing:.02em;text-shadow:0 0 3px var(--lb-halo),0 0 3px var(--lb-halo)}
+ #hq .cap b{color:var(--hq-brand);font-weight:700}
+ #hq .msg{font-size:11px;color:var(--hq-msg);white-space:nowrap;display:none;
+   text-shadow:0 0 3px var(--lb-halo),0 0 3px var(--lb-halo)}
  #hq .rg{position:absolute;left:50%;top:15px;width:52px;height:52px;margin:-26px 0 0 -26px;
    border-radius:50%;pointer-events:none;display:none;animation:fxHalo 3.2s ease-in-out infinite;
    box-shadow:0 0 0 2px rgba(var(--c),.95),0 0 18px 6px rgba(var(--c),.65)}
  #hq.hot .rg,#hq.hot .msg{display:block}
  #hq.fly{visibility:hidden}
+ body:not(.mapready) #hq{visibility:hidden}   /* 바탕보다 먼저 뜨지 않게(`MAP_READY`) */
+ /* 바다색은 `#wrap` 바탕이라 페이지가 열리자마자 칠해진다. 레이어를 받는
+    동안 빈 바다만 보이면 "지도가 안 나온다"로 읽혀 **기다리는 중임을 적는다** */
+ #loading{position:absolute;left:50%;top:45%;transform:translate(-50%,-50%);
+   z-index:2;font-size:14px;color:var(--map-fg);opacity:.75;pointer-events:none;
+   animation:fxHalo 1.6s ease-in-out infinite}
+ body.mapready #loading{display:none}
  /* SGW → PGW. **필요할 때만** 긋는다 — 상시 선은 10-27 에 지운 부채꼴과 같다 */
- .eg{fill:none;stroke:#9ff0e4;stroke-width:2px;stroke-opacity:1;
+ .eg{fill:none;stroke:var(--eg);stroke-width:2px;stroke-opacity:1;
    stroke-dasharray:7 4;vector-effect:non-scaling-stroke}
  #glob{position:absolute;inset:0;pointer-events:none;z-index:2;display:none;
    animation:fxHalo 3.2s ease-in-out infinite}
@@ -4213,24 +4385,25 @@ _HTML_MAP = """<!doctype html>
  #flist .bd{overflow:auto}
  #flist.fold .bd{display:none}
  #flist .it{display:block;width:100%;text-align:left;border:0;border-radius:0;
-   border-left:4px solid #ff5b5b;border-bottom:1px solid #1d232b;
+   border-left:4px solid var(--sev-CRITICAL);border-bottom:1px solid #1d232b;
    background:none;padding:6px 10px 6px 9px;cursor:pointer;line-height:1.45}
  #flist .it:hover{background:#18202a} #flist .it.on{background:#24303f}
- #flist .it.MAJOR{border-left-color:#ff9640} #flist .it.WARN{border-left-color:#ffd84a}
- #flist .it.INFO{border-left-color:#5cb6ff}
+ #flist .it.MAJOR{border-left-color:var(--sev-MAJOR)} #flist .it.WARN{border-left-color:var(--sev-WARN)}
+ #flist .it.INFO{border-left-color:var(--sev-INFO)}
  #flist .it.old{opacity:.62}
  #flist .it .t{font-weight:600;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
  #flist .it .m{opacity:.7;font-size:11px;display:block}
  #flist .lv{display:inline-block;font-size:10px;font-weight:700;padding:0 5px;
-   margin-right:5px;border-radius:3px;background:#ff5b5b;color:#0b0e12}
+   margin-right:5px;border-radius:3px;background:var(--sev-CRITICAL);color:#0b0e12}
  #flist .na{opacity:.5;font-style:italic}
  #flist .empty{padding:10px;opacity:.6}
- #src{position:absolute;right:8px;bottom:6px;font-size:11px;opacity:.45}
+ #src{position:absolute;right:8px;bottom:6px;font-size:11px;opacity:.45;color:var(--map-fg)}
  /* 축척 — 출처 줄 위에 둔다. 셀 간격이 수백 m 라 "지금 몇 m 를 보고
     있나"가 장비 밀도를 읽는 데 필요하다 */
  #scale{position:absolute;right:8px;bottom:24px;z-index:3;font-size:11px;
-   display:flex;align-items:center;gap:6px;opacity:.75;pointer-events:none}
- #scale i{height:7px;border:1px solid #c6cedb;border-top:0;display:block}
+   display:flex;align-items:center;gap:6px;opacity:.75;pointer-events:none;
+   color:var(--map-fg)}
+ #scale i{height:7px;border:1px solid var(--scale-line);border-top:0;display:block}
  #scale b{font-weight:600;font-variant-numeric:tabular-nums}
 </style></head><body>
 <header>
@@ -4242,6 +4415,10 @@ _HTML_MAP = """<!doctype html>
     <option value=mme>MME</option>
   </select></label>
   <button id=reset>전체 보기</button>
+  <label title="지도 색상셋 — 고른 것은 이 브라우저에 기억한다">색상 <select id=theme>
+    <option value=dark>어두운</option>
+    <option value=light>밝은</option>
+  </select></label>
   <span class=nav><a href="/">장애 주입 화면</a> · <a href="/topo">마스터 토폴로지</a></span>
   <span class=nav title="전체 eNB·TA 보기에서 Shift 를 누른 채 끌면 사각형 안의 eNB 를 한 번에 고른다">Shift+드래그 = eNB 범위 선택</span>
   <span class=rt><span id=upd title="장애 이력을 마지막으로 받아 화면에 반영한 시각 (10초마다 묻는다)">—</span>
@@ -4292,6 +4469,7 @@ _HTML_MAP = """<!doctype html>
   <div id=flist class=fold><div class=hd><b>장애 이력</b><span id=fcnt></span><em id=ffold>펼치기</em></div>
     <div class=bd id=fbody><div class=empty>graphio 에 묻는 중</div></div></div>
   <div id=labels></div>
+  <div id=loading>地図を読み込み中…</div>
   <div id=tip></div><div id=legend></div><div id=scale></div><div id=src></div>
 </div>
 <script>
@@ -4303,6 +4481,29 @@ const svg=document.getElementById('svg'), tip=document.getElementById('tip');
 const geofx=document.getElementById('geofx');
 let VB=null, HOME=null, D=null, GEO=null, ALL=null, RAIL=null, RIV=null;
 let ROAD=null, GREEN=null, STBL=null, WATER=null, CHOME=null;
+
+// ── 색상셋 — CSS 변수(`body[data-theme]`)가 정본이다 ─────────────────────
+//
+// JS 가 칠하는 색도 거기서 읽는다. 셀 7,694개를 칠할 때마다
+// `getComputedStyle` 을 부르면 무거우므로 **셋을 바꿀 때 한 번** 읽어 둔다.
+const THEME_KEY='gp-map-theme';
+const THEME_VARS=['cell','node-in','node-mme','node-sgw','glow','line-s','line-l','pal-s','pal-l',
+  ...['CRITICAL','MAJOR','WARN','INFO'].flatMap(k=>['sev-'+k,'sev-'+k+'-rgb','sev-'+k+'-lt'])];
+let TH={};
+function loadTheme(name){
+  document.body.dataset.theme=name;
+  const cs=getComputedStyle(document.body);
+  TH={}; for(const k of THEME_VARS) TH[k]=cs.getPropertyValue('--'+k).trim();
+}
+loadTheme(['dark','light'].includes(localStorage.getItem(THEME_KEY))
+  ? localStorage.getItem(THEME_KEY) : 'dark');
+document.getElementById('theme').value=document.body.dataset.theme;
+document.getElementById('theme').onchange=e=>{
+  localStorage.setItem(THEME_KEY, e.target.value);
+  loadTheme(e.target.value);
+  // 노선·팔레트·장애 색은 그릴 때 정해지므로 **다시 그린다**
+  if(D){ draw(); if(typeof buildFx==='function') buildFx(); }
+};
 
 // ── 장애 현황 — **10초마다 묻고, 바뀐 것만 건드린다** ──────────────────
 //
@@ -4337,8 +4538,8 @@ function markFault(node, f){
 }
 
 // 효과 층 — 심각도별 후광(번지는 빛)과 숨쉬기 겹(밝은 쪽 색)
-const FX_COLOR={CRITICAL:['255,91,91','#ffd0d0'], MAJOR:['255,150,64','#ffe0c4'],
-                WARN:['255,216,74','#fff2b8'], INFO:['92,182,255','#d3ebff']};
+//: 색은 색상셋에서 — [후광 rgb, 숨쉬기 밝은 쪽]
+const fxColor=(sev)=>[TH['sev-'+sev+'-rgb'], TH['sev-'+sev+'-lt']];
 let FX=[];        // [도형, 심각도, 후광 배율]
 let FX_AT=null;   // 효과를 깔 때의 화면 변환 — 옮기기만 했으면 이것과의 차이만큼 민다
 
@@ -4363,7 +4564,7 @@ function buildFx(){
   for(const [sh, sev, grow] of FX){
     const [cx,cy,sz]=shapeAt(sh); if(!isFinite(cx)||!sz) continue;
     const x=cx*m.a+m.e-w.left, y=cy*m.d+m.f-w.top, px=sz*m.a;
-    const [rgb, light]=FX_COLOR[sev];
+    const [rgb, light]=fxColor(sev);
     const h=document.createElement('i'), d=px*grow;
     h.style.cssText=`left:${x}px;top:${y}px;width:${d}px;height:${d}px;`
       + `background:radial-gradient(circle,rgba(${rgb},.9) 0,rgba(${rgb},.5) 30%,rgba(${rgb},0) 70%)`;
@@ -4622,12 +4823,12 @@ function geoPoints(h){
   }
   return pts;
 }
-const SEV_FILL={CRITICAL:'#ff5b5b', MAJOR:'#ff9640', WARN:'#ffd84a', INFO:'#5cb6ff'};
+
 function drawGeo(h){
   const box=document.getElementById('gGeo'); box.replaceChildren();
   geofx.replaceChildren();
   if(!h||!h.axis) return;
-  const col=SEV_FILL[SEV_CLASS[String(h.severity).toUpperCase()]||'CRITICAL'];
+  const col=TH['sev-'+(SEV_CLASS[String(h.severity).toUpperCase()]||'CRITICAL')];
   const nm=GEO_NAME[h.axis]||h.axis;
   for(const g of geoShapes(h)){
     let q;
@@ -4720,7 +4921,8 @@ function focusPoints(h){
   return out;
 }
 //: 점들을 담는 viewBox. **목록 패널이 오른쪽을 덮으므로** 그만큼 비우고
-//: 남은 자리 가운데에 놓는다. 한 점뿐이어도 1.2km 폭은 보인다
+//: 남은 자리 가운데에 놓는다. 최소 폭은 0 으로 나누지 않으려는 것뿐이다 —
+//: 실제 최소 축척은 `fitFor` 의 단계 하한이 정한다
 const FIT_MIN_W=0.013;
 function fitBox(pts){
   const r=wrap.getBoundingClientRect();
@@ -4739,36 +4941,40 @@ function fitBox(pts){
   // 내용의 가운데가 **왼쪽 `useW` × 아래쪽 `useH` 구간**의 가운데에 오도록
   return {x:cx-upp*useW/2, y:cy-upp*(TOP+useH/2), w:upp*r.width, h:upp*r.height};
 }
-//: **구역 장애(메시·행정구역)는 축척 눈금 1km 보다 당기지 않는다**(사람 결정
-//: 2026-10-30). 丁目 하나·1km 메시 한 칸이 200m 눈금까지 당겨져 그것만 보이고
-//: 어디인지 알 수 없었다. 처음엔 ADM 에만 걸어 메시가 그대로 당겨졌다.
-//: 눈금은 140px 안에 드는 가장 큰 1·2·5 값이라(`drawScale`) 1km 가 되려면
-//: 1px ≥ 1000/140 m 여야 한다
-const ADM_MIN_MPP=1000/140;
+//: **장애를 눌러 당길 때의 최소 축척 — 장비 500m · 구역 1km**(사람 결정
+//: 2026-11-03). 구역(메시·행정구역)은 10-30 에 1km 로 정했다 — 丁目 하나·
+//: 1km 메시 한 칸이 200m 눈금까지 당겨져 그것만 보이고 어디인지 알 수 없었다.
+//: 장비는 하한이 없어 창 크기·장비 분포에 따라 200m 와 500m 사이 아무
+//: 데나 멈췄다. 이보다 넓게 보는 것은 상관없다 — 내용이 넓으면 올라간다
+const FIT_MIN_M={area:1000, equip:500};
 function fitFor(h, pts){
   const v=fitBox(pts);
-  if(!h.axis || h.axis==='GLOBAL') return v;
-  const mpp=mppOf(v);
-  if(mpp>=ADM_MIN_MPP) return v;
+  const mpp=mppOf(v); if(!mpp) return v;
+  const area = !!h.axis && (h.axis.startsWith('MESH') || h.axis.startsWith('ADM'));
+  const t=snapUp(Math.max(mpp, (area?FIT_MIN_M.area:FIT_MIN_M.equip)/SCALE_PX));
   // **내용의 가운데를 고정점으로** 넓힌다. 상자 가운데로 넓히면 fitBox 가
   // 위쪽 바·오른쪽 목록을 피해 놓은 자리에서 내용이 밀려난다
   let x0=1e9,x1=-1e9,y0=1e9,y1=-1e9;
   for(const [lon,lat] of pts){ const x=mx(lon), y=-my(lat);
     x0=Math.min(x0,x); x1=Math.max(x1,x); y0=Math.min(y0,y); y1=Math.max(y1,y); }
-  const f=ADM_MIN_MPP/mpp, px=(x0+x1)/2, py=(y0+y1)/2;
-  return {w:v.w*f, h:v.h*f, x:px-(px-v.x)*f, y:py-(py-v.y)*f};
+  return zoomAbout(v, t/mpp, (x0+x1)/2, (y0+y1)/2);
 }
 //: 부드럽게 날아간다. 도중에는 viewBox 만 바꾸고 효과·라벨은 숨긴다 —
 //: 프레임마다 `draw` 를 부르면 2천 개를 매번 다시 만든다(드래그 측정과 같은 이유)
 let FLY=null;
-function flyTo(v, ms=700){
+//: `opt.at` — 이 점([x, y], viewBox 좌표)을 **화면에서 고정한 채** 확대한다.
+//:   휠이 쓴다. 가운데를 따로 보간하면 도중에 커서 아래 지점이 흘렀다가
+//:   끝에서 돌아온다
+//: `opt.near` — 거의 다 왔을 때(`FLY_NEAR`) 한 번 부른다. 휠이 다음 칸을
+//:   **앞 이동이 끝나기 직전에** 이어 붙이는 자리다(`wheelStep`)
+const EASE_INOUT=t=>-(Math.cos(Math.PI*t)-1)/2;   // 사인 — 출발·도착 모두 부드럽게
+const FLY_NEAR=.8;
+function flyTo(v, ms=700, opt={}){
   if(!VB) return;
   const a={...VB};
-  // 축소 한계(`MAX_MPP`)는 도착점에서 `setVB` 가 지킨다 — 여기서 미리 맞춰
+  // 축척 단계는 도착점에서 `setVB` 가 지킨다 — 여기서 미리 맞춰
   // 둬야 마지막 프레임에서 튀지 않는다
-  const mpp=mppOf(v);
-  if(mpp>MAX_MPP){ const f=MAX_MPP/mpp, cx=v.x+v.w/2, cy=v.y+v.h/2;
-    v={w:v.w*f, h:v.h*f, x:cx-v.w*f/2, y:cy-v.h*f/2}; }
+  v=snapVB(v);
   const t0=performance.now(), fx=document.getElementById('fx'), lb=document.getElementById('labels');
   fx.style.visibility='hidden'; lb.style.visibility='hidden';
   document.getElementById('hq').classList.add('fly');
@@ -4776,21 +4982,27 @@ function flyTo(v, ms=700){
   FLY=id;
   const step=now=>{
     if(FLY!==id) return;              // 다른 이동이 끼어들었다
-    const t=Math.min(1,(now-t0)/ms), e=t<.5?2*t*t:1-Math.pow(-2*t+2,2)/2;
+    const t=Math.min(1,(now-t0)/ms);
+    const e=opt.at ? EASE_INOUT(t) : t<.5?2*t*t:1-Math.pow(-2*t+2,2)/2;
     // 폭은 **비율로** 보간한다 — 선형이면 줌인할 때 끝에서 갑자기 당겨진다
-    const w=a.w*Math.pow(v.w/a.w,e), h=a.h*Math.pow(v.h/a.h,e);
-    const cx=(a.x+a.w/2)+((v.x+v.w/2)-(a.x+a.w/2))*e;
-    const cy=(a.y+a.h/2)+((v.y+v.h/2)-(a.y+a.h/2))*e;
-    VB={x:cx-w/2, y:cy-h/2, w, h};
+    if(opt.at) VB=zoomAbout(a, Math.pow(v.w/a.w,e), opt.at[0], opt.at[1]);
+    else {
+      const w=a.w*Math.pow(v.w/a.w,e), h=a.h*Math.pow(v.h/a.h,e);
+      const cx=(a.x+a.w/2)+((v.x+v.w/2)-(a.x+a.w/2))*e;
+      const cy=(a.y+a.h/2)+((v.y+v.h/2)-(a.y+a.h/2))*e;
+      VB={x:cx-w/2, y:cy-h/2, w, h};
+    }
     svg.setAttribute('viewBox',`${VB.x} ${VB.y} ${VB.w} ${VB.h}`);
     geofx.setAttribute('viewBox',`${VB.x} ${VB.y} ${VB.w} ${VB.h}`);
-    drawScale();
+    drawScale(); syncKs();
+    if(opt.near && t>=FLY_NEAR){ const f=opt.near; opt.near=null; f(); if(FLY!==id) return; }
     if(t<1){ requestAnimationFrame(step); return; }
     FLY=null; fx.style.visibility=''; lb.style.visibility='';
     document.getElementById('hq').classList.remove('fly');
     setVB(v); draw();
   };
   requestAnimationFrame(step);
+  return id;
 }
 // 고른 장애를 선택 바에 적고, 걸린 장비만 남기고 물린다
 function drawFocus(){
@@ -4813,7 +5025,7 @@ function drawFocus(){
     egressLines(document.getElementById('gPick'), sg);
   } else hqHot(null);
   if(h.axis==='GLOBAL'){
-    const [rgb]=FX_COLOR[SEV_CLASS[String(h.severity).toUpperCase()]||'CRITICAL'];
+    const [rgb]=fxColor(SEV_CLASS[String(h.severity).toUpperCase()]||'CRITICAL');
     glob.style.boxShadow=`inset 0 0 110px 40px rgba(${rgb},.85), inset 0 0 0 5px rgba(${rgb},1)`;
     glob.style.display='block';
   }
@@ -4968,6 +5180,15 @@ const kmSpan=()=>VB?VB.w*90.4:1e9;
 //: 픽셀로 그려졌다. 처음 화면은 세로가 꽉 차 1단위 = 0.6px, "전체 보기"는
 //: 가로가 꽉 차 1.2px — **장비가 두 배로 커졌다.** 0.6 은 처음 화면의
 //: 크기를 기준으로 고정한 값이다(사람 결정 2026-10-28)
+//: 마지막으로 그린 축척(`draw`) 대비 지금 축척 — 장비 점을 그 비율만큼
+//: 되돌린다(`#gCell circle` CSS 머리말). 다시 그리면 1 이다
+let K_DRAWN=0;
+function syncKs(){
+  const k=sizeK();
+  // 확대하면 1px 당 단위(k)가 줄어 점이 커 보인다 — **그만큼 줄인다**(k/K_DRAWN).
+  // 처음에 거꾸로(K_DRAWN/k) 넣어 오히려 두 배로 부풀었다
+  svg.style.setProperty('--ks', K_DRAWN&&k ? String(k/K_DRAWN) : '1');
+}
 function sizeK(){
   if(!VB) return 1;
   const r=document.getElementById('wrap').getBoundingClientRect();
@@ -4980,10 +5201,27 @@ const ROAD_LOD={motorway:1e9, trunk:1e9, primary:14, secondary:7, tertiary:3};
 const lodOf=()=>{const k=kmSpan(); return k>14?0:k>7?1:k>3?2:3;};
 let LOD=-1;
 
-//: **축소 한계 — 축척 눈금이 10km 를 넘지 않는다**(사람 결정 2026-10-28).
-//: 눈금은 140px 안에 드는 가장 큰 1·2·5 값이라, 1px 이 142.9m 를 넘으면
-//: 20km 로 바뀐다. 그 앞에서 멈춘다. 이동은 막지 않는다
-const MAX_MPP=140;
+//: **축척은 정해진 단계로만 움직인다**(사람 결정 2026-11-03). 연속 줌일 때는
+//: 같은 "200 m" 눈금 막대가 57~140px 로 늘었다 줄었다 해서, 두 화면의 200m 를
+//: 사람이 비교할 수 없었다. 단계마다 막대가 늘 `SCALE_PX` 로 같은 길이다.
+//: 1·2·5 계열이라 단계 사이 배율은 ×2 와 ×2.5 가 섞인다
+const SCALE_PX=100;
+const ZOOM_MPP=[50,100,200,500,1000,2000,5000,10000].map(m=>m/SCALE_PX);
+//: **확대 한계 — 눈금 50m**(사람 결정 2026-11-03).
+//: **축소 한계 — 눈금 10km**(사람 결정 2026-10-28). 이동은 막지 않는다
+const MAX_MPP=ZOOM_MPP[ZOOM_MPP.length-1];
+//: 이 값을 담는 가장 촘촘한 단계 — **올림**이다(내용이 잘리지 않게).
+//: 1% 여유는 이미 맞춘 값이 부동소수 오차로 한 단계 튀지 않게
+function snapUp(mpp){ for(const s of ZOOM_MPP) if(s>=mpp*.99) return s; return MAX_MPP; }
+//: (px, py) 를 고정점으로 f 배 — 축척은 정확히 f 배가 된다(가로세로 같은 배율)
+function zoomAbout(v, f, px, py){
+  return {w:v.w*f, h:v.h*f, x:px-(px-v.x)*f, y:py-(py-v.y)*f}; }
+//: 가장 가까운 위쪽 단계로 — **가운데를 두고**
+function snapVB(v){
+  const mpp=mppOf(v); if(!mpp) return v;
+  const t=snapUp(mpp); if(Math.abs(t/mpp-1)<1e-9) return v;
+  return zoomAbout(v, t/mpp, v.x+v.w/2, v.y+v.h/2);
+}
 //: 화면 1px 이 몇 m 인가. `preserveAspectRatio` 가 meet 이라 **꽉 찬 축**이
 //: 정한다 — 가로만 보면 세로가 꽉 찬 화면에서 축척이 틀린다
 function mppOf(v){
@@ -4992,15 +5230,14 @@ function mppOf(v){
   return Math.max(v.w/r.width, v.h/r.height)*90400;
 }
 function setVB(v){
-  // 넘치면 **가운데를 두고** 줄인다 — "전체 보기"·처음 화면이 여기로 온다
-  const mpp=mppOf(v);
-  if(mpp>MAX_MPP){ const f=MAX_MPP/mpp, cx=v.x+v.w/2, cy=v.y+v.h/2;
-    v={w:v.w*f, h:v.h*f, x:cx-v.w*f/2, y:cy-v.h*f/2}; }
+  // **어디서 오든 단계에 맞춘다** — "전체 보기"·처음 화면·창 크기 변경이
+  // 여기로 온다. 이미 맞춘 값(휠·장애 맞추기)은 그대로 지나간다
+  v=snapVB(v);
   VB=v; svg.setAttribute('viewBox',`${v.x} ${v.y} ${v.w} ${v.h}`);
   geofx.setAttribute('viewBox',`${v.x} ${v.y} ${v.w} ${v.h}`);   // 구역 겉층도 같이
-  drawScale();
+  drawScale(); syncKs();
   // **단계가 바뀌면 draw 가 placeLabels 까지 한다** — 여기서 또 부르면 두 번이다
-  if(D && lodOf()!==LOD){ draw(); return; }
+  if(D && MAP_READY && lodOf()!==LOD){ draw(); return; }
   placeLabels();}
 
 // ── 도코모 본사 · PGW ────────────────────────────────────────────────
@@ -5018,7 +5255,7 @@ function placeHq(m, r){
 function hqHot(sev, msg){
   const q=document.getElementById('hq'); if(!q) return;
   q.classList.toggle('hot', !!sev);
-  if(sev) q.style.setProperty('--c', FX_COLOR[SEV_CLASS[String(sev).toUpperCase()]||'CRITICAL'][0]);
+  if(sev) q.style.setProperty('--c', fxColor(SEV_CLASS[String(sev).toUpperCase()]||'CRITICAL')[0]);
   q.querySelector('.msg').textContent=msg||'';
 }
 // SGW → PGW 선 (`ids` 가 비면 전부)
@@ -5080,7 +5317,7 @@ function placeLabels(){
 function lineColor(name){
   let h=0;
   for(let i=0;i<String(name).length;i++) h=(h*31+String(name).charCodeAt(i))|0;
-  return `hsl(${((h%360)+360)%360} 32% 64%)`;
+  return `hsl(${((h%360)+360)%360} ${TH['line-s']} ${TH['line-l']})`;
 }
 
 // ── 축척 ────────────────────────────────────────────────────────────
@@ -5094,10 +5331,11 @@ function drawScale(){
   const w=document.getElementById('wrap').getBoundingClientRect().width;
   if(!w) return;
   const mpp=mppOf(VB);
-  // 1·2·5 계열에서 **140px 를 넘지 않는** 가장 큰 눈금을 고른다
+  // 1·2·5 계열에서 **`SCALE_PX` 를 넘지 않는** 가장 큰 눈금 — 단계에 맞춰
+  // 서 있으면 막대가 늘 `SCALE_PX` 다. 길이가 달라지는 것은 날아가는 도중뿐이다
   const nice=[10,20,50,100,200,500,1000,2000,5000,10000,20000,50000];
   let m=nice[0];
-  for(const v of nice) if(v/mpp<=140) m=v;
+  for(const v of nice) if(v/mpp<=SCALE_PX*1.01) m=v;
   box.innerHTML=`<i style="width:${(m/mpp).toFixed(1)}px"></i>`
     +`<b>${m>=1000?(m/1000)+' km':m+' m'}</b>`;
 }
@@ -5111,7 +5349,7 @@ function buildPal(axis){
   const vals=[...new Set(D.cells.map(c=>c[axis]).filter(v=>v!==null&&v!==''))]
     .sort((a,b)=>String(a).localeCompare(String(b),undefined,{numeric:true}));
   // 채도 68% 는 셀이 7,694개가 되자 눈이 아팠다 — 구분만 되면 된다
-  PAL={}; vals.forEach((v,i)=>PAL[v]=`hsl(${Math.round(i*360/Math.max(1,vals.length))} 42% 62%)`);
+  PAL={}; vals.forEach((v,i)=>PAL[v]=`hsl(${Math.round(i*360/Math.max(1,vals.length))} ${TH['pal-s']} ${TH['pal-l']})`);
   return vals;
 }
 function legend(axis, vals){
@@ -5191,9 +5429,13 @@ function markYamanote(){
 }
 
 //: 코어 장비 색 — 파스텔 색상환 자리(eNB 연분홍 · 장애 산호와 갈린다)
-const NODE_COL={mme:'#b9a7e3', sgw:'#93bfe6'};
+//: 실제 색은 색상셋(`--node-mme`·`--node-sgw`)이 정한다
+//: **지도 바탕을 다 받기 전에는 아무것도 그리지 않는다**(사람 요청 2026-11-03).
+//: 처음 화면을 잡는 `setVB(HOME)` 이 `draw` 를 불러, 경계·도로를 받는 동안
+//: 빈 바다 위에 장비만 먼저 떠 있었다. `load` 가 레이어를 다 받고 켠다
+let MAP_READY=false;
 function draw(){
-  if(!D) return;
+  if(!D || !MAP_READY) return;
   LOD=lodOf();                       // 이 단계로 그린다 — `setVB` 가 비교한다
   svg.setAttribute('data-lod', LOD);  // 도로 굵기를 CSS 가 단계별로 집는다
   for(const id of ['gAdm','gGreen','gChome','gRoad','gRiv','gRail','gYmt','gAll','gKde','gGeo','gCell','gPick','gStn','gNode'])
@@ -5272,6 +5514,7 @@ function draw(){
   const M=modeOf(), axis=M.axis;
   const vals=buildPal(axis); legend(axis, vals);
   const k = sizeK();                  // 확대해도 점 크기가 유지되게
+  K_DRAWN=k; syncKs();                // 이 크기로 그렸다 — 되돌림 배율은 1
 
   // TA 묶음 — **선이 아니라 면이다**(사람 결정 2026-10-28).
   // 볼록껍질은 바깥쪽 몇 점만 이어 안이 비고, 두 묶음이 겹치면 어디까지가
@@ -5296,7 +5539,7 @@ function draw(){
     // (#e2efc4 연녹)과 명도·색상이 겹쳐 역 위의 기지국이 사라졌다.
     // 배경이 쓰지 않는 색상환 자리로 뺀다 — 색축이 있는 모드는
     // 팔레트가 이긴다
-    d.setAttribute('fill',PAL[c[axis]] || '#fbd6e4');
+    d.setAttribute('fill',PAL[c[axis]] || TH.cell);
     d.setAttribute('fill-opacity',String(base));
     // **주인공이 아니면 누를 수 없다**(사람 결정 2026-10-28). SGW·MME 보기에서
     // 물러난 eNB 가 눌리면 선택이 엉뚱한 쪽으로 바뀌었다
@@ -5318,7 +5561,7 @@ function draw(){
     const g=el('g'), r=(kind==='mme'?15:10)*(hot?1.45:1)*k;
     if(M.focus && !hot){ g.setAttribute('opacity','.3'); g.style.pointerEvents='none'; }
     const sh=el(kind==='mme'?'rect':'circle');
-    const cx=mx(n.lon), cy=-my(n.lat), col=NODE_COL[kind];
+    const cx=mx(n.lon), cy=-my(n.lat), col=TH['node-'+kind];
     if(kind==='mme'){ sh.setAttribute('x',cx-r); sh.setAttribute('y',cy-r);
       sh.setAttribute('width',2*r); sh.setAttribute('height',2*r);
       sh.setAttribute('rx',r*.42); sh.setAttribute('ry',r*.42); }
@@ -5328,7 +5571,7 @@ function draw(){
     // 어두운 속 + 장비 색 테두리 + 가운데 표식. 색상환 자리는 그대로다 —
     // MME 연보라, SGW 하늘. 장애가 걸리면 `.ft-*` 가 속을 심각도 색으로
     // 채우고 가운데 표식은 숨는다(`.ft + .ndi`) — 평시와 확실히 갈린다
-    sh.setAttribute('fill', '#141b26'); sh.setAttribute('stroke', col);
+    sh.setAttribute('fill', TH['node-in']); sh.setAttribute('stroke', col);
     sh.setAttribute('class', 'nd');
 
     sh.dataset.kind=kind; sh.dataset.id=n.id;
@@ -5400,20 +5643,35 @@ async function load(){
     const x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
     const px=(x1-x0)*.12+.002, py=(y1-y0)*.12+.002;
     HOME={x:x0-px,y:y0-py,w:(x1-x0)+2*px,h:(y1-y0)+2*py}; setVB({...HOME});
+    // **바탕을 못 받아도 장비는 그린다** — 아래에서 던지면 `MAP_READY` 가
+    // 영영 안 켜져 화면이 통째로 빈다. 왜 없는지는 `note` 에 적는다
+    try{
     // **마스터를 먼저 받아 그 범위로 경계를 받는다.** 생성 범위로만 받으면
     // `전체 보기` 에서 도쿄 바깥이 경계 없는 검은 바다로 남는다
     ALL=await (await fetch('/api/map/all')).json();
-    const la=[...D.cells.map(c=>c.lat), ...(ALL.pts||[]).map(p=>p[1])];
-    const lo=[...D.cells.map(c=>c.lon), ...(ALL.pts||[]).map(p=>p[0])];
-    const g=await (await fetch(`/api/map/geo?bbox=${Math.min(...la)-.15},`
-      +`${Math.min(...lo)-.15},${Math.max(...la)+.15},${Math.max(...lo)+.15}`)).json();
+    // **경계와 레이어를 한꺼번에 받는다**(2026-11-03 실측). 땅은 레이어가 덮는
+    // 범위까지 깔려야 하는데(간토 전역의 철도가 바다 위에 떴다), 그 범위를
+    // 화면이 레이어를 다 받은 뒤 재서 다시 물었더니 경계가 뒤에 줄을 서
+    // 0.4초 늦었다. 범위는 서버가 레이어 파일에서 직접 잰다(`cover=1`).
+    // `bbox` 는 기지국 범위 — 그 안은 상세 그대로, 바깥은 서버가 솎는다
+    let la0=1e9, la1=-1e9, lo0=1e9, lo1=-1e9;
+    const put=(lo,la)=>{ if(lo<lo0)lo0=lo; if(lo>lo1)lo1=lo; if(la<la0)la0=la; if(la>la1)la1=la; };
+    for(const c of D.cells) put(c.lon, c.lat);
+    for(const p of (ALL.pts||[])) put(p[0], p[1]);
+    const geoP=fetch(`/api/map/geo?cover=1&bbox=${la0-.15},${lo0-.15},${la1+.15},${lo1+.15}`)
+      .then(r=>r.json()).catch(e=>({error:`geo: ${e}`, features:[]}));
+    const LAYERS=[['rail',v=>RAIL=v],['rivers',v=>RIV=v],
+                  ['roads',v=>ROAD=v],['green',v=>GREEN=v],
+                  ['station_bldg',v=>STBL=v],
+                  ['water',v=>WATER=v],['chome',v=>CHOME=v]];
+    const [g, ...got]=await Promise.all([geoP, ...LAYERS.map(([nm])=>
+      fetch(`/api/map/layer/${nm}`).then(r=>r.json()).catch(e=>({error:`${nm}: ${e}`})))]);
     GEO=g.features?g:null;
+    if(g.error) document.getElementById('note').textContent=g.error;
+    // 출처 표기 순서 — 경계가 맨 앞
     const src=[g.source||g.error||''];
-    for(const [nm,set] of [['rail',v=>RAIL=v],['rivers',v=>RIV=v],
-                          ['roads',v=>ROAD=v],['green',v=>GREEN=v],
-                          ['station_bldg',v=>STBL=v],
-                          ['water',v=>WATER=v],['chome',v=>CHOME=v]]){
-      const r=await (await fetch(`/api/map/layer/${nm}`)).json();
+    for(let i=0;i<LAYERS.length;i++){
+      const [, set]=LAYERS[i], r=got[i];
       set(r.items||[]);
       if(r.source && !src.includes(r.source)) src.push(r.source);
       // 레이어가 없어도 지도는 선다 — 다만 **왜 없는지는 말한다**
@@ -5422,6 +5680,7 @@ async function load(){
     // 출처 표기는 **약관 의무다.** 레이어를 늘리면 여기도 늘어야 한다
     document.getElementById('src').textContent=src.filter(Boolean).join('  ·  ');
     markYamanote();
+    }catch(e){ document.getElementById('note').textContent=`지도 바탕을 받지 못했다 — ${e}`; }
   }
   // **점 하나는 셀이 아니라 자리(eNB)다.** 셀 수만 적으면 "2만 개가 왜
   // 이것밖에 안 보이나"가 된다 — 겹친 섹터는 한 점이다
@@ -5430,8 +5689,8 @@ async function load(){
     (ALL ? `마스터 ${ALL.enb.toLocaleString()} eNB / `
          + `${ALL.cells.toLocaleString()}셀 중 ` : '')
     + `${D.counts.enb} eNB / ${D.cells.length}셀`;
-  if(true){
-  }
+  MAP_READY=true;                     // 바탕이 다 왔다 — 이제 장비까지 한 번에
+  document.body.classList.add('mapready');
   draw();
 }
 
@@ -5483,7 +5742,7 @@ function drawPick(){
   lit.setAttribute('class','glow'); lit.setAttribute('filter','url(#kdeblur)');
   const litAt=(x,y,r)=>{ const q=el('circle');
     q.setAttribute('cx',x); q.setAttribute('cy',y); q.setAttribute('r',r);
-    q.setAttribute('fill','#ff8ebc'); q.setAttribute('fill-opacity','.5');
+    q.setAttribute('fill',TH.glow); q.setAttribute('fill-opacity','.5');
     lit.appendChild(q); };
   // **TA 보기에서는 불을 넣지 않는다**(사람 결정 2026-10-28). 그 보기는
   // 이미 묶음 히트맵이 빛이라, 고른 자리에만 분홍 빛이 하나 더 얹혀
@@ -5774,17 +6033,57 @@ for(const id of ['sel','fbar','incs','flist']){
   el.addEventListener('mousedown',e=>e.stopPropagation());
   el.addEventListener('wheel',e=>e.stopPropagation());
 }
+//: **휠 한 칸 = 한 단계, 짧게 날아간다**(사람 결정 2026-11-03). 일반 지도
+//: (카카오맵·구글)와 같은 방식이다. 세 번 돌아 여기 왔다 —
+//:   ① 한 칸 = 한 단계 **순간 이동** + 입력 모으기·쉬기 → "딱딱하다"
+//:   ② 굴리는 동안 연속, 멈추면 단계로 맞춤 → "커졌다 돌아오는 게 이상하다"
+//:   ③ 도중에 또 굴리면 그 자리에서 끊고 새로 출발 → 연속 2회부터 "이상하다"
+//: 지금은 **줄을 세운다.** 굴린 칸 수는 목표 단계(`WHEEL_TGT`)에 쌓기만 하고,
+//: 앞 이동이 80% 왔을 때(`FLY_NEAR`) 다음 칸을 **앞 이동의 도착점에서** 이어
+//: 붙인다. 다시 그리기(`draw`)는 줄의 마지막 칸이 끝났을 때 한 번이다.
+//: 고정점(커서)은 줄이 시작될 때 하나로 묶는다 — 칸마다 바꾸면 이어 붙인
+//: 이동의 도착점이 앞 이동의 궤적에서 벗어나 끝에서 튄다
+const WHEEL_MS=280, WHEEL_STEP=50;
+let WHEEL_TGT=0, WHEEL_AT=null, WHEEL_RUN=null, WHEEL_ACC=0, WHEEL_LAST=0;
+const nearestLevel=mpp=>{ let i=0;
+  ZOOM_MPP.forEach((s,k)=>{ if(Math.abs(Math.log(s/mpp))<Math.abs(Math.log(ZOOM_MPP[i]/mpp))) i=k; });
+  return i; };
+//: 줄의 다음 칸을 띄운다 — 진행 중이면 그 **도착점**에서, 아니면 지금 화면에서
+function wheelStep(){
+  const base=WHEEL_RUN ? WHEEL_RUN.v : VB;
+  const from=WHEEL_RUN ? WHEEL_RUN.i : nearestLevel(mppOf(VB));
+  if(from===WHEEL_TGT) return;
+  const i=from+(WHEEL_TGT>from?1:-1);
+  const v=zoomAbout(base, ZOOM_MPP[i]/mppOf(base), WHEEL_AT[0], WHEEL_AT[1]);
+  const run={i, v, near:false};
+  WHEEL_RUN=run;
+  run.id=flyTo(v, WHEEL_MS, {at:WHEEL_AT, near:()=>{ run.near=true; wheelStep(); }});
+}
 wrap.addEventListener('wheel',e=>{
   e.preventDefault(); if(!VB) return;
-  const r=wrap.getBoundingClientRect();
-  const fx=(e.clientX-r.left)/r.width, fy=(e.clientY-r.top)/r.height;
-  let z=e.deltaY>0?1.15:1/1.15;
-  // 한계에서는 **커서 자리를 지킨 채** 멈춘다. `setVB` 의 가운데 기준
-  // 보정에 맡기면 휠을 굴릴 때마다 화면이 조금씩 미끄러진다
-  if(z>1){ const cur=mppOf(VB); z=Math.min(z, MAX_MPP/cur); if(z<=1.0001) return; }
-  setVB({w:VB.w*z,h:VB.h*z,x:VB.x+(VB.w-VB.w*z)*fx,y:VB.y+(VB.h-VB.h*z)*fy});
-  draw();
+  const now=performance.now();
+  if(now-WHEEL_LAST>300) WHEEL_ACC=0;   // 지난 손길의 찌꺼기는 버린다
+  WHEEL_LAST=now;
+  // 줄 단위(파이어폭스)는 픽셀로 바꾼다. 마우스 한 칸은 보통 ±100 이다
+  const dy=e.deltaY*(e.deltaMode===1?33:1);
+  let dir=0;
+  if(Math.abs(dy)>=WHEEL_STEP) dir=dy>0?1:-1;
+  else { WHEEL_ACC+=dy; if(Math.abs(WHEEL_ACC)>=WHEEL_STEP){ dir=WHEEL_ACC>0?1:-1; WHEEL_ACC=0; } }
+  if(!dir) return;
+  // 줄이 끝났거나 다른 이동(장애 맞추기·전체 보기)이 끼어들었으면 새 줄이다
+  if(WHEEL_RUN && FLY!==WHEEL_RUN.id) WHEEL_RUN=null;
+  if(!WHEEL_RUN){
+    const r=wrap.getBoundingClientRect();
+    WHEEL_AT=[VB.x+VB.w*(e.clientX-r.left)/r.width, VB.y+VB.h*(e.clientY-r.top)/r.height];
+    WHEEL_TGT=nearestLevel(mppOf(VB));
+  }
+  WHEEL_TGT=Math.min(Math.max(WHEEL_TGT+dir, 0), ZOOM_MPP.length-1);
+  // 진행 중이면 쌓기만 한다 — 80% 지점에서 앞 이동이 이어 붙인다.
+  // **이미 그 지점을 지났으면** 이어 붙일 기회가 지나갔으니 여기서 띄운다
+  if(!WHEEL_RUN || WHEEL_RUN.near) wheelStep();
 },{passive:false});
+//: 창 크기가 바뀌면 같은 viewBox 라도 1px 의 거리가 달라진다 — 단계로 되돌린다
+window.addEventListener('resize',()=>{ if(VB) setVB(VB); });
 
 wrap.addEventListener('click',e=>{
   if(moved>4) return;        // 끌고 놓은 것은 클릭이 아니다
