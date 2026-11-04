@@ -31,6 +31,7 @@ DuckDB 를 두면 컬럼 이름·타입을 두 번 번역해야 하고, 그 번�
 
 from __future__ import annotations
 
+import math
 import hashlib
 import json
 import random
@@ -84,7 +85,7 @@ def _shift_cfg():
     (`set_shift_cfg` 가 갈아 끼우므로 import 시점 값을 붙잡으면 안 된다)."""
     return _scenarios.SHIFT
 from .scenarios import build_scenarios as build_sim_scenarios
-from .session import Call, SessionEngine, Shape
+from .session import Call, SessionEngine, Shape, net_mode_of
 from .apps import load as load_apps
 
 # --------------------------------------------------------------------------
@@ -1953,6 +1954,8 @@ class Mobility:
     walk_share: float = 0.0
     walk_sec_min: int = 180
     walk_sec_max: int = 600
+    #: 기동 때 걷는 사람을 **미리 걷게** 할 시간(분) — 0 이면 끈다(`generator._warm_walkers`)
+    walk_warmup_min: int = 0
     #: **시간대별 호 그룹 비율** — `[[시작시, 끝시, 고정%, 이동%, 지하철%], …]`
     #: (`generator.Groups`). 지하철은 이동에 포함된다. 비면 종전대로
     #: `call_share` 하나로 노선 탑승자를 고른다. 있으면 `call_share` 는 안 쓴다
@@ -1961,6 +1964,9 @@ class Mobility:
     subway_hours: list = field(default_factory=lambda: [6, 24])
     #: 시간대 경계를 넘어가는 시간(분) — 경계 앞뒤 절반씩
     blend_min: int = 60
+    #: 시간대 이름·특징 문구 — **gen-ui 만 읽는다**(`ui._clock_bands`). 생성기는 쓰지 않지만
+    #: `from_cfg` 가 모르는 키를 거부하므로 자리를 둔다
+    hourly_notes: list = field(default_factory=list)
     #: **노선을 타지 않는 가입자**를 거주지 근처에서 뽑나. 기본 끄기.
     #:
     #: 경로와 **다른 축이다.** 경로는 "이 사람이 이 구간을 다닌다"이고 이쪽은
@@ -1981,6 +1987,12 @@ class Mobility:
             raise RuntimeError(
                 f"mobility 설정에 모르는 키: {bad} (아는 키: {sorted(known)})")
         return cls(**cfg)
+
+
+def _fault_no(scenario_id: str) -> int | None:
+    """`"F-66"` → 66. 라이브 fault 가 아니면(배치 시나리오) `None`."""
+    head, _, num = str(scenario_id).partition("-")
+    return int(num) if head == "F" and num.isdigit() else None
 
 
 class PemdbGen:
@@ -2018,7 +2030,10 @@ class PemdbGen:
                  scope: dict | None = None,
                  #: `j-sc-24` 부하 이동 — A eNB 와 소등 eNB 목록
                  #: (`scenarios.ShiftCfg`). 비면 소등 eNB 가 없다.
-                 capacity_shift: dict | None = None):
+                 capacity_shift: dict | None = None,
+                 #: 망 모드 — `sa_device_share`(5G 능력 단말 비율, 기본 0.3).
+                 #: 가입자 풀을 만들 때 한 번 쓰므로 **재시작해야 바뀐다**
+                 net_mode: dict | None = None):
         self.plmn = plmn or Plmn()
         cells = load_cells(conn, enb_limit=enb_limit, drawable=drawable,
                            ensure_coords=ensure_coords, plmn=self.plmn,
@@ -2054,6 +2069,13 @@ class PemdbGen:
         #: 장애 공통 설정(`pemdb1.fault`) — TIMEOUT 대기시간. mutator 가
         #: 모듈 전역(`scenarios.FAULT`)으로 읽는다(서명에 설정을 받을 자리가 없다).
         self.fault = set_fault_cfg(fault)
+        #: 하한을 채운 셀의 마지막 분과 그때의 하한 — `_floor_drafts` 의 꼬리가
+        #: 읽는다. 장애가 끝나면 시나리오가 `active` 에서 빠지므로(라이브는
+        #: 활성 fault 행만 걸린다) 끝난 뒤의 하한은 여기 남은 값으로만 안다.
+        #: **프로세스 상태다** — gen 을 재시작하면 진행 중이던 꼬리가 사라진다
+        #: 값은 `(마지막 분, 그때의 하한, fault_id)` — fault_id 는 화면에 꼬리가
+        #: 끝나는 시각을 fault 별로 알리는 데 쓴다(`floor_tail_until`)
+        self._floor_last: dict[str, tuple[int, float, int | None]] = {}
         self.dist = Distributions(
             data_dir / "pemdb1" / "_distributions.json",
             random.Random(seed + 101), success_only=success_only,
@@ -2089,6 +2111,7 @@ class PemdbGen:
             # `initial_*_duration`·`initial_nr_conn_time` 은 못 덮는다.
             end_only=True,
             plmn=self.plmn,
+            sa_device_share=float((net_mode or {}).get("sa_device_share", 0.3)),
         )
         self._reseat_subscribers(random.Random(seed + 202))
         # 평시 PathSwitch 는 `_coerce` 가 셀 마스터를 보고 심는다. 생성기 쪽에도
@@ -2353,11 +2376,87 @@ class PemdbGen:
                     continue
                 done.add(k)                     # 두 장애가 같은 셀이면 한 번만
                 if suppress is not None and suppress(cell):
+                    # 무호 장애 셀은 꼬리도 걸지 않는다 — 복구 뒤 호가 돌아오는
+                    # 모양이 그 장애의 서명이다
+                    self._floor_last.pop(k, None)
                     continue
+                self._floor_last[k] = (minute, want, _fault_no(sc.id))
                 need = int(want + gen.rng.random()) - landed[k]
                 for _ in range(max(0, need)):
                     sub = gen.subs[pool[gen.rng.randrange(len(pool))]]
                     yield gen.base_lte_call(ts, slot_start, at=(sub, cell))
+        yield from self._floor_tail(minute, done, landed, suppress, ts, slot_start)
+
+    def floor_tail_until(self) -> dict[str, str]:
+        """fault 별 **하한 꼬리가 끝나는 시각** — `{"66": "2026-11-02 15:31"}`.
+
+        꼬리는 이 프로세스의 메모리 상태라 UI 가 직접 볼 수 없다. 데몬이 틱마다
+        이것을 `CM_DATAGEN_CONFIG.floor_tail` 에 쓰고 `/api/faults` 가 읽는다
+        (2026-11-02 · 카드 15). 진행 중인 장애는 "지금 끝나면"의 시각이다.
+        재시작하면 비어 있다 — 그것이 사실이다(꼬리가 사라졌다).
+        """
+        if self.anchor is None:
+            return {}
+        last_by: dict[int, int] = {}
+        for last, peak, fid in self._floor_last.values():
+            if fid is not None:
+                end = last + self._tail_len(peak)
+                last_by[fid] = max(end, last_by.get(fid, end))
+        # 끝 분 + 1 이 "다시 같은 셀을 노려도 되는" 시각이다
+        return {str(fid): (self.anchor + timedelta(minutes=last + 1))
+                .strftime("%Y-%m-%d %H:%M")
+                for fid, last in sorted(last_by.items())}
+
+    def _tail_len(self, peak: float) -> int:
+        """하한 꼬리가 몇 분 가나 — 초과분 `peak·0.5^(t/h)` 가 ε 아래로 내려오는 t.
+
+        `floor_tail_min` 은 안전 상한이다(11-03 재설계).
+        """
+        cfg = self.fault
+        if peak <= cfg.floor_tail_eps:
+            return 0
+        h = max(cfg.floor_tail_half_min, 1e-9)
+        return min(int(cfg.floor_tail_min),
+                   math.ceil(h * math.log2(peak / max(cfg.floor_tail_eps, 1e-9))))
+
+    def _floor_tail(self, minute: int, done: set[str], landed, suppress,
+                    ts, slot_start):
+        """장애가 끝난 셀의 하한을 **평시 위 초과분으로 천천히 거둔다**.
+
+        2026-11-02 판(카드 15)은 반감기 2분으로 셀당 1호까지 내려와 그 수준을
+        붙들다 40분째 한 번에 놓았다. 놓는 순간 eNB 호율이 계단으로 꺾이고
+        graphio D4 가 무호 구간을 소등으로 읽었다(11-03 C-01 201건).
+
+        11-03 재설계: 꼬리 동안은 **모자란 만큼 채우지 않고 초과분만 얹는다**
+        (`landed` 를 빼지 않는다). 채우는 식이면 평시 호가 0 인 분마다 메워
+        실제 호율이 평시보다 높게 남고, 놓는 순간 다시 계단이 생긴다.
+        초과분 `peak·0.5^(t/h)` 이 `floor_tail_eps` 아래로 내려오면 놓는다 —
+        놓는 계단이 ε 이하다. 장애 중 회복 구간은 `visible_level` 이 강도
+        (`ramp_out`)를 따라 이미 내려 둔다.
+
+        더 만든 호는 장애가 걸리지 않은 **평시 호**다. 끝난 시나리오는
+        `active` 에 없어 뮤테이터가 붙지 않는다.
+        """
+        gen, cfg = self.gen, self.fault
+        by_key = gen.cell_by_key
+        pool = gen._fixed or range(len(gen.subs))
+        h = max(cfg.floor_tail_half_min, 1e-9)
+        for k, (last, peak, _fid) in sorted(self._floor_last.items()):
+            if k in done:
+                continue
+            t = minute - last
+            if t <= 0:
+                continue
+            extra = peak * 0.5 ** (t / h)
+            if extra < cfg.floor_tail_eps or t > cfg.floor_tail_min:
+                del self._floor_last[k]
+                continue
+            cell = by_key.get(k)
+            if cell is None or (suppress is not None and suppress(cell)):
+                continue
+            for _ in range(int(extra + gen.rng.random())):
+                sub = gen.subs[pool[gen.rng.randrange(len(pool))]]
+                yield gen.base_lte_call(ts, slot_start, at=(sub, cell))
 
     def _shifter(self, minute: int, active: list[Scenario]):
         """A 셀로 뽑힌 호 → 소등 eNB(B) 셀 콜백 — `j-sc-24` 부하 이동.
@@ -2520,9 +2619,28 @@ class PemdbGen:
 
         끄면 **모든 시각이 피크(19시)와 같아진다.** 배율 1.0 이 기준이므로
         평탄화는 저점을 끌어올리는 쪽이다 — 야간에도 주간 수준이 나온다.
+
+        **끄면 균등 모드도 함께 켠다** (2026-11-04 사용자 결정). 전에는 생성량만 평탄해지고
+        시간대별 그룹 비율(`mobility.hourly` — 07~09시 호의 50% 지하철)은 그대로라, 출근
+        시각에 노선 88셀이 전국 시도의 절반을 받았다(apn3 F-104 야마노테선 모양). 끄면
+        그룹·이동 없이 **전체 eNB 에 골고루**(`Generator.flat_mode` · eNB 균등 추첨)다.
+        장애 주입의 셀 배율(`set_weight_boost`)은 그 위에 그대로 걸린다.
         """
         self.gen.diurnal = bool(on)
+        self.gen.flat_mode = not self.gen.diurnal
+        self.gen.refresh_weights()
         return self.gen.diurnal
+
+    def set_virtual_offset(self, sec: float) -> float:
+        """가상 시각 오프셋(초) — 곡선 켬일 때 곡선·그룹 비율이 보는 시각만 옮긴다. 적용값을 돌려준다.
+
+        **레코드 시각은 실제 시각 그대로다**(`Generator.curve_time`). 하루를 넘는 값은 접는다.
+        """
+        sec = float(sec or 0.0) % 86400.0
+        if sec > 43200.0:
+            sec -= 86400.0                     # ±12시간으로 — 화면 표시와 같은 뜻
+        self.gen.virtual_offset = sec
+        return sec
 
     def diurnal(self) -> bool:
         """시간대 곡선이 켜져 있나."""
@@ -2564,6 +2682,7 @@ class PemdbGen:
         """그냥 이동 그룹과 시간대 비율을 건다 — **노선 뒤에** 부른다(노선
         탑승자를 건너뛰고 나머지에서 고른다)."""
         self.gen.seat_walkers(mb.walk_share, rng, (mb.walk_sec_min, mb.walk_sec_max))
+        self.gen.walk_warmup_min = int(mb.walk_warmup_min)
         self.gen.groups = (Groups(mb.hourly, mb.subway_hours, mb.blend_min)
                            if mb.hourly else None)
 
@@ -2582,7 +2701,12 @@ class PemdbGen:
         gen = self.gen
         # **이동을 먼저 전진시킨다.** 호를 만든 뒤에 옮기면 그 분의 호가
         # 한 칸 전 위치에서 생기고, 전환이 분 경계에 몰린다
+        warm = gen.walk_warmup_stats
         gen.advance_routes(ts.timestamp())
+        if warm is None and gen.walk_warmup_stats is not None:
+            w = gen.walk_warmup_stats
+            print(f"  걷는 사람 미리 걷기 — {w['minutes']}분 · {w['walkers']:,}명 · "
+                  f"이동 {w['moves']:,}회 · {w['sec']}초", flush=True)
         slot_start = ts.timestamp()
         active = self._active(minute)
         mutate = self._mutator(minute, active)
@@ -2600,6 +2724,7 @@ class PemdbGen:
         # 가 한 번도 적용되지 않았다.** 알림만 받고 끝나는 호(Paging·TAU·
         # Detach)도 데이터 세션을 열었고, 에러는 나지 않았다.
         i_ct = idx.get("call_type", -1)
+        i_nr = idx["initial_nr_conn_time"]
 
         out: list[list[str]] = []
         calls: list[Call] = []
@@ -2687,7 +2812,8 @@ class PemdbGen:
                 calls.append(Call(
                     cell=cell, user=tuple(vals[i] for i in i_user),
                     apn=vals[i_apn], t=t, outcome=outcome, rel=vals[i_rel],
-                    call_type=(vals[i_ct] if i_ct >= 0 else "")))
+                    call_type=(vals[i_ct] if i_ct >= 0 else ""),
+                    net_mode=net_mode_of(gen, vals[i_imsi], vals[i_nr])))
         # ── TAU — **TAC 가 바뀐 전환마다 한 건** ────────────────────────
         #
         # 핸드오버 레코드와 **별개 절차**다. 이것이 없으면 "TAC 가 바뀌었는데

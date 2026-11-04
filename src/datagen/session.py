@@ -50,10 +50,11 @@
 세션은 끊지 않는다 — 두 줄 다 같은 `SessionID` 이고 `End` 는 한 번뿐이라
 **집계가 세는 수는 변하지 않는다**(불변규칙 6).
 
-**`4` 는 규격서에 없는 Graphio 확장이다.** 규격은 Transport·DNS 가
-`0·1·2·20`, HTTP 가 `3 : Http Interim` 까지다. 운영 프로브가 주지 않을
-가능성이 크므로 집계 쪽에 폴백(연속 Interim 의 셀 변화)을 함께 둔다 —
-근거와 요청서는 graphio `docs/jp/XDR규격-확장항목.md` §1.
+**`4` 는 실장비에 있다**(복원 · 현업 확인 2026-11-02 사용자). 보유
+규격서는 Transport·DNS 를 `0·1·2·20`, HTTP 를 `3 : Http Interim` 까지만
+적지만, 실장비 U-Plane SD Corr 는 `4 H/O Interim` 을 낸다. 10-28 에
+"판단이라 뺀다"고 철회했던 것을 사용자가 되돌렸다 — 경위는 graphio
+`docs/jp/XDR규격-확장항목.md` §1 · `docs/HANDOVER-STATS.md`.
 
 **집계는 `{2, 20}` 만 센다**(graphio `schema/codes.COUNTED_ONGOING_FLAGS`).
 그래서 `Total` 과 `Delta` 의 뜻이 갈린다 — 종료 레코드의 `Total` 이 세션 전체를
@@ -105,25 +106,21 @@ from .scenarios import Plan, Rec
 F_START = "0"
 F_INTERIM = "1"
 F_END = "2"
-#: **내부 표시일 뿐 레코드에 나가지 않는다** (2026-10-28 · 사용자 결정).
+#: **H/O Interim — 떠난 셀의 마지막 줄** (복원 · 현업 확인 2026-11-02 사용자).
+#:
+#: 실장비 U-Plane SD Corr 레코드에 `4` 가 있고 핸드오버 분석에 쓰인다
+#: (현업 답). 보유 규격서 xlsx 에 없을 뿐이다 — 규격서가 현장보다 덜 적었다.
+#: C-Plane(LTE-Call-KPI)에는 없으므로 **transport 만** 낸다. HTTP·DNS 는
+#: 현업 확인 전이라 내지 않는다.
 #:
 #: 셀이 바뀌는 순간 레코드를 끊는 것은 그대로다 — 한 줄에 셀이 하나라
 #: 전환 전후를 한 줄에 담으면 **떠나는 셀이 과소, 들어오는 셀이 과대**가
-#: 된다(§1.2). 바뀐 것은 **그 줄에 `4` 를 적지 않는다**는 것이다.
+#: 된다(§1.2). 집계가 세는 수는 변하지 않는다 — `4` 는 `COUNTED` 밖이다.
 #:
-#: > *"XDR 은 내용을 판단해서 정리하는 게 아냐. 그냥 있던 사실을 적는
-#: > 거야. 근데 ongoing=4 를 어떻게 알꺼야."*
-#:
-#: 프로브는 셀이 바뀐 **사실**은 안다(패킷의 eNB ID 가 바뀐다). 그러나
-#: *"이 Interim 은 핸드오버 때문이다"* 는 **판단**이고, 그 판단에 필요한
-#: 것(S1AP/X2AP 제어 메시지)이 U-Plane 관측점에 없다. `4` 는 관찰이
-#: 아니라 추정이다 — §1.4 가 *"추정으로 채우지 않는다"* 고 적은 원칙이
-#: 폴백보다 **그 값 자체에 먼저** 걸린다.
-#:
-#: 그래서 끊은 줄도 규격 안의 `1 Interim` 으로 나간다. 규격서가 아는
-#: 값만 쓰므로 **원본과 가장 유사해진다.** 핸드오버 관측은 C-Plane 이
-#: 한다(`PathSwitch_count` · 해제 Cause · `First != Last` 셀).
-_SPLIT_AT_HO = "\x00ho"
+#: 이력: 2026-10-28 에 "`4` 는 관찰이 아니라 판단이다"라는 이유로 이 줄을
+#: `1 Interim` 으로 냈다(사용자 결정). 11-02 에 현업이 실장비에 있다고
+#: 확인해 사용자가 그 결정을 뒤집었다.
+F_HO = "4"
 F_SINGLE = "20"         #: Start/End — 1분 안에 끝난 세션(한 줄)
 
 #: 집계가 세는 값. graphio `codes.COUNTED_ONGOING_FLAGS` = {2, 20} 와 짝이고
@@ -398,6 +395,33 @@ class Call:
     #: `CALL_TYPE` 코드(`CD_CALL_TYPE`). **세션을 몇 개 열지가 여기서 갈린다** —
     #: Paging·TAU·Detach 는 사용자 트래픽과 무관한 절차다(`CT_SESSION_W`).
     call_type: str = ""
+    #: **망 모드** `LTE`·`SA` — 이름은 둘뿐이다(사용자 결정 2026-11-02).
+    #: `net_mode_of` 가 정한다. U-Plane 장애가 "SA 세션만" 고르는 데 쓴다
+    #: (`Plan.net_mode` · `j-sc-16`)
+    net_mode: str = "LTE"
+
+
+#: 망 모드 이름 — graphio `xp_agg` 와 같은 철자다
+NET_LTE, NET_SA = "LTE", "SA"
+
+
+def net_mode_of(gen, imsi: str, nr_conn_time: str) -> str:
+    """호의 망 모드 — **5G 능력 단말이고 NR 연결 시각이 있으면 `SA`**.
+
+    능력은 레코드의 `ue_dcnr` 가 아니라 **단말 속성**에서 읽는다. 레코드
+    값 `-1` 은 그 절차에 IE 가 없었다는 뜻이지 능력이 없다는 뜻이 아니다
+    (현업 답 2026-11-02). 가입자를 되찾지 못하면 `LTE` 다. NR 연결 시각은
+    레코드 값이다 — 장애가 NR 레그를 풀었으면(`j-sc-13`·`j-sc-17`) 그 호는
+    LTE 로 붙은 것이다.
+    """
+    si = gen.sub_by_imsi.get(imsi, -1)
+    if si < 0 or gen.subs[si].dcnr != "1":
+        return NET_LTE
+    try:
+        nr = float(nr_conn_time or 0)
+    except ValueError:
+        nr = 0.0
+    return NET_SA if nr > 0 else NET_LTE
 
 
 @dataclass(slots=True)
@@ -438,13 +462,17 @@ class Session:
     #: 이 세션을 처음 본다** — 누적(`Traffic_Total_*`)이 거기서 0 부터 다시
     #: 시작한다(사람 확인 2026-10-27).
     #:
-    #: `0.0` 이면 세션 시작부터 같은 장비가 보고 있다. `S1`·`S1_MME` 전환에서
-    #: 그 분의 비율로 올라간다 — `INTRA_ENB`·`X2` 는 장비가 그대로라 올리지
-    #: 않는다.
+    #: `0.0` 이면 세션 시작부터 같은 장비가 보고 있다. **SGW_ID 가 실제로
+    #: 바뀐 전환**에서 그 분의 비율로 올라간다(사용자 확정 2026-11-02) —
+    #: 전환 종류가 아니다. S1 이어도 SGW 가 같으면, MME 만 바뀌어도 그대로다.
     base: float = 0.0
     #: 현재 장비가 보기 시작한 **시각**(epoch). `Traffic_Total_*_FirstTime`
     #: 이 이 값이다 — 세션 시작이 아니다.
     base_t: float = 0.0
+    #: 현재 레코드의 **down 첫 패킷 시각**(epoch). 보통 `base_t` 와 같고,
+    #: SGW 가 바뀐 직후 정체가 걸리면 정체가 끝나는 시각이다 — FirstTime 은
+    #: 방향별이다(사용자 확정 2026-11-02)
+    base_t_dn: float = 0.0
     #: 가입자 인덱스. `-1` 은 **고정 가입자이거나 되찾지 못한 경우**다.
     #: 이동 가입자면 전환이 추첨이 아니라 **그 사람의 위치**를 따른다.
     sub_i: int = -1
@@ -642,8 +670,9 @@ class SessionEngine:
             return 0.0
         if not self.gen.diurnal:
             return self.sessions_peak / n_calls
-        f_call = diurnal_factor(ts.hour, "lte_call")
-        f_sess = diurnal_factor(ts.hour, "uplane_sessions")
+        hour = self.gen.curve_time(ts).hour        # 가상 시각(곡선만) — 레코드 시각이 아니다
+        f_call = diurnal_factor(hour, "lte_call")
+        f_sess = diurnal_factor(hour, "uplane_sessions")
         return self.sessions_peak * f_call * f_sess / n_calls
 
     def _ct_weight(self, call: Call) -> float:
@@ -924,6 +953,7 @@ class SessionEngine:
             totals.update({n: plain[i] for i, n in enumerate(CUM_PLAIN)})
             pl = Plan(totals, dict(zip(TRANSPORT_CONST, const)),
                       call.outcome, span)
+            pl.net_mode = call.net_mode
             plan_mutate(call.cell, pl)
             traffic = [totals[f"Traffic_Total_{n}"] for n in TRAFFIC_PAIRS]
             plain = tuple(totals[n] for n in CUM_PLAIN)
@@ -1095,7 +1125,7 @@ class SessionEngine:
             # 핸드오버면 `Shape.handover` 와 무관하게 켜지는데, 그때 추첨으로
             # 상대를 고르면 **경로 밖 셀로 간다** — 실측으로 26,452건 중 4건이
             # 그렇게 궤적을 벗어났다. 움직이는 사람의 전환 근거는 경로 하나다.
-            flag = _SPLIT_AT_HO
+            flag = F_HO
         else:
             flag = F_INTERIM
 
@@ -1108,7 +1138,7 @@ class SessionEngine:
         s.ho_kind = ""
         before = s.cell
 
-        if flag != _SPLIT_AT_HO:
+        if flag != F_HO:
             self._put(out, mutate, s, flag, t, prev, now, slot, s.cell)
         else:
             # 핸드오버 — **분 경계가 아니라 사건 시각에 레코드를 끊는다.**
@@ -1151,45 +1181,68 @@ class SessionEngine:
                                          / max(1e-6, t - max(s.t0, slot)))
             mid = min(max(mid, prev), now)
 
+            # 코어는 **종류가 정한다.** 새 셀의 마스터 값을 무조건 쓰면 X2
+            # 에서도 MME·SGW 가 바뀐다 — 그렇게 두었을 때 전환 4,773건 중
+            # 1,634건이 MME 를 갈았다(틀린 쪽. X2 는 코어 재배치가 없다).
+            core = s.core
+            if s.ho_kind == HO_S1:
+                core = (s.core[0], after.sgw_id, after.pgw_id)
+            elif s.ho_kind == HO_S1_MME:
+                core = (after.mme_id, after.sgw_id, after.pgw_id)
+            # **U-Plane 레코드는 SGW 가 만든다**(사용자 확정 2026-11-02).
+            # 레코드를 다시 여는 계기는 전환 종류가 아니라 **SGW_ID 가 실제로
+            # 바뀐 것**이다. S1 이어도 SGW 가 같으면 이어지고, MME 만 바뀐
+            # 경우도 이어진다 — U-Plane 은 MME 를 보지 않는다
+            sgw_change = core[1] != s.core[1]
+
             # ① 전환 **이전** 셀. 스펙 §4.2 가 그렇게 정했다 — 끊긴 자리는
             #    떠난 셀이고, 새 셀에 적으면 원인이 한 칸 뒤로 밀린다.
-            # **`1 Interim` 으로 나간다** — `4` 는 적지 않는다(위 상수).
-            self._put(out, mutate, s, F_INTERIM, t_ho, prev, mid, slot, before)
+            #    **코어는 옛 것을 싣는다** — 여기서 갈면 두 줄이 같은 값을
+            #    갖고, 재배치가 일어났는지 알 수 없어진다.
+            #
+            #    같은 SGW 면 **`4 H/O Interim`** 이다(복원 · 현업 확인
+            #    2026-11-02). SGW 가 바뀌면 옛 SGW 는 그 세션을 놓친 것이라
+            #    자기 레코드를 **`2 End`** 로 닫는다 — `4` 는 나오지 않는다.
+            #    세션 끝의 사건(FIN·RST)은 이 줄에 없다. 정체 증거(창 닫힘)는
+            #    그 구간에 정체가 있었을 때만 남긴다(`_split_const`)
+            if sgw_change:
+                self._put(out, mutate, s, F_END, t_ho, prev, mid, slot, before,
+                          over=self._old_end_over(s, mid))
+            else:
+                self._put(out, mutate, s, F_HO, t_ho, prev, mid, slot, before)
 
             # **전환 직후 정체**(`j-sc-15` · 확정대장 §7.0 "H/O 직후 3–8초").
             # 앞 줄을 낸 **뒤에** 정한다 — 구간 시작(`mid`) 이전의 배분은
             # 선형과 같으므로 이미 낸 줄과 어긋나지 않는다. 길이는 초를 이
-            # 분 남은 시간의 비율로 옮긴 것이다
+            # 분 남은 시간의 비율로 옮긴 것이다. 같은 SGW·SGW 변경 두 경로
+            # 모두에서 걸린다
             #
             # **마지막 분이면 걸지 않는다** — 밀린 양을 받을 뒤 구간이 없어
             # `Total` 이 모자란 채 끝난다(`b < 1` 이 `_freeze_frac` 의 전제)
+            stall_end = None
             if s.ho_stall_s > 0 and s.freeze is None and now < 1.0:
                 left = max(1e-6, t - t_ho)
                 s.freeze = (mid, mid + (now - mid) * min(1.0, s.ho_stall_s / left))
+                stall_end = t_ho + min(s.ho_stall_s, left)
                 s.ho_stall_s = 0.0
 
-            # ② 새 셀로 이어진다. 마지막 분이면 `End` 지만 `ho_at` 이
-            #    `span-2` 이하라 실제로는 `Interim` 이다(방어적으로 둔다).
-            # **코어 재배치는 전환 뒤에 적는다.** 앞 줄(`flag=4`)은 떠난
-            # 셀의 호 이므로 옛 장비를 싣는다 — 여기서 갈면 두 줄이 같은
-            # 값을 갖고, 재배치가 **일어났는지 알 수 없어진다.**
-            #
-            # 종류가 정한다. 새 셀의 마스터 값을 무조건 쓰면 X2 에서도
-            # MME·SGW 가 바뀐다 — 그렇게 두었을 때 전환 4,773건 중 1,634건이
-            # MME 를 갈았다(틀린 쪽. X2 는 코어 재배치가 없다).
-            if s.ho_kind == HO_S1:
-                s.core = (s.core[0], after.sgw_id, after.pgw_id)
-            elif s.ho_kind == HO_S1_MME:
-                s.core = (after.mme_id, after.sgw_id, after.pgw_id)
-            if s.ho_kind in (HO_S1, HO_S1_MME):
-                # **새 장비는 이 세션을 처음 본다.** XDR 이 SGW·MME 단위로
-                # 생성되므로 누적이 거기서 0 부터 다시 시작한다(`Session.base`).
-                # `INTRA_ENB`·`X2` 는 장비가 그대로라 리셋하지 않는다 —
-                # 리셋하면 같은 프로브가 자기가 센 것을 잊는 셈이 된다.
+            # ② 새 셀로 이어진다.
+            s.core = core
+            if sgw_change:
+                # **새 SGW 는 이 세션을 처음 본다.** 누적이 0 부터 다시
+                # 시작하고(`Session.base`) `FirstTime` 은 그 SGW 에서 방향별
+                # 첫 패킷 시각이다. 정체가 걸렸으면 down 첫 패킷은 정체가
+                # 끝난 뒤다 — up 은 전환 시각 그대로다(`STALL_FROZEN` 은 down
+                # 만). 같은 SGW 전환은 `FirstTime` 을 건드리지 않는다
                 s.base, s.base_t = mid, t_ho
+                s.base_t_dn = stall_end if stall_end is not None else t_ho
+                # 새 레코드는 TCP 악수를 보지 못했다(`_new_record_const`)
+                s.const = self._new_record_const(s, mid)
+                flag2 = F_SINGLE if last else F_START
+            else:
+                flag2 = F_END if last else F_INTERIM
             s.cell = after
-            self._put(out, mutate, s, F_END if last else F_INTERIM,
-                      t, mid, now, t_ho, s.cell)
+            self._put(out, mutate, s, flag2, t, mid, now, t_ho, s.cell)
             s.ho_t = t_ho
 
         # HTTP — 남은 트랜잭션을 남은 분에 나눠 흘린다
@@ -1224,8 +1277,53 @@ class SessionEngine:
                     mutate("http", h, hc)
                 out["http"].append(h.values)
 
+    #: SGW 가 바뀌어 **새 레코드가 보지 못한** TCP 악수 필드 → 빈 값.
+    #: 표기는 UDP 경로(`_plan`)와 같다 — graphio 는 `SYN_COUNT`·`ACK_TIME`
+    #: 이 0 보다 클 때만 센다(`uplane_agg._u_pos`). **모든 행**을 비운다 —
+    #: 새 레코드의 `End` 가 악수를 가지면 `U-01` 시도가 두 번 세어진다
+    NEW_RECORD_BLANK = (("SynCount", "0"), ("SynAckCount", "0"),
+                        ("AckTime", "0.0"), ("SynMssSize", "0"),
+                        ("SynAckMssSize", "0"), ("SynFirstTime", ""),
+                        ("SynAckFirstTime", ""))
+    #: 정체 증거 카운터 — 그 구간에 정체가 있던 레코드만 갖는다
+    WINDOW_CLOSE = ("UplinkWindowCloseCount", "DnlinkWindowCloseCount")
+
+    def _stalled(self, s: Session, a: float, b: float) -> bool:
+        """누적 비율 `[a, b)` 구간에 정체가 있었나 — 창 닫힘 카운터의 귀속."""
+        if s.outcome == OUT_STALL:
+            return True                     # 세션 전체가 막혔다
+        fz = s.freeze
+        return fz is not None and fz[0] < b and fz[1] > a
+
+    def _old_end_over(self, s: Session, mid: float) -> dict[int, str]:
+        """SGW 가 바뀌어 닫히는 옛 레코드 `End` 에만 덮는 값.
+
+        **FIN·RST 를 달지 않는다**(조이 J-3) — 세션 끝의 사건이고 세션은
+        새 SGW 에서 계속된다. 달면 `U-04`(RST 종료율) 분자가 전환 수만큼
+        늘어 없던 장애가 생긴다. 창 닫힘은 이 레코드 구간에 정체가 있었을
+        때만 남긴다.
+        """
+        idx = self.gen.index["transport"]
+        over = {idx["FinCount"]: "0", idx["RstCount"]: "0"}
+        if not self._stalled(s, s.base, mid):
+            for f in self.WINDOW_CLOSE:
+                over[idx[f]] = "0"
+        return over
+
+    def _new_record_const(self, s: Session, mid: float) -> tuple:
+        """새 SGW 레코드의 세션 상수 — 악수 필드를 비우고 창 닫힘을 가른다."""
+        const = list(s.const)
+        pos = {f: i for i, f in enumerate(TRANSPORT_CONST)}
+        for f, v in self.NEW_RECORD_BLANK:
+            const[pos[f]] = v
+        if not self._stalled(s, mid, 1.0):
+            for f in self.WINDOW_CLOSE:
+                const[pos[f]] = "0"
+        return tuple(const)
+
     def _put(self, out: dict, mutate, s: Session, flag: str, t: float,
-             f_prev: float, f_now: float, d_start: float, cell: Cell) -> None:
+             f_prev: float, f_now: float, d_start: float, cell: Cell,
+             over: dict[int, str] | None = None) -> None:
         """transport 한 줄을 낸다 — 누적 비율 `f_prev`→`f_now` 구간.
 
         **`_emit` 에서 떼어낸 이유는 핸드오버 분에 두 번 불러야 하기
@@ -1241,9 +1339,13 @@ class SessionEngine:
         `Total` 은 세션 전체가 아니다** — 재배치 뒤 구간만이다. 집계가 그
         조각을 이어 붙이는 것은 통계 쪽 일이다(사람 결정 2026-10-27).
 
-        `d_start` 는 **Delta 관측 구간의 시작**이다. 분 경계 줄은 분 시작,
-        핸드오버 뒤 줄은 전환 시각이다. `Total` 쪽은 **현재 장비가 보기
-        시작한 시각**이다.
+        `d_start` 는 이 줄이 덮는 구간의 시작이다(분 시작 또는 전환 시각).
+        **`FirstTime` 에는 쓰지 않는다** — `Traffic_*_FirstTime` 은 그 SGW
+        레코드에서 그 방향의 첫 패킷 시각이고 레코드 안에서 행마다 같다
+        (사용자 확정 2026-11-02). Total·Delta 가 같은 값이다.
+
+        `over` 는 이 줄에만 덮는 필드(인덱스 → 값)다 — SGW 가 바뀌어 닫히는
+        옛 레코드의 `End` 가 쓴다(`_old_end_over`).
         """
         vals = self._slice(s, flag, t, cell)
         # **누적은 `base` 부터다** — 현재 장비가 보기 시작한 지점. Delta 는
@@ -1264,13 +1366,18 @@ class SessionEngine:
             vals[i_del] = str(cum - int(v * fp))
         for j, v in zip(self._i_plain, s.plain):
             vals[j] = str(int(v * f_now) - int(v * b))
-        # 양(量)의 관측 구간. `Total` 은 **현재 장비가 보기 시작한 시각**부터,
-        # `Delta` 는 이 줄부터다.
-        t_s, t_now = f"{max(s.t0, s.base_t):.6f}", f"{t:.6f}"
-        d_s = f"{max(s.t0, d_start):.6f}"
+        # 첫·마지막 패킷 시각. 첫 시각은 **방향별 레코드 시작**이다 —
+        # Total·Delta 가 같다. `_i_times` 는 (Total,Up)(Total,Dn)(Delta,Up)
+        # (Delta,Dn) 순이다(`__init__` 의 생성식)
+        t_up = f"{max(s.t0, s.base_t):.6f}"
+        t_dn = f"{max(s.t0, s.base_t, s.base_t_dn):.6f}"
+        t_now = f"{t:.6f}"
         for k, (i_first, i_last) in enumerate(self._i_times):
-            vals[i_first] = t_s if k < 2 else d_s
+            vals[i_first] = t_dn if k % 2 else t_up
             vals[i_last] = t_now
+        if over:
+            for j, v in over.items():
+                vals[j] = v
         if mutate is not None:
             mutate("transport",
                    Rec(vals, self.gen.index["transport"], "transport"), cell)

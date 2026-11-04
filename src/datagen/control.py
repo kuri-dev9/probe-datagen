@@ -347,6 +347,7 @@ def add_fault(conn, kind: str, target: str | None, start_ts: datetime,
         # 경로로 들어와도 이 함수를 지난다.
         from .scenarios import SHIFT_TOTAL
         duration_min = SHIFT_TOTAL
+    _check_like(conn, kind, target)
     now = datetime.now()
     with conn.cursor() as cur:
         cur.execute(
@@ -358,6 +359,38 @@ def add_fault(conn, kind: str, target: str | None, start_ts: datetime,
         fid = cur.lastrowid
     conn.commit()
     return fid
+
+
+def _check_like(conn, kind: str, target: str | None) -> None:
+    """`LIKE:<fault_id>` 를 받기 전에 원본을 확인한다 (2026-11-02 · 카드 15r2).
+
+    해석(`faults.build`)은 DB 를 보지 않으므로 여기서 막는다 — 틀린 원본을
+    받아 두면 주입 시각에 대상이 엉뚱하게 해석되고 에러가 나지 않는다.
+
+    * 원본이 없으면 거부
+    * kind 가 다르면 거부 — kind 마다 대상 해석 함수가 달라 같은 rng 로도
+      다른 셀이 나온다
+    * 원본이 **자동 대상**(TARGET 비어 있음)이 아니면 거부 — 그때는 원본의
+      TARGET 을 그대로 쓰면 된다
+    """
+    from .faults import LIKE_PREFIX, like_fault_id
+
+    text = (target or "").strip()
+    if not text.upper().startswith(LIKE_PREFIX):
+        return
+    src = like_fault_id(text)
+    if src is None:
+        raise ValueError(f"LIKE 형식 오류: {text!r} — LIKE:<fault_id>")
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT FAULT_KIND, TARGET FROM {T_FAULT} WHERE FAULT_ID=%s", [src])
+        row = cur.fetchone()
+    if row is None:
+        raise ValueError(f"LIKE 원본 fault {src} 가 없다")
+    if row[0] != kind:
+        raise ValueError(f"LIKE 원본 fault {src} 의 kind 는 {row[0]!r} — {kind!r} 와 다르다")
+    if (row[1] or "").strip():
+        raise ValueError(
+            f"LIKE 원본 fault {src} 는 대상 {row[1]!r} 를 지정했다 — 그 값을 그대로 쓴다")
 
 
 def cancel_fault(conn, fault_id: int) -> bool:
@@ -435,6 +468,24 @@ def get_config(conn, k: str, default: str | None = None) -> str | None:
         cur.execute(f"SELECT CONFIG_VALUE FROM {T_CONFIG} WHERE CONFIG_KEY=%s", [k])
         row = cur.fetchone()
     return row[0] if row else default
+
+
+#: 하한 꼬리가 끝나는 시각(fault 별 JSON) — 데몬이 쓰고 `/api/faults` 가 읽는다
+FLOOR_TAIL_KEY = "floor_tail"
+
+
+def floor_tail_value(until: dict[str, str]) -> str:
+    """`CONFIG_VALUE`(varchar 255)에 들어가게 접는다 — 넘치면 **최근 fault 부터** 남긴다.
+
+    오래된 fault 를 버리는 것은 그쪽 꼬리가 먼저 끝나기 때문이다.
+    """
+    items = sorted(until.items(), key=lambda kv: int(kv[0]), reverse=True)
+    while True:
+        v = json.dumps(dict(sorted(items, key=lambda kv: int(kv[0]))),
+                       separators=(",", ":"))
+        if len(v) <= 255 or not items:
+            return v
+        items = items[:-1]
 
 
 def set_config(conn, k: str, v: str) -> None:

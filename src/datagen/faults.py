@@ -27,11 +27,13 @@ from .scenarios import (
     Scenario,
     Target,
     _cells_in_one_sgg,
+    enb_cluster,
     _node_eq,
     area_cells,
     busy_cluster,
     corridor_cells,
     place,
+    whole_enbs,
 )
 
 #: 노드 지정 target 접두사 → Cell 의 노드 필드
@@ -138,6 +140,18 @@ def _auto_target(kind: str, cells: list[Cell], rng: random.Random) -> Target | N
         _, code = _cells_in_one_sgg(cells, rng, 60)
         keys = _sgg_all(cells, code)
         return Target(cell_keys=keys, sgg_codes={code}) if keys else None
+    if kind == "anchor_saturation":
+        # **셀 50개 · 한 시군구**(`j-sc-16`) — 시나리오 정본(`build_scenarios`
+        # 의 `anchor_cells`)과 같은 함수·같은 크기다. 전에는 여기 분기가 없어
+        # 전국 `Target()` 으로 떨어졌고, mutator 가 `active_cells_cache` 를
+        # 보므로 **대상 셀 0개 = 아무 일도 없는 주입**이 됐다(16번 카드 1절).
+        # `_AUTO_SGG` 처럼 시군구 전부를 가져가지 않는다 — 판정 축이 CELL 이고
+        # (U-15 셀 스펙) 정본이 50개다
+        # 2026-11-03: 시군구 첫 추첨 셀을 앵커로 **인접 eNB 10~15셀 군집**
+        # (`enb_cluster`) — 정본과 같은 함수다
+        picked, code = _cells_in_one_sgg(cells, rng, 50)
+        keys = {c.cell_key for c in enb_cluster(cells, picked[0])} if picked else set()
+        return Target(cell_keys=keys, sgg_codes={code}) if keys else None
     if kind == "enb_s1_outage":
         busy = _busiest(cells, "enb_id")
         return Target(cell_keys={c.cell_key for c in cells if c.enb_id == busy},
@@ -146,7 +160,8 @@ def _auto_target(kind: str, cells: list[Cell], rng: random.Random) -> Target | N
         keys = {c.cell_key for c in busy_cluster(cells, rng, want=8)}
         return Target(cell_keys=keys) if keys else None
     if kind in _AREA_KINDS:
-        keys = {c.cell_key for c in area_cells(cells, rng, want=25)}
+        # 지진은 사이트 단위 정지 — 걸친 eNB 의 셀 전부다(`whole_enbs`)
+        keys = {c.cell_key for c in whole_enbs(cells, area_cells(cells, rng, want=25))}
         return Target(cell_keys=keys) if keys else None
     if kind in _VENUE_KINDS:
         keys = {c.cell_key for c in area_cells(cells, rng, want=8)}
@@ -218,9 +233,14 @@ def _resolve_target(raw: str | None, kind: str, cells: list[Cell],
             return Target(cell_keys={c.cell_key for c in mine}
                           | {c.cell_key for c in near}, enb_id=num)
         if kind in _AREA_KINDS and anchor0 is not None:
-            near = area_cells(cells, rng, want=25, anchor=anchor0)
+            near = whole_enbs(cells, area_cells(cells, rng, want=25, anchor=anchor0))
             return Target(cell_keys={c.cell_key for c in mine}
                           | {c.cell_key for c in near}, enb_id=num)
+        if kind == "anchor_saturation" and anchor0 is not None:
+            # 지도에서 찍은 eNB 를 앵커로 같은 군집 함수(2026-11-03)
+            near = enb_cluster(cells, anchor0)
+            return Target(cell_keys={c.cell_key for c in near},
+                          sgg_codes={anchor0.adm_sgg_cd}, enb_id=num)
         if kind in _CROWD_KINDS and anchor0 is not None:
             # 군중 혼잡(14번) — 그 eNB 를 중심으로 **주변 상위 대역 셀**까지.
             # eNB 하나(3~6셀)로는 "역 일대"가 되지 않는다
@@ -297,8 +317,36 @@ def _shift_target(raw: str | None, start_ts: datetime,
     return Target(cell_keys=mine, enb_id=a, shift_to=b)
 
 
+#: **이전 fault 의 대상을 다시 쓴다** — `LIKE:<fault_id>` (2026-11-02 · 카드 15r2).
+#: 같은 시나리오를 같은 셀에 다시 넣어 회차끼리 비교하려는 것이다. 셀 목록을
+#: 직접 받지 않는 이유: `TARGET` 이 `varchar(64)` 라 셀 15개(약 150자)가
+#: 들어가지 않고, 넓히는 것은 운영 스키마 DDL 이다. 대상은 fault_id 로 시드한
+#: rng 로 정해지므로(`resolve_active`) 그 rng 를 다시 만들면 같은 대상이 나온다.
+#: **원본이 자동 대상(TARGET 이 비어 있음)이었던 것만** 받는다 — 검사는
+#: `control.add_fault` 가 한다(여기는 DB 를 보지 않는다).
+LIKE_PREFIX = "LIKE:"
+
+
+def like_fault_id(raw: str | None) -> int | None:
+    """`LIKE:66` → 66. 형식이 아니면 `None`."""
+    text = (raw or "").strip()
+    if not text.upper().startswith(LIKE_PREFIX):
+        return None
+    num = text[len(LIKE_PREFIX):].strip()
+    return int(num) if num.isdigit() else None
+
+
+def target_rng(seed: int, fault_id: int) -> random.Random:
+    """fault 한 건의 전용 rng — 대상 해석이 이것을 **처음으로** 쓴다.
+
+    `resolve_active` 와 `LIKE:` 가 같은 식을 쓰게 한 자리에 둔다. 두 벌이면
+    한쪽만 고쳐졌을 때 "같은 대상"이 조용히 다른 대상이 된다.
+    """
+    return random.Random(seed * 1_000_003 + fault_id)
+
+
 def build(fault: dict, cells: list[Cell], anchor: datetime,
-          rng: random.Random) -> Scenario | None:
+          rng: random.Random, seed: int | None = None) -> Scenario | None:
     """CM_DATAGEN_FAULT 한 행을 Scenario 로 바꾼다.
 
     시간창은 anchor(분 인덱스 0의 시각) 기준 분 좌표로 옮긴다 — Scenario 가
@@ -312,8 +360,15 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
     spec = KIND_SPECS.get(fault["kind"])
     if spec is None:
         return None
+    like = like_fault_id(fault.get("target"))
     if fault["kind"] == "capacity_shift":
         target = _shift_target(fault.get("target"), fault["start_ts"], cells)
+    elif like is not None:
+        # 원본 fault 의 rng 는 **대상 해석에만** 쓴다(조이 결정). 나머지 난수
+        # (`place` 의 파형·셀 순서 등)는 이 fault 의 rng 다 — 회차가 독립이다
+        if seed is None:
+            return None
+        target = _resolve_target(None, fault["kind"], cells, target_rng(seed, like))
     else:
         target = _resolve_target(fault.get("target"), fault["kind"], cells, rng)
     if target is None:
@@ -364,8 +419,8 @@ def resolve_active(cells: list[Cell], anchor: datetime, seed: int,
         if cached and cached[0] == key:
             scs.append(cached[1])
             continue
-        frng = random.Random(seed * 1_000_003 + fid)
-        sc = build(f, cells, anchor, frng)
+        frng = target_rng(seed, fid)
+        sc = build(f, cells, anchor, frng, seed=seed)
         if sc is None:
             bad.append(fid)
         else:
