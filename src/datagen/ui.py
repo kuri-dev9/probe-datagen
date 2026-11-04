@@ -30,10 +30,10 @@ from pydantic import BaseModel
 
 from . import raw_parquet, topo
 from .geo_lite import dms_to_decimal
-from .generator import diurnal_factor
+from .generator import Groups, diurnal_factor, set_curve
 from .pemdb1 import BLOCKABLE_SERIES, CPLANE_ROOT_DEFAULT, CPLANE_SERIES
-from .control import (FAULT_SELECT, KINDS, T_CONFIG, T_FAULT, T_HISTORY,
-                      add_fault, cancel_fault, ensure_tables, get_config,
+from .control import (FAULT_SELECT, FLOOR_TAIL_KEY, KINDS, T_CONFIG, T_FAULT,
+                      T_HISTORY, add_fault, cancel_fault, ensure_tables, get_config,
                       list_faults, list_scenarios, set_config)
 
 HERE = Path(__file__).resolve().parents[2]
@@ -246,13 +246,18 @@ def _gen_state() -> dict:
         # 부르므로** 질의를 늘리지 않고 같은 KV 테이블에서 두 키를 더 읽는다.
         blocked = [x for x in str(get_config(conn, "blocked", "") or "").split(",")
                    if x.strip()]
-        diurnal = str(get_config(conn, "diurnal", "true")).lower() != "false"
+        di_d, vo_d = _clock_defaults()
+        diurnal = str(get_config(conn, "diurnal", di_d)).lower() != "false"
+        vo = float(get_config(conn, "virtual_offset_sec", vo_d) or 0)
     finally:
         conn.close()
     return {
         "gen_enabled": on,
         "blocked": blocked,
         "diurnal": diurnal,
+        # 가상 시각 — 곡선 켬일 때만 뜻이 있다(끔이면 시간대를 안 본다)
+        "virtual_offset_sec": vo if diurnal else 0.0,
+        "virtual_now": _virtual(vo) if diurnal else None,
         "volume_pct": pct,
         "base_rates": base,
         "rates": {s: max(0, round(v * pct / 100.0)) for s, v in base.items()},
@@ -336,6 +341,18 @@ def api_ingest(minutes: int = 60, date: str | None = None):
                 f"SELECT DATE(EVENT_TIME) d, COUNT(*) slots, SUM(RECORD_CNT) recs "
                 f"FROM {T_HISTORY} GROUP BY 1 ORDER BY 1 DESC LIMIT 7")
             days = [dict(zip([d[0] for d in cur.description], r)) for r in cur.fetchall()]
+            # **오늘 계열별 합계** (2026-11-04) — 상단 바 "오늘 생성"용. `by_day.recs` 는
+            # `RECORD_CNT`(= lte_call)뿐이라 U-Plane 이 빠진다. 하루 최대 1,440행이다
+            cur.execute(f"SELECT SERIES_STAT FROM {T_HISTORY} "
+                        "WHERE EVENT_TIME >= CURDATE() AND EVENT_TIME < CURDATE() + INTERVAL 1 DAY")
+            today: dict[str, int] = {}
+            for (stat,) in cur.fetchall():
+                blob = stat if isinstance(stat, dict) else json.loads(stat or "{}")
+                for series, v in (blob or {}).items():
+                    today[series] = today.get(series, 0) + int((v or {}).get("n", 0) or 0)
+            today_series = ([{"series": k, "recs": today[k]} for k in order if k in today]
+                            + [{"series": k, "recs": n} for k, n in sorted(today.items())
+                               if k not in order])
     finally:
         conn.close()
     for r in rows:
@@ -353,6 +370,7 @@ def api_ingest(minutes: int = 60, date: str | None = None):
         "total": {"slots": tot_slots or 0, "records": int(tot_recs or 0),
                   "per_min": round((tot_recs or 0) / tot_slots, 1) if tot_slots else 0},
         "by_day": days,
+        "today_series": today_series,
     }
 
 
@@ -518,7 +536,7 @@ def api_settings():
     try:
         over = {}
         for k in ("enabled", "retention_hours", "retention_on",
-                  "volume_pct", "reassign", "blocked", "diurnal"):
+                  "volume_pct", "reassign", "blocked", "diurnal", "virtual_offset_sec"):
             v = get_config(conn, k)
             if v is not None:
                 over[k] = v
@@ -573,18 +591,92 @@ def api_settings():
         # 생성기를 만든다). 화면에 스위치가 없어서 "빠진 기능"으로 보였을 뿐이고,
         # 보이지 않는 이유는 진폭이다 — 호 수에 걸리는 가중이 0.25 라
         # 04시↔19시가 1.14배다(`generator.DIURNAL_WEIGHT` 머리말).
-        "diurnal": str(over.get("diurnal", "true")).lower() != "false",
+        "diurnal": str(over.get("diurnal", _clock_defaults()[0])).lower() != "false",
+        # 가상 시각 — 곡선·그룹 비율만 옮긴다. 레코드 시각은 실제 시각(`Generator.curve_time`)
+        "virtual_offset_sec": float(over.get("virtual_offset_sec", _clock_defaults()[1]) or 0),
         #: 화면이 곡선을 그릴 수 있게 배율표를 함께 내린다 — 숫자를 화면에
         #: 다시 적으면 두 벌이 되고, 곡선을 고칠 때 화면만 옛 모양을 그린다.
-        "diurnal_curve": [
-            {"h": h,
-             "call": round(diurnal_factor(h, "lte_call"), 3),
-             "sess": round(diurnal_factor(h, "uplane_sessions"), 3),
-             "byte": round(diurnal_factor(h, "transport"), 3)}
-            for h in range(24)],
+        "diurnal_curve": _curve_rows(),
+        #: 시각별 특징 문장의 재료 — 그룹 비율은 생성기와 **같은 클래스**(`Groups`)로 계산한다
+        "clock_bands": _clock_bands(),
         "topology": {"cells": len(cells_list), **nodes},
         "note": "장비 추가·삭제는 미지원 — 셀 재배정 설계가 선행되어야 한다",
     }
+
+
+def _curve_rows() -> list[dict]:
+    """시간대 곡선 24칸 — **설정 곡선(`pemdb1.clock.curve`)을 먼저 얹는다.** 데몬과 같은
+    규칙이다(`cli` 가 기동 때 `set_curve`). 안 얹으면 yaml 을 고쳐도 화면만 코드 기본값을 그린다."""
+    set_curve((_pem_cfg().get("clock") or {}).get("curve"))
+    return [{"h": h,
+             "call": round(diurnal_factor(h, "lte_call"), 3),
+             "sess": round(diurnal_factor(h, "uplane_sessions"), 3),
+             "byte": round(diurnal_factor(h, "transport"), 3)}
+            for h in range(24)]
+
+
+def _clock_defaults() -> tuple[str, str]:
+    """시간대 곡선·가상 시각 기본값 — 설정 `pemdb1.clock`(UI 저장값이 없을 때). 데몬과 같은 규칙."""
+    clk = _pem_cfg().get("clock") or {}
+    return ("false" if clk.get("diurnal") is False else "true",
+            str(60.0 * float(clk.get("virtual_offset_min", 0) or 0)))
+
+
+_ROUTE_CELLS: dict = {}
+
+
+def _route_cells(path: str) -> int | None:
+    """노선 파일의 고유 셀 수(외선·내선 합집합). 못 읽으면 None — 화면이 그 줄을 뺀다."""
+    if path not in _ROUTE_CELLS:
+        import json as _json
+        try:
+            rows = _json.loads(Path(path).read_text(encoding="utf-8"))
+            _ROUTE_CELLS[path] = len({k for r in rows for k in r.get("cells", [])}) or None
+        except (OSError, ValueError):
+            _ROUTE_CELLS[path] = None
+    return _ROUTE_CELLS[path]
+
+
+def _clock_bands() -> dict | None:
+    """시간대 곡선 칸의 특징 문장 재료 (2026-11-04 사용자 요청).
+
+    **비율을 화면이 계산하지 않는다.** 경계 보간(`blend_min`)·지하철 운행 시각까지
+    생성기와 같은 `Groups.shares` 로 10분 간격 144칸을 내린다 — 화면이 `hourly` 를
+    따로 풀면 보간 규칙이 두 벌이 되고, 고칠 때 화면만 옛 비율을 말한다.
+    `hourly` 가 없으면(그룹 없이 `call_share` 하나) None 이고 화면은 비율 줄을 뺀다.
+    """
+    mb = _pem_cfg().get("mobility") or {}
+    rows = mb.get("hourly") or []
+    if not rows:
+        return None
+    try:
+        g = Groups(rows, mb.get("subway_hours", [6, 24]), mb.get("blend_min", 60))
+    except RuntimeError:
+        return None
+    day = datetime(2000, 1, 1)
+    steps = []
+    for k in range(144):
+        sw, wk = g.shares(day + timedelta(minutes=10 * k))
+        steps.append([round(sw, 3), round(wk, 3)])
+    notes = {int(n.get("h", -1)): n for n in (mb.get("hourly_notes") or []) if isinstance(n, dict)}
+    bands = []
+    for r in sorted(rows):
+        n = notes.get(int(r[0]), {})
+        bands.append({"h0": r[0], "h1": r[1],
+                      **{k: str(n.get(k, "")) for k in
+                         ("name", "name_ja", "note", "note_ja", "warn", "warn_ja")}})
+    return {"steps": steps, "bands": bands,
+            "blend_min": int(mb.get("blend_min", 60)),
+            "subway_hours": list(mb.get("subway_hours", [6, 24])),
+            "walk_warmup_min": int(mb.get("walk_warmup_min", 0) or 0),
+            "route_cells": _route_cells(str(mb.get("routes_file") or "")) if mb.get("routes_file") else None}
+
+
+def _virtual(offset_sec: float) -> str | None:
+    """가상 시각 HH:MM — 오프셋이 0 이면 None(지금 시각)."""
+    if not offset_sec:
+        return None
+    return (datetime.now() + timedelta(seconds=offset_sec)).strftime("%H:%M")
 
 
 class SettingsReq(BaseModel):
@@ -599,8 +691,12 @@ class SettingsReq(BaseModel):
     retention_on: bool | None = None
     #: 끊을 계열. 빈 리스트면 해제. `pemdb1.BLOCKABLE_SERIES` 안의 값만.
     blocked: list[str] | None = None
-    #: 시간대 곡선 on/off. 끄면 모든 시각이 피크(19시) 수준으로 평탄해진다.
+    #: 시간대 곡선 on/off. 끄면 생성량은 피크(19시) 수준으로 평탄, 그룹·이동 없이 전체
+    #: eNB 에 골고루(2026-11-04 사용자 결정 — `Generator.flat_mode`)
     diurnal: bool | None = None
+    #: 가상 시각 "HH:MM" — 곡선·그룹 비율이 볼 시각. 빈 문자열이면 해제(지금 시각).
+    #: **레코드 시각은 바꾸지 않는다** — 데몬은 오프셋(초)만 받는다(`virtual_offset_sec`)
+    virtual_clock: str | None = None
 
 
 @app.post("/api/settings")
@@ -650,6 +746,23 @@ def api_set_settings(req: SettingsReq):
             set_config(conn, "blocked", ",".join(sorted(set(req.blocked))))
         if req.diurnal is not None:
             set_config(conn, "diurnal", "true" if req.diurnal else "false")
+        if req.virtual_clock is not None:
+            v = req.virtual_clock.strip()
+            if not v:
+                set_config(conn, "virtual_offset_sec", "0")
+            else:
+                try:
+                    hh, mm = (int(x) for x in v.split(":"))
+                    assert 0 <= hh < 24 and 0 <= mm < 60
+                except (ValueError, AssertionError):
+                    raise HTTPException(400, f"가상 시각은 HH:MM 이다: {v!r}")
+                now = datetime.now()
+                # 오늘 그 시각까지의 차(초)를 ±12시간으로 접는다 — 곡선은 시·분만 보므로
+                # 날짜는 뜻이 없다. 지금부터 실제 시간과 같은 속도로 흐른다(오프셋 방식)
+                d = ((hh * 3600 + mm * 60) - (now.hour * 3600 + now.minute * 60 + now.second)) % 86400
+                if d > 43200:
+                    d -= 86400
+                set_config(conn, "virtual_offset_sec", str(int(d)))
     finally:
         conn.close()
     return {"ok": True}
@@ -672,16 +785,22 @@ def api_targets():
     conn = _connect()
     try:
         cells_list = _cells(conn)
+        names = _enb_names(conn)
     finally:
         conn.close()
 
+    # **장비 단위로 센다**(2026-11-03 사람 지시) — 노드 아래 eNB 수. 셀 수는
+    # 화면이 셀 군집 시나리오에서만 쓴다
     def tally(attr: str) -> list[dict]:
         cnt: dict[str, int] = {}
+        enbs: dict[str, set] = {}
         for c in cells_list:
             v = getattr(c, attr)
             if v:
                 cnt[v] = cnt.get(v, 0) + 1
-        return [{"id": k, "cells": n}
+                enbs.setdefault(v, set()).add(c.enb_id)
+        return [{"id": k, "cells": n, "enbs": len(enbs[k]),
+                 **({"name": names.get(str(k))} if attr == "enb_id" else {})}
                 for k, n in sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0]))]
 
     sgg: dict[str, int] = {}
@@ -702,6 +821,22 @@ def api_targets():
     }
 
 
+def _enb_names(conn) -> dict[str, str]:
+    """eNB 번호 → 이름(`BTS_NAME`) — 생성 로케일의 조직 벌에서.
+
+    번호만으로는 어디의 eNB 인지 모른다. 이름이 없는 eNB 는 빠진다 —
+    화면이 번호로 보인다(지어내지 않는다 · 불변규칙 17)
+    """
+    loc = str(_pem_cfg().get("locale", "kr"))
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT ENB_ID, BTS_NAME FROM {topo.table_name('enb_org', loc)} "
+                        "WHERE BTS_NAME IS NOT NULL AND BTS_NAME <> ''")
+            return {str(a): str(b) for a, b in cur.fetchall()}
+    except pymysql.MySQLError:
+        return {}       # 이름은 곁다리다 — 없어도 주입은 된다
+
+
 @app.get("/api/scenarios")
 def api_scenarios():
     """장애 시나리오 목록과 발생 장비 마스크 — `CM_ERROR_SCENARIO`.
@@ -712,9 +847,14 @@ def api_scenarios():
     conn = _connect()
     try:
         ensure_tables(conn)  # 표가 아직 없는 DB 에서 UI 만 먼저 떠도 보이게
-        return list_scenarios(conn)
+        rows = list_scenarios(conn)
     finally:
         conn.close()
+    # 권장 지속시간(`scenarios.recommended_duration`) — 주입 칸 기본값과 확정 대기 표시
+    from .scenarios import recommended_duration
+    for r in rows:
+        r["dur"] = recommended_duration(r.get("kind") or "")
+    return rows
 
 
 @app.get("/api/faults")
@@ -727,15 +867,27 @@ def api_faults(limit: int = 50, date: str | None = None):
     conn = _connect()
     try:
         if not date:
-            return list_faults(conn, limit=limit)
-        with conn.cursor() as cur:
-            cur.execute(
-                FAULT_SELECT + f" FROM {T_FAULT} "
-                "WHERE START_TIME >= %s "
-                "AND START_TIME < DATE_ADD(%s, INTERVAL 1 DAY) "
-                "ORDER BY FAULT_ID DESC LIMIT %s", [date, date, limit])
-            cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, r)) for r in cur.fetchall()]
+            rows = list_faults(conn, limit=limit)
+        else:
+            with conn.cursor() as cur:
+                cur.execute(
+                    FAULT_SELECT + f" FROM {T_FAULT} "
+                    "WHERE START_TIME >= %s "
+                    "AND START_TIME < DATE_ADD(%s, INTERVAL 1 DAY) "
+                    "ORDER BY FAULT_ID DESC LIMIT %s", [date, date, limit])
+                cols = [d[0] for d in cur.description]
+                rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        # 하한 꼬리가 끝나는 시각(2026-11-02 · 카드 15) — 데몬의 **실제 상태**다
+        # (`PemdbGen.floor_tail_until`). 규칙으로 추정하지 않는다: 셀 대상처럼
+        # 보여도 해석 결과가 전국이면 꼬리가 없다(16번 `anchor_saturation`).
+        # 값이 없으면 꼬리가 없거나 끝났다. 같은 셀을 다시 노리려면 이 시각 뒤에
+        try:
+            tail = json.loads(get_config(conn, FLOOR_TAIL_KEY) or "{}")
+        except ValueError:
+            tail = {}
+        for r in rows:
+            r["tail_until"] = tail.get(str(r.get("fault_id")))
+        return rows
     finally:
         conn.close()
 
@@ -754,9 +906,13 @@ def api_add_fault(req: FaultReq):
     conn = _connect()
     try:
         ensure_tables(conn)  # 새 DB 에 UI 만 먼저 떠도 동작하도록
-        fid = add_fault(conn, req.kind, target, start,
-                        duration_min=req.duration_min, intensity=req.intensity,
-                        mode="manual", note=req.note)
+        try:
+            fid = add_fault(conn, req.kind, target, start,
+                            duration_min=req.duration_min, intensity=req.intensity,
+                            mode="manual", note=req.note)
+        except ValueError as e:
+            # `LIKE:` 원본 검사(`control._check_like`) — 500 이 아니라 사유를 돌려준다
+            raise HTTPException(400, str(e))
     finally:
         conn.close()
     return {"fault_id": fid}
@@ -1435,8 +1591,18 @@ _HTML = """<!doctype html>
   #ftab th.sort:hover, #ftab th.sort.on { color:var(--fg); }
   #ftab th i { font-style:normal; font-size:10px; margin-left:3px; }
   /* 장애 주입 — 종류(시나리오 이름)가 길어 두 칸을 준다 */
-  #f { grid-template-columns:repeat(7,minmax(0,1fr)); }
-  #f > label:first-child { grid-column:span 2; }
+  /* 두 줄 — 위: 종류(넓게)·대상·지속·강도, 아래: 메모(길게). 주입 버튼은
+     오른쪽 칸에 한 줄 높이로 세로 가운데(2026-11-03 사람 지시) */
+  #f { grid-template-columns:minmax(0,2.4fr) minmax(0,1.6fr) minmax(0,.8fr) minmax(0,1fr) 92px;
+       grid-template-areas:"kind tgt dur int go" "memo memo memo memo go" "hint hint hint hint hint"; }
+  #f .f-kind { grid-area:kind; } #f .f-tgt { grid-area:tgt; } #f .f-dur { grid-area:dur; }
+  #f .f-int { grid-area:int; } #f .f-memo { grid-area:memo; }
+  #f button[type=submit] { grid-area:go; align-self:center; }
+  /* 권장 지속시간 힌트 — 폼 전체 폭 한 줄(빈 칸에 끼면 3줄로 접혔다) */
+  #f #dur-hint { grid-area:hint; color:var(--dim); line-height:1.5; }
+  /* 지역 — 콤보와 저장을 한 줄로. 전역 select{width:100%} 가 줄을 넘겼다 */
+  #region-sel { width:auto; flex:1; min-width:0; }
+  #region-row { flex-wrap:nowrap; }
   .pager { display:flex; flex-wrap:wrap; gap:4px; margin-top:10px; }
   /* 전역 button 이 파랑으로 채워져 있어 지금 쪽이 안 보였다 — 나머지는 비운다 */
   .pager button { min-width:30px; padding:3px 8px; font-size:12px; background:transparent;
@@ -1517,7 +1683,7 @@ _HTML = """<!doctype html>
   @keyframes lamp { 0%,100% { opacity:1 } 50% { opacity:.4 } }
   .daysep td { background:#222b36; color:var(--dim); font-size:12px;
                letter-spacing:.3px; padding:4px 8px; }
-  .chart { width:100%; height:190px; display:block; }
+  .chart { width:100%; height:204px; display:block; }
   /* 툴팁은 SVG 밖 div 다 — SVG 안에 그리면 viewBox 가
      preserveAspectRatio="none" 로 늘어나 글자가 가로로 찌그러진다. */
   .chartwrap { position:relative; }
@@ -1640,8 +1806,8 @@ _HTML = """<!doctype html>
          묶이면 생성량을 조절하다가 지역까지 함께 저장된다. -->
     <div class="sect" style="margin-top:0">
       <h3>지역 <small>— 재시작 후 반영</small></h3>
-      <div class="row">
-        <select id="region-sel" style="min-width:160px"></select>
+      <div class="row" id="region-row">
+        <select id="region-sel"></select>
         <button type="button" onclick="saveRegion()">지역 저장</button>
         <span class="dim" id="region-msg"></span>
       </div>
@@ -1684,8 +1850,22 @@ _HTML = """<!doctype html>
           <input type="checkbox" id="diurnal" onchange="toggleDiurnal(this)"><i></i>
         </label>
         <b id="diurnal-label" style="min-width:52px">—</b>
-        <span class="dim" style="font-size:12px">끄면 모든 시각이 피크 수준으로 평탄</span>
+        <span class="dim" style="font-size:12px">끄면 피크 수준 평탄 · 전체 eNB 에 골고루(이동·노선 쏠림 없음)</span>
       </div>
+      <!-- 가상 시각 (2026-11-04 사용자 결정) — 곡선 켬일 때 곡선·시간대 비율이 볼 시각을 옮긴다.
+           **레코드 시각은 바꾸지 않는다** — 옮기면 1분 집계·corr 실시간 흐름이 깨진다 -->
+      <!-- 좌우 스핀 (2026-11-04 사용자 요청) — 1시간씩, 23↔00 이 이어진다. 돌리는 동안은
+           **미리보기**(곡선 점·특징 문장만 바뀐다)이고 생성기에는 `적용` 을 눌러야 간다 -->
+      <div class="row" id="vclock-row" style="margin-top:8px; align-items:center">
+        <span class="dim" style="font-size:12px">가상 시각</span>
+        <button type="button" class="ghost" onclick="spinHour(-1)" title="1시간 앞으로">◀</button>
+        <b id="vclock-spin" style="min-width:48px; text-align:center; font-size:15px">--:--</b>
+        <button type="button" class="ghost" onclick="spinHour(1)" title="1시간 뒤로">▶</button>
+        <button type="button" onclick="setVClock()">적용</button>
+        <button type="button" class="ghost" onclick="resetVClock()">지금으로</button>
+        <b id="vclock-label" style="font-size:12px">—</b>
+      </div>
+      <div class="dim" style="margin-top:4px; font-size:11px">곡선·지하철·이동 비율만 그 시각 기준이다 — 레코드 시각은 실제 시각 그대로</div>
       <div class="dim" id="diurnal-note" style="margin-top:8px; font-size:12px;
            line-height:1.6"></div>
       <!-- **viewBox 를 박지 않는다**(2026-10-16). 320 폭 좌표계를
@@ -1693,7 +1873,7 @@ _HTML = """<!doctype html>
            됐다 — 눈금 글자가 뭉개지고 현재 시각 점이 타원이 되고 0시·23시
            끝점의 선이 가장자리에서 잘렸다. `renderDiurnal` 이 실제 폭을 읽어
            1:1 로 세운다. 높이는 아래 눈금 글자 자리를 포함한 값이다. -->
-      <svg id="dcurve" style="width:100%; height:64px; margin-top:6px;
+      <svg id="dcurve" style="width:100%; height:104px; margin-top:6px;
            display:block"></svg>
     </div>
     <!-- ── 데이터 보존 ─────────────────────────────────────────────────
@@ -1718,10 +1898,9 @@ _HTML = """<!doctype html>
     </div>
     <div class="dim" id="topo" style="margin-top:10px; font-size:12px"></div>
   </div>
-  <div class="panel">
-    <h2>인입 현황 <small class="dim" id="ing-range">최근 60분</small></h2>
-    <div id="ingest" class="dim">불러오는 중…</div>
-  </div>
+  <!-- 인입 현황 카드는 지웠다 (2026-11-04 사용자 지시) — 시간대 설명이 길어져 창이 길어졌다.
+       같은 내용(계열별 건수·분당 건수·합계)은 상단 바 "오늘 생성" 칸에 마우스를 올리면 보인다
+       (`_SHELL_JS`). `/api/ingest` 는 그대로다 -->
   <div class="panel">
     <!-- 재배정·계열 차단 — **장애가 아니다.** 재배정은 총량을 유지하는 쏠림이고
          차단은 미연동이다. 전에는 장애 주입과 한 카드였는데(2026-10-15) 오른쪽을
@@ -1770,23 +1949,24 @@ _HTML = """<!doctype html>
   <div class="panel">
     <h2>장애 주입</h2>
     <form id="f" onsubmit="return inject(event)">
-      <label>종류
-        <select id="kind" onchange="renderTargets()"></select>
+      <label class="f-kind">종류
+        <select id="kind" onchange="renderTargets(); applyDur()"></select>
       </label>
-      <label>대상
+      <label class="f-tgt">대상
         <select id="target"><option value="">자동 선택</option></select>
       </label>
-      <label>지속시간(분)
-        <input id="dur" type="number" min="1" value="30">
+      <label class="f-dur">지속시간(분)
+        <input id="dur" type="number" min="1" value="10" oninput="renderDurHint()">
       </label>
-      <label>강도 <span id="iv">1.0</span>
+      <label class="f-int">강도 <span id="iv">1.0</span>
         <input id="intensity" type="range" min="0.1" max="1.0" step="0.1" value="1.0"
                oninput="document.getElementById('iv').textContent=this.value">
       </label>
-      <label>메모
+      <label class="f-memo">메모
         <input id="note" type="text" placeholder="(옵션)">
       </label>
       <button type="submit">주입</button>
+      <div id="dur-hint" class="hint" style="font-size:12px"></div>
     </form>
     <div id="msg"></div>
   </div>
@@ -1838,6 +2018,7 @@ async function loadKinds() {
          + `${s.no}. ${esc(T(s.name))}${live ? (eq ? ` [${eq}]` : "") : off}</option>`;
   }).join("");
   renderTargets();
+  applyDur();
 }
 
 async function loadTargets() {
@@ -1845,7 +2026,35 @@ async function loadTargets() {
   renderTargets();
 }
 
+//: eNB 를 앵커로 **주변 셀까지** 묶어 거는 kind — `faults._PAIR_KINDS`·
+//: `_CROWD_KINDS`·`_AREA_KINDS`·`_VENUE_KINDS`·`anchor_saturation` 과 같은 목록
+const CELL_KINDS = new Set(["mobility", "son_param_change", "ho_interruption",
+  "ran_congestion", "earthquake", "event_crowd", "anchor_saturation"]);
+
 // 고른 시나리오의 발생 장비(`*_YN`)만 대상 후보로 보인다.
+// 권장 지속시간 — **권장값만 주입한다.** 결과 확정까지 걸리는 시간(확정 대기)은
+// 주입 길이에 더하지 않고 따로 보인다(2026-11-03 사용자 지시)
+function curDur() {
+  const s = SCN.find(x => String(x.no) === $("kind").value);
+  return s && s.dur;
+}
+function applyDur() {
+  const d = curDur();
+  if (d) $("dur").value = d.recommended;
+  renderDurHint();
+}
+function renderDurHint() {
+  const d = curDur(), el = $("dur-hint");
+  if (!el) return;
+  if (!d) { el.textContent = ""; return; }
+  const v = parseInt($("dur").value, 10) || 0;
+  let h = T("권장 {r}분 · 최소 {m}분 · {w}", {r: d.recommended, m: d.min, w: T(d.why)})
+        + (d.basis === "shape" ? T(" (모양 기준 초기값)") : "")
+        + T(" — 주입 종료 후 결과 확정까지 약 +{s}분 (주입 시간에 포함 안 됨)", {s: d.settle});
+  if (v && v < d.min) h += T(" · ⚠ 최소보다 짧아 탐지·L2 가 서지 않을 수 있다");
+  el.textContent = h;
+}
+
 function renderTargets() {
   if (!TGT) return;
   const s = SCN.find(x => String(x.no) === $("kind").value);
@@ -1854,11 +2063,17 @@ function renderTargets() {
     `<optgroup label="${label}">` + items.map(i =>
       `<option value="${esc(i.v)}">${esc(i.t)}</option>`).join("") + "</optgroup>";
   let h = `<option value="">${T("자동 선택")}</option>`;
-  const lab = (n, c) => T("{n} (셀 {c})", {n, c});
-  if (on("sgw")) h += og("SGW", TGT.sgw.map(x => ({v:`SGW-${x.id}`, t:lab(`SGW-${x.id}`, x.cells)})));
-  if (on("mme")) h += og("MME", TGT.mme.map(x => ({v:`MME-${x.id}`, t:lab(`MME-${x.id}`, x.cells)})));
-  if (on("pgw")) h += og("PGW", TGT.pgw.map(x => ({v:`PGW-${x.id}`, t:lab(`PGW-${x.id}`, x.cells)})));
-  if (on("enb")) h += og("eNB", (TGT.enb || []).map(x => ({v:`ENB:${x.id}`, t:lab(`eNB-${x.id}`, x.cells)})));
+  // **장비 단위로 적는다**(2026-11-03) — 노드는 그 아래 eNB 수, eNB 는 이름.
+  // 셀 수는 **셀 군집 시나리오**에서만 붙인다: 그 eNB 를 앵커로 주변 셀까지
+  // 묶어 걸리므로(`faults._resolve_target`) 셀이 걸리는 단위다
+  const node = (k, x) => T("{k} {id} · eNB {n}국", {k, id: x.id, n: x.enbs});
+  const cellish = s && CELL_KINDS.has(s.kind);
+  const enbLab = x => (x.name || `eNB ${x.id}`)
+    + (cellish ? T(" · 셀 {c} + 주변 셀", {c: x.cells}) : "");
+  if (on("sgw")) h += og("SGW", TGT.sgw.map(x => ({v:`SGW-${x.id}`, t:node("SGW", x)})));
+  if (on("mme")) h += og("MME", TGT.mme.map(x => ({v:`MME-${x.id}`, t:node("MME", x)})));
+  if (on("pgw")) h += og("PGW", TGT.pgw.map(x => ({v:`PGW-${x.id}`, t:node("PGW", x)})));
+  if (on("enb")) h += og("eNB", (TGT.enb || []).map(x => ({v:`ENB:${x.id}`, t:enbLab(x)})));
   $("target").innerHTML = h;
 }
 
@@ -2067,7 +2282,7 @@ async function inject(ev) {
   const body = {
     kind: (SCN.find(x => String(x.no) === $("kind").value) || {}).kind,
     target: $("target").value || null,
-    duration_min: parseInt($("dur").value, 10) || 30,
+    duration_min: parseInt($("dur").value, 10) || (curDur() || {}).recommended || 10,
     intensity: parseFloat($("intensity").value),
     // 어느 시나리오로 걸었는지 남긴다 — 같은 kind 를 여러 번호가 쓴다(1/18)
     note: `#${$("kind").value} ` + ($("note").value || ""),
@@ -2127,14 +2342,15 @@ function renderIngest(d) {
        ${r.per_min}/${T("분")}</span></b></div>`).join("");
   const today = (d.by_day || [])[0];
   const cum = (d.by_day || []).reduce((a, x) => a + (x.slots || 0), 0);
-  $("ingest").innerHTML = rows +
+  // 카드는 지웠다(2026-11-04) — 상단 바가 같은 값을 보여 준다. 자리가 없으면 건너뛴다
+  if ($("ingest")) $("ingest").innerHTML = rows +
     `<div class="kv" style="margin-top:6px; border-top:1px solid var(--line)">
        <span>${T("합계")}</span><b>${(tot.records ?? 0).toLocaleString()} ${T("건")} ·
        ${tot.per_min ?? 0}/${T("분")}</b></div>` +
     `<div class="dim" style="margin-top:8px; font-size:12px">
        ${T("오늘 {a}분 · 누적 {b}분", {a: today ? today.slots : 0, b: cum})}
        ${(d.by_day || []).length > 1 ? T("({n}일)", {n: d.by_day.length}) : ""}</div>`;
-  $("ing-range").textContent = d.date ? T("{d} 하루", {d: d.date}) : T("최근 {n}분", {n: d.minutes});
+  if ($("ing-range")) $("ing-range").textContent = d.date ? T("{d} 하루", {d: d.date}) : T("최근 {n}분", {n: d.minutes});
   // 데이터가 있는 날짜는 여기서만 알 수 있다 — 별도 조회를 만들지 않는다.
   const days = (d.by_day || []).map(x => String(x.d).slice(0, 10));
   if (days.length && days.join() !== DAYS.join()) DAYS = days;
@@ -2152,6 +2368,7 @@ function renderIngest(d) {
   const ymd = `${lx.getFullYear()}-${String(lx.getMonth()+1).padStart(2,"0")}`
             + `-${String(lx.getDate()).padStart(2,"0")}`;
   const isToday = t0 && String(t0.d).slice(0, 10) === ymd;
+  if (!$("st-today")) return;
   $("st-today").textContent = T("{n}분", {n: isToday ? t0.slots : 0});
   $("st-today-n").textContent =
     isToday ? T("({n}건)", {n: Number(t0.recs || 0).toLocaleString()}) : "";
@@ -2172,7 +2389,8 @@ const COLORS = { lte_call:"#4e9af1", transport:"#4caf7d",
 //: `W` 는 **레이아웃 전(폭 0)에만 쓰는 대비값**이다. 실제 폭은 그릴 때
 //: `clientWidth` 로 읽어 viewBox 를 1:1 로 세운다 — 창 크기가 바뀌어도 글자와
 //: 선이 늘어나지 않는다. `H` 는 CSS `.chart` 의 높이와 같아야 한다.
-const CHART = { W:1000, H:190, PAD_B:22, PAD_T:8 };
+//: `PAD_T` 22 — 장애 띠 이름(A3)을 막대 **위**에 쓴다. 막대 위에 겹치면 초록에 묻혔다
+const CHART = { W:1000, H:204, PAD_B:22, PAD_T:22 };
 let CHART_SLOTS = [];          // 마우스 추적이 쓰는 슬롯 메타
 
 function fmtBytes(n) {
@@ -2183,6 +2401,27 @@ function fmtBytes(n) {
 }
 
 let LAST_SERIES = null;
+// lte_call 목표(분당) — 시각 → 건수. 계산할 수 없으면 null(선을 긋지 않는다)
+function callTarget() {
+  const r = RATES && RATES.lte_call;
+  if (!r || (typeof BLOCKED !== "undefined" && BLOCKED.has("lte_call"))) return null;
+  const on = $("diurnal") && $("diurnal").checked;
+  return h => r * (on && DCURVE[h] ? DCURVE[h].call : 1);
+}
+
+// 장애 띠 라벨 — `▼ [22] 결제 앱…` 을 띠 폭(px)에 맞춰 자른다. 겹친 장애는 `+n`
+const _cv = document.createElement("canvas").getContext("2d");
+function segLabel(seg, w) {
+  const ids = seg.ids || [];
+  const f = (typeof FAULTS !== "undefined" ? FAULTS : []).find(x => String(x.fault_id) === String(ids[0]));
+  let t = "▼ " + (f ? faultName(f) : "#" + (ids[0] ?? "")) + (ids.length > 1 ? ` +${ids.length - 1}` : "");
+  _cv.font = "600 10px sans-serif";
+  const room = Math.max(w - 6, 28);
+  if (_cv.measureText(t).width <= room) return t;
+  while (t.length > 3 && _cv.measureText(t + "…").width > room) t = t.slice(0, -1);
+  return t + "…";
+}
+
 function renderChart(d) {
   LAST_SERIES = d;
   // **상태바의 "직전 틱"을 여기서 채운다.** 선언만 해 두고 채우는 곳이 없어
@@ -2197,7 +2436,9 @@ function renderChart(d) {
   const { H, PAD_B, PAD_T } = CHART;
   const W = Math.max(Math.round(svg.clientWidth || 0), 320);
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  const names = d.series_names || [];
+  // lte_call 을 **맨 아래**에 — 목표선(A1)과 바로 견주게
+  const names = (d.series_names || []).slice()
+    .sort((a, b) => (a === "lte_call" ? -1 : b === "lte_call" ? 1 : a.localeCompare(b)));
 
   // 슬롯 축을 **현재 분**에서 역산한다. 서버 응답이 비어 있어도 축은 선다 —
   // 축이 데이터에 의존하면 빈 화면에서 눈금이 사라져 "고장"처럼 보인다.
@@ -2214,9 +2455,13 @@ function renderChart(d) {
     if (i >= 0 && i < slots) byIdx.set(i, p);
   });
 
-  const max = Math.max(1, ...P.map(p => p.total || 0));
+  const tgt0 = callTarget();
+  const max = Math.max(1, ...P.map(p => p.total || 0),
+                       tgt0 ? Math.max(...Array.from({length: 24}, (_, h) => tgt0(h))) : 0);
   const y = v => PAD_T + (H - PAD_B - PAD_T) * (1 - v / max);
-  let out = "";
+  let out = `<defs><pattern id="gapHatch" width="6" height="6" patternUnits="userSpaceOnUse"
+      patternTransform="rotate(45)"><rect width="6" height="6" fill="#8a94a3" opacity=".07"/>
+      <line x1="0" y1="0" x2="0" y2="6" stroke="#8a94a3" stroke-width="2" opacity=".45"/></pattern></defs>`;
 
   // ── 장애 구간 — **잘 보여야 한다** (2026-10-15) ────────────────────
   // 전에는 opacity .10 의 배경 띠 하나뿐이라 **막대에 묻혀 안 보였다.**
@@ -2225,6 +2470,23 @@ function renderChart(d) {
   //
   // 장애 판정이 아니라 **주입 이력의 표시**다. 품질 판단은 관제 화면(8008)의
   // 일이고 여기서 색으로 단정하면 두 화면이 다른 말을 한다.
+  // ── A2 빈 분 — 생성 기록이 없는 분을 빗금으로 (2026-11-03) ─────────
+  // 막대가 없으면 그냥 빈자리라 "멈춤·끊김"과 "볼 게 없음"이 같아 보였다.
+  // **첫 기록 이전과 지금 분은 빼다** — 앞은 창이 기록보다 길어서, 지금 분은
+  // 틱이 아직 안 끝나서 비어 있다
+  const firstIdx = byIdx.size ? Math.min(...byIdx.keys()) : slots;
+  const gaps = [];
+  for (let i = firstIdx; i < slots - 1; i++) {
+    if (byIdx.has(i)) continue;
+    const last = gaps[gaps.length - 1];
+    if (last && last.to === i - 1) last.to = i; else gaps.push({ from: i, to: i });
+  }
+  gaps.forEach(g => {
+    out += `<rect x="${(g.from*bw).toFixed(2)}" y="${PAD_T}"
+             width="${Math.max((g.to-g.from+1)*bw, 1.5).toFixed(2)}" height="${H-PAD_B-PAD_T}"
+             fill="url(#gapHatch)"/>`;
+  });
+
   const fseg = [];               // 연속 구간으로 묶는다 — 칸마다 선을 그으면 숲이 된다
   byIdx.forEach((p, i) => {
     const on = !!(p.faults && p.faults.length);
@@ -2237,14 +2499,15 @@ function renderChart(d) {
     out += `<rect x="${x.toFixed(2)}" y="${PAD_T}" width="${w.toFixed(2)}"
              height="${H-PAD_B-PAD_T}" fill="#e5534b" opacity=".18"/>`;
     // 상단 막대 — 배경만으로는 막대 색에 묻힌다
-    out += `<rect x="${x.toFixed(2)}" y="${(PAD_T-6).toFixed(1)}"
+    out += `<rect x="${x.toFixed(2)}" y="${(PAD_T-5).toFixed(1)}"
              width="${w.toFixed(2)}" height="4" fill="#e5534b"/>`;
     // 시작 지점 — 세로 점선 + 라벨. "언제 주입했나"가 한눈에 보여야 한다
-    out += `<line x1="${x.toFixed(2)}" y1="${(PAD_T-6).toFixed(1)}"
+    out += `<line x1="${x.toFixed(2)}" y1="${(PAD_T-5).toFixed(1)}"
              x2="${x.toFixed(2)}" y2="${(H-PAD_B).toFixed(1)}"
              stroke="#e5534b" stroke-width="1.5" stroke-dasharray="3 2"/>`;
-    out += `<text x="${(x+3).toFixed(2)}" y="${(PAD_T+9).toFixed(1)}"
-             fill="#e5534b" font-size="9">▼ ${esc(String(seg.ids[0] ?? ""))}</text>`;
+    // A3 — 번호 대신 **주입 칸과 같은 이름**(`faultName`). 띠 폭에 맞춰 자른다
+    out += `<text x="${(x+3).toFixed(2)}" y="${(PAD_T-9).toFixed(1)}"
+             fill="#e5534b" font-size="10" font-weight="600">${esc(segLabel(seg, w))}</text>`;
   });
 
   // 계열별 적층 막대. 폭이 1px 미만이면 틈이 생기지 않게 간격을 두지 않는다.
@@ -2262,11 +2525,31 @@ function renderChart(d) {
     });
   });
 
+  // ── A1 lte_call 목표선 (2026-11-03) ──────────────────────────────
+  // 설정 생성량 × 시간대 배율 — 생성기가 호 수를 정하는 식이다(`diurnal_factor`).
+  // **lte_call 만 긋는다.** U-Plane 셋은 성공 호에서 파생돼(`session.py`) 자기
+  // 목표가 없다 — 설정 요율과 실제 건수가 다르다(transport 3,300 → 7,700).
+  // 그래서 lte_call 을 맨 아래에 쌓아 선과 바로 견주게 했다.
+  // **현재 설정 기준이다** — 지난 시각에 생성량을 바꿨으면 그 앞은 맞지 않는다
+  const tgt = callTarget();
+  if (tgt) {
+    let d = "";
+    for (let i = firstIdx; i < slots; i++) {
+      const h = new Date(t0 + i * 60000).getHours();
+      const v = tgt(h), py = y(Math.min(v, max)).toFixed(1);
+      d += (d ? "L" : "M") + `${(i*bw).toFixed(2)} ${py}H${((i+1)*bw).toFixed(2)}`;
+    }
+    if (d) out += `<path d="${d}" fill="none" stroke="#fff" stroke-width="1.4"
+                   stroke-dasharray="5 3" opacity=".85"/>`;
+  }
+
   // 눈금 — 정시마다. 슬롯이 촘촘하면 30분 간격으로 줄인다.
   const everyMin = bw < 4 ? 30 : 60;
   for (let i = 0; i < slots; i++) {
     const t = new Date(t0 + i * 60000);
     if (t.getMinutes() % everyMin !== 0) continue;
+    // 오른쪽 끝은 `now` 자리다 — 정시 글자가 겹쳐 `now1` 로 보였다
+    if (i * bw > W - 40) continue;
     const x = (i * bw).toFixed(2);
     const hh = String(t.getHours()).padStart(2,"0"),
           mm = String(t.getMinutes()).padStart(2,"0");
@@ -2290,7 +2573,9 @@ function renderChart(d) {
   CHART_SLOTS = { slots, t0, bw, byIdx, names };
   $("legend").innerHTML = names.map(n =>
     `<span><i style="background:${COLORS[n] || "#6b7684"}"></i>${esc(n)}</span>`).join("")
-    + `<span><i style="background:#e5534b;opacity:.35"></i>${T("장애 주입 구간")}</span>`;
+    + `<span><i style="background:#e5534b;opacity:.35"></i>${T("장애 주입 구간")}</span>`
+    + (callTarget() ? `<span><i style="background:none;border-top:2px dashed #fff;height:0;border-radius:0"></i>${T("lte_call 목표 (현재 설정)")}</span>` : "")
+    + `<span><i style="background:repeating-linear-gradient(45deg,#8a94a3 0 2px,transparent 2px 5px);opacity:.6"></i>${T("생성 없음")}</span>`;
 }
 
 // ── 툴팁 ────────────────────────────────────────────────────────────────
@@ -2435,6 +2720,8 @@ function renderSettings(d) {
   $("ret-on").checked = !!d.retention_on;
   renderRetNote();
   DCURVE = d.diurnal_curve || [];
+  CBANDS = d.clock_bands || null;
+  VO = Number(d.virtual_offset_sec || 0);
   $("diurnal").checked = d.diurnal !== false;
   renderDiurnal();
   BLOCKABLE = d.blockable || [];
@@ -2503,6 +2790,33 @@ function renderRetNote() {
 // 내려 준다 — 숫자를 여기 복사하면 곡선을 고칠 때 화면만 옛 모양을 그리고,
 // 그 상태는 에러가 나지 않는다.
 let DCURVE = [];
+//: 가상 시각 오프셋(초) — 서버 값(`virtual_offset_sec`). 곡선 위 "지금" 점이 이 시각을 따른다
+let VO = 0;
+//: 시각별 특징 재료 — 서버 `_clock_bands`(그룹 비율 144칸 · 시간대 이름·문구)
+let CBANDS = null;
+function vNow() { return new Date(Date.now() + VO * 1000); }
+async function postClock(v) {
+  const r = await fetch("/api/settings", { method:"POST",
+    headers:{"content-type":"application/json"}, body: JSON.stringify({ virtual_clock: v }) });
+  if (!r.ok) { alert((await r.json().catch(() => ({}))).detail || T("실패")); return; }
+  const d = await (await fetch("/api/settings")).json();
+  VO = Number(d.virtual_offset_sec || 0);
+  renderDiurnal();
+}
+//: 스핀 미리보기 시(0~23) — null 이면 적용된 시각(가상 또는 지금)을 본다
+let PV = null;
+function spinHour(d) {
+  const base = PV != null ? PV : vNow().getHours();
+  PV = (base + d + 24) % 24;
+  renderDiurnal();
+}
+function setVClock() {
+  if (PV == null) return;
+  const v = String(PV).padStart(2, "0") + ":00";
+  PV = null;
+  postClock(v);
+}
+function resetVClock() { PV = null; postClock(""); }
 async function toggleDiurnal(el) {
   const want = el.checked;
   el.disabled = true;
@@ -2514,6 +2828,51 @@ async function toggleDiurnal(el) {
   } catch (e) { el.checked = !want; }
   finally { el.disabled = false; renderDiurnal(); }
 }
+// 그 시각의 **특징 문장** (2026-11-04 사용자 요청) — 숫자 나열이 먼저 오면 무슨 시각인지
+// 안 읽힌다. 문장 → 비율 → 주의 → 보조 숫자 순이다. **숫자는 모두 서버 값이다** —
+// 그룹 비율은 `Groups.shares`(경계 보간·운행 시각 반영), 생성량은 `diurnal_factor`.
+function clockFeature(h, m, c) {
+  const pct = x => Math.round(x * 100);
+  const tot = x => x.call * x.sess * x.byte;
+  const totals = DCURVE.map(tot);
+  const peakH = totals.indexOf(Math.max(...totals)), lowH = totals.indexOf(Math.min(...totals));
+  const hh = String(h).padStart(2, "0") + T("시");
+  const B = CBANDS, ja = LANG === "ja";
+  const band = B ? B.bands.find(b => b.h0 <= h && h < b.h1) : null;
+  const nm = band ? (ja && band.name_ja ? band.name_ja : band.name) : "";
+  const tx = band ? (ja && band.note_ja ? band.note_ja : band.note) : "";
+  const wn = band ? (ja && band.warn_ja ? band.warn_ja : band.warn) : "";
+  let out = `<b>${esc(hh)}${nm ? " · " + esc(nm) : ""}</b>${tx ? " — " + esc(tx) : ""}<br>`;
+  if (B && B.steps && B.steps.length === 144) {
+    const [sw, wk] = B.steps[Math.floor((h * 60 + m) / 10) % 144];
+    const mv = sw + wk;
+    const run = h >= B.subway_hours[0] && h < B.subway_hours[1];
+    out += T("이동 세션 <b>{mv}%</b>", {mv: pct(mv)})
+      + (run ? T("(그중 지하철 {sw}%)", {sw: pct(sw)})
+             : T("(지하철 운행 전 — {s}시 시작)", {s: B.subway_hours[0]}))
+      + T(" · 고정 세션 <b>{fx}%</b>", {fx: pct(1 - mv)})
+      + T(" · 생성량(호)은 피크의 <b>{v}%</b>", {v: pct(c.call)}) + "<br>";
+    // 지하철 몫은 전부 노선 셀에서 난다 — 그래서 "그 이상"이다(고정·걷기 호도 일부 노선 셀에 떨어진다)
+    if (run && sw > 0 && B.route_cells)
+      out += T("야마노테선 노선 셀({n})에 호의 약 {p}% 이상이 몰린다 — 이 시각에 넣은 전국 장애는 지도에서 노선 모양으로 보일 수 있다",
+               {n: B.route_cells, p: pct(sw)}) + "<br>";
+  } else {
+    out += T("생성량(호)은 피크의 <b>{v}%</b>", {v: pct(c.call)}) + "<br>";
+  }
+  const extra = [];
+  if (h === peakH) extra.push(T("하루 중 최대 부하 시각"));
+  if (h === lowH) extra.push(T("하루 중 최저 부하 시각"));
+  if (wn || extra.length)
+    out += `<span style="color:var(--yellow)">${esc(T("주의"))} — ${esc([wn, ...extra].filter(Boolean).join(" · "))}</span><br>`;
+  out += `<span style="color:var(--dim)">`
+    + T("시각을 옮기면 적용하는 순간 그 시각의 비율로 바뀐다(<code>blend_min</code> {b}분 보간은 시간대 경계를 지날 때만 걸린다) · 걷는 사람 위치는 기동 때 미리 걷기({w}분)로 이미 퍼져 있어 다시 자리 잡지 않는다 — 바뀌는 것은 걷는 속도뿐 · 레코드 시각은 실제 시각 그대로",
+        {b: B ? B.blend_min : "-", w: B ? B.walk_warmup_min : 0})
+    + "<br>"
+    + T("호 {call} · 호당 세션 {sess} · 세션 바이트 {byte} → 총 트래픽 {tot} ({p}시 = 1.000)",
+        {call: c.call, sess: c.sess, byte: c.byte, tot: tot(c).toFixed(3), p: peakH})
+    + `</span>`;
+  return out;
+}
 //
 // **주기적으로 다시 부른다**(2026-10-16). 이 함수는 `new Date()` 로 현재 시를
 // 직접 읽는데 `renderSettings` 안에서만 불렸다 — 즉 **페이지를 연 시각에
@@ -2523,28 +2882,31 @@ function renderDiurnal() {
   const on = $("diurnal").checked;
   $("diurnal-label").textContent = on ? T("켜짐") : T("평탄");
   $("diurnal-label").style.color = on ? "var(--green)" : "var(--dim)";
-  const h = new Date().getHours();
+  // 스핀 미리보기면 그 시의 정시, 아니면 적용된 시각(가상 또는 지금)
+  const vn = vNow();
+  const h = PV != null ? PV : vn.getHours();
+  const m = PV != null ? 0 : vn.getMinutes();
   const c = DCURVE[h];
   const note = $("diurnal-note"), svg = $("dcurve");
+  // 가상 시각 줄 — 곡선을 껐으면 시간대를 안 보므로 흐리게 둔다
+  $("vclock-row").style.opacity = on ? "1" : ".45";
+  $("vclock-spin").textContent = String(h).padStart(2, "0") + ":" + String(m).padStart(2, "0");
+  $("vclock-label").textContent = !on ? T("곡선 꺼짐 — 시간대 안 봄")
+    : PV != null ? T("미리보기 — 적용 전")
+    : VO ? T("가상 {t} (실제 대비 {m}분)", {t: vn.toTimeString().slice(0, 5), m: (VO >= 0 ? "+" : "") + Math.round(VO / 60)})
+    : T("지금 시각");
   // 폭을 그릴 때마다 읽어 viewBox 를 1:1 로 세운다. 패널이 접혀 있거나
   // 레이아웃 전이면 0 이 오므로 하한을 둔다 — 0 으로 나누지 않게.
-  const W = Math.max(Math.round(svg.clientWidth || 0), 240), H = 64;
+  // 지역 줄을 한 줄로 줄인 만큼 높였다(64 → 104, 2026-11-03)
+  const W = Math.max(Math.round(svg.clientWidth || 0), 240), H = 104;
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   if (!on) {
-    note.innerHTML = T("모든 시각이 <b>피크(19시)</b> 수준이다 — 야간에도 주간만큼 만든다");
+    note.innerHTML = T("<b>시간대 무관</b> · 전체 eNB 균등 · 이동·노선 쏠림 없음 · 생성량 피크 수준(장애 주입은 그대로 걸린다)");
     svg.innerHTML = `<line x1="5" y1="${(H-16+8)/2}" x2="${W-5}" y2="${(H-16+8)/2}"
       stroke="var(--dim)" stroke-width="1.5" stroke-dasharray="3 3"/>`;
     return;
   }
-  // 세 자리에 나눠 걸린 곡선을 다 적는다 — 하나만 보여 주면 "왜 호 수는
-  // 거의 안 변하나"의 답이 화면에 없다.
-  note.innerHTML = c
-    ? T("지금 <b>{h}시</b> — 호 <b>{call}</b> · 호당 세션 <b>{sess}</b> · 세션 바이트 <b>{byte}</b> → 총 트래픽 <b>{tot}</b> (19시 = 1.000)<br>",
-        {h, call: c.call, sess: c.sess, byte: c.byte, tot: (c.call * c.sess * c.byte).toFixed(3)})
-      + `<span style="color:var(--dim)">`
-      + T("호 수의 진폭은 일부러 작다(04↔19시 1.14배) — 야간에 셀 표본이 마르면 탐지가 통째로 선다(불변규칙 5)")
-      + `</span>`
-    : "";
+  note.innerHTML = c ? clockFeature(h, m, c) : "";
   if (!DCURVE.length) { svg.innerHTML = ""; return; }
   // 총 트래픽 곡선 한 줄. **하루는 24칸이다** — 전에는 `i/23` 으로 펴서
   // 23시가 오른쪽 끝에 붙었고, 그만큼 모든 시각의 x 가 오른쪽으로 밀려
@@ -3473,8 +3835,11 @@ def api_map():
     conn = _connect()
     try:
         cells = _map_cells(conn)
+        allnm = _enb_names(conn)
     finally:
         conn.close()
+    # 화면이 eNB 를 번호 대신 이름으로 부른다 — 그려지는 eNB 것만
+    enb_names = {e: allnm[e] for e in {str(c["enb"]) for c in cells} if e in allnm}
 
     def centers(key: str) -> list[dict]:
         acc: dict[str, list[dict]] = collections.defaultdict(list)
@@ -3516,6 +3881,7 @@ def api_map():
         "scope": " + ".join(parts) or "전량",
         "cells": cells,
         "stations": stations,
+        "enb_names": enb_names,
         "lines": lines,
         "unmapped": max(0, len(_CELLS or ()) - len(cells)),
         "nodes": {"sgw": centers("sgw"), "mme": centers("mme")},
@@ -5348,6 +5714,8 @@ const modeOf=()=>MODE[document.getElementById('mode').value]||MODE.enb;
 //: TAC·TA목록·SGW·MME 도 eNB 안에서 갈리지 않아(실측 0건) 대표 셀의
 //: 값을 그대로 쓴다.
 let ENB=null;
+// eNB 이름(`BTS_NAME`) — 없으면 번호. 번호만으로는 어디인지 모른다
+const enbName=e=>(D&&D.enb_names&&D.enb_names[String(e)]) || `eNB ${e}`;
 function enbPoints(){
   if(ENB) return ENB;
   const m=new Map();
@@ -5767,7 +6135,7 @@ function draw(){
     if(M.focus) d.style.pointerEvents='none';
     d.dataset.kind=M.unit; d.dataset.id=c.key; d.dataset.enb=c.enb;
     d.dataset.t = (M.unit==='enb'
-      ? T('eNB {e}  (셀 {n})',{e:c.enb,n:c.n})
+      ? T('{e}  (셀 {n})',{e:enbName(c.enb),n:c.n})
       : `${c.key}  (${c.name})`)
       + T('\\nTAC {tac} · TA목록 {ta}\\nSGW {sgw} · MME {mme}',{tac:c.tac,ta:c.ta_list,sgw:c.sgw,mme:c.mme});
     document.getElementById('gCell').appendChild(d);
@@ -6015,7 +6383,7 @@ function drawPick(){
   }
   const lbl={cell:'eNB', enb:'eNB', sgw:'SGW', mme:'MME', pgw:'PGW'}[PICK.kind];
   const head = PICK.kind==='pgw' ? T('NTT docomo 本社 · PGW (대표)') : PICK.kind==='box' ? T('드래그 범위 · eNB {n}국',{n:PICK.enb.length})
-    : (PICK.kind==='cell'||PICK.kind==='enb') ? `eNB ${PICK.enb[0]}` : `${lbl} ${PICK.id}`;
+    : (PICK.kind==='cell'||PICK.kind==='enb') ? enbName(PICK.enb[0]) : `${lbl} ${PICK.id}`;
   bar.style.display='flex';   // CSS 기본이 none 이라 '' 로는 안 열린다
   bar.innerHTML=`<b>${head}</b>`
     + `<span>${T('셀 {n}',{n:PICK.cells.length})}</span>`
@@ -6065,7 +6433,7 @@ function injScopes(p){
   if(u!=='enb') return [['one', `${u.toUpperCase()} ${p.id}`, `${u.toUpperCase()}-${p.id}`, 0]];
   const e=String(p.enb[0]), c=p.cells[0]||{};
   const nEnb=f=>new Set(D.cells.filter(f).map(x=>x.enb)).size;
-  const out=[['one', T('이 eNB 만 ({e})',{e}), `ENB:${e}`, 1]];
+  const out=[['one', T('이 eNB 만 ({e})',{e:enbName(e)}), `ENB:${e}`, 1]];
   if(c.tac!=null) out.push(['tac', T('같은 TAC {t}',{t:c.tac}), `TAC:${c.tac}`,
     nEnb(x=>String(x.tac)===String(c.tac))]);
   if(c.gu) out.push(['gu', T('같은 구 {g}',{g:c.gu}), `SGG:${c.gu}`,
@@ -6102,6 +6470,11 @@ function injRow(){
       + '<button id=injGo>'+T('주입')+'</button><span class=msg id=injMsg></span>';
     const first=list.find(s=>s.kind && SCN_OK.has(s.kind));
     if(first) box.querySelector('#injScn').value=String(first.no);
+    // 권장 지속시간을 기본값으로 — 주입 탭과 같은 값(`/api/scenarios` 의 dur)
+    const setDur=()=>{ const s=list.find(x=>String(x.no)===box.querySelector('#injScn').value);
+      if(s&&s.dur){ box.querySelector('#injDur').value=s.dur.recommended;
+        box.querySelector('#injDur').title=T('권장 {r}분 · 최소 {m}분 · 결과 확정까지 약 +{s}분(주입 시간에 포함 안 됨)',{r:s.dur.recommended,m:s.dur.min,s:s.dur.settle}); } };
+    box.querySelector('#injScn').onchange=setDur; setDur();
     box.querySelector('#injGo').onclick=injFire;
   }
   INJ_EL=box; INJ_KEY=key; return box;
@@ -6522,7 +6895,7 @@ _JA_MAP = {
     "다시 맞추기": "再フィット",
     # 범례·툴팁·머리 줄
     "{l} · {n}개": "{l} · {n}個", "… 외 {n}개": "… 他 {n}個",
-    "eNB {e}  (셀 {n})": "eNB {e}  (セル {n})",
+    "{e}  (셀 {n})": "{e}  (セル {n})", "eNB {e}  (셀 {n})": "eNB {e}  (セル {n})",
     "\nTAC {tac} · TA목록 {ta}\nSGW {sgw} · MME {mme}": "\nTAC {tac} · TAリスト {ta}\nSGW {sgw} · MME {mme}",
     "{k} {id}\n셀 {c} · eNB {e}\n(위치 = 맡은 셀의 중심)": "{k} {id}\nセル {c} · eNB {e}\n(位置 = 担当セルの中心)",
     "좌표 없는 셀 {n}": "座標なしセル {n}",
@@ -6667,6 +7040,9 @@ _JA_MAIN = {
     "시간대 곡선": "時間帯カーブ", "— 04시 최저 · 19시 최고": "— 4時最低 · 19時最高",
     "시간대 곡선 on/off — 즉시 반영": "時間帯カーブ on/off — 即時反映",
     "끄면 모든 시각이 피크 수준으로 평탄": "オフにすると全時刻がピーク水準で平坦",
+    "끄면 피크 수준 평탄 · 전체 eNB 에 골고루(이동·노선 쏠림 없음)": "オフでピーク水準平坦・全 eNB に均等(移動・路線の偏りなし)",
+    "가상 시각": "仮想時刻", "적용": "適用", "지금으로": "現在に戻す",
+    "곡선·지하철·이동 비율만 그 시각 기준이다 — 레코드 시각은 실제 시각 그대로": "曲線・地下鉄・移動比率のみその時刻基準 — レコード時刻は実時刻のまま",
     "데이터 보존": "データ保持", "— 지난 파티션을 떨어뜨린다": "— 古いパーティションを削除する",
     "보존 정리 on/off": "保持整理 on/off", "보존": "保持", "시간": "時間", "설정 저장": "設定を保存",
     "망 조작": "網操作", "재배정·차단은 장애가 아니다 — 장애 목록에 남지 않는다": "再割当・遮断は障害ではない — 障害一覧に残らない",
@@ -6687,7 +7063,7 @@ _JA_MAIN = {
     # 요일
     "일": "日", "월": "月", "화": "火", "수": "水", "목": "木", "금": "金", "토": "土",
     # 상태 줄
-    "{n} (셀 {c})": "{n} (セル {c})",
+    "{k} {id} · eNB {n}국": "{k} {id} · eNB {n}局", " · 셀 {c} + 주변 셀": " · セル {c} + 周辺セル", "{n} (셀 {c})": "{n} (セル {c})",
     "가동": "稼働", "정지": "停止", "장애 {n}": "障害 {n}", 
     "곡선 off": "カーブ off", "생성 중": "生成中",
     "(방금)": "(たった今)", "({n}분 전)": "({n}分前)",
@@ -6700,7 +7076,7 @@ _JA_MAIN = {
     # 인입·차트
     "합계": "合計", "오늘 {a}분 · 누적 {b}분": "本日 {a}分 · 累計 {b}分", "({n}일)": "({n}日)",
     "{d} 하루": "{d} 1日分", "최근 {n}분": "直近{n}分", "({n}건)": "({n}件)",
-    "데이터 없음": "データなし", "장애 주입 구간": "障害注入区間",
+    "데이터 없음": "データなし", "lte_call 목표 (현재 설정)": "lte_call 目標 (現在の設定)", "생성 없음": "生成なし", "장애 주입 구간": "障害注入区間",
     "생성 기록 없음": "生成記録なし", "장애 주입 #{ids}": "障害注入 #{ids}",
     # 지역
     "설정 파일 {a}": "設定ファイル {a}", " · UI 저장값 {a}": " · UI保存値 {a}",
@@ -6729,6 +7105,26 @@ _JA_MAIN = {
     "원시 Parquet 는 이 값과 별개다 — 생성 설정의 <code>retain_minutes</code>(U-Plane 10분 · C-Plane 1440분)":
         "生Parquetはこの値とは別 — 生成設定の <code>retain_minutes</code>(U-Plane 10分 · C-Plane 1440分)",
     "켜짐": "オン", "평탄": "平坦",
+    "가상": "仮想", "지금 시각": "現在時刻", "곡선 꺼짐 — 시간대 안 봄": "曲線オフ — 時間帯を見ない",
+    "가상 {t} (실제 대비 {m}분)": "仮想 {t}（実時刻比 {m}分）",
+    "미리보기 — 적용 전": "プレビュー — 未適用", "1시간 앞으로": "1時間戻す", "1시간 뒤로": "1時間進める",
+    "시": "時", "주의": "注意", "하루 중 최대 부하 시각": "一日で最大負荷の時刻", "하루 중 최저 부하 시각": "一日で最低負荷の時刻",
+    "<b>시간대 무관</b> · 전체 eNB 균등 · 이동·노선 쏠림 없음 · 생성량 피크 수준(장애 주입은 그대로 걸린다)":
+        "<b>時間帯に依存しない</b>・全 eNB 均等・移動/路線の偏りなし・生成量はピーク水準(障害注入はそのまま効く)",
+    "이동 세션 <b>{mv}%</b>": "移動セッション <b>{mv}%</b>",
+    "(그중 지하철 {sw}%)": "(うち地下鉄 {sw}%)",
+    "(지하철 운행 전 — {s}시 시작)": "(地下鉄は運行前 — {s}時開始)",
+    " · 고정 세션 <b>{fx}%</b>": "・固定セッション <b>{fx}%</b>",
+    " · 생성량(호)은 피크의 <b>{v}%</b>": "・生成量(呼)はピークの <b>{v}%</b>",
+    "생성량(호)은 피크의 <b>{v}%</b>": "生成量(呼)はピークの <b>{v}%</b>",
+    "야마노테선 노선 셀({n})에 호의 약 {p}% 이상이 몰린다 — 이 시각에 넣은 전국 장애는 지도에서 노선 모양으로 보일 수 있다":
+        "山手線の路線セル({n})に呼の約 {p}% 以上が集中 — この時刻に入れた全国障害は地図で路線の形に見えうる",
+    "시각을 옮기면 적용하는 순간 그 시각의 비율로 바뀐다(<code>blend_min</code> {b}분 보간은 시간대 경계를 지날 때만 걸린다) · 걷는 사람 위치는 기동 때 미리 걷기({w}분)로 이미 퍼져 있어 다시 자리 잡지 않는다 — 바뀌는 것은 걷는 속도뿐 · 레코드 시각은 실제 시각 그대로":
+        "時刻を移すと適用した瞬間にその時刻の比率に変わる(<code>blend_min</code> {b}分の補間は時間帯の境界を通るときだけ)・歩く人の位置は起動時の事前歩行({w}分)で既に散っており再配置しない — 変わるのは歩く速さだけ・レコード時刻は実時刻のまま",
+    "호 {call} · 호당 세션 {sess} · 세션 바이트 {byte} → 총 트래픽 {tot} ({p}시 = 1.000)":
+        "呼 {call}・呼あたりセッション {sess}・セッションバイト {byte} → 総トラフィック {tot} ({p}時 = 1.000)",
+    "모든 시각이 <b>피크(19시)</b> 수준이고 <b>전체 eNB 에 골고루</b> 만든다 — 지하철·이동 그룹 없음(장애 주입은 그대로 걸린다)":
+      "全時刻が<b>ピーク(19時)</b>水準で<b>全 eNB に均等</b>に生成 — 地下鉄・移動グループなし(障害注入はそのまま)",
     "모든 시각이 <b>피크(19시)</b> 수준이다 — 야간에도 주간만큼 만든다":
         "全時刻が<b>ピーク(19時)</b>水準 — 夜間も昼間と同じだけ生成する",
     "지금 <b>{h}시</b> — 호 <b>{call}</b> · 호당 세션 <b>{sess}</b> · 세션 바이트 <b>{byte}</b> → 총 트래픽 <b>{tot}</b> (19시 = 1.000)<br>":
@@ -6783,6 +7179,18 @@ _SHELL_CSS = """
  .gp-sum i{font-style:normal;font-size:9.5px;color:#8a94a3;letter-spacing:.03em}
  .gp-sum b{font-size:12.5px;font-weight:600;font-variant-numeric:tabular-nums;
    display:flex;align-items:center;gap:5px}
+ .gp-today{position:relative;cursor:default}
+ .gp-today:hover,.gp-today:focus{background:#1d232c;outline:0}
+ .gp-pop{display:none;position:absolute;top:100%;left:0;margin-top:6px;z-index:70;min-width:300px;
+   background:#161b22;border:1px solid #2a313a;border-radius:7px;padding:10px 12px;
+   box-shadow:0 6px 18px rgba(0,0,0,.45);white-space:nowrap;font-size:12px;color:#c6cedb}
+ .gp-today:hover .gp-pop,.gp-today:focus .gp-pop,.gp-today:focus-within .gp-pop{display:block}
+ .gp-pop h4{margin:0 0 6px;font-size:11px;color:#8a94a3;font-weight:500}
+ .gp-pop .r{display:flex;justify-content:space-between;gap:18px;padding:2px 0;
+   font-variant-numeric:tabular-nums}
+ .gp-pop .r.t{border-top:1px solid #2a313a;margin-top:4px;padding-top:5px;font-weight:600}
+ .gp-pop .r span:last-child{color:#d8dee9}
+ .gp-pop small{color:#8a94a3}
  .gp-dot{width:7px;height:7px;border-radius:50%;background:#6b7684;display:inline-block}
  .gp-top-r{margin-left:auto;display:flex;align-items:center;gap:10px}
  .gp-badge{padding:1px 8px;border-radius:999px;border:1px solid #2a313a;font-size:11px;color:#c6cedb}
@@ -6828,6 +7236,9 @@ def _shell_html(page: str) -> str:
         '<div class="gp-sum"><i>마지막 슬롯</i><b id="gp-slot">—</b></div>'
         '<div class="gp-sum"><i>생성량</i><b id="gp-pct">—</b></div>'
         '<div class="gp-sum"><i>활성 장애</i><b id="gp-act">—</b></div>'
+        # 오늘 생성 — 인입 현황 카드가 여기로 왔다(2026-11-04). 상세는 마우스를 올리면
+        '<div class="gp-sum gp-today" tabindex="0"><i>오늘 생성</i><b id="gp-today">—</b>'
+        '<div class="gp-pop" id="gp-today-pop">불러오는 중…</div></div>'
         '</div>'
         '<div class="gp-top-r">'
         '<span class="gp-badge" id="gp-loc" title="생성 지역 — gen-ui 의 지역 설정">—</span>'
@@ -6843,14 +7254,19 @@ _SHELL_JS = r"""
   const g=id=>document.getElementById(id);
   langSelect('gp-lang');
   const pad=n=>String(n).padStart(2,'0');
-  const clock=()=>{ const d=new Date(); g('gp-clock').textContent=
-    `${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
+  //: 가상 시각 오프셋(초) — `/api/status` 가 곡선 켬일 때만 준다. 시계 옆에 "가상 HH:MM"
+  let vo=0;
+  const clock=()=>{ const d=new Date(); const v=new Date(d.getTime()+vo*1000);
+    g('gp-clock').textContent=
+    `${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+    + (vo ? ` · ${T('가상')} ${pad(v.getHours())}:${pad(v.getMinutes())}` : ''); };
   clock(); setInterval(clock, 1000);
   // **장애 주입 화면의 1초 폴링과 별개다** — 그 화면만의 상태줄이고, 이쪽은
   // 세 화면 공통이라 가볍게 5초다
   const tick=async()=>{
     try{
       const st=await (await fetch('/api/status')).json();
+      vo=Number(st.virtual_offset_sec||0);
       const on=st.gen_enabled!==false, act=(st.active||[]).length;
       g('gp-gen-t').textContent=on ? T('생성 중') : T('정지');
       g('gp-gen-t').style.color=on ? '#4caf7d' : '#8a94a3';
@@ -6870,6 +7286,33 @@ _SHELL_JS = r"""
     }catch(e){ g('gp-gen-t').textContent=T('서버 응답 없음'); g('gp-dot').style.background='#e5534b'; }
   };
   tick(); setInterval(tick, 5000);
+  // 오늘 생성 — 인입 현황(전 카드)의 값을 그대로 쓴다(`/api/ingest`). `CM_DATAGEN_HISTORY` 를
+  // 훑는 조회라 1분 주기다. 오늘 행이 없으면 0 이 사실이다(자정 직후·하루 내내 정지)
+  const esc2=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const fmt=n=>Number(n||0).toLocaleString();
+  const today=async()=>{
+    try{
+      const d=await (await fetch('/api/ingest?minutes=60')).json();
+      const lx=new Date(), ymd=`${lx.getFullYear()}-${pad(lx.getMonth()+1)}-${pad(lx.getDate())}`;
+      const t0=(d.by_day||[])[0], isT=t0&&String(t0.d).slice(0,10)===ymd;
+      const ts=d.today_series||[], tsum=ts.reduce((a,x)=>a+(x.recs||0),0);
+      g('gp-today').textContent=T('{n}건',{n:fmt(tsum)});
+      const tot=d.total||{};
+      const cum=(d.by_day||[]).reduce((a,x)=>a+(x.slots||0),0);
+      g('gp-today-pop').innerHTML=
+        `<h4>${esc2(T('오늘'))}</h4>`
+        +`<div class="r"><span>${esc2(T('생성한 분'))}</span><span>${esc2(T('{n}분',{n:isT?t0.slots:0}))}</span></div>`
+        +ts.map(r=>`<div class="r"><span>${esc2(r.series)}</span><span>${esc2(T('{n}건',{n:fmt(r.recs)}))}</span></div>`).join('')
+        +`<div class="r t"><span>${esc2(T('합계'))}</span><span>${esc2(T('{n}건',{n:fmt(tsum)}))}</span></div>`
+        +`<h4 style="margin-top:9px">${esc2(T('최근 {n}분 · 계열별',{n:d.minutes||60}))}</h4>`
+        +(d.series||[]).map(r=>`<div class="r"><span>${esc2(r.series)}</span>`
+          +`<span>${esc2(T('{n}건',{n:fmt(r.recs)}))} · ${esc2(r.per_min)}/${esc2(T('분'))}</span></div>`).join('')
+        +`<div class="r t"><span>${esc2(T('합계'))}</span><span>${esc2(T('{n}건',{n:fmt(tot.records)}))} · ${esc2(tot.per_min||0)}/${esc2(T('분'))}</span></div>`
+        +`<div style="margin-top:6px"><small>${esc2(T('누적 {b}분',{b:cum}))}`
+        +`${(d.by_day||[]).length>1?esc2(T('({n}일)',{n:d.by_day.length})):''}</small></div>`;
+    }catch(e){ g('gp-today').textContent='—'; }
+  };
+  today(); setInterval(today, 60000);
   // 생성 지역 — 저장값이 정본이다(graphio 상단 바도 같은 키를 본다)
   fetch('/api/region').then(r=>r.json()).then(r=>{
     const v=r.saved||r.file||''; const L={};
@@ -6892,6 +7335,9 @@ _JA_SHELL = {
     # 토폴로지는 본문을 옮기지 않는다 — 제목만
     "probe-datagen 마스터 토폴로지": "probe-datagen マスタトポロジ",
     "행정구역 · 장비 · 셀": "行政区域 · 装置 · セル",
+    "오늘 생성": "本日生成", "불러오는 중…": "読み込み中…", "오늘": "本日", "생성한 분": "生成した分",
+    "{n}분": "{n}分", "{n}건": "{n}件", "분": "分", "합계": "合計", "최근 {n}분 · 계열별": "直近{n}分・系列別",
+    "누적 {b}분": "累計 {b}分", "({n}일)": "({n}日)",
 }
 
 

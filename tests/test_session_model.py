@@ -219,7 +219,7 @@ def test_every_session_opens_and_closes_exactly_once(gen):
         assert n_end == 1, (sid, flags)
         closed += 1
         # 중간 레코드는 Interim 또는 H/O 뿐이다
-        assert set(flags) <= {S.F_START, S.F_INTERIM,
+        assert set(flags) <= {S.F_START, S.F_INTERIM, S.F_HO,
                               S.F_END, S.F_SINGLE}, (sid, flags)
     assert closed > 1000
 
@@ -325,10 +325,11 @@ def test_handover_changes_the_cell_without_breaking_the_session(gen):
     def moved_at(v):
         """셀이 바뀐 **첫 자리**. 없으면 `None`.
 
-        **`OngoingFlag` 로 찾지 않는다** (2026-10-28). `4 H/O Interim` 은
-        규격에 없는 확장이었고, *"프로브가 그것을 어떻게 아느냐"* 는 이유로
-        빼기로 했다(`session._SPLIT_AT_HO`). 전환의 증거는 flag 가 아니라
-        **셀이 실제로 바뀐 사실**이고, 그 쪽이 더 강한 기준이다.
+        **`OngoingFlag` 로 찾지 않는다.** 셀이 실제로 바뀐 사실이 더 강한
+        기준이고, flag 는 그 사실과 맞는지를 **따로** 단언한다. `4 H/O
+        Interim` 은 10-28 에 빼기로 했다가 11-02 에 복원했다(현업 확인 ·
+        `session.F_HO`) — 기준을 flag 로 옮기면 그 왕복마다 이 테스트가
+        제 뜻을 잃는다.
         """
         for i in range(1, len(v)):
             if (v[i][1], v[i][2]) != (v[i - 1][1], v[i - 1][2]):
@@ -338,6 +339,12 @@ def test_handover_changes_the_cell_without_breaking_the_session(gen):
     ho = [v for sid, v in seq.items()
           if sid not in open_now and moved_at(v) is not None]
     assert ho, "핸드오버 세션이 하나도 없다"
+    # **`4` 인데 다음 줄 셀이 같으면 일어나지 않은 전환이다** — 집계가
+    # 그것을 세면 Q-08 이 부푼다(옛 구현 실측 10.7%). 열린 세션도 본다 —
+    # 창에 잘린 마지막 줄 말고는 다음 줄이 있다
+    same = [v for v in seq.values() for i in range(len(v) - 1)
+            if v[i][0] == S.F_HO and v[i][1:] == v[i + 1][1:]]
+    assert same == [], same[:3]
     for v in ho:
         k = moved_at(v)
         assert k > 0, v                       # Start 가 먼저다
@@ -349,6 +356,9 @@ def test_handover_changes_the_cell_without_breaking_the_session(gen):
         # 기준을 **셀 변화**로 옮기면서 그 단언은 의미가 뒤집혔다 —
         # 지금 `v[k]` 는 바뀐 쪽이다.
         assert (v[k][1], v[k][2]) != (v[k - 1][1], v[k - 1][2]), v
+        # **떠난 줄이 `4` 다**(복원 2026-11-02). graphio 가 이 줄로 전환을
+        # 세고(`HO_EVENTS`) 떠난 셀에 귀속한다
+        assert v[k - 1][0] == S.F_HO, v
         # **eNB 가 바뀔 수 있다.** 섹터만 바뀌는 것으로 고정하면 장비 ID 와
         # TAC 가 구조적으로 못 바뀐다(셀 마스터 실측: 같은 eNB 안 장비
         # 갈림 0 · TAC 갈림 0). `handover.Topology` 가 인접 eNB 도 준다.
@@ -361,7 +371,7 @@ def test_handover_sessions_still_close(gen):
     i_sid, i_flag = idx["SessionID"], idx["OngoingFlag"]
     i_enb, i_cell = idx["eNB_ID"], idx["Cell_ID"]
     # **셀도 함께 담는다** — 전환을 `OngoingFlag` 가 아니라 셀 변화로 찾기
-    # 때문이다(`4` 를 빼기로 했다 · `session._SPLIT_AT_HO`).
+    # 때문이다(flag 는 `moved_at` 이 따로 단언한다).
     seq: dict[str, list[tuple]] = {}
     for m in runs:
         for r in m["up"]["transport"]:
@@ -542,7 +552,7 @@ def _ho_minutes(gen, runs):
             per.setdefault((r[i_sid], m_i), []).append(r)
     i_enb, i_cell = idx["eNB_ID"], idx["Cell_ID"]
     # **셀이 바뀐 분**이 핸드오버 분이다 — `OngoingFlag` 로 찾지 않는다
-    # (`4` 를 빼기로 했다 · `session._SPLIT_AT_HO`). 한 분에 두 줄이고
+    # (flag 는 따로 단언한다). 한 분에 두 줄이고
     # 그 둘의 셀이 다르면 그 자리에서 끊긴 것이다.
     return {k: v for k, v in per.items()
             if len({(r[i_enb], r[i_cell]) for r in v}) > 1}
@@ -564,9 +574,9 @@ def test_handover_cuts_the_record_at_the_event_not_the_minute(gen):
     for v in ho.values():
         assert len(v) == 2, v                      # 그 분만 두 줄
         a, b = sorted(v, key=lambda r: float(r[i_t]))
-        # **둘 다 규격 안의 값이다** — `4` 를 적지 않는다. 전환은
-        # *"같은 분·같은 세션에 셀이 다른 두 줄"* 이라는 사실로만 남는다.
-        assert a[i_flag] in (S.F_START, S.F_INTERIM), v
+        # **앞 줄이 `4 H/O Interim` 이다**(복원 2026-11-02 · 현업 확인).
+        # 시작 분은 끊지 않으므로(`F_START` 우선) 앞 줄은 늘 `4` 다
+        assert a[i_flag] == S.F_HO, v
         assert b[i_flag] in (S.F_INTERIM, S.F_END), v
         # **셀이 실제로 바뀐다.** 안 바뀌면 일어나지 않은 전환이고,
         # 집계가 그것을 세면 Q-08 이 부푼다
@@ -740,7 +750,8 @@ def test_core_is_carried_by_the_session_not_the_cell(gen):
 # --------------------------------------------------------------------------
 
 
-def _mobile_run(gen, minutes, *, share=0.30, call_share=0.6, n_routes=10):
+def _mobile_run(gen, minutes, *, share=0.30, call_share=0.6, n_routes=10,
+                plan_mutate=None):
     """경로를 깔고 돌린다. **`Shape.handover=0.0`** — 추첨 전환을 끈다.
 
     끄는 이유: 전환이 전부 경로에서 왔음을 확인하려는 것이다. 섞여 있으면
@@ -760,7 +771,8 @@ def _mobile_run(gen, minutes, *, share=0.30, call_share=0.6, n_routes=10):
             ts = ANCHOR + timedelta(minutes=m)
             gen.advance_routes(ts.timestamp())
             calls, _rows = _calls(gen, eng, ts)
-            out.append({"ts": ts, "up": eng.minute(ts, calls, None),
+            out.append({"ts": ts,
+                        "up": eng.minute(ts, calls, None, plan_mutate),
                         "engine": eng})
         # **태운 상태를 여기서 찍어 돌려준다.** 끄고 나면 `sub.route` 가
         # 전부 `-1` 이라 호출부가 누가 이동 가입자였는지 알 수 없다
@@ -1225,6 +1237,85 @@ def test_total_restarts_when_the_core_is_relocated(gen):
     assert plain > 100, plain
 
 
+def test_record_restarts_only_when_the_sgw_changes(gen):
+    """**U-Plane 레코드는 SGW 가 만든다**(사용자 확정 2026-11-02).
+
+    - 같은 SGW 전환: 떠난 줄이 `4` 이고 레코드가 이어진다 — `SessionID` ·
+      `FirstTime` 이 같고 `Total` 이 줄지 않는다. 전환 종류(S1·S1_MME)가
+      아니라 SGW 가 기준이라 MME 만 바뀐 전환도 여기다.
+    - SGW 변경: `4` 가 없다. 옛 레코드는 `End`, 새 레코드는 `Start`(또는
+      `20`)로 열리고 `SessionID` 는 이어진다. `FirstTime` 이 다시 시작한다.
+    - 새 레코드는 TCP 악수를 보지 못했다(전 행 `SynCount=0`). 옛 `End` 는
+      FIN·RST 를 달지 않는다 — 달면 `U-04` 가 전환 수만큼 부푼다.
+    - 레코드 단위로 `Σ Delta == Total`.
+    """
+    def ho_stall(cell, plan):
+        plan.ho_stall = True
+        return True
+
+    _routes, runs, _ = _mobile_run(gen, 20, share=0.8, call_share=0.9,
+                                   plan_mutate=ho_stall)
+    idx = gen.index["transport"]
+    i_sid, i_flag, i_t = idx["SessionID"], idx["OngoingFlag"], idx["SummaryCreateTime"]
+    i_sgw, i_mme = idx["SGW_ID"], idx["MME_ID"]
+    i_cell = (idx["eNB_ID"], idx["Cell_ID"])
+    i_tot = idx["Traffic_Total_Dnlink_PayloadSize"]
+    i_del = idx["Traffic_Delta_Dnlink_PayloadSize"]
+    i_first = [idx[f"Traffic_{g}_{d}_FirstTime"]
+               for g in ("Total", "Delta") for d in ("Uplink", "Dnlink")]
+    i_up_f, i_dn_f = idx["Traffic_Total_Uplink_FirstTime"], idx["Traffic_Total_Dnlink_FirstTime"]
+    i_syn, i_fin, i_rst = idx["SynCount"], idx["FinCount"], idx["RstCount"]
+
+    seq: dict[str, list] = {}
+    for m in runs:
+        for r in sorted(m["up"]["transport"], key=lambda x: float(x[i_t])):
+            seq.setdefault(r[i_sid], []).append(r)
+
+    same = change = mme_only = dn_late = 0
+    for rows in seq.values():
+        new_rec = False
+        for a, b in zip(rows, rows[1:]):
+            if tuple(a[i] for i in i_cell) == tuple(b[i] for i in i_cell):
+                if b[i_flag] in (S.F_START, S.F_SINGLE):
+                    new_rec = True
+                if new_rec:
+                    assert b[i_syn] == "0", b[i_syn]
+                continue
+            if a[i_sgw] == b[i_sgw]:
+                same += 1
+                mme_only += a[i_mme] != b[i_mme]
+                assert a[i_flag] == S.F_HO, (a[i_flag], b[i_flag])
+                assert b[i_flag] in (S.F_INTERIM, S.F_END)
+                assert [a[i] for i in i_first] == [b[i] for i in i_first]
+                assert int(b[i_tot]) >= int(a[i_tot])
+            else:
+                change += 1
+                assert a[i_flag] == S.F_END, (a[i_flag], b[i_flag])
+                assert b[i_flag] in (S.F_START, S.F_SINGLE)
+                assert a[i_fin] == "0" and a[i_rst] == "0"
+                assert float(b[i_up_f]) > float(a[i_up_f])
+                # 새 레코드의 첫 줄은 Total == Delta (누적이 0 부터)
+                assert b[i_tot] == b[i_del]
+                dn_late += float(b[i_dn_f]) > float(b[i_up_f])
+                new_rec = True
+            if new_rec:
+                assert b[i_syn] == "0", b[i_syn]
+        # 레코드 단위 Σ Delta == Total
+        cuts = [0] + [i for i, r in enumerate(rows)
+                      if i and r[i_flag] in (S.F_START, S.F_SINGLE)] + [len(rows)]
+        for x, y in zip(cuts, cuts[1:]):
+            rec = rows[x:y]
+            if rec[-1][i_flag] in (S.F_END, S.F_SINGLE):
+                assert int(rec[-1][i_tot]) == sum(int(r[i_del]) for r in rec)
+            # 레코드 안에서 FirstTime 은 행마다 같다
+            assert len({tuple(r[i] for i in i_first) for r in rec}) == 1
+    assert same > 100, same
+    assert change > 50, change
+    # 정체가 걸린 새 레코드는 down 첫 패킷이 up 보다 늦다
+    assert dn_late > 0, dn_late
+    print(f"같은 SGW {same} (MME 만 바뀜 {mme_only}) · SGW 변경 {change} · Dn 늦음 {dn_late}")
+
+
 def test_sector_handover_does_not_restart_the_total(gen):
     """**섹터 전환은 리셋하지 않는다** — 장비가 그대로다.
 
@@ -1394,3 +1485,76 @@ def test_walkers_move_only_to_neighbours_and_slow_down_at_night(gen):
     finally:
         gen.groups = None
         gen.seat_walkers(0.0, _r.Random(0))
+
+
+# --------------------------------------------------------------------------
+# 시간대 두 모드 — 곡선 켬(가상 시각) / 곡선 끔(전체 eNB 균등) (2026-11-04 사용자 결정)
+# --------------------------------------------------------------------------
+
+
+def test_virtual_clock_moves_only_the_curve(gen):
+    """가상 시각은 **곡선·그룹 비율이 보는 시각**만 옮긴다 — 레코드 시각은 그대로다."""
+    from datagen.generator import Groups, diurnal_factor
+    real = datetime(2026, 11, 4, 3, 0)
+    keep = gen.diurnal
+    gen.diurnal, gen.virtual_offset = True, 16 * 3600.0          # 03:00 → 가상 19:00
+    try:
+        assert gen.curve_time(real).hour == 19
+        assert gen.curve_time(real.timestamp()) == real.timestamp() + 16 * 3600
+        assert gen._traffic_scale("transport", real) == diurnal_factor(19, "transport")
+        g = Groups(HOURLY, (6, 24), blend_min=60)
+        # 실제 16:00 + 16시간 = 가상 08:00 — 그룹 비율은 출근 몫(지하철 50%)이다
+        assert g.shares(gen.curve_time(datetime(2026, 11, 4, 16, 0))) == \
+            g.shares(datetime(2026, 11, 5, 8, 0)) == (pytest.approx(0.50), pytest.approx(0.20))
+        gen.virtual_offset = 0.0
+        assert gen.curve_time(real) is real, "0 이면 지금 시각 그대로"
+    finally:
+        gen.diurnal, gen.virtual_offset = keep, 0.0
+
+
+def test_flat_mode_spreads_calls_evenly_over_enbs_without_route_bias(gen):
+    """곡선 끔 = 균등 모드 — 그룹(지하철·이동) 없이 **eNB 균등** 추첨, 이동도 멈춘다.
+
+    apn3(F-104): 07~09시 호의 50% 가 지하철 그룹이라 노선 88셀이 전국 시도의 절반을 받았다.
+    """
+    import random as _r
+    from collections import Counter
+
+    from datagen import handover as _HO
+    from datagen.generator import Groups
+
+    gen.ho_topo = _HO.Topology(gen.cells)
+    routes = _HO.build_routes(gen.ho_topo, gen.cells, 2, _r.Random(5), length=8,
+                              dwell=(60, 60), loop_share=0.0)
+    route_cells = {c.cell_key for rt in routes for c in rt.cells}
+    gen.groups = Groups(HOURLY, (6, 24), blend_min=60)
+    gen.seat_routes(routes, 0.5, _r.Random(1))
+    rush = datetime(2026, 11, 4, 8, 0)
+    try:
+        def share_on_route(n=3000):
+            hit = 0
+            enbs = Counter()
+            for _ in range(n):
+                _rec, cell = gen._lte_call(rush, rush.timestamp())
+                hit += cell.cell_key in route_cells
+                enbs[cell.enb_id] += 1
+            return hit / n, enbs
+        gen.flat_mode = False
+        gen.refresh_weights()
+        busy, _ = share_on_route()
+        gen.flat_mode = True
+        gen.refresh_weights()
+        flat, enbs = share_on_route()
+        assert busy > 0.3, busy                                   # 출근 시각 지하철 몫
+        n_enb = len({c.enb_id for c in gen.cells})
+        route_enbs = len({c.enb_id for c in gen.cells if c.cell_key in route_cells})
+        assert flat < 3 * route_enbs / n_enb + 0.02, (flat, route_enbs, n_enb)
+        # eNB 균등 — 가장 많이 받은 eNB 가 평균의 몇 배인가(셀 마스터 가중이면 16배까지 벌어진다)
+        mean = 3000 / n_enb
+        assert max(enbs.values()) < mean * 6 + 6, (max(enbs.values()), mean)
+        assert gen.advance_routes(rush.timestamp()) == 0, "균등 모드에서는 이동하지 않는다"
+    finally:
+        gen.flat_mode = False
+        gen.refresh_weights()
+        gen.groups = None
+        gen.seat_routes([], 0.0, _r.Random(0))

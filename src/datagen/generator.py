@@ -36,6 +36,11 @@ SERIES_FILE_PREFIX = {
 }
 SERIES_DIR = {"lte_call": "lte-call", "transport": "transport", "http": "http", "dns": "dns"}
 
+#: 평시 1회 RTT 상한(µs) — 1000ms (사용자 결정 2026-11-03). `*RTTTime` 의
+#: 규격 단위가 µs 이고 graphio 는 /1000 해 ms 로 읽는다. 장애의 혼잡 RTT
+#: (`FAULT.congestion_rtt`)는 이 상한을 받지 않는다 — `Generator._normal_rtt`
+NORMAL_RTT_MAX_US = 1_000_000
+
 #: 시간대별 트래픽 곡선 (0~23시 상대 배율).
 #:
 #: **04시가 최저, 19시가 최고다** (2026-10-14 사용자 지정). 07~24 가 높고
@@ -50,12 +55,31 @@ SERIES_DIR = {"lte_call": "lte-call", "transport": "transport", "http": "http", 
 #: 야간 저트래픽 셀에서 최소 표본 규칙(§4.8.4)이 실제로 필요한지 확인할 수
 #: 있어야 한다는 원래 목적도 그대로다 — 04시 셀당 표본이 1분 창에서 모자라
 #: `ESCALATION_WINDOWS` 확대를 밟는다.
+#:
+#: **정본은 설정 `pemdb1.clock.curve` 다** (2026-11-04). 여기 값은 설정 없이 생성기를
+#: 만드는 자리(테스트·`callflow`)의 기본값이고, 데몬·gen-ui 는 기동 때 `set_curve` 로
+#: 덮는다. 둘을 같게 둔다 — 아침 출근 봉우리(08~09시 > 10~11시)는 11-04 사용자 지적이다.
 DIURNAL = [
     # 0     1     2     3     4     5     6     7     8     9    10    11
-    0.62, 0.56, 0.52, 0.51, 0.50, 0.54, 0.62, 0.73, 0.83, 0.88, 0.91, 0.92,
+    0.62, 0.56, 0.52, 0.51, 0.50, 0.54, 0.64, 0.80, 0.94, 0.95, 0.90, 0.89,
     #12    13    14    15    16    17    18    19    20    21    22    23
-    0.91, 0.90, 0.90, 0.92, 0.95, 0.97, 0.99, 1.00, 0.98, 0.92, 0.82, 0.71,
+    0.90, 0.88, 0.88, 0.90, 0.93, 0.96, 0.99, 1.00, 0.98, 0.92, 0.82, 0.71,
 ]
+
+
+def set_curve(values) -> None:
+    """설정의 시간대 곡선으로 `DIURNAL` 을 **제자리에서** 바꾼다 — `diurnal_factor` 를
+    import 해 간 자리(gen-ui 포함)가 같은 리스트를 보게 하려는 것이다.
+
+    24칸 · 0 초과 1 이하 · 최댓값 1.0 이어야 한다. 최댓값이 1 이 아니면 "피크 = 설정
+    생성량"이라는 기준점(`volume_pct`)이 조용히 어긋난다. 비면 기본값을 그대로 둔다.
+    """
+    if not values:
+        return
+    v = [float(x) for x in values]
+    if len(v) != 24 or not all(0 < x <= 1 for x in v) or max(v) != 1.0:
+        raise RuntimeError(f"pemdb1.clock.curve 는 0~23시 24칸, 0<값≤1, 최댓값 1.0 이어야 한다: {values}")
+    DIURNAL[:] = v
 
 #: 계열별 **진폭 축소**. `1.0` 이면 곡선 그대로, `0.0` 이면 평탄하다.
 #: 적용식은 `1 - w·(1 - DIURNAL[h])` — 기준점이 1.0 이므로 피크는 그대로
@@ -327,6 +351,9 @@ class Generator:
         end_only: bool = False,
         #: 홈 PLMN · IMSI 접두. `None` 이면 한국 기본값(현 동작)이다.
         plmn: "Plmn | None" = None,
+        #: **5G 능력 단말 비율**(`pemdb1.net_mode.sa_device_share`). 단말에
+        #: 고정이다 — 가입자 풀을 만들 때 한 번 정하므로 **재시작해야 바뀐다.**
+        sa_device_share: float = 0.3,
     ):
         self.cells = cells
         self.profiles = profiles
@@ -362,9 +389,27 @@ class Generator:
         #: `PemdbGen` 이 분마다 채운다(`scenarios.APP_BOOSTERS`)
         self.app_boosts: list[tuple[set[str] | None, AppBook]] = []
         self.cell_weights = [c.traffic_weight for c in cells]
+        #: **곡선 끔(평탄)일 때의 기본 가중 — eNB 균등** (2026-11-04 사용자 결정 "전체 eNB 에
+        #: 골고루"). eNB 마다 같은 몫을 받고 그 eNB 의 셀들이 몫을 나눈다. 셀 균등으로 두면
+        #: 섹터가 많은 eNB 가 더 받는다 — 사용자 말이 eNB 단위다. 셀 마스터의
+        #: `traffic_weight`(도심 편중)는 곡선을 켰을 때만 쓴다(`_base_weights`)
+        per_enb: dict[str, int] = {}
+        for c in cells:
+            per_enb[c.enb_id] = per_enb.get(c.enb_id, 0) + 1
+        self.flat_weights = [1.0 / per_enb[c.enb_id] for c in cells]
         self._cum = self._cumulative(self.cell_weights)
         #: 지금 `_cum` 에 걸린 가중 배율(`set_weight_boost`). `None` 이면 평시.
         self._boost_key: tuple | None = None
+        self._boost: dict[str, float] | None = None
+        #: **가상 시각 오프셋(초)** — 시간대 곡선·그룹 비율·운행 시각·걷는 속도만 이 만큼
+        #: 옮긴 시각으로 계산한다(`curve_time`). **레코드 시각은 실제 시각 그대로다** —
+        #: 옮기면 1분 집계·워터마크·corr 실시간 흐름이 깨진다(1분 통계는 백필 없음).
+        #: 0 이면 지금 시각이다. gen-ui 가 정하고 데몬이 매 틱 읽는다(`virtual_offset_sec`)
+        self.virtual_offset = 0.0
+        #: **균등 모드** — 운영 데몬이 곡선을 끄면 켠다(`PemdbGen.set_diurnal`). 그룹·이동 없이
+        #: eNB 균등 추첨. `diurnal` 과 따로 둔 것은 `diurnal=False` 로 만드는 자리(테스트·
+        #: `callflow` 데이터셋)가 셀 마스터 가중을 전제하기 때문이다 — 그쪽 결과를 바꾸지 않는다
+        self.flat_mode = False
         self.cell_by_key = {c.cell_key: c for c in cells}
         #: 셀 키 → `cells` 인덱스. `_sub_for` 가 인덱스를 받으므로 필요하다 —
         #: `_pick_cell` 은 `Cell` 을 돌려주고 `_subs_by_cell` 은 인덱스로
@@ -442,12 +487,19 @@ class Generator:
         #: 그냥 이동 가입자 인덱스(`seat_walkers`)와 셀 체류 범위(초)
         self._walkers: list[int] = []
         self.walk_sec: tuple[int, int] = (180, 600)
+        #: 걷는 사람 **미리 걷기**(분) — 첫 `advance_routes` 에서 한 번 돈다(`_warm_walkers`)
+        self.walk_warmup_min: int = 0
+        #: 미리 걷기를 한 기동 지연(초)·움직인 횟수 — 기동 로그·보고용
+        self.walk_warmup_stats: dict | None = None
         #: **고정 가입자** 인덱스 — 노선도 걷기도 아닌 사람. 시간대 표가
         #: 있을 때 고정 호는 여기서만 뽑는다(아래 `groups`)
         self._fixed: list[int] = []
         #: 시간대별 그룹 비율(`Groups`). `None` 이면 종전대로 `mobility_share`
         #: 하나로 노선 탑승자를 고른다
         self.groups = None
+        if not 0.0 <= float(sa_device_share) <= 1.0:
+            raise RuntimeError(f"net_mode.sa_device_share 는 0~1 이다: {sa_device_share}")
+        self.sa_device_share = float(sa_device_share)
         pool = subscriber_pool or max(2000, len(cells) * 60)
         self.subs = self._make_subscribers(pool)
         #: IMSI → 가입자 인덱스. **U-Plane 세션이 이것으로 되찾는다** —
@@ -656,6 +708,14 @@ class Generator:
             sub.route_wait = 0.0
         sub.route_t = -rng.random() * rt.dwell_sec[sub.route_pos]
 
+    def curve_time(self, ts):
+        """시간대 곡선·그룹 비율이 보는 시각 — 실제 시각 + `virtual_offset`. 레코드 시각이 아니다."""
+        if not self.virtual_offset:
+            return ts
+        if isinstance(ts, (int, float)):
+            return ts + self.virtual_offset
+        return ts + timedelta(seconds=self.virtual_offset)
+
     def advance_routes(self, now: float) -> int:
         """체류시간이 지난 이동 가입자를 다음 칸으로. **매 분 한 번 부른다.**
 
@@ -666,10 +726,17 @@ class Generator:
         그 구간의 전환이 데이터에 없다 — 체류시간이 분보다 짧으면 그만큼
         천천히 진행하는 것이 낫다(한 세션이 여러 칸을 겪는 것이 목적이다).
         """
+        if self.flat_mode:
+            # **곡선 끔 — 이동하지 않는다** (2026-11-04 사용자 결정). 노선·걷기 그룹이 서 있으면
+            # 노선 셀·이웃 셀에 TAU·전환이 몰려 "특별한 이벤트 없이 골고루"가 아니다. 위치는
+            # 그대로 얼려 두었다가 곡선을 다시 켜면 거기서부터 움직인다
+            return 0
+        if self.walk_warmup_min > 0 and self.walk_warmup_stats is None:
+            self._warm_walkers(now)
         moved = self._advance_walkers(now)
         # **운행 시간 밖에는 열차가 서 있다** — 새벽에 노선 탑승자가 계속
         # 칸을 옮기면 아무도 통화하지 않는 시각에 TAU 만 쏟아진다
-        if self.groups is not None and not self.groups.subway_running(now):
+        if self.groups is not None and not self.groups.subway_running(self.curve_time(now)):
             return moved
         for i, sub in enumerate(self.subs):
             if sub.route < 0:
@@ -758,6 +825,36 @@ class Generator:
         self._fixed = [i for i, s in enumerate(self.subs)
                        if s.route < 0 and s.walk_cell is None]
 
+    def _warm_walkers(self, now: float) -> None:
+        """기동 때 걷는 사람을 **XDR 없이 미리 걷게** 해 평시 분포에 놓는다 (2026-11-03 사용자 결정).
+
+        `seat_walkers` 는 출발 셀을 고정 호와 같은 가중 추첨으로 정한다 — 그 순간
+        걷는 사람이 고가중 셀에 몰린다. 평시에는 `_advance_walkers` 가 이웃 eNB 로
+        퍼뜨려 저가중 외곽 셀의 호 대부분이 그 몫인데, 재시작하면 그 확산이 사라져
+        외곽 셀 수십 개가 몇 시간 "호 급감"이 된다(16:52 재시작: 0호 23셀 · 80%↓ 186셀,
+        대조 0 · 14 — 히나 실측). graphio 가 그것을 D4 C-01 로 잡았다(F-86).
+
+        **이동 규칙을 그대로 쓴다** — 같은 함수(`_advance_walkers`)를 지난
+        `walk_warmup_min` 분의 매 분 시각으로 부른다. 그래서 걷는 속도의 시간대
+        배율(`walk_pace`)도 그 시각대로 걸린다. 레코드를 만들지 않고, 그 사이 TAU 는
+        버린다(지나간 시각의 절차다). 난수는 따로 쓴다 — 본 생성의 난수 흐름을
+        미리 걷기 길이에 따라 바꾸지 않으려는 것이다.
+        """
+        import time as _time
+
+        t0 = _time.monotonic()
+        keep, self.rng = self.rng, random.Random(self.rng.random())
+        moved = 0
+        try:
+            start = now - 60.0 * self.walk_warmup_min
+            for k in range(self.walk_warmup_min):
+                moved += self._advance_walkers(start + 60.0 * k)
+        finally:
+            self.rng = keep
+            self.tau_events.clear()
+        self.walk_warmup_stats = {"minutes": self.walk_warmup_min, "walkers": len(self._walkers),
+                                  "moves": moved, "sec": round(_time.monotonic() - t0, 2)}
+
     def _advance_walkers(self, now: float) -> int:
         """머문 시간이 지난 걷는 사람을 **이웃 eNB 의 셀**로 옮긴다.
 
@@ -773,7 +870,7 @@ class Generator:
         # **걷는 속도는 그 시각의 "그냥 이동" 몫에 비례한다.** 새벽에 낮과
         # 같은 속도로 걸으면 아무도 통화하지 않는 시각에 TAU 만 분당 300건이
         # 났다(실측). 몫이 가장 큰 시각이 기준 속도다
-        pace = self.groups.walk_pace(now) if self.groups is not None else 1.0
+        pace = self.groups.walk_pace(self.curve_time(now)) if self.groups is not None else 1.0
         moved = 0
         for i in self._walkers:
             sub = self.subs[i]
@@ -830,6 +927,14 @@ class Generator:
         """
         rec, _cell = self._lte_call(ts, slot_start)
         self._common_user(rec, sub)
+        # **5G 필드도 당사자 것으로 바꾼다.** `_lte_call` 이 임의의 다른
+        # 가입자 X 로 레코드를 만들고 `_common_user` 가 신원만 바꾸므로,
+        # 두면 X 의 `ue_dcnr`·NR 연결 시각이 남는다 — 같은 IMSI 가 호마다
+        # 다른 5G 능력을 가진 원인이었다(히나 실측 2026-11-02: TAU 6,809행)
+        rec.set("ue_dcnr", self._ue_dcnr(sub))
+        if rec.get("initial_nr_conn_time") and sub.dcnr != "1":
+            rec.set("initial_nr_conn_time", self.templates["lte_call"][
+                self.index["lte_call"]["initial_nr_conn_time"]])
         # 새 TA 에서 수행한다 — 셀은 전환 **후**다
         rec.set("First_eNB_ID", dst.enb_id)
         rec.set("First_Cell_ID", dst.cell_id)
@@ -875,7 +980,20 @@ class Generator:
         if key == self._boost_key:
             return
         self._boost_key = key
-        w = self.cell_weights
+        self._boost = dict(boost) if boost else None
+        self._rebuild_cum()
+
+    def _base_weights(self) -> list[float]:
+        """셀 추첨 기본 가중 — 곡선 켬이면 셀 마스터 `traffic_weight`, 끔이면 eNB 균등."""
+        return self.flat_weights if self.flat_mode else self.cell_weights
+
+    def refresh_weights(self) -> None:
+        """곡선 on/off 가 바뀌면 누적표를 다시 만든다 — 장애 배율(boost)은 그대로 얹는다."""
+        self._rebuild_cum()
+
+    def _rebuild_cum(self) -> None:
+        boost = self._boost
+        w = self._base_weights()
         if boost:
             w = [x * boost.get(c.cell_key, 1.0) for c, x in zip(self.cells, w)]
         self._cum = self._cumulative(w)
@@ -889,6 +1007,7 @@ class Generator:
     def _make_subscribers(self, n: int) -> list[Subscriber]:
         smp = self.samplers.get("lte_call")
         rng = random.Random(self.rng.randrange(1 << 30))
+        cap_rng = random.Random(0x5A_5A + n)
         subs: list[Subscriber] = []
         for i in range(n):
             vendor = smp.categorical("Vendor", "100SS") if smp else "100SS"
@@ -923,7 +1042,13 @@ class Generator:
                     model=model,
                     mcc_mnc=mcc_mnc,
                     exchange=f"{rng.randint(1000, 9999)}",
-                    dcnr=smp.categorical("ue_dcnr", "-1") if smp else "-1",
+                    # **5G 능력은 단말(IMEI) 속성이다** — 0/1 만 갖는다. `-1`
+                    # 은 단말이 아니라 **그 절차에 IE 가 없었다**는 호 단위
+                    # 사건이다(현업 답 2026-11-02) — `_ue_dcnr` 가 호마다 정한다.
+                    # 기종별 5G 규칙은 원천이 없어(`mobilemodels_100.csv` 에
+                    # 그런 컬럼이 없다) 모든 단말을 같은 비율로 추첨한다.
+                    # 난수원을 따로 둔다 — 다른 필드의 추첨 순서를 흔들지 않는다
+                    dcnr="1" if cap_rng.random() < self.sa_device_share else "0",
                     home_cell=rng.randrange(len(self.cells)),
                 )
             )
@@ -1054,7 +1179,7 @@ class Generator:
         base = self.rates.get(series, 0)
         if not base:
             return 0
-        factor = diurnal_factor(ts.hour, series) if self.diurnal else 1.0
+        factor = diurnal_factor(self.curve_time(ts).hour, series) if self.diurnal else 1.0
         factor *= 1.0 + self.rng.uniform(-0.06, 0.06)
         return max(0, int(base * factor))
 
@@ -1073,7 +1198,7 @@ class Generator:
             return 1.0
         # 분 단위 흔들림은 개수 쪽에만 준다. 크기까지 흔들면 같은 분의 처리율이
         # 이유 없이 출렁여 변화점 탐지(D2)가 그것을 집는다.
-        return diurnal_factor(ts.hour, series)
+        return diurnal_factor(self.curve_time(ts).hour, series)
 
     # -- record builders -------------------------------------------------
 
@@ -1182,6 +1307,24 @@ class Generator:
                     if i != cell_idx:
                         yield i
 
+    def _ue_dcnr(self, sub: Subscriber) -> str:
+        """이 호의 `ue_dcnr` — 단말 능력(0/1)이거나 **IE 부재 `-1`**.
+
+        `-1` 의 비율은 프로파일 그대로다(`lte_call` 의 `ue_dcnr` 분포에서
+        `-1` 의 몫). 전에는 가입자 단위로 `-1/0/1` 을 뽑아 `-1` 이 단말
+        속성처럼 굳었다 — 현업 답(2026-11-02)은 그것이 절차의 IE 부재다.
+        """
+        p = self._p_dcnr_absent
+        if p is None:
+            smp = self.samplers.get("lte_call")
+            dist = (smp.p.categorical.get("ue_dcnr") or {}) if smp else {}
+            tot = sum(v for k, v in dist.items() if k != "__other__")
+            p = (dist.get("-1", 0.0) / tot) if tot > 0 else 0.0
+            self._p_dcnr_absent = p
+        return "-1" if self.rng.random() < p else sub.dcnr
+
+    _p_dcnr_absent: float | None = None
+
     def _common_user(self, rec: Rec, sub: Subscriber) -> None:
         for name, value in zip(USER_FIELDS, user_values(sub)):
             rec.set(name, value)
@@ -1198,12 +1341,18 @@ class Generator:
         # 정지한 셀에 있던 **그 사람**이 이웃 셀에 다시 붙어야 하므로 추첨을
         # 건너뛴다 — 다시 뽑으면 다른 가입자가 되어 "재분배" 일 뿐이다
         fixed_only = False
+        flat = self.flat_mode
         if at is not None:
             got = at
+        elif flat:
+            # **곡선 끔 — 그룹 없이 전원 고정** (2026-11-04 사용자 결정). 지하철·이동 몫이
+            # 시간대 표를 따라 노선 셀에 몰리지 않게 한다. 셀은 eNB 균등 추첨(`_base_weights`)
+            got = None
+            fixed_only = True
         elif self.groups is not None:
             # **시간대별 그룹 비율** (2026-10-29 사람 결정). 고르는 순서는
             # 지하철 → 그냥 이동 → 고정이고, 그룹이 비어 있으면 고정으로 간다
-            sw, wk = self.groups.shares(ts)
+            sw, wk = self.groups.shares(self.curve_time(ts))
             x = rng.random()
             got = (self.pick_mobile() if x < sw
                    else self.pick_walker() if x < sw + wk else None)
@@ -1229,7 +1378,13 @@ class Generator:
             # 사람이 더하는 것이다 — 지하철 노선(`mobility.journeys`)과 같은
             # 층이고, 켜면 셀·분 `SUBS` 가 **-22%** 움직여(8.7 → 6.8)
             # 기존 기준선과 전후 비교가 끊긴다.
-            if fixed_only and self._fixed:
+            if flat:
+                # 고정 가입자가 있으면 그 안에서, 없으면 전체에서 — 이동 중인 사람을 뽑아도
+                # 그 사람 위치(`cell_of`)로 옮기지 않는다(아래). 추첨한 셀에 둔다
+                pool = self._fixed or None
+                sub = (self.subs[pool[rng.randrange(len(pool))]] if pool
+                       else self.subs[rng.randrange(len(self.subs))])
+            elif fixed_only and self._fixed:
                 # 그룹을 나눴으면 **고정 호는 고정 가입자**다. 전체에서 뽑으면
                 # 아래 `cell_of` 가 이동 중인 사람의 위치로 셀을 바꿔, 고정
                 # 몫이 이동 몫으로 새어 나간다
@@ -1243,7 +1398,7 @@ class Generator:
             # 한 번 고른 뒤에 임의 셀에 두면 **그 사람이 경로를 벗어난다** —
             # 실측으로 이동 가입자 925명 중 863명이 그렇게 경로 밖 셀에
             # 나타났다. 궤적이 깨지면 경로를 깐 의미가 없다.
-            at = self.cell_of(sub)
+            at = None if flat else self.cell_of(sub)
             if at is not None:
                 cell = at
 
@@ -1285,7 +1440,7 @@ class Generator:
             "InitialUEMessage_RRC_Establishment_Cause",
             smp.categorical("InitialUEMessage_RRC_Establishment_Cause", "4"),
         )
-        rec.set("ue_dcnr", sub.dcnr)
+        rec.set("ue_dcnr", self._ue_dcnr(sub))
         rec.set("equip_nw", smp.categorical("equip_nw", ""))
         rec.set("nas_key_validity", smp.categorical("nas_key_validity", "1"))
 
@@ -1390,6 +1545,38 @@ class Generator:
         if self.rng.random() < 0.55:
             rec.set("success_flag", 0)
 
+    def _normal_rtt(self, smp, way: str) -> tuple[int, int]:
+        """평시 RTT `(건수, 시간 합)` — **건수를 먼저 뽑고 합은 건수 × 1회 RTT**.
+
+        전에는 `*RTTCount` 와 `*RTTTime` 을 각자 독립으로 뽑았다. 합계 꼬리
+        (p100 이 수백억)가 건수 0~1 과 짝지어지면 1회 평균이 수십 초가 되고,
+        건수 0 에 합계만 남는 레코드도 생긴다. 그러면 평시에도 graphio 의
+        대기 불량(`xp.judge.rtt_ms`)이 켜져 장애 셀과 구분되지 않는다
+        (사용자 결정 2026-11-03).
+
+        * 건수는 프로파일에서 뽑고 **최소 1** 이다.
+        * 1회 RTT 는 같은 분위수의 `시간 ÷ 건수` 다 — 두 필드를 같은 분위수로
+          읽어야 짝이 맞는다(`profile.numeric` 의 ``u`` 머리말과 같은 이유).
+          그 분위수에서 건수가 0 이면 비율이 없으므로 분위수를 다시 뽑는다.
+        * 1회 RTT 상한은 `NORMAL_RTT_MAX_US`(1000ms)다.
+
+        장애가 RTT 를 올리는 경로(`scenarios._congested_rtt`)는 이 뒤에 합계를
+        덮으므로 그대로다. 프로파일에 RTT 가 없는 계열(dns)은 0 을 준다 —
+        전과 같다.
+        """
+        c_name, t_name = f"{way}RTTCount", f"{way}RTTTime"
+        c_dec = smp.p.numeric.get(c_name)
+        if not c_dec or not smp.p.numeric.get(t_name) or c_dec[-1] <= 0:
+            return int(smp.numeric(c_name)), int(smp.numeric(t_name))
+        cnt = max(1, int(smp.numeric(c_name)))
+        while True:
+            u = self.rng.random() * 10
+            c_u = smp.numeric(c_name, u=u)
+            if c_u > 0:
+                break
+        per = min(NORMAL_RTT_MAX_US, smp.numeric(t_name, u=u) / c_u)
+        return cnt, int(cnt * per)
+
     def uplane_rec(self, series: str, ts: datetime, tf: float,
                    cell: Cell, t: float, user: tuple[str, ...],
                    apn: str | None, ongoing: str, sid: str,
@@ -1443,10 +1630,10 @@ class Generator:
         rec.set("SynMssSize", smp.categorical("SynMssSize", "1372"))
         rec.set("SynAckMssSize", smp.categorical("SynAckMssSize", "1380"))
 
-        for f in (
-            "UplinkRTTCount", "UplinkRTTTime", "DnlinkRTTCount", "DnlinkRTTTime",
-        ):
-            rec.set(f, int(smp.numeric(f)))
+        for way in ("Uplink", "Dnlink"):
+            cnt, tot = self._normal_rtt(smp, way)
+            rec.set(f"{way}RTTCount", cnt)
+            rec.set(f"{way}RTTTime", tot)
         for direction in ("Uplink", "Dnlink"):
             # **`PayloadSize` 와 `ThroughputTime` 은 같은 분위수에서 뽑는다**
             # (2026-10-28). 처리율 `U-15` 가 그 둘의 비(比)이므로 독립으로

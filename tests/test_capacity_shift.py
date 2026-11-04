@@ -330,9 +330,98 @@ def test_fault_target_cells_reach_the_floor(gen):
         gen.uplane_records(m, ts)
     floor = gen.fault.floor_per_cell * 3            # 셀 3개
     # 강도 0.3 이어도 하한은 다 채운다 — 약한 장애도 표본은 있어야 한다
-    assert min(got[3:8]) >= floor * 0.9, got
-    # 끝나면 평소로 돌아간다
-    assert got[-1] < floor / 2, got
+    # 회복 구간(`ramp_out`·대칭 3분) 전까지 — 7분부터는 강도를 따라 내려온다
+    assert min(got[3:7]) >= floor * 0.9, got
+    # 끝나면 **한 번에 끊지 않고** 내려온다(꼬리 · `test_floor_tail_*`)
+    assert floor * 0.9 > got[-1], got
+    assert gen._floor_last, "끝난 뒤에도 꼬리 상태가 남아 있어야 한다"
+
+
+def test_floor_tail_steps_down_instead_of_cutting(gen):
+    """장애가 끝나도 대상 eNB 의 호가 **한 번에 꺾이지 않는다** (카드 15 → 11-03 재설계).
+
+    11-02 판은 셀당 1호를 붙들다 한 번에 놓아 graphio D4 가 소등으로 읽었다
+    (11-03 C-01 201건). 지금은 평시 위 초과분이 반감기로 내려오고, ε 아래가
+    되면 놓는다 — 놓는 시점의 계단이 ε 이하다.
+    """
+    t0 = datetime(2026, 10, 29, 16, 0)
+    gen.anchor = t0
+    enb = "500007"
+    gen.fault.floor_per_cell = 40.0
+    gen.fault.floor_tail_half_min = 1.0
+    gen.fault.floor_tail_eps = 0.05
+    end = 12
+    gen.set_fault_rows([{"fault_id": 7, "kind": "ran_radio", "target": f"ENB:{enb}",
+                         "start_ts": t0, "duration_min": end, "intensity": 1.0}])
+    i_c = gen.gen.index["lte_call"]["First_eNB_ID"]
+    got, extra = [], []
+    for m in range(end + 14):
+        ts = t0 + timedelta(minutes=m)
+        if m == end:
+            gen.set_fault_rows([])             # 라이브처럼 끝난 fault 는 목록에서 빠진다
+        got.append(sum(1 for r in gen.records(m, ts) if r[i_c] == enb))
+        gen.uplane_records(m, ts)
+        h = gen.fault.floor_tail_half_min
+        extra.append(sum(p * 0.5 ** ((m - last) / h)
+                         for last, p, _ in gen._floor_last.values() if m > last))
+    peak = 40.0 * 3
+    assert max(got[:end]) >= peak * 0.9, got
+    # 회복 구간(`ramp_out`)부터 이미 내려오고, 꼬리 초과분은 단조로 준다
+    tail = [x for x in extra[end:] if x > 0]
+    assert tail and all(a >= b for a, b in zip(tail, tail[1:])), extra
+    # 놓는 순간 남은 초과분(셀 3개 합)이 ε×3 이하 — 계단이 없다
+    assert tail[-1] < 2 * gen.fault.floor_tail_eps * 3, extra
+    assert not gen._floor_last, "놓은 셀은 상태에서 지운다"
+
+
+def test_ramp_out_and_instant_flags():
+    """회복도 서서히 · instant 는 즉시 (2026-11-03 궤적 공통화).
+
+    전에는 `remain <= 2` 로 전 시나리오 회복이 2분 고정이었다.
+    """
+    from datagen.scenarios import Scenario, Target
+
+    def mk(**kw):
+        return Scenario(id="x", kind="ran_radio", title="", truth_code="", truth_category="",
+                        expect_rules=(), expect_geo="", start_minute=0,
+                        target=Target(), **{"duration": 20, **kw})
+
+    sym = mk(shape="RAMP", ramp_in=4)
+    curve = [sym.intensity(m) for m in range(20)]
+    assert curve[:4] == [0.25, 0.5, 0.75, 1.0], curve
+    assert curve[-4:] == [0.8, 0.6, 0.4, 0.2], "ramp_out 기본값은 ramp_in(대칭)"
+    old = mk(shape="RAMP", ramp_in=3, ramp_out=2)
+    assert [round(old.intensity(m), 3) for m in (18, 19)] == [round(2 / 3, 3), round(1 / 3, 3)]
+    inst = mk(shape="STEP", ramp_in=3, onset="instant", offset="instant")
+    assert {inst.intensity(m) for m in range(20)} == {1.0}
+    short = mk(shape="RAMP", ramp_in=5, duration=4)
+    assert 0 < short.intensity(1) and short.intensity(2) == 1.0, "짧으면 램프를 같이 줄인다"
+
+
+#: 즉시 시작·종료 13종 · 모양 고정 4종 — 설계 `DESIGN-L1L2-2026-11-03.md` 6절
+#: (사용자 결정 11-03: 노드 다운·재기동·서비스 불가·설정 적용·지진)
+INSTANT_KINDS = {
+    "gw_node_down", "gw_pgw_restart", "auth_failure", "external_server",
+    "change_suspected", "ims_pdn", "nsa_policy_restrict", "auc_no_response",
+    "dra_route_failure", "son_param_change", "earthquake", "enb_s1_outage",
+    "apn_pdn_failure",
+}
+FIXED_KINDS = {"event_crowd", "capacity_shift", "partial_recovery", "dns_flap"}
+
+
+def test_instant_kinds_table():
+    """6절 표가 `KIND_SPECS` 에 그대로 들어 있다 — 표에 없는 kind 는 ramp 다."""
+    from datagen.scenarios import KIND_SPECS
+
+    assert INSTANT_KINDS | FIXED_KINDS <= set(KIND_SPECS)
+    for kind, spec in KIND_SPECS.items():
+        on, off = spec.get("onset", "ramp"), spec.get("offset", "ramp")
+        if kind in INSTANT_KINDS:
+            assert (on, off) == ("instant", "instant"), kind
+        else:
+            assert (on, off) == ("ramp", "ramp"), kind
+        if kind in FIXED_KINDS:
+            assert spec["shape"] in ("STEPS", "HOLD", "FLAP"), kind
 
 
 def test_floor_skips_node_wide_targets(gen):
@@ -345,3 +434,79 @@ def test_floor_skips_node_wide_targets(gen):
     assert len(sc.target.cell_keys) > gen.fault.floor_max_cells
     n = len(gen.records(5, t0 + timedelta(minutes=5)))
     assert n < 2400, n          # 하한이 걸렸다면 120셀 × 8 = 960건이 더 붙는다
+
+
+def test_floor_tail_until_reports_per_fault_end(gen):
+    """꼬리가 끝나는 시각을 fault 별로 낸다 — `/api/faults` 의 `tail_until` 재료.
+
+    꼬리는 데몬 메모리 상태라 UI 가 직접 볼 수 없다. 끝난 분 + `floor_tail_min`
+    + 1 이 "다시 같은 셀을 노려도 되는" 시각이다.
+    """
+    from datagen import control
+
+    t0 = datetime(2026, 10, 29, 16, 0)
+    gen.anchor = t0
+    gen.fault.floor_tail_min = 6
+    gen.set_fault_rows([{"fault_id": 8, "kind": "ran_radio", "target": "ENB:500007",
+                         "start_ts": t0, "duration_min": 3, "intensity": 1.0}])
+    for m in range(3):
+        gen.records(m, t0 + timedelta(minutes=m))
+    gen.set_fault_rows([])
+    assert gen.floor_tail_until() == {"8": "2026-10-29 16:09"}, gen.floor_tail_until()
+    v = control.floor_tail_value({str(i): "2026-10-29 16:09" for i in range(1, 40)})
+    assert len(v) <= 255 and '"39"' in v and '"1"' not in v, "넘치면 최근 fault 부터 남긴다"
+
+
+def test_like_target_reuses_the_original_auto_target_only(gen):
+    """`LIKE:<fid>` 는 원본 fault 의 rng 로 **대상만** 다시 계산한다 (2026-11-02 · 카드 15r2).
+
+    같은 셀에 같은 시나리오를 다시 넣어 회차를 비교하려는 것이다. 다른
+    fault_id 로 그냥 넣으면 대상 rng 가 달라 다른 띠가 나온다.
+    """
+    from datagen.faults import like_fault_id, resolve_active
+
+    t0 = datetime(2026, 10, 29, 16, 0)
+    row = {"fault_id": 66, "kind": "ho_interruption", "target": None,
+           "start_ts": t0, "duration_min": 30, "intensity": 1.0}
+    cells, seed = gen.cells, gen.seed
+    orig = resolve_active(cells, t0, seed, [row], {})[0][0].target
+    like = resolve_active(cells, t0, seed, [dict(row, fault_id=999, target="LIKE:66")],
+                          {})[0][0].target
+    other = resolve_active(cells, t0, seed, [dict(row, fault_id=999)], {})[0][0].target
+    assert like.cell_keys == orig.cell_keys and like.cell_pairs == orig.cell_pairs
+    assert other.cell_keys != orig.cell_keys, "fault_id 가 다르면 다른 대상 — LIKE 가 필요한 이유"
+    assert like_fault_id("like:66") == 66 and like_fault_id("LIKE:x") is None
+
+
+def test_like_target_is_checked_against_the_original_row():
+    """원본이 없거나 kind 가 다르거나 대상을 지정했으면 받지 않는다(`control._check_like`)."""
+    import pytest as _pt
+
+    from datagen import control
+
+    rows = {66: ("ho_interruption", None), 67: ("anchor_saturation", None),
+            9: ("ho_interruption", "ENB:136914")}
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params):
+            self.row = rows.get(int(params[0]))
+
+        def fetchone(self):
+            return self.row
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+    control._check_like(_Conn(), "ho_interruption", "LIKE:66")      # 통과
+    control._check_like(_Conn(), "ho_interruption", "ENB:1")        # LIKE 아님 — 통과
+    for tgt, msg in (("LIKE:1", "없다"), ("LIKE:67", "kind"), ("LIKE:9", "지정"),
+                     ("LIKE:x", "형식")):
+        with _pt.raises(ValueError, match=msg):
+            control._check_like(_Conn(), "ho_interruption", tgt)

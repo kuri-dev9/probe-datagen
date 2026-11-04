@@ -797,6 +797,15 @@ def test_plan_mutator_keeps_quantity_invariants(gen, kind):
 
     rng = random.Random(41)
     cell = gen.cells[0]
+    keys = {cell.cell_key}
+    if kind == "earthquake":
+        # 지진은 **eNB 단위로** 멈춘다(2026-11-03 M-5). 셀 하나짜리 대상이면
+        # 그 eNB 가 곧 정지 eNB 라 주변 혼잡(`_quake_ring`)이 설 셀이 없다 —
+        # 살아 있는 쪽이 되도록 다른 eNB 를 대상에 더한다
+        i = 0
+        while SC.quake_down(_sc(kind, target=SC.Target(cell_keys=keys)), cell, 1.0):
+            keys.add(f"9{i:05d}-0")
+            i += 1
     hit = 0
     for _ in range(300):
         rec = gen.uplane_rec("transport", ANCHOR, 1.0, cell, ANCHOR.timestamp(),
@@ -809,7 +818,10 @@ def test_plan_mutator_keeps_quantity_invariants(gen, kind):
         const = {"ClientHelloDomain": ".example.com", "APN": "apn",
                  "App_Group_Code": "PAY"}
         plan = SC.Plan(totals, const, "normal", 3)
-        sc = _sc(kind, target=SC.Target(cell_keys={cell.cell_key},
+        # SA 세션으로 준다 — `anchor_saturation` 은 SA 만 고른다(2026-11-02).
+        # 다른 kind 는 망 모드를 보지 않는다
+        plan.net_mode = "SA"
+        sc = _sc(kind, target=SC.Target(cell_keys=set(keys),
                                         pgw_id=cell.pgw_id, domain=""))
         sc.active_cells_cache = {cell.cell_key}
         # `capacity_shift` 는 강도를 인자가 아니라 **국면**에서 읽는다 — 시작
@@ -1279,18 +1291,18 @@ def test_ramp_rise_follows_ramp_in_not_duration():
 def test_ramp_reaches_peak_even_when_short():
     """짧은 장애도 피크에 닿아야 한다 — `ramp_in` 이 `duration` 을 넘지 않는다.
 
-    `duration=5` 는 교정 전 곡선(`5*0.6=3`)과 **완전히 같다.** 배치 생성은
-    8~28분(`build_scenarios` 의 `dur`)을 쓰므로 그쪽만 빨라진다.
+    2026-11-03 부터 회복도 `ramp_out`(기본 = `ramp_in`)을 쓰므로, 둘의 합이
+    `duration-1` 을 넘으면 **같은 비율로 함께 줄인다** — 3+3 → 2+2.
     """
     sc = _sc("s6a_undetermined", duration=5)
     assert [sc.intensity(m) for m in range(5)] == [
-        pytest.approx(1 / 3), pytest.approx(2 / 3), pytest.approx(1.0),
+        pytest.approx(1 / 2), pytest.approx(1.0), pytest.approx(1.0),
         pytest.approx(2 / 3), pytest.approx(1 / 3),
     ]
 
 
 def test_ramp_recovery_stays_short_regardless_of_length():
-    """회복은 길이와 무관하게 마지막 2분이다 — 상승도 이제 비대칭이 아니다."""
+    """회복은 길이와 무관하게 `ramp_out` 분이다 (2026-11-03 · 기본 = `ramp_in`)."""
     for dur in (10, 30):
         sc = _sc("s6a_undetermined", duration=dur)
         assert sc.intensity(dur - 1) < sc.intensity(dur - 2) < sc.peak
@@ -1305,7 +1317,7 @@ def test_ramp_recovery_stays_short_regardless_of_length():
 def _anchor_plan(payload=1_000_000.0, thr=2_000_000.0, retrans=50.0,
                  paypkt=10_000.0, rtt=30_000.0):
     """`anchor_saturation` 에 넘길 세션 총량."""
-    return SC.Plan(
+    p = SC.Plan(
         {
             "Traffic_Total_Dnlink_PayloadSize": payload,
             "Traffic_Total_Dnlink_ThroughputTime": thr,
@@ -1320,6 +1332,10 @@ def _anchor_plan(payload=1_000_000.0, thr=2_000_000.0, retrans=50.0,
         },
         {}, "normal", 3,
     )
+    # SA 세션이다 — 이 mutator 는 SA 만 고른다(2026-11-02 · 테스트
+    # `test_net_mode.py::test_anchor_saturation_slows_only_sa_sessions`)
+    p.net_mode = "SA"
+    return p
 
 
 class _Cell:

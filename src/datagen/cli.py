@@ -577,6 +577,7 @@ def cmd_capacity(args) -> int:
             enb_limit=int(pem.get("enb_limit", 0)), drawable=drawable,
             call_type_floor=pem.get("call_type_floor"),
             uplane_session=pem.get("uplane_session"), mobility=pem.get("mobility"),
+            net_mode=pem.get("net_mode"),
             locale=pem.get("locale", "kr"), tac_only=bool(pem.get("tac_only", False)),
             sectors_per_enb=pem.get("sectors_per_enb"), scope=pem.get("scope"),
             baseline=pem.get("baseline"), fault=pem.get("fault"),
@@ -735,6 +736,7 @@ def cmd_run(args) -> int:
             call_type_floor=pem.get("call_type_floor"),
             # U-Plane 세션 분포 모수. 없으면 `session.Shape` 기본값이다.
             uplane_session=pem.get("uplane_session"), mobility=pem.get("mobility"),
+            net_mode=pem.get("net_mode"),
             locale=pem.get("locale", "kr"), tac_only=bool(pem.get("tac_only", False)),
             sectors_per_enb=pem.get("sectors_per_enb"), scope=pem.get("scope"),
             # 평시 배경(절차 플래그·절단·PathSwitch)과 TIMEOUT 대기시간.
@@ -778,10 +780,21 @@ def cmd_run(args) -> int:
             print("  계열 차단 — " + " · ".join(sorted(blocked))
                   + ("  ※ lte_call 차단은 U-Plane 까지 멈춘다"
                      if "lte_call" in blocked else ""), flush=True)
-        di_now = str(control.get_config(conn, "diurnal", "true")).lower() != "false"
+        tail_last: str | None = None   # 하한 꼬리 — 첫 틱에 반드시 쓴다
+        # 기본값은 설정(`pemdb1.clock`), UI 저장값(DB)이 이긴다 — `volume_pct` 와 같다
+        clk = pem.get("clock") or {}
+        from .generator import set_curve
+        set_curve(clk.get("curve"))          # 곡선 정본은 설정이다(`generator.set_curve`)
+        di_default = "false" if clk.get("diurnal") is False else "true"
+        vo_default = str(60.0 * float(clk.get("virtual_offset_min", 0) or 0))
+        di_now = str(control.get_config(conn, "diurnal", di_default)).lower() != "false"
         gen.set_diurnal(di_now)
         if not di_now:
-            print("  시간대 곡선 꺼짐 — 모든 시각이 피크(19시) 수준", flush=True)
+            print("  시간대 곡선 꺼짐 — 피크 수준 평탄 · 그룹·이동 없이 전체 eNB 에 골고루", flush=True)
+        vo_now = gen.set_virtual_offset(float(control.get_config(conn, "virtual_offset_sec", vo_default) or 0))
+        if vo_now:
+            print(f"  가상 시각 {vo_now / 60:+.0f}분 — 곡선·그룹 비율만 옮긴다(레코드 시각은 실제 시각)",
+                  flush=True)
 
         # U-Plane 은 MySQL 이 아니라 로컬 Parquet 로 간다(2026-10-14).
         # 계열 유무의 정본은 **생성 설정**이다 — 전에는 테이블 존재 여부였다.
@@ -879,14 +892,20 @@ def cmd_run(args) -> int:
                          if "lte_call" in blocked else ""), flush=True)
 
             di_want = str(control.get_config(
-                conn, "diurnal", "true")).lower() != "false"
+                conn, "diurnal", di_default)).lower() != "false"
             if di_want != di_now:
                 gen.set_diurnal(di_want)
                 di_now = di_want
                 print(f"[{ts:%H:%M}] 시간대 곡선 "
                       + ("켜짐 — 04시 최저 · 19시 최고"
-                         if di_want else "꺼짐 — 모든 시각이 피크 수준"),
+                         if di_want else "꺼짐 — 피크 수준 평탄 · 전체 eNB 에 골고루"),
                       flush=True)
+            vo_want = gen.set_virtual_offset(float(
+                control.get_config(conn, "virtual_offset_sec", vo_default) or 0))
+            if vo_want != vo_now:
+                vo_now = vo_want
+                print(f"[{ts:%H:%M}] 가상 시각 "
+                      + (f"{vo_now / 60:+.0f}분" if vo_now else "해제 — 지금 시각"), flush=True)
 
             # ── 보존 정리 (2026-10-15) ────────────────────────────────
             # **생성 정지보다 앞이다.** 전에는 틱 맨 끝, `enabled=false` 의
@@ -975,6 +994,13 @@ def cmd_run(args) -> int:
             control.record_tick(
                 conn, ts, n, ",".join(str(f["fault_id"]) for f in active),
                 series_stat=P.series_stat(rows, up_rows))
+            # 하한 꼬리 상태를 화면에 알린다(`PemdbGen.floor_tail_until`). 바뀔
+            # 때만 쓴다 — 기동 직후 첫 틱은 반드시 쓴다(재시작으로 꼬리가
+            # 사라졌다는 사실까지 덮어야 한다)
+            tail_now = control.floor_tail_value(gen.floor_tail_until())
+            if tail_now != tail_last:
+                control.set_config(conn, control.FLOOR_TAIL_KEY, tail_now)
+                tail_last = tail_now
             last_done = ts
             up = " · ".join(f"{s[:4]} {v:,}" for s, v in un.items())
             print(f"[{ts:%H:%M}] XDR {n:,}건"
@@ -1091,6 +1117,7 @@ def cmd_pemfill(args) -> int:
             drawable=drawable,
             call_type_floor=pem.get("call_type_floor"),
             uplane_session=pem.get("uplane_session"), mobility=pem.get("mobility"),
+            net_mode=pem.get("net_mode"),
             locale=pem.get("locale", "kr"), tac_only=bool(pem.get("tac_only", False)),
             sectors_per_enb=pem.get("sectors_per_enb"), scope=pem.get("scope"),
             baseline=pem.get("baseline"), fault=pem.get("fault"),
