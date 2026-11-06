@@ -46,11 +46,15 @@ def _profile_absent(gen) -> float:
     return dist.get("-1", 0.0) / tot
 
 
-def test_capability_is_fixed_per_device_and_minus_one_is_per_call(gen):
-    """IMSI 안에서 0·1 공존 0건 · SA 단말 비율 ≈ 설정 · `-1` 비율 ≈ 프로파일.
+def test_capability_is_fixed_per_device_and_end_records_carry_no_minus_one(gen):
+    """IMSI 안에서 0·1 공존 0건 · SA 단말 비율 ≈ 설정 · **End 기록에는 `-1` 이 없다**.
 
-    **TAU 도 본다.** `tau_rec` 이 다른 가입자로 레코드를 만든 뒤 신원만
-    바꾸어, 그 가입자의 `ue_dcnr` 가 남던 것이 공존의 원인이었다.
+    2026-11-05 현장 추출(1,249행)에서 `-1` 은 Start·Interim 기록의 값이었고 End 456건에는 0건이었다.
+    상용 경로는 End 만 만든다(`end_only`) — 전에는 프로파일의 `-1` 약 61% 를 섞어 5G 호의 약 60% 가
+    N-02 분모에서 빠졌다. `end_only=False` 의 호별 `-1` 은 아래 별도 테스트가 지킨다.
+
+    **TAU 도 본다.** `tau_rec` 이 다른 가입자로 레코드를 만든 뒤 신원만 바꾸어, 그 가입자의 `ue_dcnr` 가
+    남던 것이 공존의 원인이었다.
     """
     caps = [s.dcnr for s in gen.subs]
     assert set(caps) <= {"0", "1"}, "단말 능력은 0/1 뿐 — `-1` 은 단말 속성이 아니다"
@@ -72,11 +76,31 @@ def test_capability_is_fixed_per_device_and_minus_one_is_per_call(gen):
         rec, _ = gen.tau_rec(TS, slot, sub, cells[i % len(cells)],
                              cells[(i + 1) % len(cells)])
         assert rec.get("IMSI") == sub.imsi
-        assert rec.get("ue_dcnr") in ("-1", sub.dcnr), (sub.dcnr, rec.get("ue_dcnr"))
+        assert rec.get("ue_dcnr") == sub.dcnr, (sub.dcnr, rec.get("ue_dcnr"))
         seen[sub.imsi].add(rec.get("ue_dcnr"))
     mixed = [k for k, v in seen.items() if {"0", "1"} <= v]
     assert mixed == [], mixed[:5]
-    want = _profile_absent(gen)
+    assert absent == 0, f"End 기록에 -1 이 {absent}/{total} 건"
+
+
+def test_minus_one_is_per_call_when_records_are_not_end_only():
+    """`end_only=False` 면 전처럼 `-1` 이 호 단위로 섞이고 비율은 프로파일 그대로다 — 옛 동작 보존."""
+    cells = load_cells(DATA / "cells.json")
+    profiles = load_profiles(DATA / "profile.json")
+    keep = {s: profiles[s] for s in ("lte_call", "transport", "dns", "http")}
+    g = Generator(cells=cells, profiles=keep, scenarios=[], rates=RATES, seed=20260903,
+                  diurnal=True, subscriber_pool=3000, success_only=True, end_only=False)
+    slot = TS.timestamp()
+    seen: dict[str, set[str]] = collections.defaultdict(set)
+    absent = total = 0
+    for _ in range(6000):
+        rec, _c = g.base_lte_call(TS, slot)
+        v = rec.get("ue_dcnr")
+        total += 1
+        absent += v == "-1"
+        seen[rec.get("IMSI")].add(v)
+    assert [k for k, v in seen.items() if {"0", "1"} <= v] == []
+    want = _profile_absent(g)
     assert abs(absent / total - want) < 0.03, (absent / total, want)
 
 

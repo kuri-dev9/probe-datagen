@@ -500,6 +500,13 @@ class Session:
     #: 핸드오버 직후 정체 **길이(초)**. `0` 은 없음. 첫 전환에서 `freeze` 로
     #: 바뀌고 0 이 된다 — 한 세션에 한 번이다.
     ho_stall_s: float = 0.0
+    #: **노드 다운으로 끊기는 시각**(epoch · 2026-11-04). `-1` 은 끊기지 않는다. 세운 분의
+    #: 레코드가 그 세션의 마지막이다 — `End` 를 그 시각에 내고 남은 양은 흐르지 않는다
+    #: (`SessionEngine.cut` · `pemdb1._node_down_cuts`)
+    cut_t: float = -1.0
+    #: **이번 전환을 이 시각에 한다**(epoch · `-1` 은 없음) — eNB 다운 뒤 이웃 셀 재연결
+    #: (`pemdb1._enb_down_hold`). 추첨 시각(분 안 5~54초)으로 두면 죽은 셀에 데이터가 더 남는다
+    ho_at_t: float = -1.0
 
 
 #: 정체 구간에 **멈추는** 누적 필드 — down payload 만이다. 재전송·패킷 수는
@@ -583,6 +590,9 @@ class SessionEngine:
         #: 정지 셀 → 이웃 셀 (`j-sc-27`). `pemdb1` 이 **분마다** 넣는다 —
         #: 장애가 없는 분에는 `None` 이고 그때는 아무 일도 하지 않는다.
         self.relocate = None
+        #: 다운 장비 집합(`scenarios.node_down_set`) — `pemdb1` 이 분마다 넣는다. 그 장비로
+        #: 가는 핸드오버를 막는다(2026-11-04). `None` 이면 다운이 없다
+        self.down = None
 
         #: Call Type 가중 — 설정이 있으면 기본표 위에 덮는다(키만 바꿀 수 있게).
         self._ctw = dict(CT_SESSION_W)
@@ -759,12 +769,29 @@ class SessionEngine:
             for _ in range(self._k(p)):
                 self._open(ts, slot, tf, call, out, mutate, plan_mutate)
 
-        # ② 이월 세션 — 이번 분의 레코드를 낸다
+        # ② 이월 세션 — 이번 분의 레코드를 낸다. 끊긴 세션(`cut_t`)은 이 분이 마지막이다
         for s in carried:
             self._emit(ts, slot, s, out, mutate)
-            if s.i < s.span:
+            if s.i < s.span and s.cut_t < 0:
                 self.active.append(s)
         return out
+
+    def cut(self, s: Session, t: float) -> None:
+        """노드 다운 — 이 세션을 ``t`` 에 끊는다(2026-11-04 사용자 결정).
+
+        이번 분 레코드가 `End`(첫 분이면 `Single`)가 되고 누적은 **거기까지만** 오른다
+        (`_emit` 의 `now`) — 남은 양을 이 분에 몰아 내지 않는다. 정상 종료가 아니므로
+        FIN 을 지운다. RST 도 달지 않는다 — 장비가 죽어 끝을 알리는 패킷이 없다. 남은
+        HTTP 도 없다. 정체 증거(창 닫힘)는 원래 값 그대로다
+        """
+        if s.cut_t >= 0:
+            return
+        s.cut_t = t
+        s.http_left = 0
+        pos = {f: i for i, f in enumerate(TRANSPORT_CONST)}
+        const = list(s.const)
+        const[pos["FinCount"]] = "0"
+        s.const = tuple(const)
 
     def _open(self, ts: datetime, slot: float, tf: float, call: Call,
               out: dict, mutate, plan_mutate=None, retry_of=None) -> None:
@@ -783,6 +810,16 @@ class SessionEngine:
         if retry_of is not None:
             # 재시도는 **조금 뒤**다 — 실패를 보고 다시 누르기까지
             t0 = min(t0 + rng.uniform(1.0, 8.0), slot + 59.0)
+        # **다운 SGW·PGW 로는 다운 시각 뒤에 세션을 열지 않는다**(2026-11-04 · 두 번째 겹).
+        # 첫 겹은 `pemdb1.records` 의 `down_opens_session` 이다 — 거기서 빠진 경로(재시도 세션 등)를
+        # 여기서 막는다. 다운 시각을 모르면(분 단위) 그 분부터 막는다
+        if self.down is not None:
+            from .scenarios import down_at, down_of
+            hit = down_of(self.down, core=(call.cell.mme_id, call.cell.sgw_id, call.cell.pgw_id))
+            if hit is not None:
+                at = down_at(self.down, hit[0], hit[1])
+                if at is None or t0 >= at:
+                    return
 
         self._sid_n += 1
         sid = f"{int(slot):x}{self._sid_n:05x}"
@@ -827,6 +864,15 @@ class SessionEngine:
             span = 1 if rng.random() < 0.7 else 2
         sess = self._plan(ts, tf, call, t0, span, sid, plan_mutate, app, host,
                           app_ip)
+        # **다운 장비를 코어로 열린 세션** — 다운 시각 전에 붙은 호에서 열렸다(시작 분 안).
+        # 그 시각에 끊는다 — 안 끊으면 다음 분까지 죽은 SGW 로 데이터가 흐른다(2026-11-04).
+        # 다운 시각 **뒤**에 시작하는 세션은 위(`_open` 머리)에서 이미 열지 않았다
+        if self.down is not None:
+            from .scenarios import down_at, down_of
+            hit = down_of(self.down, core=sess.core)
+            if hit is not None:
+                at = down_at(self.down, hit[0], hit[1])
+                self.cut(sess, max(at if at is not None else slot, sess.t0))
         self._emit(ts, slot, sess, out, mutate)
         if sess.i < sess.span:
             self.active.append(sess)
@@ -954,6 +1000,7 @@ class SessionEngine:
             pl = Plan(totals, dict(zip(TRANSPORT_CONST, const)),
                       call.outcome, span)
             pl.net_mode = call.net_mode
+            pl.imsi = call.user[0]
             plan_mutate(call.cell, pl)
             traffic = [totals[f"Traffic_Total_{n}"] for n in TRAFFIC_PAIRS]
             plain = tuple(totals[n] for n in CUM_PLAIN)
@@ -1104,13 +1151,15 @@ class SessionEngine:
         rng = self.rng
         i = s.i
         s.i += 1
-        last = s.i >= s.span
+        cut = s.cut_t >= 0
+        last = s.i >= s.span or cut
 
         # **이동 가입자는 전환을 추첨하지 않는다.** 그 사람이 지금 있는 셀이
         # 세션이 쓰던 셀과 다르면 **움직인 것이고, 그래서 전환이 일어난다.**
         # 추첨으로 두면 같은 사람이 한 분에는 A→B, 다음 분에는 B→A 반대쪽
         # 으로 가 궤적이 이어지지 않는다(`handover` 의 Route 머리말).
-        here, mobile = (self._route_cell(s) if 0 < i < s.span
+        # 끊기는 분에는 전환하지 않는다 — 죽은 장비의 세션이 다른 셀로 이어지면 안 된다
+        here, mobile = (self._route_cell(s) if 0 < i < s.span and not cut
                         else (None, False))
         moved = here if (here is not None and here is not s.cell) else None
 
@@ -1132,6 +1181,12 @@ class SessionEngine:
         t = s.t_end if last else min(slot + 59.0, s.t_end)
         prev = i / s.span
         now = 1.0 if last else (i + 1) / s.span
+        if cut:
+            # 끊긴 자리까지만 — 누적은 **끊긴 시각까지의 몫**만 오른다(분 안 비율). SGW 다운은
+            # 분 시작에 끊으므로 그 분 레코드는 거의 0 이다 — 다운 뒤 데이터가 흐르지 않는다
+            t = max(min(s.cut_t, s.t_end), max(s.t0, slot) + 0.1)
+            frac = min(1.0, max(0.0, (t - max(s.t0, slot)) / 60.0))
+            now = min(1.0, prev + frac / s.span)
         # **매 분 초기화한다.** 남겨 두면 다음 분의 HTTP 가 이미 떠난 셀로
         # 들어가고, 그것은 에러가 아니라 틀린 셀 귀속으로만 나타난다.
         s.ho_t = -1.0
@@ -1173,10 +1228,26 @@ class SessionEngine:
                 self._put(out, mutate, s, F_INTERIM, t, prev, now,
                           slot, before)
                 return
+            # **다운 장비로는 넘어가지 않는다**(2026-11-04) — 다운 eNB 의 셀, 또는 S1 전환이
+            # 고를 SGW·PGW 가 다운이면 전환을 취소한다. X2 는 코어가 그대로라 상대 셀의
+            # SGW 를 보지 않는다
+            if self.down is not None:
+                from .scenarios import down_of
+                c2 = got[0]
+                enb_dead = str(c2.enb_id) in self.down["ENB"]
+                core_dead = (got[1] in (HO_S1, HO_S1_MME) and down_of(
+                    self.down, core=(c2.mme_id, c2.sgw_id, c2.pgw_id)) is not None)
+                if enb_dead or core_dead:
+                    self._put(out, mutate, s, F_INTERIM, t, prev, now,
+                              slot, before)
+                    return
             after, s.ho_kind = got
 
             t_ho = max(s.t0 + 0.1,
                        min(slot + rng.uniform(5.0, 54.0), t))
+            if s.ho_at_t > 0:
+                t_ho = max(s.t0 + 0.1, min(max(s.ho_at_t, slot + 0.1), t))
+                s.ho_at_t = -1.0
             mid = prev + (now - prev) * ((t_ho - max(s.t0, slot))
                                          / max(1e-6, t - max(s.t0, slot)))
             mid = min(max(mid, prev), now)

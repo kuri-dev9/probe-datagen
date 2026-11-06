@@ -1,0 +1,1446 @@
+{
+ "_doc": "시나리오 현황 화면의 용어 뜻. 이름은 graphio 의 rca/taxonomy.py·rca/rules.py·metrics/kpi.py·rca/evidence.py·schema/codes.py·detect/detector.py 에서 옮겼다. s 는 값 옆에 보이는 짧은 뜻, l 은 마우스를 올리면 보이는 설명이다.",
+ "terms": {
+  "RAN_RADIO_QUALITY": {
+   "kind": "cause",
+   "ko": {
+    "s": "무선 품질 열화",
+    "l": "분류 RAN"
+   },
+   "ja": {
+    "s": "無線品質の劣化",
+    "l": "分類 RAN"
+   }
+  },
+  "RAN_CAPACITY_CONGESTION": {
+   "kind": "cause",
+   "ko": {
+    "s": "무선 용량 혼잡",
+    "l": "분류 RAN"
+   },
+   "ja": {
+    "s": "無線容量の混雑",
+    "l": "分類 RAN"
+   }
+  },
+  "RAN_MOBILITY_ISSUE": {
+   "kind": "cause",
+   "ko": {
+    "s": "이동성(핸드오버) 이슈",
+    "l": "분류 RAN · 신뢰도 상한 0.75 · 인접셀 관계 미연동 — GPS 근접 기반 추정치"
+   },
+   "ja": {
+    "s": "移動性(ハンドオーバ)の問題",
+    "l": "分類 RAN · 信頼度上限 0.75 · 隣接セル関係は未連携 — GPS 近接に基づく推定値"
+   }
+  },
+  "RAN_HO_INTERRUPTION": {
+   "kind": "cause",
+   "ko": {
+    "s": "전환 직후 데이터 정체",
+    "l": "분류 RAN · 신뢰도 상한 0.75 · 전환 직후 여부는 가입자 단위 재료(HO_STALL_SUB) 부재로 셀 단위 동시 발생 기반 추정"
+   },
+   "ja": {
+    "s": "切替直後のデータ停滞",
+    "l": "分類 RAN · 信頼度上限 0.75 · 切替直後かどうかは加入者単位の材料(HO_STALL_SUB)がなく、セル単位の同時発生に基づく推定"
+   }
+  },
+  "EVENT_CROWD": {
+   "kind": "cause",
+   "ko": {
+    "s": "대형 이벤트 군중 혼잡 (업링크 포화)",
+    "l": "분류 RAN · 신뢰도 상한 0.75 · 이벤트 일정 미연동 — 셀 묶음의 동시 부하 급증으로 추정"
+   },
+   "ja": {
+    "s": "大規模イベントの群衆混雑(上り飽和)",
+    "l": "分類 RAN · 信頼度上限 0.75 · イベント日程は未連携 — セル群の同時負荷急増から推定"
+   }
+  },
+  "RAN_NODE_DOWN": {
+   "kind": "cause",
+   "ko": {
+    "s": "RAN 노드 무응답",
+    "l": "분류 RAN"
+   },
+   "ja": {
+    "s": "RAN ノード無応答",
+    "l": "分類 RAN"
+   }
+  },
+  "MME_OVERLOAD": {
+   "kind": "cause",
+   "ko": {
+    "s": "MME 과부하",
+    "l": "분류 CORE_CP · 신뢰도 상한 0.85"
+   },
+   "ja": {
+    "s": "MME 過負荷",
+    "l": "分類 CORE_CP · 信頼度上限 0.85"
+   }
+  },
+  "SESSION_REJECT": {
+   "kind": "cause",
+   "ko": {
+    "s": "세션 생성 거절",
+    "l": "분류 CORE_CP · 신뢰도 상한 0.85"
+   },
+   "ja": {
+    "s": "セッション生成拒否",
+    "l": "分類 CORE_CP · 信頼度上限 0.85"
+   }
+  },
+  "AUTH_FAILURE": {
+   "kind": "cause",
+   "ko": {
+    "s": "인증 실패",
+    "l": "분류 CORE_CP · 신뢰도 상한 0.85"
+   },
+   "ja": {
+    "s": "認証失敗",
+    "l": "分類 CORE_CP · 信頼度上限 0.85"
+   }
+  },
+  "NF_UNREACHABLE": {
+   "kind": "cause",
+   "ko": {
+    "s": "Core 노드 무응답",
+    "l": "분류 CORE_CP · 신뢰도 상한 0.85"
+   },
+   "ja": {
+    "s": "Core ノード無応答",
+    "l": "分類 CORE_CP · 信頼度上限 0.85"
+   }
+  },
+  "GW_RESOURCE_EXHAUSTION": {
+   "kind": "cause",
+   "ko": {
+    "s": "SGW/PGW 자원 소진",
+    "l": "분류 CORE_UP · 신뢰도 상한 0.85"
+   },
+   "ja": {
+    "s": "SGW/PGW 資源枯渇",
+    "l": "分類 CORE_UP · 信頼度上限 0.85"
+   }
+  },
+  "GW_NODE_DOWN": {
+   "kind": "cause",
+   "ko": {
+    "s": "SGW/PGW 노드 장애",
+    "l": "분류 CORE_UP · 신뢰도 상한 0.85"
+   },
+   "ja": {
+    "s": "SGW/PGW ノード障害",
+    "l": "分類 CORE_UP · 信頼度上限 0.85"
+   }
+  },
+  "TRANSPORT_LOSS": {
+   "kind": "cause",
+   "ko": {
+    "s": "전송 구간 패킷 손실",
+    "l": "분류 TRANSPORT"
+   },
+   "ja": {
+    "s": "伝送区間のパケット損失",
+    "l": "分類 TRANSPORT"
+   }
+  },
+  "UE_MODEL_ISSUE": {
+   "kind": "cause",
+   "ko": {
+    "s": "특정 기종 이슈",
+    "l": "분류 UE"
+   },
+   "ja": {
+    "s": "特定機種の問題",
+    "l": "分類 UE"
+   }
+  },
+  "UE_RECEIVE_LIMIT": {
+   "kind": "cause",
+   "ko": {
+    "s": "단말 수신 처리 한계",
+    "l": "분류 UE"
+   },
+   "ja": {
+    "s": "端末受信処理の限界",
+    "l": "分類 UE"
+   }
+  },
+  "DNS_DEGRADATION": {
+   "kind": "cause",
+   "ko": {
+    "s": "DNS 열화",
+    "l": "분류 EXTERNAL"
+   },
+   "ja": {
+    "s": "DNS 劣化",
+    "l": "分類 EXTERNAL"
+   }
+  },
+  "EXTERNAL_SERVER": {
+   "kind": "cause",
+   "ko": {
+    "s": "외부 서버/CDN 이슈",
+    "l": "분류 EXTERNAL"
+   },
+   "ja": {
+    "s": "外部サーバ/CDN の問題",
+    "l": "分類 EXTERNAL"
+   }
+  },
+  "NATURAL_DISASTER_SUSPECTED": {
+   "kind": "cause",
+   "ko": {
+    "s": "자연재해 발생",
+    "l": "분류 EXTERNAL · 신뢰도 상한 0.65 · 재해 정보 미연동 — 호 폭주 · eNB 무호 · Emergency 접속 증가의 동시 관측으로 추정. 재해 종류는 알 수 없다"
+   },
+   "ja": {
+    "s": "自然災害の発生",
+    "l": "分類 EXTERNAL · 信頼度上限 0.65 · 災害情報は未連携 — 呼殺到・eNB 無呼・Emergency 接続増加の同時観測から推定。災害の種類は分からない"
+   }
+  },
+  "IMS_PDN_ISSUE": {
+   "kind": "cause",
+   "ko": {
+    "s": "ims PDN 전용 이슈",
+    "l": "분류 IMS"
+   },
+   "ja": {
+    "s": "ims PDN 専用の問題",
+    "l": "分類 IMS"
+   }
+  },
+  "NSA_NR_LEG_FAILURE": {
+   "kind": "cause",
+   "ko": {
+    "s": "NR 레그 연결 실패",
+    "l": "분류 NSA"
+   },
+   "ja": {
+    "s": "NR レッグ接続失敗",
+    "l": "分類 NSA"
+   }
+  },
+  "SA_QUALITY_LOW": {
+   "kind": "cause",
+   "ko": {
+    "s": "5G 체감 품질 저하 (접속은 정상)",
+    "l": "분류 5G · 신뢰도 상한 0.75 · net_mode 축 미구현 — 셀 처리율에서 추론한다. 5G 가입자로 좁힌 비교(EV-19)가 서면 상한을 올린다"
+   },
+   "ja": {
+    "s": "5G 体感品質の低下(接続は正常)",
+    "l": "分類 5G · 信頼度上限 0.75 · net_mode 軸は未実装 — セルのスループットから推論する。5G 加入者に絞った比較(EV-19)が立てば上限を上げる"
+   }
+  },
+  "SA_FALLBACK_SUSPECTED": {
+   "kind": "cause",
+   "ko": {
+    "s": "SA→LTE 폴백 급증 (5G 측 장애 추정)",
+    "l": "분류 5G · 신뢰도 상한 0.7"
+   },
+   "ja": {
+    "s": "SA→LTE フォールバック急増(5G 側障害の推定)",
+    "l": "分類 5G · 信頼度上限 0.7"
+   }
+  },
+  "CHANGE_SUSPECTED": {
+   "kind": "cause",
+   "ko": {
+    "s": "구성·설정 변화 의심",
+    "l": "분류 CHANGE · 신뢰도 상한 0.65 · 파라미터·작업 이력 미연동 — 구조적으로 확정 불가. 단정 금지"
+   },
+   "ja": {
+    "s": "構成・設定変更の疑い",
+    "l": "分類 CHANGE · 信頼度上限 0.65 · パラメータ・作業履歴は未連携 — 構造的に確定できない。断定しない"
+   }
+  },
+  "UNDETERMINED": {
+   "kind": "cause",
+   "ko": {
+    "s": "판단 보류",
+    "l": "분류 UNKNOWN"
+   },
+   "ja": {
+    "s": "判断保留",
+    "l": "分類 UNKNOWN"
+   }
+  },
+  "R-00": {
+   "kind": "rule",
+   "ko": {
+    "s": "첫 오류 구간 몰림",
+    "l": "first_error_interface_protocol이 특정 값에 70% 이상 집중 → UNDETERMINED"
+   },
+   "ja": {
+    "s": "最初のエラー区間の集中",
+    "l": "first_error_interface_protocol が特定の値に 70% 以上集中 → UNDETERMINED"
+   }
+  },
+  "R-00b": {
+   "kind": "rule",
+   "ko": {
+    "s": "무응답 급증",
+    "l": "first_error_cause=900/901/902(TIMEOUT) 급증 + 특정 구간 편중 → NF_UNREACHABLE"
+   },
+   "ja": {
+    "s": "無応答の急増",
+    "l": "first_error_cause=900/901/902(TIMEOUT)急増 + 特定区間への偏り → NF_UNREACHABLE"
+   }
+  },
+  "R-01": {
+   "kind": "rule",
+   "ko": {
+    "s": "인증 거절 급증",
+    "l": "P-01 급락 + AuthenticationInformation_Cause 900/3xxx 급증 → AUTH_FAILURE"
+   },
+   "ja": {
+    "s": "認証拒否の急増",
+    "l": "P-01 急落 + AuthenticationInformation_Cause 900/3xxx 急増 → AUTH_FAILURE"
+   }
+  },
+  "R-02": {
+   "kind": "rule",
+   "ko": {
+    "s": "S11 자원 없음 거절",
+    "l": "S11 + Cause 73(No resources) + Message 33(CreateSessionResponse) → SESSION_REJECT"
+   },
+   "ja": {
+    "s": "S11 資源なしの拒否",
+    "l": "S11 + Cause 73(No resources)+ Message 33(CreateSessionResponse) → SESSION_REJECT"
+   }
+  },
+  "R-04": {
+   "kind": "rule",
+   "ko": {
+    "s": "S11 무응답·GW 몰림",
+    "l": "F-08 무응답 구간이 S11에 집중 + 특정 SGW/PGW 편중 → GW_NODE_DOWN"
+   },
+   "ja": {
+    "s": "S11 無応答・GW 集中",
+    "l": "F-08 無応答区間が S11 に集中 + 特定 SGW/PGW への偏り → GW_NODE_DOWN"
+   }
+  },
+  "R-05": {
+   "kind": "rule",
+   "ko": {
+    "s": "S11 Cause 73·GW 몰림",
+    "l": "s11_error_Cause=73 + 특정 SGW/PGW 편중 → GW_RESOURCE_EXHAUSTION"
+   },
+   "ja": {
+    "s": "S11 Cause 73・GW 集中",
+    "l": "s11_error_Cause=73 + 特定 SGW/PGW への偏り → GW_RESOURCE_EXHAUSTION"
+   }
+  },
+  "R-23": {
+   "kind": "rule",
+   "ko": {
+    "s": "MME 과부하 신호",
+    "l": "UEContextRelease_Cause=500 편중 또는 S1AP 34(OverloadStart) 관측 → MME_OVERLOAD"
+   },
+   "ja": {
+    "s": "MME 過負荷の信号",
+    "l": "UEContextRelease_Cause=500 への偏り、または S1AP 34(OverloadStart)の観測 → MME_OVERLOAD"
+   }
+  },
+  "R-06": {
+   "kind": "rule",
+   "ko": {
+    "s": "무선 오류 몰림",
+    "l": "s1ap_error_Cause 1xx 대역 편중 + First Error S1AP + 지리 뭉침 → RAN_RADIO_QUALITY"
+   },
+   "ja": {
+    "s": "無線エラーの集中",
+    "l": "s1ap_error_Cause 1xx 帯への偏り + First Error S1AP + 地理的な固まり → RAN_RADIO_QUALITY"
+   }
+  },
+  "R-22": {
+   "kind": "rule",
+   "ko": {
+    "s": "무선 연결 유실 몰림",
+    "l": "UEContextRelease_Cause=121(Radio Connection With UE Lost) 편중 + 지리 뭉침 → RAN_RADIO_QUALITY"
+   },
+   "ja": {
+    "s": "無線接続喪失の集中",
+    "l": "UEContextRelease_Cause=121(Radio Connection With UE Lost)への偏り + 地理的な固まり → RAN_RADIO_QUALITY"
+   }
+  },
+  "R-17": {
+   "kind": "rule",
+   "ko": {
+    "s": "핸드오버 실패 셀 쌍 몰림",
+    "l": "PathSwitchFailure가 특정 셀 쌍에 집중 + 개별 셀 품질은 정상 → RAN_MOBILITY_ISSUE"
+   },
+   "ja": {
+    "s": "HO 失敗のセルペア集中",
+    "l": "PathSwitchFailure が特定のセルペアに集中 + 個別セルの品質は正常 → RAN_MOBILITY_ISSUE"
+   }
+  },
+  "R-16": {
+   "kind": "rule",
+   "ko": {
+    "s": "지역 뭉침·전송 손실",
+    "l": "지리 뭉침 + 다수 Core 노드 분산 + U-Plane 손실 동반 → TRANSPORT_LOSS"
+   },
+   "ja": {
+    "s": "地域の固まり・伝送損失",
+    "l": "地理的な固まり + 複数 Core ノードに分散 + U-Plane 損失を伴う → TRANSPORT_LOSS"
+   }
+  },
+  "R-15": {
+   "kind": "rule",
+   "ko": {
+    "s": "특정 Core 노드 몰림",
+    "l": "지리 흩어짐 + 특정 Core 노드 집중 + 평시 분포에서 이탈 → NF_UNREACHABLE"
+   },
+   "ja": {
+    "s": "特定 Core ノードの集中",
+    "l": "地理的な散らばり + 特定 Core ノード集中 + 平常時の分布から逸脱 → NF_UNREACHABLE"
+   }
+  },
+  "R-09": {
+   "kind": "rule",
+   "ko": {
+    "s": "down 재전송·지연 급증",
+    "l": "C-Plane 정상 + down 재전송/aRTT 급증, up 축 정상 → TRANSPORT_LOSS"
+   },
+   "ja": {
+    "s": "down 再送・遅延の急増",
+    "l": "C-Plane 正常 + down 再送/aRTT 急増、up 軸は正常 → TRANSPORT_LOSS"
+   }
+  },
+  "R-09b": {
+   "kind": "rule",
+   "ko": {
+    "s": "up 재전송·지연 급증",
+    "l": "up 재전송/sRTT 급증, down 축 정상 + Domain 편중 → EXTERNAL_SERVER"
+   },
+   "ja": {
+    "s": "up 再送・遅延の急増",
+    "l": "up 再送/sRTT 急増、down 軸は正常 + Domain への偏り → EXTERNAL_SERVER"
+   }
+  },
+  "R-09c": {
+   "kind": "rule",
+   "ko": {
+    "s": "단말 수신 창 닫힘 급증",
+    "l": "DnlinkWindowCloseCount 급증 + down 처리율 저하 + 양 축 RTT 정상 → UE_RECEIVE_LIMIT"
+   },
+   "ja": {
+    "s": "端末受信ウィンドウ閉鎖の急増",
+    "l": "DnlinkWindowCloseCount 急増 + down スループット低下 + 両軸の RTT は正常 → UE_RECEIVE_LIMIT"
+   }
+  },
+  "R-14": {
+   "kind": "rule",
+   "ko": {
+    "s": "DNS 응답·실패 급증",
+    "l": "DNS 응답시간·실패율 급증 + TCP 성공률 정상 → DNS_DEGRADATION"
+   },
+   "ja": {
+    "s": "DNS 応答・失敗の急増",
+    "l": "DNS 応答時間・失敗率の急増 + TCP 成功率は正常 → DNS_DEGRADATION"
+   }
+  },
+  "R-14b": {
+   "kind": "rule",
+   "ko": {
+    "s": "HTTP 5xx·도메인 몰림",
+    "l": "HTTP 5xx 급증 + 특정 Domain 편중 + 망 지표 정상 → EXTERNAL_SERVER"
+   },
+   "ja": {
+    "s": "HTTP 5xx・ドメイン集中",
+    "l": "HTTP 5xx 急増 + 特定 Domain への偏り + 網指標は正常 → EXTERNAL_SERVER"
+   }
+  },
+  "R-20": {
+   "kind": "rule",
+   "ko": {
+    "s": "절단율만 급증",
+    "l": "소통률 정상 + 절단율만 급증 → RAN_RADIO_QUALITY"
+   },
+   "ja": {
+    "s": "切断率のみ急増",
+    "l": "疎通率は正常 + 切断率のみ急増 → RAN_RADIO_QUALITY"
+   }
+  },
+  "R-21": {
+   "kind": "rule",
+   "ko": {
+    "s": "소통률만 악화",
+    "l": "소통률만 악화 + 절단율 정상 → SESSION_REJECT"
+   },
+   "ja": {
+    "s": "疎通率のみ悪化",
+    "l": "疎通率のみ悪化 + 切断率は正常 → SESSION_REJECT"
+   }
+  },
+  "R-10": {
+   "kind": "rule",
+   "ko": {
+    "s": "특정 기종에 실패 몰림",
+    "l": "특정 Vendor+Model에만 실패 집중 + 지리 흩어짐 → UE_MODEL_ISSUE"
+   },
+   "ja": {
+    "s": "特定機種への失敗集中",
+    "l": "特定 Vendor+Model にのみ失敗が集中 + 地理的な散らばり → UE_MODEL_ISSUE"
+   }
+  },
+  "R-30": {
+   "kind": "rule",
+   "ko": {
+    "s": "IMS 접속만 악화",
+    "l": "C-21(IMS)만 악화, C-20(Data) 정상 → IMS_PDN_ISSUE"
+   },
+   "ja": {
+    "s": "IMS 接続のみ悪化",
+    "l": "C-21(IMS)のみ悪化、C-20(Data)は正常 → IMS_PDN_ISSUE"
+   }
+  },
+  "R-33": {
+   "kind": "rule",
+   "ko": {
+    "s": "NR 레그 연결률 급락",
+    "l": "N-02(NR 레그 연결률) 급락 + N-04(DCNR 제한) 정상 → NSA_NR_LEG_FAILURE"
+   },
+   "ja": {
+    "s": "NR レッグ接続率の急落",
+    "l": "N-02(NR レッグ接続率)急落 + N-04(DCNR 制限)は正常 → NSA_NR_LEG_FAILURE"
+   }
+  },
+  "R-39": {
+   "kind": "rule",
+   "ko": {
+    "s": "SA 처리율만 하락",
+    "l": "SA 만 처리율 하락(EV-08d · LTE 유지) — 재료 없으면 down 처리율만 하락 (재전송·RTT 정상) + N-02 정상 + 부하 상승 → SA_QUALITY_LOW"
+   },
+   "ja": {
+    "s": "SA スループットのみ低下",
+    "l": "SA のみスループット低下(EV-08d・LTE 維持)— 材料がなければ down スループットのみ低下(再送・RTT 正常)+ N-02 正常 + 負荷上昇 → SA_QUALITY_LOW"
+   }
+  },
+  "R-47": {
+   "kind": "rule",
+   "ko": {
+    "s": "체감 지연·저속 증가(혼잡)",
+    "l": "체감 RTT 초과 + down RTT 상승 + 저속 가입자 증가(SA·LTE 공통) + 손실 낮음 + up·C-Plane 정상 → RAN_CAPACITY_CONGESTION"
+   },
+   "ja": {
+    "s": "体感遅延・低速増加(混雑)",
+    "l": "体感 RTT 超過 + down RTT 上昇 + 低速加入者の増加(SA・LTE 共通)+ 損失は低い + up・C-Plane は正常 → RAN_CAPACITY_CONGESTION"
+   }
+  },
+  "R-48": {
+   "kind": "rule",
+   "ko": {
+    "s": "DCNR 단말 비율 급상승",
+    "l": "칸의 DCNR 단말 비율 급상승 + 접속·절단 정상 → SA_FALLBACK_SUSPECTED"
+   },
+   "ja": {
+    "s": "DCNR 端末比率の急上昇",
+    "l": "区画の DCNR 端末比率が急上昇 + 接続・切断は正常 → SA_FALLBACK_SUSPECTED"
+   }
+  },
+  "R-40": {
+   "kind": "rule",
+   "ko": {
+    "s": "전환 가입자만 정체",
+    "l": "전환 가입자만 정체 상승(Q-08 · EV-04g) — 재료 없으면 U-07 셀 급증 + 전환 발생 셀 + C-Plane·재전송 정상 → RAN_HO_INTERRUPTION"
+   },
+   "ja": {
+    "s": "切替加入者のみ停滞",
+    "l": "切替加入者のみ停滞上昇(Q-08・EV-04g)— 材料がなければ U-07 セル急増 + 切替発生セル + C-Plane・再送は正常 → RAN_HO_INTERRUPTION"
+   }
+  },
+  "R-41": {
+   "kind": "rule",
+   "ko": {
+    "s": "셀 묶음 부하 급증",
+    "l": "셀 묶음 가입자·세션 급증 + 체감(업링크) 저하 + C-Plane 정상 + CLUSTER → EVENT_CROWD"
+   },
+   "ja": {
+    "s": "セル群の負荷急増",
+    "l": "セル群の加入者・セッション急増 + 体感(上り)低下 + C-Plane 正常 + CLUSTER → EVENT_CROWD"
+   }
+  },
+  "R-24": {
+   "kind": "rule",
+   "ko": {
+    "s": "First Error 상승·소통률 정상",
+    "l": "First Error 발생률 상승 + 회복률 높음 + 소통률 정상 → UNDETERMINED"
+   },
+   "ja": {
+    "s": "First Error 上昇・疎通率正常",
+    "l": "First Error 発生率の上昇 + 回復率が高い + 疎通率は正常 → UNDETERMINED"
+   }
+  },
+  "R-36": {
+   "kind": "rule",
+   "ko": {
+    "s": "특정 eNB 호 소멸",
+    "l": "특정 eNB 의 호 수 소멸 + 인접 eNB 정상 → RAN_NODE_DOWN"
+   },
+   "ja": {
+    "s": "特定 eNB の呼消滅",
+    "l": "特定 eNB の呼数が消滅 + 隣接 eNB は正常 → RAN_NODE_DOWN"
+   }
+  },
+  "R-46": {
+   "kind": "rule",
+   "ko": {
+    "s": "호 폭주·무호·Emergency 증가",
+    "l": "한 지역에 호 폭주 + eNB 무호 + Emergency 접속 증가 → NATURAL_DISASTER_SUSPECTED"
+   },
+   "ja": {
+    "s": "呼殺到・無呼・Emergency 増加",
+    "l": "一地域に呼殺到 + eNB 無呼 + Emergency 接続増加 → NATURAL_DISASTER_SUSPECTED"
+   }
+  },
+  "R-18": {
+   "kind": "rule",
+   "ko": {
+    "s": "열화 영역 시간 확대",
+    "l": "열화 영역이 시간에 따라 확대 → UNDETERMINED"
+   },
+   "ja": {
+    "s": "劣化領域の時間的拡大",
+    "l": "劣化領域が時間とともに拡大 → UNDETERMINED"
+   }
+  },
+  "R-11": {
+   "kind": "rule",
+   "ko": {
+    "s": "계단형 변화·정비창 미등록",
+    "l": "계단형 변화 + 변곡 전후 안정 + 정비창 미등록 → CHANGE_SUSPECTED"
+   },
+   "ja": {
+    "s": "階段状の変化・保守枠未登録",
+    "l": "階段状の変化 + 変曲点前後は安定 + 保守枠未登録 → CHANGE_SUSPECTED"
+   }
+  },
+  "C-01": {
+   "kind": "kpi",
+   "ko": {
+    "s": "호 시도수",
+    "l": ""
+   },
+   "ja": {
+    "s": "呼試行数",
+    "l": ""
+   }
+  },
+  "C-02": {
+   "kind": "kpi",
+   "ko": {
+    "s": "소통률",
+    "l": ""
+   },
+   "ja": {
+    "s": "疎通率",
+    "l": ""
+   }
+  },
+  "C-04": {
+   "kind": "kpi",
+   "ko": {
+    "s": "절단률",
+    "l": ""
+   },
+   "ja": {
+    "s": "切断率",
+    "l": ""
+   }
+  },
+  "C-20": {
+   "kind": "kpi",
+   "ko": {
+    "s": "Data 접속률",
+    "l": ""
+   },
+   "ja": {
+    "s": "Data 接続率",
+    "l": ""
+   }
+  },
+  "C-21": {
+   "kind": "kpi",
+   "ko": {
+    "s": "IMS 접속률",
+    "l": ""
+   },
+   "ja": {
+    "s": "IMS 接続率",
+    "l": ""
+   }
+  },
+  "N-01": {
+   "kind": "kpi",
+   "ko": {
+    "s": "DCNR 단말 비율",
+    "l": ""
+   },
+   "ja": {
+    "s": "DCNR 端末比率",
+    "l": ""
+   }
+  },
+  "N-02": {
+   "kind": "kpi",
+   "ko": {
+    "s": "NR 레그 연결률",
+    "l": ""
+   },
+   "ja": {
+    "s": "NR レッグ接続率",
+    "l": ""
+   }
+  },
+  "P-01": {
+   "kind": "kpi",
+   "ko": {
+    "s": "인증 성공률",
+    "l": ""
+   },
+   "ja": {
+    "s": "認証成功率",
+    "l": ""
+   }
+  },
+  "U-07": {
+   "kind": "kpi",
+   "ko": {
+    "s": "down Zero Window율",
+    "l": ""
+   },
+   "ja": {
+    "s": "down Zero Window 率",
+    "l": ""
+   }
+  },
+  "U-12": {
+   "kind": "kpi",
+   "ko": {
+    "s": "down 재전송률",
+    "l": ""
+   },
+   "ja": {
+    "s": "down 再送率",
+    "l": ""
+   }
+  },
+  "U-15": {
+   "kind": "kpi",
+   "ko": {
+    "s": "down 처리율",
+    "l": ""
+   },
+   "ja": {
+    "s": "down スループット",
+    "l": ""
+   }
+  },
+  "U-23": {
+   "kind": "kpi",
+   "ko": {
+    "s": "HTTP 성공률",
+    "l": ""
+   },
+   "ja": {
+    "s": "HTTP 成功率",
+    "l": ""
+   }
+  },
+  "U-25": {
+   "kind": "kpi",
+   "ko": {
+    "s": "HTTP 5xx율",
+    "l": ""
+   },
+   "ja": {
+    "s": "HTTP 5xx 率",
+    "l": ""
+   }
+  },
+  "U-29": {
+   "kind": "kpi",
+   "ko": {
+    "s": "DNS 성공률",
+    "l": ""
+   },
+   "ja": {
+    "s": "DNS 成功率",
+    "l": ""
+   }
+  },
+  "U-32": {
+   "kind": "kpi",
+   "ko": {
+    "s": "DNS 응답시간",
+    "l": ""
+   },
+   "ja": {
+    "s": "DNS 応答時間",
+    "l": ""
+   }
+  },
+  "Q-02": {
+   "kind": "kpi",
+   "ko": {
+    "s": "불량 체감 가입자 비율",
+    "l": ""
+   },
+   "ja": {
+    "s": "不良体感加入者比率",
+    "l": ""
+   }
+  },
+  "Q-04": {
+   "kind": "kpi",
+   "ko": {
+    "s": "정체 가입자 비율",
+    "l": ""
+   },
+   "ja": {
+    "s": "停滞加入者比率",
+    "l": ""
+   }
+  },
+  "Q-06": {
+   "kind": "kpi",
+   "ko": {
+    "s": "저속 가입자 비율",
+    "l": ""
+   },
+   "ja": {
+    "s": "低速加入者比率",
+    "l": ""
+   }
+  },
+  "Q-07": {
+   "kind": "kpi",
+   "ko": {
+    "s": "대기 불량 가입자 비율",
+    "l": ""
+   },
+   "ja": {
+    "s": "待機不良加入者比率",
+    "l": ""
+   }
+  },
+  "Q-08": {
+   "kind": "kpi",
+   "ko": {
+    "s": "이동 직후 정체 가입자 비율",
+    "l": ""
+   },
+   "ja": {
+    "s": "移動直後の停滞加入者比率",
+    "l": ""
+   }
+  },
+  "Q-09": {
+   "kind": "kpi",
+   "ko": {
+    "s": "업링크 무선 불량 비율",
+    "l": ""
+   },
+   "ja": {
+    "s": "上り無線不良比率",
+    "l": ""
+   }
+  },
+  "Q-11": {
+   "kind": "kpi",
+   "ko": {
+    "s": "RTT 초과 가입자 비율",
+    "l": ""
+   },
+   "ja": {
+    "s": "RTT 超過加入者比率",
+    "l": ""
+   }
+  },
+  "PSF": {
+   "kind": "kpi",
+   "ko": {
+    "s": "PathSwitch 실패율",
+    "l": ""
+   },
+   "ja": {
+    "s": "PathSwitch 失敗率",
+    "l": ""
+   }
+  },
+  "EV-00": {
+   "kind": "evidence",
+   "ko": {
+    "s": "Incident 맥락",
+    "l": ""
+   },
+   "ja": {
+    "s": "Incident の文脈",
+    "l": ""
+   }
+  },
+  "EV-04b": {
+   "kind": "evidence",
+   "ko": {
+    "s": "호 상태 전이 분해",
+    "l": ""
+   },
+   "ja": {
+    "s": "呼状態遷移の分解",
+    "l": ""
+   }
+  },
+  "EV-04g": {
+   "kind": "evidence",
+   "ko": {
+    "s": "전환 / 비전환 가입자 정체율",
+    "l": ""
+   },
+   "ja": {
+    "s": "切替 / 非切替加入者の停滞率",
+    "l": ""
+   }
+  },
+  "EV-08e": {
+   "kind": "evidence",
+   "ko": {
+    "s": "체감 가입자 부하",
+    "l": ""
+   },
+   "ja": {
+    "s": "体感加入者負荷",
+    "l": ""
+   }
+  },
+  "EV-09": {
+   "kind": "evidence",
+   "ko": {
+    "s": "가입자 영향 규모",
+    "l": ""
+   },
+   "ja": {
+    "s": "加入者影響規模",
+    "l": ""
+   }
+  },
+  "EV-11": {
+   "kind": "evidence",
+   "ko": {
+    "s": "지리 분포 패턴",
+    "l": ""
+   },
+   "ja": {
+    "s": "地理分布パターン",
+    "l": ""
+   }
+  },
+  "EV-12": {
+   "kind": "evidence",
+   "ko": {
+    "s": "지리 × Core노드 교차 분석",
+    "l": ""
+   },
+   "ja": {
+    "s": "地理 × Core ノード交差分析",
+    "l": ""
+   }
+  },
+  "POINT": {
+   "kind": "geo",
+   "ko": {
+    "s": "한 지점",
+    "l": "셀 1곳이거나 반경 0.9km 미만에 모여 있음"
+   },
+   "ja": {
+    "s": "一地点",
+    "l": "セル1か所、または半径 0.9km 未満に集中"
+   }
+  },
+  "CLUSTER": {
+   "kind": "geo",
+   "ko": {
+    "s": "한 동네에 뭉침",
+    "l": "셀이 반경 3km 이내에 뭉쳐 있음"
+   },
+   "ja": {
+    "s": "一地域に固まる",
+    "l": "セルが半径 3km 以内に固まっている"
+   }
+  },
+  "CORRIDOR": {
+   "kind": "geo",
+   "ko": {
+    "s": "선을 따라 길쭉함",
+    "l": "셀 5개 이상이 반경 2.5km 넘게 길쭉하게 놓임(긴 축이 짧은 축의 3.2배 초과)"
+   },
+   "ja": {
+    "s": "線に沿って細長い",
+    "l": "セル5か所以上が半径 2.5km 超で細長く並ぶ(長軸が短軸の 3.2 倍超)"
+   }
+  },
+  "SCATTER": {
+   "kind": "geo",
+   "ko": {
+    "s": "셀이 흩어져 있음",
+    "l": "한 곳에 모이지 않고 흩어짐. 반경 60km 를 넘어도 셀이 12개 미만이면 여기다"
+   },
+   "ja": {
+    "s": "セルが散らばる",
+    "l": "一か所に集まらず散らばる。半径 60km 超でもセル12か所未満ならここに入る"
+   }
+  },
+  "WIDE": {
+   "kind": "geo",
+   "ko": {
+    "s": "넓은 지역 전체",
+    "l": "셀 12개 이상이 반경 60km 를 넘게 퍼져 있음"
+   },
+   "ja": {
+    "s": "広域全体",
+    "l": "セル12か所以上が半径 60km を超えて広がる"
+   }
+  },
+  "STEP": {
+   "kind": "time",
+   "ko": {
+    "s": "계단형",
+    "l": "한 번에 뛰어오른 변화(변화 폭이 추세의 3배 초과)"
+   },
+   "ja": {
+    "s": "階段状",
+    "l": "一度に跳ね上がる変化(変化幅が傾向の 3 倍超)"
+   }
+  },
+  "RAMP": {
+   "kind": "time",
+   "ko": {
+    "s": "점진형",
+    "l": "서서히 변함"
+   },
+   "ja": {
+    "s": "漸進型",
+    "l": "徐々に変化する"
+   }
+  },
+  "Cause 73": {
+   "kind": "cause_no",
+   "ko": {
+    "s": "자원 없음",
+    "l": "S11 · No resources available"
+   },
+   "ja": {
+    "s": "資源なし",
+    "l": "S11 · No resources available"
+   }
+  },
+  "Cause 68": {
+   "kind": "cause_no",
+   "ko": {
+    "s": "서비스 미지원",
+    "l": "S11 · Service not supported"
+   },
+   "ja": {
+    "s": "サービス非対応",
+    "l": "S11 · Service not supported"
+   }
+  },
+  "Cause 26": {
+   "kind": "cause_no",
+   "ko": {
+    "s": "자원 부족",
+    "l": "ESM · Insufficient resources"
+   },
+   "ja": {
+    "s": "資源不足",
+    "l": "ESM · Insufficient resources"
+   }
+  },
+  "Cause 30": {
+   "kind": "cause_no",
+   "ko": {
+    "s": "GW 가 요청 거절",
+    "l": "ESM · Request rejected by Serving GW or PDN GW"
+   },
+   "ja": {
+    "s": "GW が要求を拒否",
+    "l": "ESM · Request rejected by Serving GW or PDN GW"
+   }
+  },
+  "Cause 96": {
+   "kind": "cause_no",
+   "ko": {
+    "s": "필수 정보 오류",
+    "l": "ESM · Invalid mandatory information"
+   },
+   "ja": {
+    "s": "必須情報の誤り",
+    "l": "ESM · Invalid mandatory information"
+   }
+  },
+  "Cause 8": {
+   "kind": "cause_no",
+   "ko": {
+    "s": "서비스 허용 안 됨",
+    "l": "EMM · EPS and non-EPS services not allowed"
+   },
+   "ja": {
+    "s": "サービス許可なし",
+    "l": "EMM · EPS and non-EPS services not allowed"
+   }
+  },
+  "Cause 15": {
+   "kind": "cause_no",
+   "ko": {
+    "s": "맞는 셀 없음",
+    "l": "EMM · No Suitable Cells In tracking area"
+   },
+   "ja": {
+    "s": "適切なセルなし",
+    "l": "EMM · No Suitable Cells In tracking area"
+   }
+  },
+  "Cause 17": {
+   "kind": "cause_no",
+   "ko": {
+    "s": "망 오류",
+    "l": "EMM · Network failure"
+   },
+   "ja": {
+    "s": "網エラー",
+    "l": "EMM · Network failure"
+   }
+  },
+  "Cause 100": {
+   "kind": "cause_no",
+   "ko": {
+    "s": "사유 불특정",
+    "l": "S1AP · Unspecified"
+   },
+   "ja": {
+    "s": "理由不特定",
+    "l": "S1AP · Unspecified"
+   }
+  },
+  "Cause 106": {
+   "kind": "cause_no",
+   "ko": {
+    "s": "대상 쪽 핸드오버 실패",
+    "l": "S1AP · Handover Failure In Target EPC/eNB"
+   },
+   "ja": {
+    "s": "移動先でのハンドオーバ失敗",
+    "l": "S1AP · Handover Failure In Target EPC/eNB"
+   }
+  },
+  "Cause 121": {
+   "kind": "cause_no",
+   "ko": {
+    "s": "무선 연결 유실",
+    "l": "S1AP · Radio Connection With UE Lost"
+   },
+   "ja": {
+    "s": "無線接続喪失",
+    "l": "S1AP · Radio Connection With UE Lost"
+   }
+  },
+  "Cause 125": {
+   "kind": "cause_no",
+   "ko": {
+    "s": "무선 자원 없음",
+    "l": "S1AP · Radio resources not available"
+   },
+   "ja": {
+    "s": "無線資源なし",
+    "l": "S1AP · Radio resources not available"
+   }
+  },
+  "Cause 126": {
+   "kind": "cause_no",
+   "ko": {
+    "s": "무선 절차 실패",
+    "l": "S1AP · Failure in the Radio Interface Procedure"
+   },
+   "ja": {
+    "s": "無線手順の失敗",
+    "l": "S1AP · Failure in the Radio Interface Procedure"
+   }
+  },
+  "Cause 301": {
+   "kind": "cause_no",
+   "ko": {
+    "s": "인증 실패",
+    "l": "S1AP · Authentication Failure"
+   },
+   "ja": {
+    "s": "認証失敗",
+    "l": "S1AP · Authentication Failure"
+   }
+  },
+  "Cause 302": {
+   "kind": "cause_no",
+   "ko": {
+    "s": "해제(Detach)",
+    "l": "S1AP · Detach"
+   },
+   "ja": {
+    "s": "解除(Detach)",
+    "l": "S1AP · Detach"
+   }
+  },
+  "Cause 500": {
+   "kind": "cause_no",
+   "ko": {
+    "s": "제어 처리 과부하",
+    "l": "S1AP · Control Processing Overload"
+   },
+   "ja": {
+    "s": "制御処理の過負荷",
+    "l": "S1AP · Control Processing Overload"
+   }
+  },
+  "Cause 504": {
+   "kind": "cause_no",
+   "ko": {
+    "s": "사유 불특정 실패",
+    "l": "S1AP · Unspecified Failure"
+   },
+   "ja": {
+    "s": "理由不特定の失敗",
+    "l": "S1AP · Unspecified Failure"
+   }
+  },
+  "Cause 900": {
+   "kind": "cause_no",
+   "ko": {
+    "s": "응답 시간 초과",
+    "l": "공통 · TIMEOUT"
+   },
+   "ja": {
+    "s": "応答タイムアウト",
+    "l": "共通 · TIMEOUT"
+   }
+  },
+  "SGW": {
+   "kind": "abbr",
+   "ko": {
+    "s": "세션을 나르는 코어 장비",
+    "l": "Serving Gateway"
+   },
+   "ja": {
+    "s": "セッションを運ぶコア装置",
+    "l": "Serving Gateway"
+   }
+  },
+  "PGW": {
+   "kind": "abbr",
+   "ko": {
+    "s": "외부 망과 잇는 코어 장비",
+    "l": "PDN Gateway"
+   },
+   "ja": {
+    "s": "外部網とつなぐコア装置",
+    "l": "PDN Gateway"
+   }
+  },
+  "MME": {
+   "kind": "abbr",
+   "ko": {
+    "s": "접속·이동을 관리하는 코어 장비",
+    "l": "Mobility Management Entity"
+   },
+   "ja": {
+    "s": "接続・移動を管理するコア装置",
+    "l": "Mobility Management Entity"
+   }
+  },
+  "HSS": {
+   "kind": "abbr",
+   "ko": {
+    "s": "가입자 정보 저장소",
+    "l": "Home Subscriber Server"
+   },
+   "ja": {
+    "s": "加入者情報の保管装置",
+    "l": "Home Subscriber Server"
+   }
+  },
+  "APN": {
+   "kind": "abbr",
+   "ko": {
+    "s": "접속 대상 망 이름",
+    "l": "Access Point Name"
+   },
+   "ja": {
+    "s": "接続先の網の名前",
+    "l": "Access Point Name"
+   }
+  },
+  "eNB": {
+   "kind": "abbr",
+   "ko": {
+    "s": "LTE 기지국",
+    "l": "evolved NodeB"
+   },
+   "ja": {
+    "s": "LTE 基地局",
+    "l": "evolved NodeB"
+   }
+  },
+  "NSA": {
+   "kind": "abbr",
+   "ko": {
+    "s": "LTE 에 5G 를 얹어 쓰는 방식",
+    "l": "Non-Standalone"
+   },
+   "ja": {
+    "s": "LTE に 5G を重ねて使う方式",
+    "l": "Non-Standalone"
+   }
+  },
+  "DCNR": {
+   "kind": "abbr",
+   "ko": {
+    "s": "LTE·5G NR 동시 연결",
+    "l": "Dual Connectivity with NR"
+   },
+   "ja": {
+    "s": "LTE・5G NR の同時接続",
+    "l": "Dual Connectivity with NR"
+   }
+  },
+  "RTT": {
+   "kind": "abbr",
+   "ko": {
+    "s": "왕복 지연",
+    "l": "Round Trip Time"
+   },
+   "ja": {
+    "s": "往復遅延",
+    "l": "Round Trip Time"
+   }
+  },
+  "field:confidence": {
+   "kind": "field",
+   "ko": {
+    "s": "판단 확신. 0~1, 0.5 이상이어야 인정",
+    "l": "0.5 미만이면 원인이 맞아도 화면에는 판단 보류로 보인다. 원인마다 상한이 있다."
+   },
+   "ja": {
+    "s": "判断の確信度。0~1、0.5 以上で認定",
+    "l": "0.5 未満なら原因が合っていても画面には判断保留と表示される。原因ごとに上限がある。"
+   }
+  },
+  "field:detect_min": {
+   "kind": "field",
+   "ko": {
+    "s": "주입부터 첫 사건·이벤트까지(대략)",
+    "l": "0 은 주입과 같은 분이다."
+   },
+   "ja": {
+    "s": "注入から最初の事象・イベントまで(概算)",
+    "l": "0 は注入と同じ分である。"
+   }
+  },
+  "field:reached": {
+   "kind": "field",
+   "ko": {
+    "s": "정상이 끊기지 않고 이어진 마지막 단계",
+    "l": "정상·해당 없음 단계가 끊기지 않고 이어진 마지막 단계다. D 가 일부여도 끊긴 것으로 보고 '도달 없음'이다."
+   },
+   "ja": {
+    "s": "正常が途切れず続いた最後の段階",
+    "l": "正常・該当なしの段階が途切れず続いた最後の段階である。D が一部でも途切れたとみなし「到達なし」とする。"
+   }
+  },
+  "field:cause": {
+   "kind": "field",
+   "ko": {
+    "s": "맞혀야 할 원인",
+    "l": "시스템이 1위로 내야 하는 원인 코드다."
+   },
+   "ja": {
+    "s": "当てるべき原因",
+    "l": "システムが1位に出すべき原因コードである。"
+   }
+  },
+  "field:rules": {
+   "kind": "field",
+   "ko": {
+    "s": "그 원인을 세우는 판정 규칙",
+    "l": "정답 원인 코드를 내는 룰이다."
+   },
+   "ja": {
+    "s": "その原因を立てる判定ルール",
+    "l": "正解の原因コードを出すルールである。"
+   }
+  },
+  "field:alternatives": {
+   "kind": "field",
+   "ko": {
+    "s": "정답은 아니지만 설 것으로 예상되는 룰",
+    "l": "경쟁 후보나 심각도 보조 룰이다. 채점에는 쓰지 않고 사람이 확인할 때 본다."
+   },
+   "ja": {
+    "s": "正解ではないが立つと予想されるルール",
+    "l": "競合候補や重大度の補助ルールである。採点には使わず、人の確認用である。"
+   }
+  },
+  "field:kpi": {
+   "kind": "field",
+   "ko": {
+    "s": "장애가 움직이는 대표 지표",
+    "l": ""
+   },
+   "ja": {
+    "s": "障害で動く代表指標",
+    "l": ""
+   }
+  },
+  "field:geo": {
+   "kind": "field",
+   "ko": {
+    "s": "대상 셀이 지도에 퍼진 모양",
+    "l": ""
+   },
+   "ja": {
+    "s": "対象セルの地図上の広がり方",
+    "l": ""
+   }
+  },
+  "field:latest_cause": {
+   "kind": "field",
+   "ko": {
+    "s": "시스템이 1위로 낸 원인",
+    "l": ""
+   },
+   "ja": {
+    "s": "システムが1位に出した原因",
+    "l": ""
+   }
+  },
+  "field:fault": {
+   "kind": "field",
+   "ko": {
+    "s": "주입 번호",
+    "l": ""
+   },
+   "ja": {
+    "s": "注入番号",
+    "l": ""
+   }
+  },
+  "field:run": {
+   "kind": "field",
+   "ko": {
+    "s": "회차 이름",
+    "l": ""
+   },
+   "ja": {
+    "s": "実行回の名前",
+    "l": ""
+   }
+  }
+ }
+}

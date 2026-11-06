@@ -1383,6 +1383,15 @@ def inject(rec, fault_name: str, rng: random.Random, *, tries: int = 6,
     return True
 
 
+def request_gap(cause: int, rng) -> float:
+    """절단의 요청 → 해제 간격(초) — 명세 `drop.request_gap_ms`."""
+    d = _spec().drop
+    gap = ((d.get("request_gap_ms_by_cause") or {}).get(cause)
+           or d.get("request_gap_ms", (1, 12)))
+    g_lo, g_hi = (float(v) / 1000 for v in gap)
+    return rng.uniform(g_lo, g_hi)
+
+
 def drop(rec, cause: int, rng: random.Random) -> bool:
     """**연결된 호를 비정상 해제로 끊는다** — `spec.drop` 의 실측 모양.
 
@@ -1407,10 +1416,7 @@ def drop(rec, cause: int, rng: random.Random) -> bool:
     floor = sum(rec.num(f"initial_{p}_duration") for p in PHASES) / US
     lo, hi = (float(v) for v in d.get("duration_scale", (0.15, 0.6)))
     t_req = t0 + max(floor + 0.01, dur * rng.uniform(lo, hi))
-    gap = ((d.get("request_gap_ms_by_cause") or {}).get(cause)
-           or d.get("request_gap_ms", (1, 12)))
-    g_lo, g_hi = (float(v) / 1000 for v in gap)
-    t_rel = t_req + rng.uniform(g_lo, g_hi)
+    t_rel = t_req + request_gap(cause, rng)
     m_req, m_rel = int(d.get("first_message", 18)), int(d.get("last_message", 23))
     rec.set("drop_flag", 1)
     rec.set("first_error_interface_protocol", 2)

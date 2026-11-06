@@ -7,9 +7,12 @@ A 의 호를 받는다. 이 파일이 지키는 것은 —
    새면 B 에 평소 호가 쌓이고, 끄는 순간 graphio 무호(D4)로 탐지된다.
 2. **같은 B 를 60분 안에 다시 켜지 않는다** — D4 는 꺼지는 순간 직전 60분
    호 수 중앙값을 본다(`scenarios.shift_pick` 머리말).
-3. **국면** — 0–10분 A 상승 · 10분 B 개통 후 A 40 / B 60 · 30분 B 소등.
-4. **길이가 DB 에 30분으로 들어간다** — `poll_transitions` 가 행의
+3. **국면** — 0–20분 A 상승 · 20분 B 개통 후 A 40 / B 60 · 40분 B 소등(11-06 사용자 승인으로 30분 → 40분. 숫자는
+   `SHIFT_RISE`·`SHIFT_TOTAL` 에서 읽는다).
+4. **길이가 DB 에 `SHIFT_TOTAL` 분으로 들어간다** — `poll_transitions` 가 행의
    `DURATION_MIN` 으로 장애를 끝낸다.
+5. **B 가 켜진 뒤 A 에 하한 꼬리가 남지 않는다** — 남으면 B 소등 뒤 꼬리가 모두 A 에 떨어져 평시의 3배로 뛴다
+   (F-152 · 17:29 80건 · 평시 22건).
 
 **DB 를 쓰지 않는다**(`test_session_model.py` 머리말). `PemdbGen` 은
 `load_cells`·`load_apps` 만 바꿔 띄운다 — 분포·프로파일은 `data/` 의 실측
@@ -163,18 +166,46 @@ def test_consecutive_runs_use_different_standby():
 
 def test_phases_rise_split_and_switch_off(gen):
     t0 = datetime(2026, 10, 29, 15, 0)
-    got = _run(gen, t0, start=2, minutes=36)
+    st, rise, total = 2, S.SHIFT_RISE, S.SHIFT_TOTAL
+    got = _run(gen, t0, start=st, minutes=st + total + 6)
     # 시작 전·B 개통 전에는 B 에 호가 없다
-    assert all(b == 0 for _, b, _ in got[:12])
-    # 0–10분 A 가 오른다
-    assert got[11][0] > got[1][0] * 1.2
+    assert all(b == 0 for _, b, _ in got[:st + rise])
+    # 혼잡 구간에 A 가 오른다
+    assert got[st + rise - 1][0] > got[st + 1][0] * 1.2
     # 개통 뒤 A 40 · B 60 (±8%p)
-    a = sum(x for x, _, _ in got[13:31])
-    b = sum(y for _, y, _ in got[13:31])
+    a = sum(x for x, _, _ in got[st + rise + 1:st + total - 1])
+    b = sum(y for _, y, _ in got[st + rise + 1:st + total - 1])
     assert 0.52 < b / (a + b) < 0.68
-    # 30분 창이 끝나면 B 호는 즉시 0, 세션은 한 분 안에 떠난다
-    assert all(y == 0 for _, y, _ in got[32:])
-    assert all(s == 0 for _, _, s in got[33:])
+    # 창이 끝나면 B 호는 즉시 0, 세션은 한 분 안에 떠난다
+    assert all(y == 0 for _, y, _ in got[st + total:])
+    assert all(s_ == 0 for _, _, s_ in got[st + total + 1:])
+
+
+def test_a_does_not_jump_after_b_is_switched_off(gen):
+    """F-152 — B 소등 뒤 A 가 평시의 3배(78·60·64·56건)로 뛰었다. 꼬리를 거둬 평시 수준으로 돌아와야 한다."""
+    t0 = datetime(2026, 10, 29, 15, 0)
+    st, total = 2, S.SHIFT_TOTAL
+    got = _run(gen, t0, start=st, minutes=st + total + 6)
+    base = sum(x for x, _, _ in got[:st]) / st
+    after = [x for x, _, _ in got[st + total:st + total + 5]]
+    assert base > 0
+    assert max(after) < 2.0 * base, (base, after)
+
+
+def test_no_floor_tail_is_left_on_a_once_b_is_open(gen):
+    """B 가 켜진 뒤에는 하한 호의 60% 가 B 로 가서 A 는 평시 수준이다 — 꼬리 상태를 남기지 않는다."""
+    t0 = datetime(2026, 10, 29, 15, 0)
+    st, rise = 2, S.SHIFT_RISE
+    gen.anchor = t0
+    gen.set_fault_rows([{"fault_id": 1, "kind": "capacity_shift", "target": None,
+                         "start_ts": t0 + timedelta(minutes=st), "duration_min": S.SHIFT_TOTAL, "intensity": 1.0}])
+    seen = {}
+    for m in range(st + rise + 4):
+        ts = t0 + timedelta(minutes=m)
+        list(gen.records(m, ts))
+        seen[m] = len(gen._floor_last)
+    assert seen[st + rise - 2] > 0, "혼잡 구간에는 꼬리가 남아야 한다(하한이 A 셀을 채운다)"
+    assert seen[st + rise + 2] == 0, "B 개통 뒤에도 A 셀의 꼬리가 남았다"
 
 
 def test_every_subscriber_can_be_found_by_imsi(gen):
@@ -405,8 +436,11 @@ INSTANT_KINDS = {
     "change_suspected", "ims_pdn", "nsa_policy_restrict", "auc_no_response",
     "dra_route_failure", "son_param_change", "earthquake", "enb_s1_outage",
     "apn_pdn_failure",
+    "natural_disaster",          # 11-04 자연재해(27번) — 국면은 kind 가 만들고 시작·끝은 즉시다
+    "sa_fallback",               # 11-05 SA→LTE 폴백(17번) — 숨은 단말이 시작 분부터 들어오고(도착 램프는 단말마다) 끝나면 돌아간다
 }
-FIXED_KINDS = {"event_crowd", "capacity_shift", "partial_recovery", "dns_flap"}
+FIXED_KINDS = {"event_crowd", "capacity_shift", "partial_recovery", "dns_flap",
+               "natural_disaster", "sa_fallback"}
 
 
 def test_instant_kinds_table():

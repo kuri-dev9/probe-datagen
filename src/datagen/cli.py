@@ -955,7 +955,9 @@ def cmd_run(args) -> int:
                 continue
 
             active = control.poll_transitions(conn, datetime.now())
-            scs, bad = gen.set_fault_rows(active)
+            # 자연재해 자동 대상이 창고의 eNB 호율을 본다(`pemdb1.enb_call_rate` · 한 fault 에 한 번)
+            scs, bad = gen.set_fault_rows(
+                active, enb_rate=lambda t: P.enb_call_rate(conn, t))
             if bad:
                 _cancel_faults(conn, bad, _CANCEL_NOTE)
             _aside("정답 기록", _live_truth, P, gen, scs)
@@ -1286,7 +1288,8 @@ def _pem_follow(conn, P, gen, w, last_done, *, umaps: dict,
             active = control.poll_transitions(conn, pending)
             if gen.anchor is None:
                 gen.anchor = pending
-            scs, bad = gen.set_fault_rows(active)
+            scs, bad = gen.set_fault_rows(
+                active, enb_rate=lambda t: P.enb_call_rate(conn, t))
             for fid in bad:
                 print(f"  ! fault {fid} 해석 실패 — 건너뛴다", flush=True)
             _aside("정답 기록", _live_truth, P, gen, scs)
@@ -2291,6 +2294,41 @@ def cmd_patterns(args) -> int:
     return 0
 
 
+def cmd_measure(args) -> int:
+    """권장 지속시간 실측 한 건을 넣는다. 재지 못한 값은 빼면 `null` 로 남는다(불변규칙 17)."""
+    from . import measured
+    from .scenarios import KIND_SPECS, recommended_duration
+
+    if args.list:
+        for kind, runs in sorted(measured.load().items()):
+            if args.kind and kind != args.kind:
+                continue
+            d = recommended_duration(kind) or {}
+            print(f"{kind}  권장 {d.get('recommended')}분 ({d.get('basis')}) · {d.get('why')}")
+            for r in runs:
+                print(f"  {r.get('fault')} {r.get('result')} 정답까지 {r.get('to_correct_min')}분 "
+                      f"· 길이 {r.get('duration_min')}분 · 강도 {r.get('intensity')}")
+        return 0
+    if args.kind not in KIND_SPECS:
+        print(f"모르는 장애 종류다: {args.kind}", file=sys.stderr)
+        return 2
+    if not args.fault or not args.result:
+        print("--fault 와 --result 가 필요하다", file=sys.stderr)
+        return 2
+    if args.result == "correct" and args.correct is None:
+        print("정답 기록에는 --correct(T0 → 정답 판정)가 필요하다 — 권장의 근거다", file=sys.stderr)
+        return 2
+    measured.add(args.kind, {
+        "fault": args.fault, "result": args.result, "intensity": args.intensity,
+        "duration_min": args.duration, "to_first_event_min": args.first,
+        "to_incident_min": args.incident, "to_correct_min": args.correct,
+        "end_to_final_min": args.settle,
+    })
+    d = recommended_duration(args.kind)
+    print(f"{args.kind} {args.fault} 기록 · 권장 {d['recommended']}분 ({d['basis']}) · {d['why']}")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="datagen")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -2409,6 +2447,20 @@ def main(argv=None) -> int:
     c.add_argument("--target", type=float, default=20.0,
                    help="생성에 허용할 초 (기본 20 = 60초 틱 예산의 1/3)")
     c.set_defaults(fn=cmd_capacity)
+
+    # 권장 지속시간 실측 기록 — 값은 사람이 넣는다(`datagen.measured`)
+    ms = sub.add_parser("measure", help="주입 한 건의 탐지 구간을 권장 지속시간 실측에 기록")
+    ms.add_argument("--list", action="store_true", help="기록과 현재 권장값만 보여 준다")
+    ms.add_argument("--kind", help="장애 종류 (`ran_congestion` 등)")
+    ms.add_argument("--fault", help="장애 ID (같은 장애는 덮어쓴다)")
+    ms.add_argument("--result", choices=("correct", "wrong", "missed"), help="정답·오답·미탐")
+    ms.add_argument("--intensity", type=float)
+    ms.add_argument("--duration", type=float, help="주입 길이(분)")
+    ms.add_argument("--first", type=float, help="T0 → 첫 이벤트(분)")
+    ms.add_argument("--incident", type=float, help="T0 → 사건 열림(분)")
+    ms.add_argument("--correct", type=float, help="T0 → 정답 판정(분)")
+    ms.add_argument("--settle", type=float, help="주입 끝 → 최종 판정(분)")
+    ms.set_defaults(fn=cmd_measure)
 
     # 마스터 토폴로지 — **1회성이다.** `pemfill`·`run` 은 상주하며 마스터를
     # 읽기만 하고, 쓰기를 그쪽에 넣으면 gen 이 둘 떴을 때 마스터가 흔들린다.

@@ -153,7 +153,9 @@ def test_every_kind_has_a_hook():
     "등록됐는데 아무 일도 안 하는" 상태와 구분되지 않는다.
     """
     hooks = set(SC.MUTATORS) | set(SC.PLAN_MUTATORS) | set(SC.SUPPRESSORS)
-    assert set(SC.KIND_SPECS) == hooks, set(SC.KIND_SPECS) ^ hooks
+    # `sa_fallback`(17번 · 11-05)은 훅이 없다 — 레코드를 바꾸지 않고 **새 레코드를 더하는** 종류라
+    # `pemdb1._sa_fallback_drafts` 가 한다. 동작은 `test_sa_fallback.py` 가 지킨다(여기서는 일부러 뺀다)
+    assert set(SC.KIND_SPECS) - {"sa_fallback"} == hooks, set(SC.KIND_SPECS) ^ hooks
 
 
 def test_kind_specs_declare_scoring_meta():
@@ -184,8 +186,11 @@ def test_supported_ids_cover_every_kind():
     assert {sc.id for sc in scs} == set(SUPPORTED)
     # 채점 문항이 아닌 재현(`j-sc-24`)은 배치에 없다 — 소등 eNB 설정이
     # 있어야 성립하고, 정답 파일에 들어가지 않는다
+    # `natural_disaster`(27번 새 종류 · 11-04)도 배치에 없다 — 배치 `J-SC-27` 은 옛 `earthquake` 를 그대로 쓴다
+    # (과거 정답지·카드를 같은 동작으로 다시 읽으려는 것). 새 종류는 gen-ui 주입으로만 들어온다.
+    # `sa_fallback`(17번 · 11-05)도 같다 — 새 종류라 배치에 없다
     assert {sc.kind for sc in scs} == {
-        k for k, s in SC.KIND_SPECS.items() if s.get("scored", True)}
+        k for k, s in SC.KIND_SPECS.items() if s.get("scored", True) and k not in ("natural_disaster", "sa_fallback")}
 
 
 # --------------------------------------------------------------------------
@@ -790,6 +795,11 @@ def test_http_mutators_keep_down_axis(gen):
 PLAN_KINDS = sorted(SC.PLAN_MUTATORS)
 
 
+def _disaster_probe(keys):
+    """정지 집합을 미리 보려고 만드는 임시 `natural_disaster` 시나리오 — 키가 늘 때마다 새로 만든다(순위 캐시)."""
+    return _sc("natural_disaster", target=SC.Target(cell_keys=set(keys)))
+
+
 @pytest.mark.parametrize("kind", PLAN_KINDS)
 def test_plan_mutator_keeps_quantity_invariants(gen, kind):
     """`PLAN_MUTATORS` — U-3(음수 금지) · U-4(재전송 ≤ 페이로드) · up 축 보존."""
@@ -804,6 +814,14 @@ def test_plan_mutator_keeps_quantity_invariants(gen, kind):
         # 살아 있는 쪽이 되도록 다른 eNB 를 대상에 더한다
         i = 0
         while SC.quake_down(_sc(kind, target=SC.Target(cell_keys=keys)), cell, 1.0):
+            keys.add(f"9{i:05d}-0")
+            i += 1
+    if kind == "natural_disaster":
+        # 자연재해도 eNB 단위 정지다 — 주변 혼잡(`_disaster_ring`)은 **살아 있는** 지역 셀에서만 선다.
+        # 정지 순위는 해시라서 이 셀의 eNB 가 정지 쪽에 들지 않을 때까지 다른 eNB 를 대상에 더한다
+        i = 0
+        while str(cell.enb_id) in SC.disaster_dead_enbs(
+                _disaster_probe(keys), SC.DISASTER_DOWN_AT + 1) or len(keys) < 3:
             keys.add(f"9{i:05d}-0")
             i += 1
     hit = 0
@@ -821,12 +839,16 @@ def test_plan_mutator_keeps_quantity_invariants(gen, kind):
         # SA 세션으로 준다 — `anchor_saturation` 은 SA 만 고른다(2026-11-02).
         # 다른 kind 는 망 모드를 보지 않는다
         plan.net_mode = "SA"
+        # 14번은 세션이 아니라 **가입자**로 고른다(11-05) — 가입자가 달라야 일부가 뽑힌다
+        plan.imsi = f"4400{hit + _:011d}"
         sc = _sc(kind, target=SC.Target(cell_keys=set(keys),
                                         pgw_id=cell.pgw_id, domain=""))
         sc.active_cells_cache = {cell.cell_key}
         # `capacity_shift` 는 강도를 인자가 아니라 **국면**에서 읽는다 — 시작
         # 분(강도 0.1)이면 거의 발동하지 않으니 혼잡이 최고인 분을 준다
         sc._minute = SC.SHIFT_RISE - 1
+        if kind == "natural_disaster":
+            sc._minute = SC.DISASTER_DOWN_AT + 1               # 다운 국면 안(폭주·다운 겹침)
         if not SC.PLAN_MUTATORS[kind](plan, sc, 1.0, rng, cell):
             continue
         hit += 1

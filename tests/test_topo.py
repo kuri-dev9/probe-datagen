@@ -378,7 +378,7 @@ class _LoadConn(FakeConn):
 def _join_rows():
     """`load_cells` 의 조인 결과 — `_gap_uniq` 와 같은 상황을 DB 모양으로.
 
-    **마지막 세 칸이 `TAC`·`SGW_ID`·`MME_ID` 다**(2026-10-27). 질의가 그
+    **마지막 네 칸이 `TAC`·`SGW_ID`·`MME_ID`·`PGW_ID` 다**(2026-10-27 · `PGW_ID` 는 10-30 커밋 `4082fa6`). 질의가 그
     컬럼들을 더했고 언패킹이 수를 세므로, 빠지면 `not enough values to
     unpack` 으로 죽는다 — 스텁이 실제 질의를 따라가야 한다는 것을 그렇게
     확인한다. `None` 은 "모름"이고 그때 장비 배정이 옛 eNB 해시로 떨어진다.
@@ -386,13 +386,13 @@ def _join_rows():
     out = []
     for sector in range(2):
         out.append(("811110", sector, None, "1", None, 41, 41110, 1101053,
-                    "37:30.0/000", "127:00.0/000", None, None, None))
+                    "37:30.0/000", "127:00.0/000", None, None, None, None))
     for sector in (2, 3):
         out.append(("811110", sector, None, "1", None,
-                    None, None, None, None, None, None, None, None))
+                    None, None, None, None, None, None, None, None, None))
     for sector in range(3):      # 좌표 없는 eNB — **의도된 미매핑**
         out.append(("822222", sector, None, "1", None,
-                    None, None, None, None, None, None, None, None))
+                    None, None, None, None, None, None, None, None, None))
     return out
 
 
@@ -631,26 +631,22 @@ class _C:
     geo_status: str
 
 
-def _truth_cell_keys() -> list[tuple[str, int]]:
-    """`ground_truth.json` 의 정답 셀 키. 없으면 같은 모양의 합성 40개.
+#: **고정된 정답 셀 40개** — eNB 14곳에 셀 2~4개씩. 모양은 실제 `ground_truth.json`(채점 정답 셀)과 같다:
+#: 정답 eNB 수가 한도(60)보다 한참 작고, eNB 마다 셀이 몇 개씩 달린다. 번호는 합성이다(셀 키뿐 · 개인정보 없음).
+#: 전에는 graphio 의 `data/truth/ground_truth.json` 을 읽었다 — **그 파일은 장애를 주입할 때마다 커진다**(오늘 밤
+#: 장애 20여 건이 쌓여 정답 eNB 가 60개 한도를 넘었다). 그러면 이 시험이 "정답이 한도 밖으로 밀린다"를 보게 되어
+#: 대역과 상관없이 깨졌다(2026-11-05). 지키려는 성질("한도 밖 추가가 정답 셀을 안 건드린다")은 입력이 고정이어도
+#: 같다. 운영 파일을 읽는 경로는 없앴다
+_FIXED_TRUTH_CELLS: tuple[tuple[str, int], ...] = tuple(
+    (f"1{n:05d}", c) for n, cells in (
+        (4521, 3), (4522, 3), (4530, 4), (4549, 2), (4577, 3), (4601, 3), (4602, 2),
+        (4633, 4), (4651, 3), (4688, 3), (4702, 2), (4719, 3), (4744, 3), (4760, 2))
+    for c in range(cells))
 
-    **건너뛰지 않는다.** 그 파일은 `pemfill` 이 만드는 산출물이고 `data/` 는
-    추적 밖이라 환경마다 있고 없다. `skip` 으로 두면 "정답이 유지되는가"를
-    아무도 검증하지 않는 상태가 되므로, 없으면 합성 키로라도 **같은 성질**을
-    단정한다 — 검증하려는 것은 특정 셀 값이 아니라 "한도 밖 추가가 기존
-    선택을 건드리지 않는다"는 성질이다.
-    """
-    truth = GRAPHIO_SRC.parent / "data" / "truth" / "ground_truth.json"
-    if truth.exists():
-        keys: list[tuple[str, int]] = []
-        for sc in json.loads(truth.read_text(encoding="utf-8"))["scenarios"]:
-            for ck in (sc.get("cells") or []):
-                enb, _, cell = str(ck).rpartition("-")
-                if enb and cell.isdigit():
-                    keys.append((enb, int(cell)))
-        if keys:
-            return sorted(set(keys))
-    return [(f"1000{i // 8:02d}", i % 8) for i in range(40)]
+
+def _truth_cell_keys() -> list[tuple[str, int]]:
+    """정답 셀 키 — 고정 40개(`_FIXED_TRUTH_CELLS`). 운영 파일을 읽지 않는다."""
+    return sorted(_FIXED_TRUTH_CELLS)
 
 
 def _uniq(cells) -> dict:
@@ -747,6 +743,20 @@ def test_truth_cells_survive_the_band_include():
     # 대역 eNB 는 정답에 들어 있지 않아야 한다 — 들어 있으면 "한도 밖
     # 추가"라는 전제 자체가 깨지고 위 두 테스트의 의미가 없어진다
     assert not (truth_enbs & set(BAND))
+
+
+def test_truth_cell_fixture_is_fixed_and_reads_no_operational_file(monkeypatch):
+    """정답 셀 입력은 고정 40개이고 운영 `ground_truth.json` 을 읽지 않는다 — 주입이 쌓여도 시험이 깨지지 않는다."""
+    from pathlib import Path
+
+    def boom(self, *a, **k):
+        raise AssertionError(f"파일을 읽었다: {self}")
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    keys = _truth_cell_keys()
+    assert len(keys) == 40 and len(set(keys)) == 40
+    assert len({e for e, _ in keys}) <= 20, "정답 eNB 가 한도(60)에 한참 못 미치는 모양이어야 한다"
+    assert keys == sorted(_FIXED_TRUTH_CELLS)
 
 
 def test_topo_cells_get_a_lower_traffic_weight(monkeypatch):

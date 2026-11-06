@@ -56,7 +56,12 @@ KINDS = (
     "gw_pgw_restart", "external_path_latency", "nsa_policy_restrict",
     "anchor_saturation", "son_param_change", "ran_congestion",
     "ho_interruption", "earthquake", "cdn_degradation", "pay_dns_delay",
+    # 27번 — 지진(`earthquake`)을 대체한다(2026-11-04). 옛 `earthquake` 는 지난 기록·정답지를
+    # 다시 읽을 수 있게 남긴다(새로 주입하는 27번은 이쪽이다)
+    "natural_disaster",
     "event_crowd",
+    # 17번 — 숨은 SA 상주 단말이 LTE 로 넘어온다(2026-11-05 · `scenarios.sa_fallback`)
+    "sa_fallback",
     # 신규 8종
     "auc_no_response", "dra_route_failure", "s6a_undetermined",
     "pgw_uplane_degradation", "enb_s1_outage", "partial_recovery",
@@ -78,6 +83,10 @@ KINDS = (
 #:   * MME·SGW 장애는 그 장비에서 난다.
 #:   * S6a 인증 거절은 MME–HSS 구간 문제라 그 아래 SGW·eNB 도 함께 받는다.
 #:   * DNS 열화·외부 서버 5xx 는 SGW(사용자 평면 경로) 단위.
+#:     **외부 서버 5xx(6번)의 자동 선택은 2026-11-05 부터 전국이다**(케이 수정안 A · 아침 확인
+#:     대기). 외부 서버 장애는 그 도메인 전국 가입자에게 보이고, SGW 로 좁히면 도메인 축에서
+#:     3.4% 로 묽어져(F-108 실측 · 임계 5%) 결과가 고른 SGW 의 몫에 달렸다. 장비 표시(`SGW`)와
+#:     `SGW-n` 지정 경로는 남는다 — 지정하면 그 SGW 로 좁힌다(`faults._AUTO_NODE` 주석)
 #:   * 단말 기종은 가입자 축인데 가입자 단위로 걸 수 없다 — SGW 아래 여러
 #:     셀에 흩어져 나게 한다(`R-10` 의 "지리 흩어짐" 조건).
 #:   * IMS 는 IMS PGW 문제지만 PGW 번호를 SGW 와 같게 쓰므로(구 SPGW) SGW 로 건다.
@@ -110,12 +119,14 @@ SCENARIOS: tuple[tuple[int, str, str | None, int | None, tuple[str, ...], str], 
     (13, "NSA NR leg 실패", "nsa_nr_leg", None, ("ENB",),
      "5G NSA 단말의 NR 레그 미성립"),
     (14, "도심 역 저녁 러시 Sub6 혼잡", "ran_congestion", None, ("ENB",),
-     "상위 트래픽 셀 8개 활성 가입자 최대 1.8배 + 처리율·RTT 악화·정체 — CP 정상"),
+     "역 주변 셀의 기존 가입자 60% 처리율·RTT 악화·정체(호는 늘지 않음) — CP 정상"),
     (15, "야마노테선 구간 4G↔5G 전환 정체", "ho_interruption", None, ("ENB",),
      "코리도 셀 쌍에서 전환 직후 3–8초 down 정체 + NR 레그 해제 — CP 정상"),
     (16, "앵커 고착 — 안테나는 서는데 느리다", "anchor_saturation", None, ("ENB",),
      "LTE 앵커 경합으로 5G 체감 저하"),
-    (17, "SA→LTE 폴백 급증", None, None, (), "보류 — XDR 에 SA 판정 근거가 없다"),
+    (17, "SA→LTE 폴백 급증 (5G 측 장애 추정)", "sa_fallback", None, ("ENB",),
+     "평소 SA 에 있어 안 보이던 5G 단말이 한 지역 LTE 에 TAU·Attach 로 몰려 나타난다 — "
+     "5G 장비는 주장하지 않는다(시스템 간 전환 필드가 XDR 에 없다)"),
     (18, "SA UPF 자원 소진 → EPC 재현", "gw_resource", 1, ("SGW",),
      "1번과 같은 데이터 — UPF 라고 주장하지 않는다"),
     (19, "AMF 과부하 확산 → EPC 재현", "mme_overload", 10, ("MME",),
@@ -133,21 +144,23 @@ SCENARIOS: tuple[tuple[int, str, str | None, int | None, tuple[str, ...], str], 
     # (`write_truth`). 대상은 설정(`pemdb1.capacity_shift`)이 고정하므로
     # 발생 장비가 없다 — 지도에서 고른 eNB 에 걸리는 것처럼 보이면 안 된다.
     (24, "기지국 증설 후 부하 이동", "capacity_shift", None, (),
-     "30분 고정 — A eNB 에 10분간 호가 몰려 혼잡 → 소등 eNB(B) 개통, "
+     "40분 고정 — A eNB 에 20분간 호가 몰려 혼잡 → 소등 eNB(B) 개통, "
      "A 40 · B 60 으로 나뉘며 A 회복 → 10분 분석 뒤 B 소등. 채점 제외"),
     (25, "SON 파라미터 변경 후 계단형 저하", "son_param_change", None, ("ENB",),
      "그 eNB 의 셀 쌍 핸드오버 실패가 계단으로 선다"),
     (26, "특정 단말 SW 업데이트 후 등록 실패 → 기종 장애 재현", "ue_model", 8,
      ("SGW",), "8번과 같은 데이터 — SW 버전 필드가 XDR 에 없다"),
-    (27, "지진 — 국지 다수 셀 정지 + 주변 부하 유입", "earthquake", None, ("ENB",),
-     "지역 셀 25개 중 40% 정지 — 그 가입자가 이웃 셀로 옮겨 붙고 주변이 혼잡해진다"),
+    (27, "자연재해 — 호 폭주 + 기지국 장애", "natural_disaster", None, ("ENB",),
+     "경보 지역 호 폭주(0~13분) · 지역 eNB 40% 정지(3~23분) — 세션은 이웃 셀에서 이어진다"),
 )
 
 #: **증거 없음** — 데이터에 그 장애를 판정할 근거 필드가 없어 만들지 않는 번호.
 #: "준비 중"(아직 안 만들었다)과 다르다. 이쪽은 만들면 근거 없는 주장이 된다 —
 #: 18~20번이 "UPF·AMF 라고 주장하지 않는다"로 남은 것과 같은 결이다.
 #: 화면은 `STATUS='NO_EVIDENCE'` 를 "증거 없음"으로 그린다(2026-10-29).
-NO_EVIDENCE = frozenset({17})
+#: 17번은 2026-11-05 에 빠졌다 — 시스템 간 핸드오버 대신 "숨은 5G 단말이 LTE 에 나타나는" 모양으로
+#: 기존 필드(`ue_dcnr`·call_type 1/5)만 써서 만든다(사용자 승인 대안)
+NO_EVIDENCE = frozenset()
 
 #: `CM_ERROR_SCENARIO` 의 장비 마스크 컬럼 — 순서가 곧 화면 표기 순서다.
 SCENARIO_EQUIP = ("MME", "SGW", "PGW", "ENB")
@@ -341,7 +354,7 @@ def add_fault(conn, kind: str, target: str | None, start_ts: datetime,
     if kind not in KINDS:
         raise ValueError(f"알 수 없는 kind: {kind!r} — {', '.join(KINDS)}")
     if kind == "capacity_shift":
-        # **길이를 여기서 고정한다** — `faults.build` 에서만 30분으로 늘리면
+        # **길이를 여기서 고정한다** — `faults.build` 에서만 `SHIFT_TOTAL` 로 늘리면
         # `poll_transitions` 가 행의 `DURATION_MIN`(화면 기본 10분)으로 장애를
         # 끝내, B 가 켜지는 순간 시나리오가 내려간다. 화면·지도·CLI 어느
         # 경로로 들어와도 이 함수를 지난다.

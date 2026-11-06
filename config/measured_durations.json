@@ -1,0 +1,213 @@
+{
+  "anchor_saturation": [
+    {
+      "duration_min": 30.0,
+      "end_to_final_min": null,
+      "fault": "F-137",
+      "intensity": null,
+      "recorded_at": "2026-11-05T17:48:52",
+      "result": "missed",
+      "to_correct_min": null,
+      "to_first_event_min": null,
+      "to_incident_min": null
+    }
+  ],
+  "capacity_shift": [
+    {
+      "duration_min": 30.0,
+      "end_to_final_min": null,
+      "fault": "F-152",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-06T17:33:56",
+      "result": "missed",
+      "to_correct_min": null,
+      "to_first_event_min": null,
+      "to_incident_min": null
+    }
+  ],
+  "gw_resource": [
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-142",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-06T13:07:01",
+      "result": "correct",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-149",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-06T16:18:21",
+      "result": "correct",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0
+    }
+  ],
+  "ho_interruption": [
+    {
+      "duration_min": 30.0,
+      "end_to_final_min": null,
+      "fault": "F-139",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-06T11:39:44",
+      "result": "wrong",
+      "to_correct_min": null,
+      "to_first_event_min": 4.0,
+      "to_incident_min": null
+    },
+    {
+      "duration_min": 30.0,
+      "end_to_final_min": null,
+      "fault": "F-148",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-06T14:28:47",
+      "result": "correct",
+      "to_correct_min": 2.0,
+      "to_first_event_min": 2.0,
+      "to_incident_min": 2.0
+    }
+  ],
+  "ims_pdn": [
+    {
+      "duration_min": 8.0,
+      "end_to_final_min": null,
+      "fault": "F-144",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-06T13:07:01",
+      "result": "wrong",
+      "to_correct_min": null,
+      "to_first_event_min": 7.0,
+      "to_incident_min": 7.0
+    }
+  ],
+  "mme_overload": [
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-143",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-06T13:07:01",
+      "result": "correct",
+      "to_correct_min": 2.0,
+      "to_first_event_min": 1.0,
+      "to_incident_min": 2.0
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-150",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-06T16:25:52",
+      "result": "correct",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0
+    }
+  ],
+  "mobility": [
+    {
+      "duration_min": 10.0,
+      "end_to_final_min": null,
+      "fault": "F-138",
+      "intensity": null,
+      "recorded_at": "2026-11-05T17:48:52",
+      "result": "missed",
+      "to_correct_min": null,
+      "to_first_event_min": null,
+      "to_incident_min": null
+    },
+    {
+      "duration_min": 10.0,
+      "end_to_final_min": null,
+      "fault": "F-151",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-06T16:54:20",
+      "result": "correct",
+      "to_correct_min": 5.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0
+    }
+  ],
+  "natural_disaster": [
+    {
+      "duration_min": 30.0,
+      "end_to_final_min": null,
+      "fault": "F-141",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-06T11:39:43",
+      "result": "correct",
+      "to_correct_min": 5.0,
+      "to_first_event_min": null,
+      "to_incident_min": 5.0
+    }
+  ],
+  "nsa_nr_leg": [
+    {
+      "duration_min": 30.0,
+      "end_to_final_min": null,
+      "fault": "F-140",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-06T11:39:44",
+      "result": "missed",
+      "to_correct_min": null,
+      "to_first_event_min": null,
+      "to_incident_min": null
+    },
+    {
+      "duration_min": 30.0,
+      "end_to_final_min": null,
+      "fault": "F-147",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-06T13:52:07",
+      "result": "correct",
+      "to_correct_min": 5.0,
+      "to_first_event_min": 5.0,
+      "to_incident_min": 5.0
+    }
+  ],
+  "pay_dns_delay": [
+    {
+      "duration_min": null,
+      "end_to_final_min": 6,
+      "fault": "RF87B",
+      "intensity": null,
+      "recorded_at": "2026-11-03T18:52:00",
+      "result": "correct",
+      "to_correct_min": 3,
+      "to_first_event_min": null,
+      "to_incident_min": null
+    }
+  ],
+  "sa_fallback": [
+    {
+      "duration_min": 15.0,
+      "end_to_final_min": null,
+      "fault": "F-146",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-06T13:07:01",
+      "result": "missed",
+      "to_correct_min": null,
+      "to_first_event_min": null,
+      "to_incident_min": null
+    }
+  ],
+  "ue_model": [
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-145",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-06T13:07:01",
+      "result": "correct",
+      "to_correct_min": 5.0,
+      "to_first_event_min": 5.0,
+      "to_incident_min": 5.0
+    }
+  ]
+}

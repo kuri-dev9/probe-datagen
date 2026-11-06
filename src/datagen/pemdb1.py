@@ -2135,6 +2135,20 @@ class PemdbGen:
         # 관계를 보게 된다 — "전환은 되는데 그 셀에 사는 사람이 없다".
         self.gen.ho_topo = self.ho_topo
         self._seat_mobility(Mobility.from_cfg(mobility), seed)
+        #: **숨은 SA 상주 단말**(17번 `sa_fallback` · 2026-11-05). 평소 SA 에 붙어 있어 EPC 레코드를
+        #: 내지 않는 5G 단말이다 — **가입자 풀(`gen.subs`) 밖의 별도 집합**이라 평소 호 추첨·생산량·
+        #: 가입자 구성이 바뀌지 않는다(소등 eNB 를 셀 목록 밖에 두는 `standby` 와 같은 결). 크기는
+        #: 풀 대비 비율(`net_mode.sa_resident_share` · 초기값 0.15)이고 기동 때 한 번 만든다
+        #: NR 가능 eNB 비율(`net_mode.nr_enb_share`) — 현장은 호가 있는 eNB 의 41%(치우친 표본).
+        #: 초기값 0.4 · 사용자 결정 대기. `_nr_fields` 가 eNB 해시로 쓴다
+        self._nr_enb_share = float((net_mode or {}).get("nr_enb_share", 0.4))
+        self._nr_rng = random.Random(seed + 5050)
+        #: 평시 절단의 요청 간격 — 본 난수 흐름을 밀지 않게 따로 둔다
+        self._drop_rng = random.Random(seed + 5051)
+        self.sa_hidden = self._make_sa_hidden(
+            float((net_mode or {}).get("sa_resident_share", 0.15)), seed)
+        #: 넘어와 있는 숨은 단말 — IMSI → [시나리오 ID, 가입자, 셀, 도착 시각, 들어옴 기록 여부, 돌아갈 시각]
+        self._sa_in: dict[str, list] = {}
         # **시나리오의 APN 대상이 레코드에 실제로 있는 값이어야 한다.**
         # `_coerce` 가 `Distributions.apn()` 으로 APN 을 덮으므로 프로파일에서
         # 고르면 그 APN 이 한 건도 없을 수 있고, 그러면 SC-19·SC-11 이 주입돼도
@@ -2182,6 +2196,41 @@ class PemdbGen:
         #: Scenario 를 재사용해야 generator 의 도메인·기종 바인딩이 다시 구르지
         #: 않는다 (`faults.resolve_active` 가 읽고 쓴다).
         self._fault_cache: dict[int, tuple[tuple, Scenario]] = {}
+
+    def _make_sa_hidden(self, share: float, seed: int) -> dict[str, list]:
+        """숨은 SA 상주 단말 — 셀 키 → 가입자 목록. 풀 밖이므로 `sub_by_imsi` 에 넣지 않는다.
+
+        * **식별자는 풀 뒤 번호**(`len(subs) + k`)로 만든다 — 같은 합성 규칙이라 풀과 겹치지 않는다.
+        * 기종·PLMN 등 나머지 속성은 풀의 가입자 하나를 본뜬다(실측 분포를 이미 입은 값).
+        * **상주 셀은 평소 호 가중**(`gen._cum`)을 따른다 — 사람이 많은 셀에 5G 상주 단말도 많다.
+        * 5G 능력은 `1` 이다(SA 에 붙어 있던 단말). 난수는 따로 쓴다 — 본 생성의 난수 흐름을
+          흔들지 않는다(그래야 이 기능을 넣어도 평소 레코드가 그대로다)
+        """
+        import bisect
+        import dataclasses
+        from .cells import encrypt_id
+        from .identity import synth_mdn
+        gen = self.gen
+        out: dict[str, list] = {}
+        if share <= 0.0 or not gen.subs:
+            return out
+        if share > 1.0:
+            raise RuntimeError(f"net_mode.sa_resident_share 는 0~1 이다: {share}")
+        rng = random.Random(seed + 1717)
+        base_n = len(gen.subs)
+        cum = gen._cum
+        for k in range(int(share * base_n)):
+            i = base_n + k
+            src = gen.subs[rng.randrange(base_n)]
+            ci = bisect.bisect_left(cum, rng.random() * cum[-1])
+            sub = dataclasses.replace(
+                src, imsi=synth_imsi(src.mcc_mnc, i), mdn=synth_mdn(i),
+                imei=synth_imei(src.vendor, src.model, i),
+                service_code=encrypt_id(f"svc:{i % 40}", "sub"),
+                dcnr="1", home_cell=ci, route=-1)
+            sub.walk_cell = None
+            out.setdefault(gen.cells[ci].cell_key, []).append(sub)
+        return out
 
     def _reseat_subscribers(self, rng: random.Random) -> None:
         """가입자 풀의 Vendor/Model·PLMN 을 상용 실측 분포로 바꾼다.
@@ -2300,7 +2349,7 @@ class PemdbGen:
         return suppress
 
     def _boost(self, minute: int, active: list[Scenario]) -> dict[str, float] | None:
-        """셀 키 → 가중 배율 (`scenarios.BOOSTERS`) — `j-sc-14` 활성 가입자 증가.
+        """셀 키 → 가중 배율 (`scenarios.BOOSTERS`) — `j-sc-24` 활성 가입자 증가.
 
         suppressor 의 대칭이다. 둘 다 "어느 셀에 호가 생기나"를 바꾸므로
         mutator(레코드를 고친다)로는 쓸 수 없다. 여러 장애가 같은 셀에 걸리면
@@ -2366,10 +2415,28 @@ class PemdbGen:
         pool = gen._fixed or range(len(gen.subs))
         done: set[str] = set()
         for sc in active:
+            if sc.kind == "natural_disaster":
+                # **자연재해는 하한을 채우지 않는다**(2026-11-05 · F-111 · 케이 (가)). 하한은 대상 셀을
+                # 셀당 8호까지 채워 국소 25셀을 평소 14호 → 200호로 올렸다 — 폭주가 끝난 "다운만"
+                # 국면도 평소의 14배로 남아 이 시나리오의 모양(급증 → 평시 복귀)을 지운다. 또 넓은
+                # 지역(80셀)은 `floor_max_cells` 를 넘어 하한이 안 걸려 국소·넓은 지역의 모양이 갈린다.
+                # 표본은 폭주 자체와 정지 eNB 의 0호가 준다. 옛 `earthquake` 는 과거 기록 재현을 위해 그대로다
+                continue
+            if sc.kind == "sa_fallback":
+                # **17번 SA 폴백도 하한을 채우지 않는다**(2026-11-05 · F-115 · 케이). 이 시나리오의 신호는
+                # **단말 구성의 변화**(N-01 · 5G 능력 단말 비중)다. 하한이 대상 25셀을 평소 6.3호 → 200호로
+                # 채워 넘어온 단말 몇 명의 레코드가 평소 구성의 호에 묻혔다 — `dcnr=1` 비중이 지역 밖과
+                # 같아졌다(리오 실측 29.9% 대 29.8%). 셀당 호를 맞추는 장치와 구성비 신호는 함께 못 간다
+                continue
+            if sc.kind == "ran_congestion":
+                # **14번도 하한을 채우지 않는다**(2026-11-05 · F-129). 원래 있던 사람이 나빠지는 장애라
+                # 호를 늘리지 않는다. 하한이 대상 8셀을 평소 분당 4호 → 60호로 채워 고유 가입자가
+                # 약 8배가 됐다 — 판정 단위가 메시·정목이라 셀 표본을 채울 이유도 없다
+                continue
             keys = sc.target.cell_keys
             if not keys or len(keys) > cfg.floor_max_cells:
                 continue
-            want = cfg.floor_per_cell * visible_level(sc, minute)
+            want = cfg.floor_by_kind.get(sc.kind, cfg.floor_per_cell) * visible_level(sc, minute)
             for k in sorted(sc.active_cells_cache):
                 cell = by_key.get(k)
                 if cell is None or k in done:
@@ -2380,7 +2447,13 @@ class PemdbGen:
                     # 모양이 그 장애의 서명이다
                     self._floor_last.pop(k, None)
                     continue
-                self._floor_last[k] = (minute, want, _fault_no(sc.id))
+                if sc.kind == "capacity_shift" and shift_split(sc) > 0:
+                    # **B 가 켜진 뒤에는 꼬리를 남기지 않는다.** 하한 호의 60% 는 B 로 가서 A 는 이미
+                    # 평시 수준이고 놓아도 계단이 없다. 남기면 B 가 꺼진 뒤 셀당 8호 꼬리가 모두 A 에
+                    # 떨어져 평시의 3배로 뛰었다(F-152 · 17:29 80건 · 평시 22건)
+                    self._floor_last.pop(k, None)
+                else:
+                    self._floor_last[k] = (minute, want, _fault_no(sc.id))
                 need = int(want + gen.rng.random()) - landed[k]
                 for _ in range(max(0, need)):
                     sub = gen.subs[pool[gen.rng.randrange(len(pool))]]
@@ -2739,6 +2812,12 @@ class PemdbGen:
         relocate = self._relocator(minute, active)
         shift = self._shifter(minute, active)
         i_imsi = idx["IMSI"]
+        # **노드 다운**(2026-11-04 사용자 결정) — 그 장비로는 아무것도 들어오지 않는다.
+        # 다운 집합은 활성 장애에서 매 분 다시 계산한다(`scenarios.node_down_set`)
+        down = _scenarios.node_down_set(active, minute)
+        any_down = any(down.values())
+        # `_coerce` 의 기본 핸드오버가 다운 장비로 가지 않게 — 다운이 없는 분에는 `None`
+        self._down = down if any_down else None
         # **장애 대상 셀의 판정 하한** (2026-10-29 사람 결정 · `FaultCfg.floor_*`).
         # 사람이 위치를 찍어 장애를 넣었는데 그 셀에 호가 분당 0.3건이면
         # 열화를 걸어도 최소 표본(20)이 서지 않아 **아무 데도 안 보인다**
@@ -2773,10 +2852,31 @@ class PemdbGen:
                 yield rec, cell
             # 평소 호를 다 낸 뒤 — `landed` 가 이 분의 대상 셀 호 수를 다 셌다
             if n_calls:
+                # **하한을 채우기 전의 평소량**을 떠 둔다 — 폭주 배율의 기준이다(F-111 · 2026-11-05).
+                # 하한(셀당 8호)을 채운 뒤의 `landed` 를 기준으로 삼아 국소 25셀이 평소 14호/분 →
+                # 200호 기준 × 6 = 1,200호로 굳었다(84배 · 리오 실측). 자연재해는 이제 하한을 채우지
+                # 않지만, 같은 셀에 다른 장애의 하한이 걸려도 배율 기준이 흔들리지 않게 남긴다
+                natural = collections.Counter(landed)
                 yield from self._floor_drafts(minute, active, landed, suppress,
                                               ts, slot_start)
+                # 자연재해 호 폭주 — 더한 호의 절차는 `force_ct` 가 정한다(음성·발신 쪽으로)
+                yield from self._surge_drafts(minute, active, landed, n_calls,
+                                              ts, slot_start, force_ct, natural, emergency)
+                # SA 폴백(17번) — 숨은 5G 단말이 들어오는 TAU·Attach 와, 들어온 단말의 호
+                yield from self._sa_fallback_drafts(minute, active, n_calls, ts,
+                                                    slot_start, force_ct, sa_entry)
 
+        #: 폭주 호의 절차 고정 — `id(rec)` → call_type. 재배치로 레코드가 바뀌기 전에 꺼낸다
+        force_ct: dict[int, str] = {}
+        #: 폭주 호 중 Emergency 접속 — `id(rec)`. `force_ct` 와 같은 이유로 재배치 전에 꺼낸다
+        emergency: set[int] = set()
+        #: SA 폴백으로 **들어오는** 레코드 — `id(rec)` → 도착 시각. 직전 호 기록을 비우고 끝 시각을 맞춘다
+        sa_entry: dict[int, float] = {}
         for rec, cell in drafts():
+            fct = force_ct.pop(id(rec), None)
+            emg = id(rec) in emergency
+            emergency.discard(id(rec))
+            t_sa = sa_entry.pop(id(rec), None)
             landed[cell.cell_key] += 1
             dst = relocate(cell) if relocate is not None else None
             if dst is None and shift is not None:
@@ -2794,11 +2894,31 @@ class PemdbGen:
                 if si >= 0:
                     rec, cell = gen.base_lte_call(ts, slot_start,
                                                   at=(gen.subs[si], dst))
-            self._coerce(rec, cell)
+            self._coerce(rec, cell, force_call_type=fct)
+            if emg:
+                rec.set("InitialUEMessage_RRC_Establishment_Cause", "0")
+            if t_sa is not None:
+                self._sa_entry_fix(rec)
+            # 노드 다운이 이 호를 바꾸면 끝 시각 하한(다운 시각) — **바꾸기 전 시각으로** 가른다
+            lo_down = _scenarios.down_floor(rec, cell, down) if any_down else None
+            if t_sa is not None:
+                lo_down = t_sa if lo_down is None else max(lo_down, t_sa)
             if mutate is not None:
                 mutate("lte_call", rec, cell)
+            # 다운 SGW·PGW 아래의 호 — 성공으로 두지 않는다(`scenarios.node_down_gate`)
+            if any_down and not _scenarios.node_down_gate(rec, cell, down, gen.rng,
+                                                           slot=slot_start):
+                continue
+            _scenarios.nr_settle(rec)       # 변형이 실패·절단으로 바꾼 호의 NR·Modify Bearer
+            # 끝 시각을 이 분 안으로 — S11 타임아웃이 늘린 호가 다음 분으로 넘치지 않게
+            # (`scenarios.fit_minute` · 장애 종류와 무관하게 모든 호에 건다 · 평시엔 0건이다)
+            _scenarios.fit_minute(rec, slot_start, lo_down)
             vals = rec.values
             out.append(vals)
+            # 다운 SGW·PGW 에서 다운 시각 뒤에 끝난 호는 세션을 열지 않는다 — 절단된 호도
+            # `success_flag=1` 이라 그냥 두면 죽은 SGW 로 세션이 열렸다(에스터 회귀)
+            if any_down and not _scenarios.down_opens_session(rec, cell, down):
+                continue
             outcome = self.sessions.classify(rec)
             if outcome is not None:
                 # **레코드에 적힌 값을 그대로 가져간다.** 생성기의 가입자
@@ -2842,12 +2962,357 @@ class PemdbGen:
                 self._coerce(rec, None, force_call_type=TAU_CALL_TYPE)
                 if mutate is not None:
                     mutate("lte_call", rec, cell)
+                _scenarios.nr_settle(rec)
                 out.append(rec.values)
         # **매 분 비운다.** 남겨 두면 같은 전환으로 TAU 가 계속 나온다
         gen.tau_events = []
+        # 이미 열린 세션 — 다운 장비를 지나면 끊는다. 이번 분 세션 엔진이 그 표식을 읽는다
+        if any_down and "lte_call" not in self._blocked:
+            out.extend(self._node_down_cuts(minute, ts, slot_start, down, relocate))
 
         self._calls, self._calls_at = calls, ts
         return out
+
+    #: 노드 다운으로 끊긴 세션의 C-Plane 해제 Cause — S1AP `504 Unspecified Failure`(misc).
+    #: 정상 종료(불변규칙 6 · `S1AP_NORMAL_CAUSES`)가 아니므로 절단으로 센다. 무선 유실
+    #: (`RAN_LOST_CAUSES`)·전송(`200`)·과부하(`500`)는 다른 장애를 가리키는 값이라 쓰지 않는다 —
+    #: 쓰면 GW 장애가 RAN·전송 장애처럼 읽힌다. **초기값**(2026-11-04 · 현업 확인 전)
+    DOWN_CUT_CAUSE = 504
+    #: **C-Plane 절단 기록**을 나누는 분 수 — 다운 첫 분에 절반, 다음 분에 나머지. MME 가
+    #: SGW·PGW 장애를 알아차리는 시차다(경로 감시 · 한 분에 몰지 않는다). **데이터는 나누지
+    #: 않는다** — SGW·PGW 세션의 U-Plane 은 다운 시각에 멈춘다(2026-11-04 사용자 지적). eNB
+    #: 다운 세션의 끊기는 이 분할을 그대로 쓴다(지금 동작 유지)
+    DOWN_CUT_MINUTES = 2
+
+    #: 폭주로 더하는 호의 상한 — 그 분 평소 호 수(`n_calls`)의 배수. 전국 합이 평소의 3배를 넘지
+    #: 않게(처리 용량 · corr 틱이 이미 60초 예산의 최대 80% · 리오 11-04 실측). 초기값
+    SURGE_CAP = 2.0
+
+    def _surge_drafts(self, minute: int, active: list[Scenario], landed, n_calls: int,
+                      ts, slot_start: float, force_ct: dict, natural=None, emergency=None):
+        """자연재해 호 폭주 — 경보 지역 셀에 **하한 전 평소량 × (배율 − 1)** 만큼 호를 더 낸다.
+
+        세는 기준은 그 분 그 지역에 실제로 떨어진 호(`landed`)다 — 생성량(15%)이 달라도 모양이 같다.
+        셀은 평소 호 수에 비례해 고른다(바쁜 셀이 더 바쁘다). 가입자는 고정 그룹이다(`_floor_drafts`
+        와 같은 이유). 절차는 `DISASTER_SURGE_MIX` 에서 뽑아 `force_ct` 에 적는다. 발신 호의
+        `disaster_emergency_share` 는 `emergency` 에 적는다 — 호출부가 Emergency 접속으로 찍는다
+        """
+        gen = self.gen
+        rng = gen.rng
+        by_key = gen.cell_by_key
+        pool = gen._fixed or range(len(gen.subs))
+        budget = int(self.SURGE_CAP * n_calls)
+        cts = [c for c, _w in _scenarios.DISASTER_SURGE_MIX]
+        wts = [w for _c, w in _scenarios.DISASTER_SURGE_MIX]
+        for sc in active:
+            mult = _scenarios.disaster_surge_mult(sc, minute)
+            if mult <= 1.0 or budget <= 0:
+                continue
+            keys = [k for k in sorted(sc.target.cell_keys) if k in by_key]
+            cell_base = sc.__dict__.get("_surge_cell_base") or {}
+            if cell_base and sum(cell_base.get(k, 0.0) for k in keys) > 0:
+                # **장애 시작 앞 60분의 셀 기대 호**(`faults._surge_base`)가 기준이다(2026-11-05 · F-112).
+                # 그 분 평소 호(6~15건)를 기준으로 삼으면 그 출렁임이 ×39 로 커져 분당 21~62배를
+                # 오갔다. 더하는 수는 `기준 × (배율 − 1)` 의 **포아송 추첨**이다 — 흔들림은 남기되
+                # 평소 호의 흔들림을 곱하지 않는다
+                base = [cell_base.get(k, 0.0) for k in keys]
+                total = sum(base)
+                extra = min(budget, _poisson(rng, total * (mult - 1.0)))
+            else:
+                # 기준값이 없으면(창고 조회 실패 · 지정 대상 전 데이터 없음) 전처럼 **하한 전 평소량**
+                # (`natural`)이고 더하는 수는 `평소 × (배율 − 1)` 이다
+                nat = natural if natural is not None else landed
+                base = [nat.get(k, 0) for k in keys]
+                total = sum(base)
+                if not total:
+                    continue
+                extra = min(budget, int(total * (mult - 1.0) + rng.random()))
+            if extra <= 0:
+                continue
+            budget -= extra
+            picks = rng.choices(keys, weights=base, k=extra)
+            for k, ct in zip(picks, rng.choices(cts, weights=wts, k=extra)):
+                sub = gen.subs[pool[rng.randrange(len(pool))]]
+                rec, cell = gen.base_lte_call(ts, slot_start, at=(sub, by_key[k]))
+                force_ct[id(rec)] = ct
+                if (emergency is not None and ct in _scenarios.DISASTER_EMERGENCY_CALL_TYPES
+                        and rng.random() < self.fault.disaster_emergency_share):
+                    emergency.add(id(rec))
+                yield rec, cell
+
+    #: 들어오는 레코드에서 비우는 직전 호 기록 — 프로브가 이 단말의 EPC 직전 호를 본 적이 없다
+    _SA_OLD_FIELDS = ("old_call_type", "old_call_end_time", "old_call_Last_eNB_ID",
+                      "old_call_Last_Cell_ID", "old_call_Last_TAC", "old_call_Last_eNB_PLMN",
+                      "old_call_s1ap_release_cause", "old_call_error_interface_protocol",
+                      "old_call_error_cause")
+
+    def _sa_entry_fix(self, rec) -> None:
+        """SA 폴백으로 **들어오는** TAU·Attach — 직전 호 기록(`old_call_*`)을 템플릿 기본값(빈 값)으로.
+
+        `old_call_*` 는 프로브가 그 단말의 **직전 EPC 호**를 이어 붙인 기록이다(규격 "old call"). 이
+        단말은 5GS 에서 왔으므로 이어 붙일 EPC 호가 없다 — 5GS TAI 는 EPC TAC 체계가 아니고(TS 23.003
+        §19.4.2.3 매핑 GUTI), 그 값을 지어내면 "어느 LTE 셀에서 왔다"는 없는 사실이 된다.
+        `_coerce` 가 실패 호에 직전 실패를 붙일 수 있어 `_coerce` **뒤**에 비운다
+        """
+        tpl = self.gen.templates["lte_call"]
+        ix = self.gen.index["lte_call"]
+        for name in self._SA_OLD_FIELDS:
+            if name in ix:
+                rec.set(name, tpl[ix[name]])
+
+    def _sa_fallback_drafts(self, minute: int, active: list[Scenario], n_calls: int,
+                            ts, slot_start: float, force_ct: dict, sa_entry: dict):
+        """SA 폴백(17번) — 숨은 5G 단말의 **들어옴**(TAU·Attach)과 **들어온 뒤의 호**.
+
+        * 첫 분에 대상 지역에 상주하던 숨은 단말 중 강도만큼을 고르고, 도착 시각을
+          `[시작, 시작 + SA_FALLBACK_RAMP_MIN 분)` 에서 단말마다 뽑는다.
+        * 도착한 분에 그 단말의 상주 셀에서 TAU(5) 또는 Attach(1) 한 건 — 절차의 성공·실패는 평소
+          분포 그대로다(실패를 늘리지 않는다). 기록은 생산량 비율(`volume_pct`)로 뽑는다 — 평시
+          TAU 와 같은 규칙이다(이동은 사람 수, 기록은 생산량).
+        * 들어온 뒤에는 **평소 가입자 1인당 호 빈도**(`n_calls / len(subs)`)로 호를 낸다 — 생산량이
+          그 빈도에 이미 들어 있다.
+        * **NR 레그가 없다**(`initial_nr_conn_time` 템플릿 기본값) — 단말이 SA 에서 밀려난 것은 5G
+          무선(gNB)이나 5GC 가 서비스를 못 하기 때문이고, 일본 현장 SA 는 같은 사이트 NR 을 NSA 와
+          나눠 써서 gNB 가 죽으면 EN-DC 의 SgNB 도 없다. 5GC 장애면 NR 무선은 살아 있어 EN-DC 가
+          붙을 수 있다 — 그 경우는 이 시나리오가 다루지 않는다(보고 · 결정 대기)
+        * 장애가 끝나면(시나리오가 `active` 에서 빠지면) `[0, RAMP)` 분에 걸쳐 SA 로 돌아간다 — 그
+          시각에 EPC 세션을 끊고(`sessions.cut` · FIN 없음) **C-Plane 기록은 내지 않는다**. 유휴
+          단말의 EPS→5GS 이동은 5GS 등록이고(TS 23.502 §4.11.1.3.3), MME 는 N26 문맥 이전 뒤 S1 메시지
+          없이 정리한다 — S1-MME 프로브에 남을 호가 없다
+        """
+        gen = self.gen
+        mine = [sc for sc in active if sc.kind == "sa_fallback"]
+        live_ids = {sc.id for sc in mine}
+        rng = gen.rng
+        # ── 돌아가기 — 끝난 장애의 단말 ───────────────────────────────
+        if self._sa_in:
+            ramp = _scenarios.SA_FALLBACK_RAMP_MIN * 60.0
+            gone = []
+            for imsi, st in self._sa_in.items():
+                if st[0] in live_ids:
+                    continue
+                if st[5] is None:
+                    st[5] = slot_start + rng.random() * ramp
+                if st[5] < slot_start + 60.0:
+                    gone.append(imsi)
+            if gone:
+                back = {k: self._sa_in.pop(k) for k in gone}
+                for s in self.sessions.active:
+                    st = back.get(s.user[0])
+                    if st is not None and s.cut_t < 0:
+                        self.sessions.cut(s, max(st[5], slot_start + 0.5))
+        if not mine or not n_calls:
+            return
+        budget = int(_scenarios.SA_FALLBACK_CAP * n_calls)
+        keep = min(1.0, max(0.0, self._volume_pct / 100.0))
+        rate = n_calls / max(1, len(gen.subs)) * _scenarios.FAULT.sa_fallback_call_boost
+        tpl = gen.templates["lte_call"]
+        i_nr = gen.index["lte_call"].get("initial_nr_conn_time")
+        by_key = gen.cell_by_key
+        for sc in mine:
+            if not sc.__dict__.get("_sa_seated"):
+                self._sa_seat(sc, by_key)
+            for imsi, st in self._sa_in.items():
+                if st[0] != sc.id or budget <= 0:
+                    continue
+                _sid, sub, cell, t_at, entered, t_back = st
+                if t_at >= slot_start + 60.0:
+                    continue            # 아직 오지 않았다
+                if not entered:
+                    st[4] = True
+                    if rng.random() >= keep:
+                        continue
+                    rec, cell2 = gen.base_lte_call(ts, slot_start, at=(sub, cell))
+                    force_ct[id(rec)] = ("5" if rng.random() < _scenarios.SA_FALLBACK_TAU_SHARE
+                                         else "1")
+                    sa_entry[id(rec)] = max(t_at, slot_start)
+                elif rng.random() < rate:
+                    rec, cell2 = gen.base_lte_call(ts, slot_start, at=(sub, cell))
+                else:
+                    continue
+                if i_nr is not None:
+                    rec.values[i_nr] = tpl[i_nr]
+                budget -= 1
+                yield rec, cell2
+
+    def _sa_seat(self, sc: Scenario, by_key) -> None:
+        """장애 첫 분 — 대상 지역 숨은 단말 중 강도만큼을 고르고 도착 시각을 뽑는다(한 번만)."""
+        sc._sa_seated = True
+        t0 = sc.__dict__.get("start_ts")
+        if t0 is None:
+            t0 = (self.anchor.timestamp() + sc.start_minute * 60.0) if self.anchor else 0.0
+        rng = random.Random(zlib.crc32(sc.id.encode()))
+        pool = [(sub, by_key[k]) for k in sorted(sc.target.cell_keys) if k in by_key
+                for sub in self.sa_hidden.get(k, ())]
+        rng.shuffle(pool)
+        n = int(round(max(0.0, min(1.0, sc.peak)) * len(pool)))
+        ramp = _scenarios.SA_FALLBACK_RAMP_MIN * 60.0
+        for sub, cell in pool[:n]:
+            self._sa_in[sub.imsi] = [sc.id, sub, cell, t0 + rng.random() * ramp, False, None]
+        sc._sa_n = n
+        # 정답지 `fallback_imsis` — 넘어오기로 뽑힌 단말(합성 평문 IMSI · 불변규칙 14 의 운영 암호문이 아니다)
+        sc._sa_imsis = sorted(sub.imsi for sub, _cell in pool[:n])
+
+    def _node_down_cuts(self, minute: int, ts: datetime, slot_start: float,
+                        down: dict, relocate=None) -> list[list[str]]:
+        """다운 장비를 지나는 **열린 세션**을 끊고, SGW·PGW 다운이면 C-Plane 절단 레코드를 낸다.
+
+        세션은 `core`(열 때 박은 MME·SGW·PGW)로 가린다 — 셀의 현재 장비가 아니다. 다운
+        첫 분에는 세션 ID 해시로 절반, 둘째 분부터 나머지를 끊는다. 끊는 시각은 그 분 안의
+        무작위 초다. eNB 다운은 레코드를 내지 않는다 — 기지국이 죽어 해제를 알릴 주체가
+        없고, 그 셀의 호도 억제기가 이미 막는다(`enb_s1_outage` 의 "무호").
+        C-Plane 레코드는 **가입자당 한 건**이다(세션이 여럿이어도 접속은 하나다).
+        """
+        gen = self.gen
+        rng = gen.rng
+        out: list[list[str]] = []
+        seen: set[str] = set()
+        # 미뤄 둔 C-Plane 절단 기록 — **기한이 된 것만** 낸다. 세션은 이미 끊겼다
+        later: list[tuple] = []
+        for item in getattr(self, "_down_pending", []):
+            imsi, cell, core, due, at0 = item[:5]
+            if minute < due:
+                later.append(item)
+            elif len(item) > 5 and item[5] == "reconnect":
+                self._reconnect_rec(out, ts, slot_start, imsi, cell, core, at0)
+            else:
+                self._down_cut_rec(out, ts, slot_start, imsi, cell, core, at0)
+        # 끝난 세션의 표식은 지운다 — 쌓이지 않게
+        held = self.__dict__.get("_enb_held")
+        if held:
+            live = {x.sid for x in self.sessions.active}
+            held &= live
+        reconn = self.__dict__.get("_enb_reconn")
+        if reconn:
+            alive = {x.user[0] for x in self.sessions.active if x.sid in (held or ())}
+            for k in [k for k in reconn if k not in alive]:
+                del reconn[k]
+        for s in self.sessions.active:
+            if s.cut_t >= 0:
+                continue
+            hit = _scenarios.down_of(down, core=s.core)
+            if hit is None and str(s.cell.enb_id) in down["ENB"]:
+                hit = ("ENB", str(s.cell.enb_id), down["ENB"][str(s.cell.enb_id)])
+            if hit is None:
+                continue
+            age = minute - hit[2]
+            first_half = zlib.crc32(s.sid.encode()) % self.DOWN_CUT_MINUTES == 0
+            if hit[0] == "ENB":
+                # **eNB 다운 — 세션은 코어에 살아 있다**(2026-11-04 원칙 · SGW 다운과 다르다).
+                # 끊지 않는다. 다운 시각부터 재연결까지 데이터가 멈추고(`freeze`), 그 시각에 이웃
+                # 셀로 넘어가(`relocate` · `Session.ho_at_t`) 같은 세션이 이어진다. 그 셀에서
+                # 재연결 Service Request 를 다음 분에 남긴다. C-Plane 해제 기록은 내지 않는다 —
+                # 기지국이 죽어 S1 해제 메시지가 오가지 않는다(MME 의 로컬 해제 · 프로브에 없다)
+                self._enb_down_hold(s, minute, slot_start, down, hit, relocate, later)
+                continue
+            # **SGW·PGW 다운 — 데이터는 다운 시각에 멈춘다**(장애 기록의 초 단위 시작 ·
+            # `node_down_set` 의 `AT`). 시작 분이면 그 시각에, 그 뒤 분이면 분 시작에 끊는다 —
+            # 그 분 레코드는 끊긴 시각까지의 몫만 갖는 `End` 다(F-110 은 19:07:18 장애를 19:07:00
+            # 에 끊으려 했다 — 18초 이르다)
+            at = _scenarios.down_at(down, hit[0], hit[1])
+            t_cut = at if (at is not None and at >= slot_start) else slot_start + 0.5
+            self.sessions.cut(s, t_cut)
+            imsi = s.user[0]
+            if imsi in seen:
+                continue
+            seen.add(imsi)
+            # **C-Plane 절단 기록은 끊은 분 다음부터 두 분에 나눈다** — MME 가 경로 장애를
+            # 알아차리는 시차다. 기준은 **끊은 분**이다: 장애 시작 분을 기준으로 두면 gen 이
+            # 그 분을 장애 전에 이미 만든 경우(재기동 직후 · F-110) 첫 처리 분이 "둘째 분"이 되어
+            # 절반이 아니라 전부가 한 분에 나왔다. 다음 분부터라 기록 시각이 다운 시각보다
+            # 앞서지 않는다
+            later.append((imsi, s.cell, s.core, minute + (1 if first_half else 2), at))
+        self._down_pending = later
+        return out
+
+    def _enb_down_hold(self, s, minute: int, slot_start: float, down: dict, hit,
+                       relocate, later: list) -> None:
+        """다운 eNB 의 열린 세션 하나 — 데이터를 멈추고 이웃 셀로 잇는다. 세션마다 한 번만."""
+        held = self.__dict__.setdefault("_enb_held", set())
+        if s.sid in held:
+            return
+        held.add(s.sid)
+        rng = self.gen.rng
+        at = _scenarios.down_at(down, "ENB", hit[1])
+        at = slot_start if at is None or at < slot_start else at
+        # **재연결은 가입자당 한 번이다**(에스터 xfail · 2026-11-05). 단말 하나가 Service Request
+        # 한 번으로 모든 베어러를 되살린다(TS 24.301 §5.6.1 · 세션이 여럿이어도 RRC 연결은 하나다).
+        # 그래서 같은 가입자의 세션은 **첫 세션이 뽑은 시각에 모두 함께** 넘어가고 레코드도 한 건이다.
+        # 같은 다운(`at`)에 대한 것만 묶는다 — 다른 장애로 다시 다운되면 새로 뽑는다
+        reconn = self.__dict__.setdefault("_enb_reconn", {})
+        imsi = s.user[0]
+        prev = reconn.get(imsi)
+        if prev is None or prev[0] != at:
+            reconn[imsi] = prev = [at, at + rng.uniform(*_scenarios.DISASTER_RECONNECT_S), False]
+        gap = reconn[imsi][1] - at
+        span = max(1, s.span)
+        f0 = s.i / span + min(1.0, max(0.0, (at - max(s.t0, slot_start)) / 60.0)) / span
+        f1 = f0 + gap / 60.0 / span
+        if s.freeze is None and f1 < 1.0:
+            s.freeze = (f0, f1)
+        s.ho_at_t = at + gap                    # 이웃 셀로 넘어가는 시각 = 재연결
+        dst = relocate(s.cell) if relocate is not None else None
+        if dst is not None and not prev[2]:
+            # 재연결 Service Request — 다음 분(그 시각이 이 분 안이어도 레코드는 끝난 뒤다).
+            # 이웃을 찾은 첫 세션이 한 건을 낸다
+            prev[2] = True
+            later.append((s.user[0], dst, s.core, minute + 1, at + gap, "reconnect"))
+
+    def _reconnect_rec(self, out: list, ts: datetime, slot_start: float,
+                       imsi: str, cell0, core, t_at: float | None) -> None:
+        """다운 eNB 에서 넘어온 단말의 **재연결 Service Request** — 성공 호, 같은 코어.
+
+        새 세션을 열지 않는다(`calls` 에 넣지 않는다) — 세션은 코어에 살아 있고 이웃 셀로 이어졌다.
+        `Service MO(3)` 이고 끝 시각은 재연결 시각 이후, 이 분 안이다(`fit_minute` 하한)
+        """
+        gen = self.gen
+        si = gen.sub_by_imsi.get(imsi, -1)
+        if si < 0:
+            return
+        for _try in range(3):
+            rec, cell = gen.base_lte_call(ts, slot_start, at=(gen.subs[si], cell0))
+            self._coerce(rec, cell, force_call_type="3")
+            if str(rec.get("success_flag")) in ("1", "True") and str(rec.get("drop_flag")) != "1":
+                break
+        else:
+            return
+        rec.set("MME_ID", core[0]); rec.set("SGW_ID", core[1]); rec.set("PGW_ID", core[2])
+        _scenarios.fit_minute(rec, slot_start, t_at)
+        out.append(rec.values)
+
+    def _down_cut_rec(self, out: list, ts: datetime, slot_start: float,
+                      imsi: str, cell0, core, at: float | None = None) -> None:
+        """C-Plane 절단 레코드 한 건 — MME 가 다운 SGW·PGW 의 세션을 정리한 기록.
+
+        Service(3) 호를 그 가입자·그 셀로 만들고 `callflow.drop`(Cause 504)으로 끊는다.
+        레코드의 코어는 **세션 것**이다 — X2 로 옮겨 간 셀의 장비가 아니다.
+        """
+        gen = self.gen
+        rng = gen.rng
+        from . import callflow
+        si = gen.sub_by_imsi.get(imsi, -1)
+        if si < 0:
+            return
+        for _try in range(3):
+            rec, cell = gen.base_lte_call(ts, slot_start, at=(gen.subs[si], cell0))
+            self._coerce(rec, cell, force_call_type="3")
+            if str(rec.get("success_flag")) in ("1", "True"):
+                break
+        else:
+            return
+        rec.set("MME_ID", core[0]); rec.set("SGW_ID", core[1]); rec.set("PGW_ID", core[2])
+        if callflow.drop(rec, self.DOWN_CUT_CAUSE, rng):
+            # 절단 시각은 **이 분 안**이다 — `drop` 은 호 길이의 비율로 끊어 호 시작(최대
+            # 10분 앞)에 끌려 다운 시각보다 앞설 수 있었다(에스터 관찰 · 약 5%). 기록이 나오는
+            # 분은 끊은 다음 분부터라 분 안이면 다운 시각 뒤다
+            _scenarios.retime_drop(rec, slot_start + 0.5, slot_start + 58.0, rng)
+            # 접속 절차 끝(하한)이 분 끝 너머면 `retime_drop` 이 구간을 지킬 수 없다 — 뽑은 호가
+            # 분 끝 가까이 시작해 단계가 길 때다(에스터 관찰 · 60.8초 1건). 이 레코드는 `records`
+            # 의 호 루프 밖(`out.extend`)이라 `fit_minute` 를 따로 건다
+            # 하한은 다운 시각 — 이 기록은 끊은 다음 분부터라 실제로는 분 시작이 이긴다(두 겹)
+            _scenarios.nr_settle(rec)
+            _scenarios.fit_minute(rec, slot_start, at)
+            out.append(rec.values)
 
     def uplane_records(self, minute: int, ts: datetime) -> dict[str, list[list[str]]]:
         """한 분의 U-Plane 레코드 — 계열별 값 리스트.
@@ -2873,6 +3338,9 @@ class PemdbGen:
         active = self._active(minute)
         # 열려 있던 세션도 정지 셀을 떠난다 — `records` 와 같은 콜백이다
         self.sessions.relocate = self._relocator(minute, active)
+        # 다운 장비로 가는 전환을 막는다 — 다운이 없는 분에는 `None` 으로 되돌린다
+        down = _scenarios.node_down_set(active, minute)
+        self.sessions.down = down if any(down.values()) else None
         # 장애 대상 셀의 세션은 **대상 앱을 더 자주 고른다** — 장애가 없는
         # 분에는 빈 목록으로 되돌린다
         book = self.gen.app_book
@@ -2971,6 +3439,79 @@ class PemdbGen:
             # 직전 호 — 핸드오버 **뒤**다. 핸드오버-In 호의 출발 셀을
             # `_baseline_handover` 가 정한 이웃 관계에서 고르기 때문이다
             self._baseline_old_call(rec, ct, cell, f)
+        if f["drop"]:
+            self._drop_request(rec)
+        # NR 필드 — 호 길이와 PathSwitch 가 정해진 **뒤**다
+        self._nr_fields(rec, ct, cell, f)
+
+    def _drop_request(self, rec) -> None:
+        """평시 절단의 eNB 요청 — 실측 절단은 요청이 해제에 앞서고 Cause 가 같다(`callflow.yaml` drop).
+
+        해제만 적어 요청 시각이 `0.0` 으로 남았다(에스터 관찰 · 평시 절단 전부). `first_error_*` 는
+        비운 채 둔다 — 평시 호에 오류 기록을 세우면 룰이 증상만 보고 발동한다(불변규칙 7).
+        해제 Cause 는 전환이 바꿀 수 있어(`_baseline_handover`) 그 뒤의 값을 읽는다
+        """
+        from . import callflow
+        t_rel = rec.num("UEContextRelease_Time")
+        if not t_rel:
+            return
+        cause = int(rec.num("UEContextRelease_Cause"))
+        t_req = max(rec.num("call_start_time"), t_rel - callflow.request_gap(cause, self._drop_rng))
+        rec.set("UEContextReleaseRequest_Time", f"{t_req:.6f}")
+        rec.set("UEContextReleaseRequest_Cause", cause)
+
+    #: NR 을 얹는 절차 — 현장 추출의 NR 호 145건이 전부 ct 3·4 다. 7(Ext Svc MO)은 같은 서비스 호다
+    NR_CALL_TYPES = frozenset(("3", "4", "7"))
+    #: Modify Bearer 가 없는 절차 — 현장 ct 6 은 0. Detach 는 경로를 만들지 않는다
+    NO_MB_CALL_TYPES = frozenset(("6", "9"))
+    #: 호 길이(초 상한) → NR 가능 eNB 에서 NR 이 붙는 확률. **초기값.** 현장은 5G 단말 전체로 5초 미만
+    #: 0% · 5~20초 19% · 20~60초 43% · 60초 이상 88% 이고, 호가 있는 eNB 의 41% 가 NR 가능이라 그 값으로
+    #: 나눠 1 에서 잘랐다. 60초 이상은 eNB 비율을 곱하면 40% 까지만 나온다 — 현장의 긴 호는 여러 eNB 를
+    #: 지나며 NR 을 만나는데 여기서는 호의 첫 셀만 본다
+    NR_BY_LENGTH = ((5.0, 0.0), (20.0, 0.45), (60.0, 0.90), (float("inf"), 1.0))
+    #: 호 길이 → NR 변화 횟수 1·2·3·4 이상의 몫. **초기값.** 현장 분포(41·20·14·25%)가 이 길이 구성에서
+    #: 나오게 잡았다 — 호가 길수록 크다
+    NR_CHANGE_BY_LENGTH = ((20.0, (.55, .22, .13, .10)), (60.0, (.35, .20, .15, .30)),
+                           (float("inf"), (.15, .12, .15, .58)))
+    #: NR 시각 — 호 시작 뒤 초의 로그정규(중앙 0.5초 · 90% 6초 · 상한 100초). 현장 값이다. 초기값
+    NR_DELAY_MEDIAN_S = 0.5
+    NR_DELAY_SIGMA = 1.94
+    NR_DELAY_MAX_S = 100.0
+
+    def _nr_on(self, enb_id: str) -> bool:
+        """이 eNB 가 NR 을 낼 수 있나 — **eNB 에 고정**이다. 현장은 호가 3건 이상인 eNB 가 (4/4)·(0/11)
+        처럼 거의 전부이거나 없음이다. 해시라 재시작해도 같다"""
+        return zlib.crc32(f"nr:{enb_id}".encode()) % 1000 < self._nr_enb_share * 1000
+
+    def _nr_fields(self, rec, ct: str, cell: Cell | None, f: dict) -> None:
+        """`initial_nr_conn_time` 과 `ModifyBearer_success_count` — **현장 추출의 모양**(2026-11-05).
+
+        NR 시각은 호 안에서 NR 이 처음 붙은 시각이고 지속 시간이 아니다. Modify Bearer 는 호당 1 +
+        PathSwitch 성공 + NR 변화다(`scenarios.modify_bearer_base`). 난수는 따로 쓴다 — 쓰는 곳이
+        5G 호뿐이라 본 흐름에 섞으면 `sa_device_share` 가 다른 필드의 추첨 순서를 흔든다.
+        숨은 SA 단말(17번)은 풀 밖이라 여기서 NR 을 받지 않는다 — 5G 측 장애로 넘어온 단말이다
+        """
+        rng = self._nr_rng
+        rec.set("initial_nr_conn_time", "0.0")
+        change = 0
+        dur = rec.num("call_duration_time") / 1e6
+        if (ct in self.NR_CALL_TYPES and cell is not None and f["suc"]
+                and rec.get("ue_dcnr") == "1" and rec.get("IMSI") in self.gen.sub_by_imsi
+                and self._nr_on(str(cell.enb_id))):
+            p = next(v for lim, v in self.NR_BY_LENGTH if dur < lim)
+            if rng.random() < p:
+                delay = min(self.NR_DELAY_MAX_S, dur * 0.9, self.NR_DELAY_MEDIAN_S
+                            * math.exp(rng.gauss(0.0, self.NR_DELAY_SIGMA)))
+                rec.set("initial_nr_conn_time",
+                        f"{rec.num('call_start_time') + delay:.6f}")
+                w = next(v for lim, v in self.NR_CHANGE_BY_LENGTH if dur < lim)
+                change = rng.choices((1, 2, 3, 4), weights=w, k=1)[0]
+                if change == 4:
+                    change += min(20, int(rng.expovariate(1.0 / 3.0)))
+        if ct in self.NO_MB_CALL_TYPES or (f["att"] and not f["suc"]):
+            rec.set("ModifyBearer_success_count", 0)
+        else:
+            _scenarios.set_nr_change(rec, change)
 
     def _baseline_procedures(self, rec, f: dict) -> None:
         """인증·가입정보·단말식별·NPR 플래그와 그 실패 기록.
@@ -3113,6 +3654,28 @@ class PemdbGen:
 
         if kind is None or nb is None:
             return
+        # **다운 장비로는 넘어가지 않는다**(2026-11-04 · 세션 쪽 `session._emit` 과 같은 규칙).
+        # 다운 eNB 의 셀, 또는 S1 전환이 고를 SGW·PGW 가 다운이면 전환하지 않는다 — 두면
+        # 살아 있는 SGW 에서 시작한 호가 다운 SGW 에서 **성공**으로 끝났다(에스터 xfail ·
+        # eNB 500020 → 500019 · SGW-0016). X2 는 코어가 그대로라 상대 셀의 SGW 를 보지 않는다
+        down = getattr(self, "_down", None)
+        if down is not None:
+            # **출발 셀이 다운 SGW·PGW 아래면 전환 시도가 없다**(2026-11-04 에스터 관찰). 그 호는
+            # 곧 뮤테이터·`node_down_gate` 가 S11 실패로 바꾼다 — 세션을 열지 못한 호는 옮겨 갈
+            # 베어러가 없다. 막지 않으면 이웃도 같은 다운 SGW 일 때 아래 준비 실패(106)가 먼저
+            # 찍히고 실패 호에 남아, SGW 다운이 이동성 실패로 섞여 읽혔다(8분 80건)
+            if _scenarios.down_of(down, core=(cell.mme_id, cell.sgw_id, cell.pgw_id)) is not None:
+                return
+            if str(nb.enb_id) in down["ENB"]:
+                return                      # 죽은 기지국은 측정 보고에 오르지 않는다 — 시도가 없다
+            if kind in (HO.HO_S1, HO.HO_S1_MME) and _scenarios.down_of(
+                    down, core=(nb.mme_id, nb.sgw_id, nb.pgw_id)) is not None:
+                # **전환 준비 실패로 남긴다**(2026-11-04 사용자 지적) — 단말은 출발 셀에 남고
+                # 세션은 산다. 취소(아무 기록 없음)로 두면 다운 SGW 쪽 전환 시도가 관측에서
+                # 사라진다. **연결된 호에만** 적는다 — 붙지 못한 호에는 옮겨 갈 베어러가 없다
+                if str(rec.get("success_flag")) in ("1", "True"):
+                    self._ho_prep_failure(rec, rel, rng)
+                return
 
         self._apply_handover(rec, cell, nb, kind, rel)
 
@@ -3187,6 +3750,32 @@ class PemdbGen:
         rec.set("old_call_Last_eNB_PLMN", cell.plmn)
         rec.set("old_call_error_interface_protocol", iface)
         rec.set("old_call_error_cause", cause)
+
+    #: 다운 SGW·PGW 로 가는 S1 전환 준비 실패 — S1AP `106 Handover Failure In Target EPC/eNB`,
+    #: 메시지 `0 HandoverPreparation`(graphio `codes.S1AP_MESSAGE`). 목표 쪽 EPC(SGW)가 자원을
+    #: 못 세운 실패라 이 Cause 가 뜻에 맞는다. `S1AP_MOBILITY_CAUSES` 에 들어 이동성 실패로
+    #: 세어진다. **절단(`callflow.drop`)은 하지 않는다** — 준비 단계 실패는 출발 셀 연결을 건드리지
+    #: 않는다(TS 36.413 §8.4.1.3 Handover Preparation Failure). 기존 `_handover_failure`(SC-09)
+    #: 의 106 은 실행 단계 실패라 끊기고, 이것은 준비 단계라 끊기지 않는다
+    HO_PREP_FAIL_CAUSE = 106
+    HO_PREP_FAIL_MESSAGE = 0
+
+    def _ho_prep_failure(self, rec, rel: str, rng) -> None:
+        """S1 전환 준비 실패를 레코드에 적는다 — 셀·장비는 그대로(출발 셀)."""
+        t0 = float(rec.get("call_start_time", "0.0") or 0.0)
+        t1 = float(rec.get("call_end_time", "0.0") or 0.0)
+        t = t0 + max(0.01, (t1 - t0) * rng.uniform(0.2, 0.8))
+        # **구간 필드(`s1ap_error_*`)에만 적는다.** 호는 성공이다 — `first/last_error_*` 에
+        # 적으면 "성공인데 오류 기록 있음"이 되어 룰이 증상만 보고 발동한다(`_coerce` 의
+        # `_clear_error` 주석 · 불변규칙 7). S1AP 구간 기록은 그 구간의 마지막 오류다
+        rec.set("s1ap_error_Cause", self.HO_PREP_FAIL_CAUSE)
+        rec.set("s1ap_error_Message", self.HO_PREP_FAIL_MESSAGE)
+        rec.set("s1ap_error_Time", f"{t:.6f}")
+        # 해제가 "전환으로 끝났다"(핸드오버 Cause)면 사실이 아니게 됐다 — 전환은 실패했고
+        # 단말은 남았다. 출발 셀에서 쉬다가 풀린 것으로 적는다(`120 User inactivity` · 정상 종료)
+        if rel in HO.HANDOVER_CAUSES:
+            rec.set("UEContextRelease_Cause", "120")
+            rec.set("UEContextReleaseRequest_Cause", "120")
 
     def _apply_handover(self, rec, src: Cell, dst: Cell, kind: str,
                         rel: str) -> None:
@@ -3277,7 +3866,8 @@ class PemdbGen:
         self.gen.scenarios = scenarios
         self.gen._bind_scenario_targets()
 
-    def set_fault_rows(self, active: list[dict]) -> tuple[list[Scenario], list[int]]:
+    def set_fault_rows(self, active: list[dict], enb_rate=None
+                       ) -> tuple[list[Scenario], list[int]]:
         """`CM_DATAGEN_FAULT` 활성 행 목록을 걸어 둔다 — 실시간 틱(`cli.cmd_run`)용.
 
         해석은 `faults.resolve_active` 가 한다. 구 창고 경로(`engine.DataGen`, 삭제됨)와
@@ -3287,7 +3877,8 @@ class PemdbGen:
         if self.anchor is None:
             raise RuntimeError("anchor 미설정 — set_fault_rows 전에 anchor 를 정해야 한다")
         scs, bad = resolve_active_faults(
-            self.cells, self.anchor, self.seed, active, self._fault_cache)
+            self.cells, self.anchor, self.seed, active, self._fault_cache, enb_rate=enb_rate,
+            routes=self.gen.routes, nr_on=self._nr_on)
         self.set_faults(scs)
         return scs, bad
 
@@ -3295,6 +3886,58 @@ class PemdbGen:
 # --------------------------------------------------------------------------
 # 적재
 # --------------------------------------------------------------------------
+
+
+def _poisson(rng: random.Random, lam: float) -> int:
+    """포아송 추첨 — 작으면 곱셈법, 크면 정규 근사(분당 수백 건이라 차이가 없다)."""
+    if lam <= 0.0:
+        return 0
+    if lam > 50.0:
+        return max(0, int(round(rng.gauss(lam, math.sqrt(lam)))))
+    lim, k, p = math.exp(-lam), 0, 1.0
+    while True:
+        p *= rng.random()
+        if p <= lim:
+            return k
+        k += 1
+
+
+def enb_call_rate(conn, end: datetime, minutes: int = 60) -> dict[str, float]:
+    """eNB → **평소 호율 λ**(분당 시도) — `[end − minutes, end)` 의 `PM_ENB_KPI_1M`.
+
+    graphio D4 의 λ 와 같은 결로 센다 — 분당 시도 평균과 무호 분 비율로 본 값(`−ln(무호 분 비율)`)
+    중 **낮은 쪽**. 평균은 몰린 몇 분에 부풀고, 무호 분 비율이 실제 확정 속도를 정한다. 창은 장애
+    시작 시각 앞이라 **gen 이 다시 떠도 같은 값**이다(1분 통계는 백필 없음). 자연재해 자동 대상
+    (`faults._busy_disaster_area`)과 정답지 `down_enbs_rate` 가 쓴다
+    """
+    lo = end - timedelta(minutes=minutes)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT ENB_ID, COUNT(DISTINCT CASE WHEN ATTEMPT_CNT > 0 THEN EVENT_TIME END), "
+            f"SUM(ATTEMPT_CNT) FROM {PM_ENB} WHERE EVENT_TIME >= %s AND EVENT_TIME < %s "
+            f"GROUP BY ENB_ID", (lo, end))
+        rows = cur.fetchall()
+    out = EnbRate()
+    for enb, busy, att in rows:
+        busy = min(int(busy or 0), minutes)
+        mean = float(att or 0) / minutes
+        idle = (minutes - busy) / minutes
+        lam = -math.log(idle) if idle > 0 else mean
+        out[str(enb)] = min(mean, lam)
+        out.mean[str(enb)] = mean
+    return out
+
+
+class EnbRate(dict):
+    """`enb_call_rate` 의 결과 — 값은 D4 결의 λ, **`.mean` 은 분당 시도 평균**(같은 조회 · 같은 창).
+
+    λ 는 지역 고르기에, 평균은 자연재해 폭주의 기준값(`faults._surge_base`)에 쓴다 — λ 는 무호 분
+    비율로 깎인 값이라 "평소 몇 호인가"가 아니다. dict 그대로 비교·직렬화된다
+    """
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.mean: dict[str, float] = {}
 
 
 class PemdbWriter:
@@ -4221,7 +4864,7 @@ def build_scenarios(gen: "PemdbGen", minutes: int, selected: str = "all",
     base_seed = (seed if seed is not None else gen.seed) + 777
     scs = build_sim_scenarios(
         gen.cells, minutes, random.Random(base_seed),
-        selected=sorted(wanted), lead_minutes=lead_minutes,
+        selected=sorted(wanted), lead_minutes=lead_minutes, nr_on=gen._nr_on,
     )
 
     # ── 관측 불가한 셀을 뺀다 ───────────────────────────────────────────

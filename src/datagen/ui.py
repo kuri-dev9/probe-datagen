@@ -18,7 +18,9 @@ import collections
 import hashlib
 import json
 import math
+import queue
 import re
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -61,9 +63,11 @@ KIND_LABELS = {
     "nsa_policy_restrict": "DCNR 정책 제한",
     "anchor_saturation": "5G 체감 품질 저하 (앵커 경합)",
     "son_param_change": "SON 변경 후 계단형 저하 (H/O)",
-    "ran_congestion": "무선 용량 혼잡 (활성 가입자 증가)",
+    "ran_congestion": "무선 용량 혼잡 (기존 가입자 품질 저하)",
     "ho_interruption": "전환 직후 정체 (코리도 4G↔5G)",
-    "earthquake": "국지 다수 셀 정지 + 주변 부하 유입 (지진)",
+    "earthquake": "국지 다수 셀 정지 + 주변 부하 유입 (지진 · 옛 27번)",
+    "natural_disaster": "자연재해 — 호 폭주 + 기지국 장애",
+    "sa_fallback": "SA→LTE 폴백 급증 (5G 측 장애 추정)",
     "cdn_degradation": "동영상 CDN 서버측 열화",
     "pay_dns_delay": "결제 앱 응답 지연 (DNS 기인)",
     "event_crowd": "대형 이벤트 군중 혼잡 + 업링크",
@@ -851,9 +855,12 @@ def api_scenarios():
     finally:
         conn.close()
     # 권장 지속시간(`scenarios.recommended_duration`) — 주입 칸 기본값과 확정 대기 표시
+    from .scenario_ja import why_ja
     from .scenarios import recommended_duration
     for r in rows:
         r["dur"] = recommended_duration(r.get("kind") or "")
+        if r["dur"]:
+            r["dur"]["why_ja"] = why_ja(r["dur"]["why"])
     return rows
 
 
@@ -1987,6 +1994,28 @@ _HTML = """<!doctype html>
 </div>
 
 <script>
+// **시계열부터 부른다** (2026-11-06 사용자 지시 · 그래프가 늦게 뜬다). 브라우저는 주소 하나에
+// 연결을 6개만 열어 먼저 낸 요청이 먼저 간다 — 그래서 사전·화면 초기화보다 앞이다.
+// 그리는 일은 `loadHeavy` 가 하고, 그때 이 요청을 그대로 이어받는다.
+//
+// `getJson` — 같은 주소가 응답을 기다리는 중이면 새로 보내지 않는다. 첫 화면의 중복 조회가
+// 사라지고, DB 가 느릴 때 1·2초 주기 조회가 연결을 차지해 그래프 요청을 막지 않는다.
+const INFLIGHT = new Map();
+function getJson(url) {
+  let p = INFLIGHT.get(url);
+  if (!p) {
+    p = fetch(url).then(r => r.json()).finally(() => INFLIGHT.delete(url));
+    INFLIGHT.set(url, p);
+  }
+  return p;
+}
+// `q()` 는 남긴다 — API 가 아직 `date` 를 받고(`_window`), 나중에 과거 조회가
+// 필요해지면 여기만 되살리면 된다. 지금은 항상 빈 문자열이다.
+const q = extra => {
+  const qs = new URLSearchParams(extra || {}).toString();
+  return qs ? "?" + qs : "";
+};
+getJson("/api/series" + q({hours:3}));
 /*__I18N__*/
 const LABELS = __KIND_LABELS__;
 let SCN = [];          // CM_ERROR_SCENARIO — /api/scenarios
@@ -2004,8 +2033,7 @@ const dow = d => DOW[new Date(d + "T00:00:00").getDay()] || "";
 async function loadKinds() {
   // 시나리오 목록·발생 장비의 정본은 `CM_ERROR_SCENARIO`(control.SCENARIOS).
   // 서버가 받지 않는 kind 는 비활성이다 — 아직 주입 경로가 없는 시나리오다.
-  const [st, sc] = await Promise.all([
-    (await fetch("/api/status")).json(), (await fetch("/api/scenarios")).json()]);
+  const [st, sc] = await Promise.all([getJson("/api/status"), getJson("/api/scenarios")]);
   const ok = new Set(st.kinds);
   SCN = sc;
   $("kind").innerHTML = SCN.map(s => {
@@ -2029,7 +2057,10 @@ async function loadTargets() {
 //: eNB 를 앵커로 **주변 셀까지** 묶어 거는 kind — `faults._PAIR_KINDS`·
 //: `_CROWD_KINDS`·`_AREA_KINDS`·`_VENUE_KINDS`·`anchor_saturation` 과 같은 목록
 const CELL_KINDS = new Set(["mobility", "son_param_change", "ho_interruption",
-  "ran_congestion", "earthquake", "event_crowd", "anchor_saturation"]);
+  "ran_congestion", "earthquake", "natural_disaster", "sa_fallback", "event_crowd", "anchor_saturation"]);
+
+//: 대상을 비우면 **전국**에 걸리는 kind — `faults._AUTO_NODE` 에서 뺀 것(2026-11-05)
+const AUTO_NATIONWIDE = new Set(["external_server"]);
 
 // 고른 시나리오의 발생 장비(`*_YN`)만 대상 후보로 보인다.
 // 권장 지속시간 — **권장값만 주입한다.** 결과 확정까지 걸리는 시간(확정 대기)은
@@ -2046,13 +2077,13 @@ function applyDur() {
 function renderDurHint() {
   const d = curDur(), el = $("dur-hint");
   if (!el) return;
-  if (!d) { el.textContent = ""; return; }
-  const v = parseInt($("dur").value, 10) || 0;
-  let h = T("권장 {r}분 · 최소 {m}분 · {w}", {r: d.recommended, m: d.min, w: T(d.why)})
-        + (d.basis === "shape" ? T(" (모양 기준 초기값)") : "")
-        + T(" — 주입 종료 후 결과 확정까지 약 +{s}분 (주입 시간에 포함 안 됨)", {s: d.settle});
-  if (v && v < d.min) h += T(" · ⚠ 최소보다 짧아 탐지·L2 가 서지 않을 수 있다");
-  el.textContent = h;
+  if (!d) { el.textContent = el.title = ""; return; }
+  // 권장은 탐지 최소 시간에 몇 분 더한 **안내**다 — 줄여도 늘려도 주입은 된다(2026-11-06 사용자
+  // 정의). 산정 근거는 마우스를 올린 사람만 본다
+  el.textContent = T("권장 {r}분 — 이보다 짧으면 탐지되지 않을 수 있습니다", {r: d.recommended});
+  el.title = T("권장 {r}분 · 최소 {m}분 · {w}", {r: d.recommended, m: d.min, w: LANG === "ja" && d.why_ja || d.why})
+           + (d.basis === "shape" ? T(" (모양 기준 초기값)") : "")
+           + T(" — 주입 종료 후 결과 확정까지 약 +{s}분 (주입 시간에 포함 안 됨)", {s: d.settle});
 }
 
 function renderTargets() {
@@ -2062,7 +2093,10 @@ function renderTargets() {
   const og = (label, items) =>
     `<optgroup label="${label}">` + items.map(i =>
       `<option value="${esc(i.v)}">${esc(i.t)}</option>`).join("") + "</optgroup>";
-  let h = `<option value="">${T("자동 선택")}</option>`;
+  // 자동 선택이 **전국**인 종류는 그렇게 적는다 — `faults._auto_target` 이 범위를 두지 않는다.
+  // 장비 표시(SGW)가 있어 "자동 = 가장 바쁜 SGW" 로 읽히기 쉽다(6번 · 2026-11-05)
+  const autoLab = s && AUTO_NATIONWIDE.has(s.kind) ? T("자동 선택 (전국)") : T("자동 선택");
+  let h = `<option value="">${autoLab}</option>`;
   // **장비 단위로 적는다**(2026-11-03) — 노드는 그 아래 eNB 수, eNB 는 이름.
   // 셀 수는 **셀 군집 시나리오**에서만 붙인다: 그 eNB 를 앵커로 주변 셀까지
   // 묶어 걸리므로(`faults._resolve_target`) 셀이 걸리는 단위다
@@ -2147,9 +2181,7 @@ function renderBar(st) {
 async function poll() {
   try {
     const [st, faults] = await Promise.all([
-      (await fetch("/api/status")).json(),
-      (await fetch("/api/faults" + q({limit:FAULT_MAX}))).json(),
-    ]);
+      getJson("/api/status"), getJson("/api/faults" + q({limit:FAULT_MAX}))]);
     renderBar(st);
     $("active-cnt").textContent = st.active.length;
     $("poll-err").textContent = "";
@@ -2171,15 +2203,18 @@ let FAULTS = [], FPAGE = 0;
 // **주입 칸과 같은 이름을 쓴다** — 주입 칸은 시나리오("2. 무선 구간 열화")로
 // 고르는데 목록은 kind 라벨로 적어서, 같은 kind 를 여러 번호가 쓰면(1/18)
 // 무엇을 걸었는지 목록에서 알 수 없었다. 번호는 주입할 때 메모에 남는다 —
-// 이 화면은 `#N`, 지도는 `지도 · 시나리오 N`
+// 이 화면은 `#N`, 지도는 `지도 · 시나리오 N`, API 로 넣는 시험 주입은 라벨 `noN-…`
 function faultName(f) {
-  const m = /^#(\\d+)\\b|시나리오 (\\d+)/.exec(f.note || "");
-  const no = m ? (m[1] || m[2]) : null;
+  const m = /^#(\\d+)\\b|시나리오 (\\d+)|^no(\\d+)-/.exec(f.note || "");
+  const no = m ? (m[1] || m[2] || m[3]) : null;
   let s = no ? SCN.find(x => String(x.no) === no) : null;
   if (!s) {
-    // 메모가 없는 것(외부 API·옛 주입)은 그 kind 를 쓰는 시나리오가 하나일 때만 잇는다
+    // 메모에 번호가 없는 것(외부 API·옛 주입)은 kind 로 잇는다. 같은 kind 를 여러 번호가 쓰면
+    // 같은 데이터의 **원본 번호**로 둔다(18 → 1) — 어느 쪽이든 만들어지는 데이터는 같다
     const c = SCN.filter(x => x.kind === f.kind);
+    const org = c.filter(x => !x.same_as);
     if (c.length === 1) s = c[0];
+    else if (org.length === 1) s = org[0];
   }
   // 번호를 `[25]` 로 감싼다 — 바로 앞 칸이 장애 ID 라 `25.` 로 두면 둘이 섞여 읽혔다
   return s ? `[${s.no}] ${T(s.name)}` : T(LABELS[f.kind] || f.kind);
@@ -2317,14 +2352,7 @@ loadKinds(); loadTargets(); poll();
 // ── 오늘만 · 항상 실시간 (2026-10-15) ───────────────────────────────────
 // 날짜 이동과 실시간 토글을 걷어냈다. 과거를 볼 일이 없고(사람 지시), 끄면
 // 화면이 멈춘 건지 생성이 멈춘 건지 구분이 안 돼 오히려 혼란스러웠다.
-//
-// `q()` 는 남긴다 — API 가 아직 `date` 를 받고(`_window`), 나중에 과거 조회가
-// 필요해지면 여기만 되살리면 된다. 지금은 항상 빈 문자열이다.
 let DAYS = [];                 // /api/ingest 의 by_day — "오늘 N분" 표시용
-const q = extra => {
-  const qs = new URLSearchParams(extra || {}).toString();
-  return qs ? "?" + qs : "";
-};
 const isLive = () => true;
 
 // ── 인입 현황 ───────────────────────────────────────────────────────────
@@ -2631,7 +2659,7 @@ function chartHover(ev) {
 // 줄 알고, 그 오해는 IMSI 를 들여다봐야 풀린다.
 let REGION = null;
 async function loadRegion() {
-  try { REGION = await (await fetch("/api/region")).json(); }
+  try { REGION = await getJson("/api/region"); }
   catch (e) { return; }
   const sel = $("region-sel");
   // **목록은 서버가 준다**(`region.LOCALES`). 화면이 자기 목록을 들면
@@ -3073,26 +3101,23 @@ async function saveSettings() {
 // ── 무거운 조회는 느린 주기로 ───────────────────────────────────────────
 // 인입·시계열은 file_ledger 를 훑는다. 5초마다 돌리면 데이터가 쌓일수록
 // 부담이 커지므로 분리한다.
-async function loadHeavy(force) {
+function loadHeavy(force) {
   // 과거 날짜나 토글 OFF 에서도 **한 번은** 그려야 화면이 빈 채로 남지 않는다.
   // 주기 호출만 막는다(setInterval 쪽에서 isLive 로 거른다).
   if (!force && !isLive()) return;
-  try {
-    const [ing, ser] = await Promise.all([
-      fetch("/api/ingest" + q({minutes:60})).then(r => r.json()),
-      fetch("/api/series" + q({hours:3})).then(r => r.json()),
-    ]);
-    renderIngest(ing); renderChart(ser);
-  } catch (e) { /* 다음 주기에 다시 */ }
+  // **서로 기다리지 않는다** — 묶으면 시계열이 인입 조회가 끝날 때까지 못 그려진다. 실패는
+  // 다음 주기에 다시 받는다
+  getJson("/api/series" + q({hours:3})).then(renderChart).catch(() => {});
+  getJson("/api/ingest" + q({minutes:60})).then(renderIngest).catch(() => {});
 }
 
-(async () => {
-  try { renderSettings(await (await fetch("/api/settings")).json()); } catch (e) {}
-  // 지역축은 **주기 폴링에 넣지 않는다** — 재시작 전에는 바뀌지 않는 값이라
-  // 1초마다 물으면 질의만 늘고 화면은 그대로다. 저장할 때 다시 읽는다.
-  loadRegion();
-  loadHeavy(true);
-})();
+// 그래프를 설정 응답 뒤에 두지 않는다. 첫 그림에 목표선(설정)·장애 이름(`poll`)이 없어도
+// 2초 주기(`loadHeavy`)의 다음 그림에서 채워진다
+loadHeavy(true);
+getJson("/api/settings").then(renderSettings).catch(() => {});
+// 지역축은 **주기 폴링에 넣지 않는다** — 재시작 전에는 바뀌지 않는 값이라
+// 1초마다 물으면 질의만 늘고 화면은 그대로다. 저장할 때 다시 읽는다.
+loadRegion();
 
 $("region-sel").addEventListener("change", renderRegionNote);
 
@@ -4188,7 +4213,9 @@ def api_map_faults(minutes: int = 15):
         hist.append({**{k: i.get(k) for k in (
             "incident_id", "severity", "status", "title", "trigger_kpi",
             "opened_ts", "updated_ts", "closed_ts", "root_code", "root_label",
-            "centroid_lat", "centroid_lon", "cell_cnt", "rca_id")},
+            "centroid_lat", "centroid_lon", "cell_cnt", "rca_id",
+            # 판정 단위 — 값은 graphio 목록 그대로다(L2 사건·L1 묶음·조각)
+            "confidence", "event_unit", "event_shape", "event_members_cnt")},
             "live": live, "enbs": sorted(h_enb), "nodes": sorted(h_node),
             "axis": axis if geo_ids else None, "geo_ids": geo_ids,
             # 위치 없는 축도 **무슨 축인지는** 화면이 말해야 한다
@@ -4227,15 +4254,19 @@ def api_map_faults(minutes: int = 15):
 
     _attach_dong(hist)
     _attach_bias(base, hist)
+    # 편향이 없는 APN 은 **PGW 에 붙인다**(사람 결정 2026-11-05) — 지역이 없고 APN 은
+    # PGW 에서 끝나는 경로다. 편향이 있으면 그 코어 장비가 먼저다
     for h in hist:
-        h.setdefault("egress", _is_egress(h)
-                     or any(n.startswith("pgw:") for n in h.get("nodes") or []))
+        if h.get("axis_raw") == "APN" and not h.get("bias"):
+            h["egress"] = True
     # 장비→심각도만 해시한다 (위 docstring)
     # 건 목록도 넣는다 — 범위 없는 Incident 가 들고 나도 건수는 바뀐다
     stamp = json.dumps(
         [{k: v["sev"] for k, v in sorted(b.items())} for b in (enb, node, sgg)]
         + [sorted(str(o["incident_id"]) for o in out)]
-        + [[h["incident_id"] for h in hist]],
+        + [[h["incident_id"] for h in hist]]
+        # 뒤에서 채워진 편향·DNS 도 넣는다 — 안 넣으면 `ver` 가 같아 화면이 받지 않는다
+        + [[h["incident_id"] for h in hist if h.get("bias") or h.get("dns")]],
         ensure_ascii=False, sort_keys=True)
     return {"ver": hashlib.sha1(stamp.encode()).hexdigest()[:12],
             "at": datetime.now().isoformat(timespec="seconds"),
@@ -4247,10 +4278,62 @@ def api_map_faults(minutes: int = 15):
             "history": hist}
 
 
+@app.get("/api/map/event/{incident_id}")
+def api_map_event(incident_id: str):
+    """사건 **전체** 범위 — 대표 조각이 아니라 구성 조각 합집합.
+
+    이력 목록의 `enbs` 는 대표 조각 하나의 범위라, 조각 4건·셀 118개 사건이 5건으로
+    보이고 셀 6,872개 사건은 0건으로 보였다. graphio `/api/incidents/{id}/map` 은
+    셀을 자르지 않고 준다(`event.cells` 는 500 에서 잘린다). 사건마다 수십 KB 라
+    목록에 싣지 않고 **누를 때만** 묻는다. 같은 eNB 의 셀은 좌표가
+    같아 eNB 하나당 점 하나만 내린다.
+    """
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    base = str(_pem_cfg().get("graphio_api") or "").rstrip("/")
+    if not base:
+        return {"error": "`pemdb1.graphio_api` 가 비어 있다", "enbs": [], "pts": []}
+    # 여기서 쓰는 것은 셀과 칸 코드뿐이다 — 둘레·사건 지리 계산을 시키지 않는다
+    url = (f"{base}/api/incidents/{urllib.parse.quote(incident_id)}/map"
+           "?cells_only=true&with_areas=true")
+    try:
+        with urllib.request.urlopen(url, timeout=8) as r:
+            doc = json.loads(r.read())
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+        return {"error": f"graphio API 에 닿지 않는다 ({url}): {e}", "enbs": [], "pts": []}
+    at: dict[str, list] = {}
+    cells = doc.get("cells") or []
+    for c in cells:
+        at.setdefault(str(c.get("key") or "").rsplit("-", 1)[0], [c.get("lon"), c.get("lat")])
+    return {"enbs": sorted(at), "pts": list(at.values()), "cells": len(cells),
+            "unmapped": doc.get("unmapped"), "areas": _event_areas(doc.get("areas") or []),
+            "areas_capped": bool(doc.get("areas_capped"))}
+
+
+def _event_areas(rows: list[dict]) -> list[dict]:
+    """구성 조각의 칸·구역을 축별로 모은다 — 화면의 `geoShapes` 가 조각 하나처럼 그대로 받는 모양이다.
+
+    넓은 축부터 준다. 나중에 그린 것이 위에 오므로 구 안의 메시가 구에 가리지 않는다.
+    """
+    by: dict[str, list[str]] = {}
+    for r in rows:
+        by.setdefault(str(r.get("level")), []).append(str(r.get("code")))
+    out = [{"axis": lv, "geo_ids": by[lv]} for lv in _AREA_ORDER if lv in by]
+    for a in out:
+        if a["axis"] == "ADM3":
+            at = _dong_at(a["geo_ids"])
+            a["dong"] = [at[g] for g in a["geo_ids"] if g in at]
+    return out
+
+
 #: 지도에 면으로 그릴 수 있는 graphio 축. 메시는 코드만으로 칸이 계산되고
 #: (JIS X 0410 — 화면이 한다), ADM2 는 화면이 이미 든 행정경계 폴리곤의
 #: `N03_007` 과 같은 코드다. ADM3(丁目)은 폴리곤이 없어 중심점뿐이다
 _GEO_AXES = ("MESH1K", "MESH500", "MESH250", "ADM1", "ADM2", "ADM3", "GLOBAL")
+#: 사건의 칸을 그리는 순서 — 넓은 것부터
+_AREA_ORDER = ("ADM1", "ADM2", "ADM3", "MESH1K", "MESH500", "MESH250")
 #: 위치 없는 축의 값(단말 기종·APN·도메인)은 선택 바에 적을 만큼만
 GEO_LIST = 10
 
@@ -4261,9 +4344,14 @@ _BIAS_AXES = ("UE", "APN")
 #: 채워진다 — 도메인 장애가 `MME-1 · 실패 0 · 비중 0%` 로 왔다. 그것을 짚으면
 #: 지도가 없는 사실을 만든다(graphio 불변규칙 18)
 BIAS_MIN_SHARE = 50.0
-#: (incident_id, rca_id) → 편향 노드. RCA 가 다시 돌면 rca_id 가 바뀌어 새로 묻는다.
-#: 10초 폴링마다 건마다 상세를 부르면 N+1 이 된다
-_BIAS_CACHE: dict[tuple, dict | None] = {}
+#: incident_id → (rca_id, 편향·DNS). 뒤 일꾼(`_bias_worker`)이 채운다. RCA 가 다시 돌면
+#: rca_id 가 달라져 새로 묻되, 새 값이 올 때까지 **옛 값을 쓴다**
+_BIAS_CACHE: dict[str, tuple] = {}
+#: 일꾼에게 맡긴 것 — 10초 폴링이 같은 건을 두 번 넣지 않게
+_BIAS_WAIT: set[tuple] = set()
+_BIAS_Q: "queue.SimpleQueue[tuple]" = queue.SimpleQueue()
+_BIAS_LOCK = threading.Lock()
+_BIAS_THREAD: threading.Thread | None = None
 
 
 def _is_egress(h: dict) -> bool:
@@ -4277,53 +4365,81 @@ def _is_egress(h: dict) -> bool:
 
 
 def _attach_bias(base: str, hist: list[dict]) -> None:
-    """UE·APN 장애에 **EV-12 편향 노드**를 붙인다 — `/api/incidents/{id}` 의 증거.
+    """UE·APN·망 밖 장애에 **EV-12 편향 노드와 DNS** 를 붙인다 — 있는 것만, 기다리지 않는다.
 
-    목록 API 에는 증거가 없어 건마다 상세를 묻는다. 캐시 키에 `rca_id` 를
-    넣어 분석이 갱신되면 다시 묻는다. 닿지 않으면 그 건만 비운다 — 지도는 선다.
+    목록 API 에 증거가 없어 건마다 `/api/incidents/{id}` 를 물어야 한다. 전에는 응답
+    안에서 순서대로 물어, 캐시가 빈 첫 호출이 **15.6초**였다(200건 중 56건 × 0.19초 +
+    재시작마다 반복 · 2026-11-05 실측). 그동안 목록 전체가 비어 있었다. 그래서 묻는 일은
+    뒤 일꾼에게 넘기고 응답은 지금 아는 값만 싣는다 — 다음 10초 폴링에 채워진다.
     """
+    global _BIAS_THREAD
+    for h in hist:
+        dns_case = _is_egress(h)
+        h["egress"] = dns_case or any(n.startswith("pgw:") for n in h.get("nodes") or [])
+        if h.get("axis_raw") not in _BIAS_AXES and not dns_case:
+            continue
+        iid, rid = h["incident_id"], h.get("rca_id")
+        rid0, got = _BIAS_CACHE.get(iid, (None, None))
+        if got:
+            h["bias"], h["dns"] = got["bias"], got["dns"]
+        if got is None or rid0 != rid:
+            with _BIAS_LOCK:
+                if (iid, rid) not in _BIAS_WAIT:
+                    _BIAS_WAIT.add((iid, rid))
+                    _BIAS_Q.put((base, iid, rid, h.get("axis_raw"), dns_case))
+    with _BIAS_LOCK:
+        if _BIAS_THREAD is None:
+            _BIAS_THREAD = threading.Thread(target=_bias_worker, daemon=True)
+            _BIAS_THREAD.start()
+
+
+def _bias_worker() -> None:
+    """한 건씩 묻는다 — 한꺼번에 던지면 graphio 화면 요청과 다툰다."""
+    while True:
+        base, iid, rid, axis_raw, dns_case = _BIAS_Q.get()
+        try:
+            got = _bias_fetch(base, iid, axis_raw, dns_case)
+            if got is not None:
+                _BIAS_CACHE[iid] = (rid, got)
+        finally:
+            with _BIAS_LOCK:
+                _BIAS_WAIT.discard((iid, rid))    # 실패면 다음 폴링이 다시 넣는다
+
+
+def _bias_fetch(base: str, iid: str, axis_raw: str | None, dns_case: bool) -> dict | None:
+    """상세 한 건 → {bias, dns}. 닿지 않으면 None — 그 건만 비고 지도는 선다."""
     import urllib.error
     import urllib.request
 
-    for h in hist:
-        dns_case = _is_egress(h)
-        if h.get("axis_raw") not in _BIAS_AXES and not dns_case:
-            continue
-        key = (h["incident_id"], h.get("rca_id"))
-        if key not in _BIAS_CACHE:
-            got = {"bias": None, "dns": None}
-            try:
-                with urllib.request.urlopen(
-                        f"{base}/api/incidents/{h['incident_id']}", timeout=3) as r:
-                    evs = (json.loads(r.read()).get("rca") or {}).get("evidence") or {}
-            except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-                continue                    # 캐시하지 않는다 — 다음 폴링에 다시
-            ev = evs.get("EV-12") or {}
-            t = ev.get("top_node") or {}
-            share = float(t.get("failure_share") or 0)
-            if (h.get("axis_raw") in _BIAS_AXES
-                    and t.get("node_type") and t.get("node_id")
-                    and int(t.get("failures") or 0) > 0
-                    and share >= BIAS_MIN_SHARE):
-                got["bias"] = {"node": f"{str(t['node_type']).lower()}:{t['node_id']}",
-                               "share": share, "failures": int(t["failures"]),
-                               "verdict": ev.get("verdict"),
-                               "concentration": ev.get("concentration")}
-            # **망 밖 장애는 DNS 를 나란히 둔다**(EV-08b) — "이름 풀이가 안 되나,
-            # 서버·백본이 느리나"를 운영자가 가르게. 값은 증거를 옮길 뿐이다
-            if dns_case:
-                rows = [d for d in (evs.get("EV-08b") or {}).get("dns") or []
-                        if isinstance(d, dict)]
-                rows.sort(key=lambda d: (-float(d.get("share_of_failures") or 0),
-                                         -int(d.get("queries") or 0)))
-                got["dns"] = [{k: d.get(k) for k in (
-                    "host_site", "queries", "fail_rate", "response_ms", "slow",
-                    "baseline_fail_rate", "baseline_response_ms", "low_sample")}
-                    for d in rows[:3]]
-            _BIAS_CACHE[key] = got
-        h["bias"] = _BIAS_CACHE[key]["bias"]
-        h["dns"] = _BIAS_CACHE[key]["dns"]
-        h["egress"] = dns_case or any(n.startswith("pgw:") for n in h.get("nodes") or [])
+    try:
+        with urllib.request.urlopen(f"{base}/api/incidents/{iid}", timeout=3) as r:
+            evs = (json.loads(r.read()).get("rca") or {}).get("evidence") or {}
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return None
+    got: dict = {"bias": None, "dns": None}
+    ev = evs.get("EV-12") or {}
+    t = ev.get("top_node") or {}
+    share = float(t.get("failure_share") or 0)
+    if (axis_raw in _BIAS_AXES
+            and t.get("node_type") and t.get("node_id")
+            and int(t.get("failures") or 0) > 0
+            and share >= BIAS_MIN_SHARE):
+        got["bias"] = {"node": f"{str(t['node_type']).lower()}:{t['node_id']}",
+                       "share": share, "failures": int(t["failures"]),
+                       "verdict": ev.get("verdict"),
+                       "concentration": ev.get("concentration")}
+    # **망 밖 장애는 DNS 를 나란히 둔다**(EV-08b) — "이름 풀이가 안 되나,
+    # 서버·백본이 느리나"를 운영자가 가르게. 값은 증거를 옮길 뿐이다
+    if dns_case:
+        rows = [d for d in (evs.get("EV-08b") or {}).get("dns") or []
+                if isinstance(d, dict)]
+        rows.sort(key=lambda d: (-float(d.get("share_of_failures") or 0),
+                                 -int(d.get("queries") or 0)))
+        got["dns"] = [{k: d.get(k) for k in (
+            "host_site", "queries", "fail_rate", "response_ms", "slow",
+            "baseline_fail_rate", "baseline_response_ms", "low_sample")}
+            for d in rows[:3]]
+    return got
 
 
 def _attach_dong(hist: list[dict]) -> None:
@@ -4336,6 +4452,14 @@ def _attach_dong(hist: list[dict]) -> None:
     ids = sorted({g for h in hist if h.get("axis") == "ADM3" for g in h["geo_ids"]})
     if not ids:
         return
+    at = _dong_at(ids)
+    for h in hist:
+        if h.get("axis") == "ADM3":
+            h["dong"] = [at[g] for g in h["geo_ids"] if g in at]
+
+
+def _dong_at(ids: list[str]) -> dict[str, dict]:
+    """丁目 코드 → 이름·중심점. DB 가 안 닿으면 빈 채로 돌려준다."""
     at: dict[str, dict] = {}
     try:
         conn = _connect()
@@ -4352,10 +4476,8 @@ def _attach_dong(hist: list[dict]) -> None:
         finally:
             conn.close()
     except pymysql.MySQLError:
-        return
-    for h in hist:
-        if h.get("axis") == "ADM3":
-            h["dong"] = [at[g] for g in h["geo_ids"] if g in at]
+        return {}
+    return at
 
 
 @app.get("/api/map/standby")
@@ -4841,6 +4963,9 @@ _HTML_MAP = """<!doctype html>
  .ga{fill-opacity:.26;stroke-width:2px;stroke-opacity:.95;
    vector-effect:non-scaling-stroke}
  .ga-approx{fill-opacity:.12;stroke-dasharray:6 4}
+ /* 구 면은 **옅게** 둔다(사용자 11-06). 구는 메시보다 훨씬 넓어 같은 농도로 칠하면 그 안의 장비와
+    메시 칸이 묻힌다. 구의 구분은 면이 아니라 경계선이 맡는다. 메시는 그대로다. 값은 초기값 */
+ .ga-ring{fill-opacity:.09}
  /* 구역 **숨쉬기** — 지도 SVG 밖의 겉층이다. 지도 SVG 안에서 움직이면
     드래그가 빈 화면이 된다(`#fx` 머리말 · 2026-10-28 실측). 겉층 **요소째**
     `opacity` 만 오가므로 칠하기 없이 합성만 한다. 박자는 장비와 같다 */
@@ -4848,6 +4973,7 @@ _HTML_MAP = """<!doctype html>
    animation:fxBreath 3.2s ease-in-out infinite}
  #geofx .gp{fill-opacity:.38;stroke-width:3.5px;stroke-opacity:1;
    vector-effect:non-scaling-stroke}
+ #geofx .gp.ga-ring{fill-opacity:.1}
  /* 전국 장애 — **지도를 칠하지 않고 화면 테두리가 빛난다.** 전부 칠하면
     장비도 길도 안 보인다. 숨쉬기는 후광과 같은 박자(`fxHalo`)이고 HTML
     층이라 드래그를 막지 않는다(`#fx` 머리말) */
@@ -4905,6 +5031,16 @@ _HTML_MAP = """<!doctype html>
  #fx i{position:absolute;transform:translate(-50%,-50%);border-radius:50%}
  #fx i.sq{border-radius:1px}
  #fx i.rg{background:none!important;border:2px solid}
+ /* 사건 윤곽의 **퍼져 나가는 물결** — 지도 SVG 안에서 굵기를 움직이면 드래그가 빈 화면이 된다.
+    대신 간격을 둔 띠를 층 셋에 미리 나눠 그리고 **층째** `opacity` 만 시차로 돌린다 — 켜지는 띠가
+    바깥으로 옮겨 가 움직임으로 보인다. 띠 하나가 끝까지 가는 시간이 3.2s(`EW_MARKS` 개가 나눠 간다) */
+ #fxe{position:absolute;inset:0;display:none;will-change:transform}
+ #fxe.on{display:block}
+ #fxe svg{position:absolute;inset:0;width:100%;height:100%;opacity:0;will-change:opacity;
+   animation:fxWave calc(3.2s/2) linear infinite}
+ #fxe svg:nth-child(2){animation-delay:calc(-3.2s/3)}
+ #fxe svg:nth-child(3){animation-delay:calc(-3.2s/6)}
+ @keyframes fxWave{0%,100%{opacity:0}50%{opacity:1}}
  @keyframes fxHalo{0%,100%{opacity:.95}50%{opacity:.35}}
  @keyframes fxBreath{0%,100%{opacity:0}50%{opacity:.85}}
  /* 고른 장비에 걸린 장애 내역 — 선택 바 바로 아래 */
@@ -4948,7 +5084,8 @@ _HTML_MAP = """<!doctype html>
  #sel b,#fbar b{color:#ff9ec4;margin-right:2px;order:-2}
  #sel span,#fbar span{opacity:.8;overflow-wrap:anywhere}
  #sel button,#fbar button{margin-left:auto;order:-1}
- #fbar{border-color:#ffb86b80}
+ /* 이력 패널(오른쪽 320px)을 비키고 그 왼쪽 가운데에 선다 — 겹치면 해제 단추가 깔렸다 */
+ #fbar{border-color:#ffb86b80;left:calc(50% - 170px);max-width:calc(100% - 370px)}
  /* 주입 줄 — 선택 바 맨 아래 한 줄을 통째로 쓴다. 해제 버튼 규칙
     (`order:-1`·오른쪽 붙임)을 받지 않게 따로 맞춘다 */
  #sel #inj{order:9;flex-basis:100%;display:flex;flex-wrap:wrap;gap:6px;
@@ -4960,6 +5097,13 @@ _HTML_MAP = """<!doctype html>
  #sel #inj .msg{opacity:.85;flex-basis:100%;font-size:11px}
  #sel #inj .msg.err{color:#f4978e;opacity:1}
  #sel i,#fbar i{order:-1;flex-basis:100%;height:0}   /* 제목·해제 줄 다음에서 끊는다 */
+ /* 사건 범위 윤곽 — 확대해도 선 굵기가 그대로다. 바깥 빛은 넓은 선 넷을 옅게 겹친 것이다 */
+ .evl,.evg{fill:none;pointer-events:none;vector-effect:non-scaling-stroke;stroke-linecap:round}
+ .evl{stroke-width:1.6px}
+ /* 판정 단위 표시 — L2 사건은 파랑, L1 묶음은 청록 */
+ .ub{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.03em;padding:0 5px;
+   margin-right:5px;border-radius:4px;line-height:15px;color:#fff;background:#4e7fe0;vertical-align:1px}
+ .ub.l1{background:#2f9a8f}
  /* 장애 이력 — 오른쪽 위. 누르면 그 장애의 장비로 날아간다 */
  #flist{position:absolute;right:10px;top:10px;z-index:4;width:320px;
    max-height:calc(100% - 70px);display:flex;flex-direction:column;
@@ -4969,7 +5113,13 @@ _HTML_MAP = """<!doctype html>
  #flist .hd b{font-size:12px} #flist .hd span{opacity:.65}
  #flist .hd em{margin-left:auto;font-style:normal;opacity:.6}
  #flist .bd{overflow:auto}
- #flist.fold .bd{display:none}
+ #flist.fold .bd,#flist.fold .ftabs{display:none}
+ /* 판정 단위 탭 — 지금 진행 중이 있으면 수에 빨간 표시 */
+ #flist .ftabs{display:flex;border-bottom:1px solid #ffffff1f}
+ #flist .ftabs button{flex:1;background:none;border:0;border-bottom:2px solid transparent;border-radius:0;
+   color:inherit;opacity:.65;padding:6px 4px;font-size:11.5px;cursor:pointer}
+ #flist .ftabs button.on{opacity:1;font-weight:600;border-bottom-color:#4e9af1}
+ #flist .ftabs i{font-style:normal;color:#ff7b72;margin-left:3px}
  #flist .it{display:block;width:100%;text-align:left;border:0;border-radius:0;
    border-left:4px solid var(--sev-CRITICAL);border-bottom:1px solid #1d232b;
    background:none;padding:6px 10px 6px 9px;cursor:pointer;line-height:1.45}
@@ -4978,6 +5128,7 @@ _HTML_MAP = """<!doctype html>
  #flist .it.INFO{border-left-color:var(--sev-INFO)}
  #flist .it.old{opacity:.62}
  #flist .it .t{font-weight:600;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ #flist .it .m{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
  #flist .it .m{opacity:.7;font-size:11px;display:block}
  #flist .lv{display:inline-block;font-size:10px;font-weight:700;padding:0 5px;
    margin-right:5px;border-radius:3px;background:var(--sev-CRITICAL);color:#0b0e12}
@@ -5042,7 +5193,7 @@ _HTML_MAP = """<!doctype html>
     <g id=gAdm></g><g id=gGreen></g><g id=gChome></g><g id=gRoad></g><g id=gRiv></g><g id=gRail></g><g id=gYmt></g><g id=gAll></g><g id=gKde></g><g id=gGeo></g><g id=gCell></g>
     <g id=gPick></g><g id=gStn></g><g id=gNode></g></svg>
   <svg id=geofx></svg>
-  <div id=fx><div id=fxin><div id=fxh></div><div id=fxb></div></div></div>
+  <div id=fx><div id=fxin><div id=fxh></div><div id=fxb></div></div><div id=fxe><svg></svg><svg></svg><svg></svg></div></div>
   <div id=glob></div>
   <div id=hq title="NTT docomo 本社 (千代田区永田町2-11-1)&#10;PGW 16대를 한 점으로 — 실제 PGW 위치가 아니다&#10;누르면 SGW 에서 모이는 선이 나온다">
     <div class=rg></div><div class=bd><span class=pg></span></div>
@@ -5052,6 +5203,7 @@ _HTML_MAP = """<!doctype html>
   <div id=sel></div>
   <div id=incs></div>
   <div id=flist class=fold><div class=hd><b>장애 이력</b><span id=fcnt></span><em id=ffold>펼치기</em></div>
+    <div class=ftabs id=ftabs></div>
     <div class=bd id=fbody><div class=empty>graphio 에 묻는 중</div></div></div>
   <div id=labels></div>
   <div id=loading>지도 불러오는 중…</div>
@@ -5173,6 +5325,7 @@ function buildFx(){
 // 지도를 **옮기기만** 했으면 층 전체를 그만큼 민다 — 요소 하나 건드리지 않는다.
 // 축척이 바뀌었으면 크기가 달라지므로 새로 깐다
 function placeFx(){
+  placeEvtWave();
   const box=document.getElementById('fxin'); if(!box) return;
   const m=svg.getScreenCTM();
   if(!FX_AT||!m||Math.abs(m.a-FX_AT.a)>1e-9*Math.abs(FX_AT.a)+1e-12){ buildFx(); return; }
@@ -5333,12 +5486,23 @@ async function pollFaults(){
 // 걸린 장비는 서버가 푼 그대로(`history[].enbs`·`nodes`) 쓴다 — 화면이
 // scopes 를 다시 해석하면 지도 색 규칙과 두 벌이 된다.
 let FOCUS=null;
+//: 사건 전체 범위 — incident_id|rca_id → `/api/map/event` 응답. 이력은 10초마다
+//: 새 객체로 오므로 건에 달지 않고 여기 둔다
+const EVT={};
+const evtKey=h=>h.incident_id+'|'+h.rca_id;
+const evtOf=h=>EVT[evtKey(h)]||null;
+//: 사건으로 묶인 것 — 범위를 따로 물어야 한다
+const isEvent=h=>h.event_unit==='L2_EVENT'||h.event_unit==='L1_BUNDLE';
 const histOf=id=>((FAULT&&FAULT.history)||[]).find(h=>h.incident_id===id);
 function focusSets(){
   if(!FOCUS) return null;
   const h=histOf(FOCUS); if(!h) return null;
   return {h, sev:h.severity,
-          E:new Set((h.enbs||[]).map(String)),
+          // **사건이면 표시는 윤곽 하나다**(사람 결정 2026-11-05). 대표 조각의 eNB 에만
+          // 불을 넣었더니 같은 윤곽 안에 빨간 점과 빈 점이 섞여 버그처럼 보였다.
+          // 사건 eNB 는 `V` 로 밝히기만 하고, 불(`E`)은 사건이 아닌 장애만 쓴다
+          E:new Set(evtOf(h)&&evtOf(h).pts.length ? [] : (h.enbs||[]).map(String)),
+          V:new Set(((evtOf(h)||{}).enbs||[]).map(String)),
           N:new Set([...(h.nodes||[]), ...(h.bias?[h.bias.node]:[])]
                      .map(k=>{ const [t,i]=k.split(':'); return t+':'+nid(i); }))};
 }
@@ -5411,11 +5575,165 @@ function geoPoints(h){
   return pts;
 }
 
-function drawGeo(h){
+// 사건 범위 **윤곽선** — 윤곽 자체는 안을 칠하지 않는다(사람 결정 2026-11-05). 칸·면은 구성 조각이
+// 판정한 곳이고(`drawGeo`), 선은 사건 전체다 — 둘이 겹쳐도 다른 것으로 읽혀야 한다.
+// 번짐 필터로 칠했을 때는 잘 안 보였고, 필터가 eNB 2천 개를 프레임마다 다시 그려 느렸다.
+// eNB 를 격자에 뿌려 밀도를 만들고 등고선 한 겹을 딴다(마칭 스퀘어). 사건당 한 번만
+// 계산한다. 빛은 **선 바깥으로만** 낸다 — 번짐 필터 대신 굵기가 다른 옅은 선을 겹치고,
+// 안쪽 절반은 윤곽 안을 칠한 마스크로 지운다. 필터는 프레임마다 다시 계산돼 느렸다
+const EVT_R=.006, EVT_G=.0018, EVT_LV=.35;
+function evtPath(ev){
+  if(ev.d!=null) return ev.d;
+  ev.fill='';
+  const P=ev.pts.filter(p=>p[0]!=null&&p[1]!=null).map(p=>[mx(p[0]), -my(p[1])]);
+  if(!P.length) return ev.d='';
+  const xs=P.map(p=>p[0]), ys=P.map(p=>p[1]), pad=EVT_R*2;
+  const x0=Math.min(...xs)-pad, y0=Math.min(...ys)-pad;
+  const W=Math.ceil((Math.max(...xs)+pad-x0)/EVT_G)+1, Hh=Math.ceil((Math.max(...ys)+pad-y0)/EVT_G)+1;
+  const f=new Float32Array(W*Hh), k=Math.ceil(EVT_R/EVT_G);
+  for(const [x,y] of P){
+    const ci=Math.round((x-x0)/EVT_G), cj=Math.round((y-y0)/EVT_G);
+    for(let j=cj-k;j<=cj+k;j++) for(let i=ci-k;i<=ci+k;i++){
+      const dx=x0+i*EVT_G-x, dy=y0+j*EVT_G-y, w=1-(dx*dx+dy*dy)/(EVT_R*EVT_R);
+      if(w>0) f[j*W+i]+=w;
+    }
+  }
+  const at=(i,j)=>f[j*W+i], out=[], fill=[];
+  const cut=(a,b)=>(EVT_LV-a)/(b-a);
+  const pt=(x,y)=>`${(x0+x*EVT_G).toFixed(5)} ${(y0+y*EVT_G).toFixed(5)}`;
+  for(let j=0;j<Hh-1;j++) for(let i=0;i<W-1;i++){
+    const a=at(i,j), b=at(i+1,j), c=at(i+1,j+1), d=at(i,j+1);
+    const n=(a>EVT_LV?8:0)|(b>EVT_LV?4:0)|(c>EVT_LV?2:0)|(d>EVT_LV?1:0);
+    if(n===0) continue;
+    if(n===15){                          // 다 안쪽 — 가로로 이어 한 사각형으로
+      let e=i+1;
+      while(e<W-1&&at(e+1,j)>EVT_LV&&at(e+1,j+1)>EVT_LV) e++;
+      fill.push(`M${pt(i,j)}L${pt(e,j)}L${pt(e,j+1)}L${pt(i,j+1)}Z`);
+      i=e-1; continue;
+    }
+    // 윤곽이 지나는 칸 — 안쪽 모서리와 교차점을 시계 방향으로 이은 다각형
+    { const v=[]; const A=n&8,B=n&4,C=n&2,D=n&1;
+      if(A) v.push(pt(i,j));
+      if(!A!==!B) v.push(pt(i+cut(a,b),j));
+      if(B) v.push(pt(i+1,j));
+      if(!B!==!C) v.push(pt(i+1,j+cut(b,c)));
+      if(C) v.push(pt(i+1,j+1));
+      if(!C!==!D) v.push(pt(i+cut(d,c),j+1));
+      if(D) v.push(pt(i,j+1));
+      if(!D!==!A) v.push(pt(i,j+cut(a,d)));
+      fill.push('M'+v.join('L')+'Z'); }
+    const T_=()=>pt(i+cut(a,b),j), R_=()=>pt(i+1,j+cut(b,c)),
+          B_=()=>pt(i+cut(d,c),j+1), L_=()=>pt(i,j+cut(a,d));
+    const seg=(p,q)=>out.push(`M${p()}L${q()}`);
+    switch(n){
+      case 1: case 14: seg(L_,B_); break;   case 2: case 13: seg(B_,R_); break;
+      case 3: case 12: seg(L_,R_); break;   case 4: case 11: seg(T_,R_); break;
+      case 6: case 9:  seg(T_,B_); break;   case 7: case 8:  seg(L_,T_); break;
+      case 5: seg(L_,T_); seg(B_,R_); break;
+      case 10: seg(T_,R_); seg(L_,B_); break;
+    }
+  }
+  ev.fill=fill.join('');
+  ev.box=[x0, y0, W*EVT_G, Hh*EVT_G];
+  return ev.d=out.join('');
+}
+//: 윤곽의 물결 — 표식 수, 띠 간격·폭(px), 첫 띠의 진하기. 값은 초기값이다(사용자 11-06).
+//: 띠 수는 표식 수 × 층 셋이다. 바깥으로 갈수록 옅어져 끝에서 사라진다
+const EW_MARKS=2, EW_GAP=9, EW_W=3.5, EW_OP=.45;
+let EW_KEY=null, EW_AT=null, EW_LAST=null;
+function clearEvtWave(){
+  if(EW_KEY===null) return;
+  EW_KEY=EW_AT=EW_LAST=null;
+  const box=document.getElementById('fxe');
+  box.classList.remove('on'); box.style.transform='';
+  for(const q of box.children) q.replaceChildren();
+}
+//: 화면이 정해졌을 때만 굽는다 — 날아가는 동안에는 `#fx` 가 숨어 있고 끝의 `draw` 가 다시 부른다
+function drawEvtWave(a){
+  if(FLY) { EW_LAST=a; return; }
+  const m=svg.getScreenCTM(); if(!m||!m.a) return;
+  const key=[a.key, a.col, VB.x, VB.y, VB.w].join();
+  EW_LAST=a; if(key===EW_KEY) return;
+  const r=wrap.getBoundingClientRect(), u=1/m.a;
+  const rc=[['x',(r.left-m.e)/m.a],['y',(r.top-m.f)/m.d],['width',r.width/m.a],['height',r.height/m.d]];
+  const box=document.getElementById('fxe'), n=box.children.length;
+  [...box.children].forEach((q,k)=>{
+    q.setAttribute('viewBox',`${VB.x} ${VB.y} ${VB.w} ${VB.h}`);
+    const m_=el('mask'); m_.id='ewm'+k; m_.setAttribute('maskUnits','userSpaceOnUse');
+    const f=el('filter'); f.id='ewf'+k; f.setAttribute('filterUnits','userSpaceOnUse');
+    const b=el('feGaussianBlur'); b.setAttribute('stdDeviation',EW_W*.3*u); f.appendChild(b);
+    const g=el('g'); g.setAttribute('filter',`url(#ewf${k})`);
+    const line=(w,c)=>{ const p=el('path'); p.setAttribute('d',a.d); p.setAttribute('fill','none');
+      p.setAttribute('stroke',c); p.setAttribute('stroke-width',w*u); p.setAttribute('stroke-linecap','round');
+      g.appendChild(p); };
+    // 바깥 띠부터 — 안쪽을 검정으로 지우며 들어온다. 띠 사이 간격은 같은 층의 다음 띠가 만든다
+    for(let i=n*EW_MARKS-n+k; i>=0; i-=n){
+      const dist=(i+1)*EW_GAP, v=Math.round(255*EW_OP*(1-i/(n*EW_MARKS)));
+      line(2*dist+EW_W, `rgb(${v},${v},${v})`); line(2*dist-EW_W, '#000');
+    }
+    const inn=el('path'); inn.setAttribute('d',a.fill); inn.setAttribute('fill','#000');
+    const paint=el('rect'); paint.setAttribute('fill',a.col); paint.setAttribute('mask',`url(#ewm${k})`);
+    for(const [p,v] of rc){ m_.setAttribute(p,v); f.setAttribute(p,v); paint.setAttribute(p,v); }
+    m_.append(g, inn);
+    q.replaceChildren(f, m_, paint);
+  });
+  box.style.transform=''; box.classList.add('on');
+  EW_KEY=key; EW_AT={e:m.e, f:m.f};
+}
+// 끌 때는 층째 민다 — 놓으면(`mouseup`) 새 자리에서 다시 굽는다
+function placeEvtWave(){
+  const m=svg.getScreenCTM(); if(!EW_AT||!m) return;
+  document.getElementById('fxe').style.transform=`translate(${m.e-EW_AT.e}px,${m.f-EW_AT.f}px)`;
+}
+function drawEvt(h){
+  const ev=evtOf(h); if(!ev||!ev.pts.length){ clearEvtWave(); return; }
+  const col=TH['sev-'+(SEV_CLASS[String(h.severity).toUpperCase()]||'CRITICAL')];
+  const d=evtPath(ev), box=document.getElementById('gGeo');
+  // 안쪽을 지우는 마스크 — 흰 바탕에 윤곽 안만 검정. 경계 틈이 안 보이게 앤티앨리어싱을 끈다.
+  // 범위는 넉넉히 — 멀리서 보면 빛 몇 px 이 지도 단위로 커진다
+  const pad=.2, [bx,by,bw,bh]=ev.box;
+  const m=el('mask'); m.id='evtMask'; m.setAttribute('maskUnits','userSpaceOnUse');
+  for(const [k,v] of [['x',bx-pad],['y',by-pad],['width',bw+2*pad],['height',bh+2*pad]]) m.setAttribute(k,v);
+  const bg=el('rect');
+  for(const [k,v] of [['x',bx-pad],['y',by-pad],['width',bw+2*pad],['height',bh+2*pad],['fill','#fff']]) bg.setAttribute(k,v);
+  const inn=el('path'); inn.setAttribute('d',ev.fill); inn.setAttribute('fill','#000');
+  inn.setAttribute('shape-rendering','crispEdges');
+  m.append(bg, inn); box.appendChild(m);
+  const glow=el('g'); glow.setAttribute('mask','url(#evtMask)');
+  for(const [w,op] of [[22,.10],[15,.14],[9,.2],[5,.3]]){
+    const q=el('path'); q.setAttribute('class','evg'); q.setAttribute('d',d);
+    q.setAttribute('stroke',col); q.setAttribute('stroke-opacity',op);
+    q.style.strokeWidth=w+'px';
+    glow.appendChild(q);
+  }
+  box.appendChild(glow);
+  const q=el('path'); q.setAttribute('class','evl'); q.setAttribute('d',d); q.setAttribute('stroke',col);
+  box.appendChild(q);
+  drawEvtWave({key:evtKey(h), col, d, fill:ev.fill});
+}
+// 사건 범위를 받는다 — 목록에 손이 올라오거나 누를 때만. 다시 그리고 맞추는 것은 부르는 쪽이
+// **한 번만** 한다. 받는 중에 누르면 같은 응답을 기다린다
+const EVT_WAIT={};
+function loadEvt(h){
+  if(!isEvent(h)||evtOf(h)) return Promise.resolve();
+  const key=evtKey(h);
+  return EVT_WAIT[key]||(EVT_WAIT[key]=(async()=>{
+    try{
+      const doc=await (await fetch('/api/map/event/'+encodeURIComponent(h.incident_id))).json();
+      if(!doc.error) EVT[key]=doc;
+    }catch(e){}
+    delete EVT_WAIT[key];
+  })());
+}
+//: `areas` — 사건이면 구성 조각 전체의 칸(`/api/map/event`). 없으면 장애 자신의 구역이다
+function drawGeo(h, areas){
   const box=document.getElementById('gGeo'); box.replaceChildren();
   geofx.replaceChildren();
-  if(!h||!h.axis) return;
+  if(!h) return;
   const col=TH['sev-'+(SEV_CLASS[String(h.severity).toUpperCase()]||'CRITICAL')];
+  for(const a of areas||(h.axis?[h]:[])) drawGeoOf(a, col, box);
+}
+function drawGeoOf(h, col, box){
   const nm=GEO_NAME[h.axis]||h.axis;
   for(const g of geoShapes(h)){
     let q;
@@ -5432,21 +5750,45 @@ function drawGeo(h){
       q.setAttribute('cx',mx(g.lon)); q.setAttribute('cy',cy);
       q.setAttribute('rx',DONG_R/Math.cos(g.lat*Math.PI/180)); q.setAttribute('ry',ry);
       q.dataset.t=T('{nm} {name}\\n경계 없음 — 중심점 근사 (원 크기에 뜻이 없다)',{nm,name:g.name}); }
-    q.setAttribute('class','ga'+(g.kind==='dot'?' ga-approx':''));
+    const shape=g.kind==='dot'?' ga-approx':g.kind==='ring'?' ga-ring':'';
+    q.setAttribute('class','ga'+shape);
     q.setAttribute('fill',col); q.setAttribute('stroke',col);
     box.appendChild(q);
     // 겉층 — 바닥(장비 아래)은 가만히 두고, 같은 모양의 밝은 겹만 숨쉰다
-    const p=q.cloneNode(); p.setAttribute('class','gp'+(g.kind==='dot'?' ga-approx':''));
+    const p=q.cloneNode(); p.setAttribute('class','gp'+shape);
     delete p.dataset.t; geofx.appendChild(p);
   }
+}
+// 판정 단위 표시와 제목 — 사건이면 **사건 결론**을, 아니면 탐지 제목을 쓴다
+function unitTag(h){
+  if(h.event_unit==='L2_EVENT') return `<span class="ub l2">L2${h.event_shape?' '+esc(h.event_shape):''}</span>`;
+  if(h.event_unit==='L1_BUNDLE') return `<span class="ub l1">L1</span>`;
+  return '';
+}
+const headOf=h=>isEvent(h)&&h.root_label&&h.root_code!=='UNDETERMINED' ? h.root_label : h.title;
+const pieces=h=>(h.event_members_cnt||1)>1 ? T('조각 {n}건',{n:h.event_members_cnt}) : '';
+const confOf=h=>isEvent(h)&&h.confidence!=null&&h.root_code&&h.root_code!=='UNDETERMINED' ? ` · ${Math.round(h.confidence*100)}%` : '';
+// 판정 단위별 탭 — L2 사건 · L1 묶음 · 일반(조각·판정 단위 없음). 고른 탭은 브라우저에 남긴다
+const FTABS=[['L2','L2'],['L1','L1'],['ETC','일반']];
+const tabOf=h=>h.event_unit==='L2_EVENT' ? 'L2' : h.event_unit==='L1_BUNDLE' ? 'L1' : 'ETC';
+let FTAB=localStorage.getItem('gp-map-ftab')||'L2';
+function renderTabs(H){
+  const box=document.getElementById('ftabs'); if(!box) return;
+  box.innerHTML=FTABS.map(([k,name])=>{
+    const of=H.filter(h=>tabOf(h)===k), lv=of.filter(h=>h.live).length;
+    return `<button type=button data-k=${k} class="${k===FTAB?'on':''}">${T(name)} ${of.length}${lv?`<i>●${lv}</i>`:''}</button>`;
+  }).join('');
 }
 function renderList(){
   const body=document.getElementById('fbody'); if(!body) return;
   const H=(FAULT&&FAULT.history)||[];
   const live=H.filter(h=>h.live).length;
   document.getElementById('fcnt').textContent=H.length ? T('{n}건 · 지금 {live}',{n:H.length,live}) : '';
+  renderTabs(H);
   if(!H.length){ body.innerHTML='<div class=empty>'+T('graphio 가 연 장애가 없다')+'</div>'; return; }
-  body.innerHTML=H.map(h=>{
+  const shown=H.filter(h=>tabOf(h)===FTAB);
+  if(!shown.length){ body.innerHTML='<div class=empty>'+T('이 탭에 장애가 없다')+'</div>'; return; }
+  body.innerHTML=shown.map(h=>{
     const sev=SEV_CLASS[String(h.severity).toUpperCase()]||'CRITICAL';
     const ne=(h.enbs||[]).length, core=coreOf(h);
     const pg=(h.nodes||[]).filter(k=>k.startsWith('pgw:')).map(k=>k.split(':')[1]);
@@ -5455,28 +5797,38 @@ function renderList(){
     const geo = h.axis==='GLOBAL' ? T('전국')
       : h.axis ? T('{geo} {n}곳',{geo:GEO_NAME[h.axis]||h.axis, n:h.geo_ids.length+(h.geo_ids.length>=GEO_CAP?'+':'')})
       : h.bias ? T('{ax} · 편향 {node}',{ax:AXIS_NAME[h.axis_raw]||h.axis_raw, node:h.bias.node.replace(':',' ').toUpperCase()})
-      : h.egress && !pg.length ? T('망 밖 · docomo 本社')
+      : h.egress && !pg.length ? (h.axis_raw==='APN' ? T('APN · docomo 本社') : T('외부(APP·PAY) · docomo 本社'))
       : AXIS_NAME[h.axis_raw] ? `<span class=na>${T('{ax} 축 — 지역과 무관',{ax:AXIS_NAME[h.axis_raw]})}</span>` : '';
     const where = ne||core.length||pg.length||geo
-      ? [ne?`eNB ${ne}`:'', core.length?T('코어 {c}',{c:esc(core.join(' ').toUpperCase())}):'',
+      ? [pieces(h), ne&&!pieces(h)?`eNB ${ne}`:'', core.length?T('코어 {c}',{c:esc(core.join(' ').toUpperCase())}):'',
          pg.length?`PGW ${esc(pg.join(' '))}`:'', geo].filter(Boolean).join(' · ')
       : (h.centroid_lat!=null ? T('중심 좌표만') : `<span class=na>${T('지도에 범위 없음')}</span>`);
     return `<button class="it ${sev}${h.live?'':' old'}${h.incident_id===FOCUS?' on':''}" data-id="${esc(h.incident_id)}">`
-      + `<span class=t>${h.live?`<span class=lv>${T('지금')}</span>`:''}${esc(h.severity)} · ${esc(h.title)}</span>`
+      + `<span class=t>${h.live?`<span class=lv>${T('지금')}</span>`:''}${unitTag(h)}${esc(h.severity)} · ${esc(headOf(h))}${confOf(h)}</span>`
       + `<span class=m>${esc(md(h.opened_ts))} ${esc(hm(h.opened_ts))}`
       + (hm(h.updated_ts)&&hm(h.updated_ts)!==hm(h.opened_ts)?`~${esc(hm(h.updated_ts))}`:'')
       + ` · ${esc(h.trigger_kpi)} · ${where}</span></button>`;
   }).join('');
 }
 // 이력에서 하나를 누른다 — 같은 것을 다시 누르면 푼다
-function focusInc(id){
+async function focusInc(id){
   if(FOCUS===id){ FOCUS=null; renderList(); draw(); return; }
-  const h=histOf(id); if(!h) return;
+  let h=histOf(id); if(!h) return;
+  // 계통을 물린 세기와 보기별 요소는 `draw` 만 되돌린다 — 그때만 통째로 다시 그린다
+  let full=!!PICK;
   FOCUS=id; PICK=null;   // 다른 장애로 넘어가면 앞서 고른 계통은 푼다
   // TA 보기에는 코어가 없고 묶음 히트맵이 빛이라 장애가 묻힌다 — eNB 로 넘긴다
   if(document.getElementById('mode').value==='ta'){
-    document.getElementById('mode').value='enb'; syncFaultToggle(); }
-  renderList(); draw();
+    document.getElementById('mode').value='enb'; syncFaultToggle(); full=true; }
+  renderList();
+  // 범위를 받고 나서 **한 번만** 난다 — 대표 조각에 날았다가 사건 범위로 또 날면 두 번 움직였다
+  if(isEvent(h)&&!evtOf(h)){
+    await loadEvt(h);
+    if(FOCUS!==id) return;               // 그새 다른 장애를 눌렀다
+    h=histOf(id)||h;
+  }
+  // 지도 전체를 다시 만들지 않는다 — 장애 표시만 바꾼다. 축척이 달라지면 이동 끝의 `draw` 가 맞춘다
+  if(full) draw(); else { applyFaults(); drawPick(); drawFocus(); }
   // 전국은 **줌하지 않고 물러난다** — 어디를 당겨 봐도 그 장애의 일부다
   // 단, 망 밖(전국 DNS 등)이면 건물과 SGW 로 맞춘다 — 전체로 빠지면 건물이
   // 목록 패널 밑에 깔렸다
@@ -5484,12 +5836,14 @@ function focusInc(id){
   const pts=focusPoints(h);
   // **그릴 위치가 없으면 전체로 물러난다.** 그대로 두면 앞서 보던 자리가
   // 남아 "이 장애가 거기 있다"로 읽힌다(APN 을 눌렀는데 MME 4 확대가 남았다)
-  if(pts.length) flyTo(fitFor(h, pts)); else document.getElementById('reset').onclick();
+  if(pts.length) flyFocus(fitFor(h, pts)); else document.getElementById('reset').onclick();
 }
 //: 장애에 걸린 장비의 좌표 [lon, lat]. 장비가 없으면 graphio 의 중심 좌표
 function focusPoints(h){
   const E=new Set((h.enbs||[]).map(String)), out=[];
   for(const c of enbPoints()) if(E.has(String(c.enb))) out.push([c.lon, c.lat]);
+  const evp=(evtOf(h)||{}).pts||[];
+  out.push(...evp);
   for(const k of [...coreOf(h), ...(h.bias?[h.bias.node]:[])]){ const [t,i]=k.split(':');
     const n=((D&&D.nodes[t])||[]).find(x=>nid(x.id)===nid(i));
     if(n) out.push([n.lon, n.lat]); }
@@ -5498,11 +5852,13 @@ function focusPoints(h){
   if(h.bias){ const [t,i]=h.bias.node.split(':');
     if(t==='mme'||t==='sgw') for(const c of enbPoints())
       if(nid(c[t])===nid(i)) out.push([c.lon, c.lat]); }
-  out.push(...geoPoints(h));
-  // 망 밖 장애는 **건물이 곧 위치다** — 선이 SGW 전부로 뻗으므로 SGW 도 담는다
+  if(!evp.length) out.push(...geoPoints(h));
+  // 망 밖 장애는 **건물이 곧 위치다**. PGW 를 지목해 선이 뻗을 때만 전체 SGW 를 담는다 —
+  // 선이 없는 사건까지 담으면 도쿄 전체로 물러나 건물이 작아진다
   if(h.egress){ out.push([HQ.lon, HQ.lat]);
     const sg=(h.nodes||[]).filter(k=>k.startsWith('sgw:')).map(k=>nid(k.split(':')[1]));
-    for(const n of (D&&D.nodes.sgw)||[]) if(!sg.length||sg.includes(nid(n.id))) out.push([n.lon,n.lat]); }
+    const all=!sg.length && (h.nodes||[]).some(k=>k.startsWith('pgw:'));
+    for(const n of (D&&D.nodes.sgw)||[]) if(all||sg.includes(nid(n.id))) out.push([n.lon,n.lat]); }
   if(!out.length && h.centroid_lat!=null && h.centroid_lon!=null)
     out.push([+h.centroid_lon, +h.centroid_lat]);
   return out;
@@ -5554,23 +5910,43 @@ let FLY=null;
 //:   끝에서 돌아온다
 //: `opt.near` — 거의 다 왔을 때(`FLY_NEAR`) 한 번 부른다. 휠이 다음 칸을
 //:   **앞 이동이 끝나기 직전에** 이어 붙이는 자리다(`wheelStep`)
+//: `opt.settle` — 도착한 화면을 한 번 보인 뒤에 다시 그린다. 끝의 `draw` 가 도착을 가리지 않게
 const EASE_INOUT=t=>-(Math.cos(Math.PI*t)-1)/2;   // 사인 — 출발·도착 모두 부드럽게
+//: 3차 — 2차 곡선은 300ms 에서 처음·끝 10% 가 84·67ms 로 짧아 감속이 약했다(3차 100·83ms)
+const EASE_FOCUS=t=>t<.5 ? 4*t*t*t : 1-Math.pow(-2*t+2,3)/2;
+//: 날던 중에 새 이동이 끼어들면 처음부터 다시 가속하지 않는다 — 0 에서 출발하면 그 자리에서 한 번 멈춘다
+const EASE_OUT=t=>Math.sin(Math.max(0,t)*Math.PI/2);
 const FLY_NEAR=.8;
+//: 장애를 눌렀을 때의 이동 시간 — 가까우면 짧게, 멀면 길게. 값은 초기값이다(사용자 11-06).
+//: 130ms 는 8프레임뿐이라 천천히-빠르게-천천히가 보이지 않았고, 700ms 고정은 가까운 곳도 기다렸다.
+//: 거리 — 축척 차이(ln 배율)에 이동량(ln(1+화면 폭 수))을 더한다. `FOCUS_FLY_FAR` 에서 최대가 된다
+const FOCUS_FLY_MIN=300, FOCUS_FLY_MAX=550, FOCUS_FLY_FAR=3;
+function focusFlyMs(a, v){
+  const pan=Math.hypot((v.x+v.w/2)-(a.x+a.w/2), (v.y+v.h/2)-(a.y+a.h/2))/Math.max(a.w, v.w);
+  const far=Math.abs(Math.log(v.w/a.w))+Math.log1p(pan);
+  return FOCUS_FLY_MIN+(FOCUS_FLY_MAX-FOCUS_FLY_MIN)*Math.min(1, far/FOCUS_FLY_FAR);
+}
+function flyFocus(v){
+  if(!VB) return;
+  v=snapVB(v);
+  flyTo(v, focusFlyMs(VB, v), {settle:true});
+}
 function flyTo(v, ms=700, opt={}){
   if(!VB) return;
   const a={...VB};
   // 축척 단계는 도착점에서 `setVB` 가 지킨다 — 여기서 미리 맞춰
   // 둬야 마지막 프레임에서 튀지 않는다
   v=snapVB(v);
-  const t0=performance.now(), fx=document.getElementById('fx'), lb=document.getElementById('labels');
+  const id={}, moving=!!FLY && !opt.at;   // 휠은 자기 방식으로 이어 붙인다(`wheelStep`)
+  // 끼어들 때는 한 프레임 앞에서 출발한다 — 첫 프레임이 제자리면 그만큼 멈춰 보인다
+  const t0=performance.now()-(moving?16:0), fx=document.getElementById('fx'), lb=document.getElementById('labels');
   fx.style.visibility='hidden'; lb.style.visibility='hidden';
   document.getElementById('hq').classList.add('fly');
-  const id={};
   FLY=id;
   const step=now=>{
     if(FLY!==id) return;              // 다른 이동이 끼어들었다
     const t=Math.min(1,(now-t0)/ms);
-    const e=opt.at ? EASE_INOUT(t) : t<.5?2*t*t:1-Math.pow(-2*t+2,2)/2;
+    const e=opt.at ? EASE_INOUT(t) : moving ? EASE_OUT(t) : EASE_FOCUS(t);
     // 폭은 **비율로** 보간한다 — 선형이면 줌인할 때 끝에서 갑자기 당겨진다
     if(opt.at) VB=zoomAbout(a, Math.pow(v.w/a.w,e), opt.at[0], opt.at[1]);
     else {
@@ -5584,9 +5960,11 @@ function flyTo(v, ms=700, opt={}){
     drawScale(); syncKs();
     if(opt.near && t>=FLY_NEAR){ const f=opt.near; opt.near=null; f(); if(FLY!==id) return; }
     if(t<1){ requestAnimationFrame(step); return; }
+    if(opt.settle){ opt.settle=false; requestAnimationFrame(step); return; }
     FLY=null; fx.style.visibility=''; lb.style.visibility='';
     document.getElementById('hq').classList.remove('fly');
-    setVB(v); draw();
+    // 단계가 바뀌면 `setVB` 가 이미 그렸다 — 또 그리지 않는다
+    const lod=LOD; setVB(v); if(LOD===lod) draw();
   };
   requestAnimationFrame(step);
   return id;
@@ -5597,19 +5975,29 @@ function drawFocus(){
   const glob=document.getElementById('glob');
   glob.style.display='none';
   const fbar=document.getElementById('fbar');
-  if(!fs){ geofx.replaceChildren(); fbar.style.display='none'; placeBars();
+  if(!fs){ geofx.replaceChildren(); clearEvtWave(); fbar.style.display='none'; placeBars();
     if(FOCUS){ FOCUS=null; renderList(); } return; }
   hqHot(null);
   const h=fs.h;
-  drawGeo(h);
-  // 망 밖(도메인·DNS)·PGW 지목 — 건물에 불을 넣고 SGW 에서 선을 잇는다.
+  // 대표 조각의 칸·면만 칠하면 사건의 일부가 전체처럼 읽힌다 — 사건이면 **구성 조각 전체**의 칸을
+  // 칠한다(사용자 11-06). 11-05 에 뺐다가, 체감 사건은 판정 단위가 칸이라 "어디가 나빴나"가 사라졌다.
+  // 윤곽은 그대로 사건 전체 범위다. 칸 정보가 없는 사건은 윤곽만 남는다
+  const evOn=!!(evtOf(h)&&evtOf(h).pts.length);
+  const areas=evOn ? (evtOf(h).areas||[]) : null;
+  drawGeo(h, areas);
+  // 실제로 그린 곳만 센다 — 경계를 못 찾은 코드는 칸이 아니다
+  const nArea=new Set((areas||[]).flatMap(a=>geoShapes(a).map(g=>a.axis+':'+g.id))).size;
+  drawEvt(h);
+  // 망 밖(도메인·DNS)·APN·PGW 지목 — 건물에 불을 넣는다. 선은 **graphio 가 PGW 를 지목했을 때만**
+  // 긋는다 — 건물에 붙이기만 한 사건에 SGW 전부를 이으면 없는 경로처럼 읽힌다(사용자 11-05).
   // 어느 SGW 를 거쳤는지 graphio 가 말하지 않으면 **전부** 잇는다
   const pgws=(h.nodes||[]).filter(k=>k.startsWith('pgw:')).map(k=>k.split(':')[1]);
   if(h.egress){
     const dom=h.axis_raw==='DOMAIN' ? (h.axis_vals||[]).join(', ') : '';
-    hqHot(h.severity, dom ? T('망 밖 · {d}',{d:dom}) : pgws.length ? `PGW ${pgws.join(', ')}` : T('망 밖 · DNS'));
+    hqHot(h.severity, dom ? T('외부(APP·PAY) · {d}',{d:dom}) : h.axis_raw==='APN' ? `APN ${(h.axis_vals||[])[0]||''}`
+      : pgws.length ? `PGW ${pgws.join(', ')}` : T('외부(APP·PAY) · DNS'));
     const sg=(h.nodes||[]).filter(k=>k.startsWith('sgw:')).map(k=>k.split(':')[1]);
-    egressLines(document.getElementById('gPick'), sg);
+    if(pgws.length) egressLines(document.getElementById('gPick'), sg);
   } else hqHot(null);
   if(h.axis==='GLOBAL'){
     const [rgb]=fxColor(SEV_CLASS[String(h.severity).toUpperCase()]||'CRITICAL');
@@ -5622,7 +6010,7 @@ function drawFocus(){
   // 장비를 함께 골랐으면 **물리기는 선택이 정한다**(`drawPick` 이 먼저 돌았다).
   // 여기서 또 물리면 계통이 사라진다 — 장애에 걸린 것만 다시 밝힌다
   for(const d of document.getElementById('gCell').children){
-    if(fs.E.has(String(d.dataset.enb))) d.setAttribute('fill-opacity', 1);
+    if(fs.E.has(String(d.dataset.enb))||fs.V.has(String(d.dataset.enb))) d.setAttribute('fill-opacity', 1);
     else if(!PICK) d.setAttribute('fill-opacity', rest); }
   for(const n of document.getElementById('gNode').children){
     const sh=n.firstChild; if(!sh) continue;
@@ -5632,17 +6020,23 @@ function drawFocus(){
   const core=coreOf(h).map(k=>k.toUpperCase().replace(':',' '));
   const pts=focusPoints(h);
   bar.style.display='flex';
-  bar.innerHTML=`<b>${esc(h.severity)} · ${esc(h.title)}</b>`
+  const ev=evtOf(h);
+  bar.innerHTML=`<b>${unitTag(h)}${esc(h.severity)} · ${esc(headOf(h))}${confOf(h)}</b>`
     + `<button id=unfocus>${T('해제')}</button><i></i>`
     + `<span>${esc(md(h.opened_ts))} ${esc(hm(h.opened_ts))}`
     + (hm(h.updated_ts)&&hm(h.updated_ts)!==hm(h.opened_ts)?`~${esc(hm(h.updated_ts))}`:'')
     + (h.live?T(' · 지금 진행'):T(' · 지난 장애'))+`</span>`
     + `<span>${esc(h.trigger_kpi)}</span>`
-    + `<span>eNB ${(h.enbs||[]).length}</span>`
+    + (ev?`<span>${T('사건 범위 eNB {e} · 셀 {c}',{e:ev.enbs.length.toLocaleString(), c:ev.cells.toLocaleString()})}</span>`
+         :`<span>eNB ${(h.enbs||[]).length}</span>`)
+    + (pieces(h)?`<span>${pieces(h)}</span>`:'')
+    + (evOn?`<span class=dimtag>${T('선 = 사건 전체 범위')}</span>`:'')
+    + (nArea?`<span class=dimtag>${T('칸 = 조각이 판정한 메시·구역 {n}곳',{n:nArea.toLocaleString()})}</span>`:'')
+    + (nArea&&evtOf(h).areas_capped?`<span class=warn>${T('graphio 가 조각마다 {n}곳까지만 넘긴다 — 더 있을 수 있다',{n:GEO_CAP})}</span>`:'')
     + (core.length?`<span>${T('코어 {c}',{c:esc(core.join(', '))})}</span>`:'')
     + (h.root_code?`<span>${T('원인 {c}',{c:esc(h.root_code)})}${h.root_label?' — '+esc(h.root_label):''}</span>`:'')
     + (h.axis==='GLOBAL'?`<span class=warn>${T('전국 장애 — 특정 지역이 아니다')}</span>`
-       : h.axis?`<span>${T('{geo} {n}곳',{geo:esc(GEO_NAME[h.axis]||h.axis), n:h.geo_ids.length})}</span>`:'')
+       : h.axis&&!evOn?`<span>${T('{geo} {n}곳',{geo:esc(GEO_NAME[h.axis]||h.axis), n:h.geo_ids.length})}</span>`:'')
     + (!h.axis&&AXIS_NAME[h.axis_raw]?`<span>${esc(AXIS_NAME[h.axis_raw])} ${esc((h.axis_vals||[]).join(', '))}</span>`:'')
     + (pgws.length?`<span>PGW ${esc(pgws.join(', '))}</span>`:'')
     // 망 밖 — HTTP 와 DNS 를 나란히. "이름 풀이가 안 되나, 서버·백본이 느리나"
@@ -5653,24 +6047,24 @@ function drawFocus(){
         + (d.baseline_fail_rate==null?'':T(' (평시 {p}%)',{p:Number(d.baseline_fail_rate).toFixed(1)}))
         + (d.response_ms==null?'':` · ${Number(d.response_ms).toFixed(0)}ms`)
         + (d.slow?` <b class=warn>${T('느림')}</b>`:'')+`</span>`).join(''):'')
-    + (h.egress&&!pgws.length?`<span class=dimtag>${T('망 밖 장애를 도코모 본사 PGW 에 붙였다 — graphio 가 PGW 를 지목한 것은 아니다')}</span>`:'')
+    + (h.egress&&!pgws.length?`<span class=dimtag>${T('도코모 본사 PGW 에 붙였다 — graphio 가 PGW 를 지목한 것은 아니다')}</span>`:'')
     // 편향 노드는 **graphio EV-12 의 판정을 옮긴 것**이다 — 원인 확정이 아니다
     + (h.bias?`<span class=warn>${T('실패가 {n} 로 쏠림',{n:esc(h.bias.node.replace(':',' ').toUpperCase())})}`
         + T(' (실패 {f}건 · 비중 {s}%)',{f:h.bias.failures.toLocaleString(), s:h.bias.share.toFixed(0)})+`</span>`
         + `<span class=dimtag>${T('graphio EV-12 노드 편향')}${h.bias.verdict?' — '+esc(h.bias.verdict):''}${T(' · 원인 확정 아님')}</span>`
-      : !h.axis&&AXIS_NAME[h.axis_raw]?`<span class=dimtag>${T('{ax} 축 — 지역과 무관',{ax:esc(AXIS_NAME[h.axis_raw])})}`
+      : !h.axis&&AXIS_NAME[h.axis_raw]&&!h.egress?`<span class=dimtag>${T('{ax} 축 — 지역과 무관',{ax:esc(AXIS_NAME[h.axis_raw])})}`
         + (h.axis_raw==='DOMAIN'?'':T(' · 특정 장비로 쏠리지 않았다'))+`</span>`:'')
-    + (h.axis&&h.axis.startsWith('MESH')?`<span class=dimtag>${T('칸 = 그 칸을 덮는 셀들의 체감 — 단말 실제 위치가 아니다')}</span>`:'')
-    + (h.axis==='ADM3'?`<span class=dimtag>${T('丁目 경계 없음 — 중심점 근사')}</span>`:'')
-    + (h.axis&&h.axis!=='GLOBAL'&&h.geo_ids.length>=GEO_CAP?`<span class=warn>${T('graphio 가 {n}곳까지만 넘긴다 — 더 있을 수 있다',{n:GEO_CAP})}</span>`:'')
-    + (h.axis&&h.axis!=='GLOBAL'&&geoShapes(h).length===0?`<span class=warn>${T('구역 좌표를 찾지 못했다')}</span>`:'')
+    + (!evOn&&h.axis&&h.axis.startsWith('MESH')?`<span class=dimtag>${T('칸 = 그 칸을 덮는 셀들의 체감 — 단말 실제 위치가 아니다')}</span>`:'')
+    + (!evOn&&h.axis==='ADM3'?`<span class=dimtag>${T('丁目 경계 없음 — 중심점 근사')}</span>`:'')
+    + (!evOn&&h.axis&&h.axis!=='GLOBAL'&&h.geo_ids.length>=GEO_CAP?`<span class=warn>${T('graphio 가 {n}곳까지만 넘긴다 — 더 있을 수 있다',{n:GEO_CAP})}</span>`:'')
+    + (!evOn&&h.axis&&h.axis!=='GLOBAL'&&geoShapes(h).length===0?`<span class=warn>${T('구역 좌표를 찾지 못했다')}</span>`:'')
     + (!pts.length&&!h.axis&&!AXIS_NAME[h.axis_raw]?`<span class=warn>${T('지도에 그릴 범위가 없다')}</span>`
-       : pts.length&&!(h.enbs||[]).length&&!core.length&&!h.axis&&!h.bias?`<span class=warn>${T('장비 범위가 없어 graphio 중심 좌표로 옮겼다')}</span>`:'')
+       : pts.length&&!(h.enbs||[]).length&&!core.length&&!h.axis&&!h.bias&&!h.egress&&!ev?`<span class=warn>${T('장비 범위가 없어 graphio 중심 좌표로 옮겼다')}</span>`:'')
     // `#sel button` 규칙(해제 단추 자리 — 오른쪽 위)을 받지 않고 맨 끝에 선다
     + (pts.length?`<button id=refly style="order:9;margin-left:0">${T('다시 맞추기')}</button>`:'');
   document.getElementById('unfocus').onclick=()=>focusInc(FOCUS);
   const rf=document.getElementById('refly');
-  if(rf) rf.onclick=()=>flyTo(fitFor(h, pts));
+  if(rf) rf.onclick=()=>flyFocus(fitFor(h, pts));
   placeBars();
 }
 // 장애 바가 위, 선택 바가 그 아래, 장애 내역(`#incs`)이 맨 아래
@@ -6473,7 +6867,7 @@ function injRow(){
     // 권장 지속시간을 기본값으로 — 주입 탭과 같은 값(`/api/scenarios` 의 dur)
     const setDur=()=>{ const s=list.find(x=>String(x.no)===box.querySelector('#injScn').value);
       if(s&&s.dur){ box.querySelector('#injDur').value=s.dur.recommended;
-        box.querySelector('#injDur').title=T('권장 {r}분 · 최소 {m}분 · 결과 확정까지 약 +{s}분(주입 시간에 포함 안 됨)',{r:s.dur.recommended,m:s.dur.min,s:s.dur.settle}); } };
+        box.querySelector('#injDur').title=T('권장 {r}분 — 이보다 짧으면 탐지되지 않을 수 있습니다',{r:s.dur.recommended}); } };
     box.querySelector('#injScn').onchange=setDur; setDur();
     box.querySelector('#injGo').onclick=injFire;
   }
@@ -6606,6 +7000,7 @@ wrap.addEventListener('mousedown',e=>{
   moved=0; wrap.classList.add('drag');});
 addEventListener('mouseup',e=>{
   if(BOXSEL){ finishBox(e); return; }
+  if(drag&&EW_LAST) drawEvtWave(EW_LAST);
   drag=null;wrap.classList.remove('drag');});
 addEventListener('mousemove',e=>{
   if(BOXSEL){ const [x,y,w,h]=boxRect(e), bx=document.getElementById('boxsel');
@@ -6721,9 +7116,23 @@ document.getElementById('mode').onchange=()=>{ PICK=null; syncFaultToggle(); dra
 // **지도까지 올라가지 않게 막는다.** `focusInc` 가 목록을 다시 그려 누른
 // 단추가 문서에서 떨어지면, 지도의 click 처리기가 `closest('#flist')` 를
 // 못 찾아 "빈 곳 누름"으로 읽고 방금 고른 것을 풀었다
+document.getElementById('ftabs').addEventListener('click',e=>{
+  e.stopPropagation();
+  const b=e.target.closest('button'); if(!b) return;
+  FTAB=b.dataset.k; localStorage.setItem('gp-map-ftab',FTAB);
+  document.getElementById('fbody').scrollTop=0; renderList();
+});
 document.getElementById('fbody').addEventListener('click',e=>{
   e.stopPropagation();
   const b=e.target.closest('.it'); if(b) focusInc(b.dataset.id); });
+// 손이 멈춘 줄의 사건 범위를 미리 받는다 — 누를 때는 받아 둔 값을 쓴다. 목록을 훑고 지나가는
+// 줄까지 묻지 않게 잠깐 머문 것만 받는다
+let EVT_HOVER=0;
+document.getElementById('fbody').addEventListener('pointerover',e=>{
+  const b=e.target.closest('.it'), h=b&&histOf(b.dataset.id);
+  clearTimeout(EVT_HOVER);
+  if(h) EVT_HOVER=setTimeout(()=>loadEvt(h), 60);
+});
 document.getElementById('flist').querySelector('.hd').onclick=e=>{
   e.stopPropagation();
   const f=document.getElementById('flist'); f.classList.toggle('fold');
@@ -6843,6 +7252,10 @@ _JA_MAP = {
     "셀": "セル", "TA목록": "TAリスト", "장애": "障害",
     "NTT docomo 本社 (千代田区永田町2-11-1)\nPGW 16대를 한 점으로 — 실제 PGW 위치가 아니다\n누르면 SGW 에서 모이는 선이 나온다":
         "NTT docomo 本社 (千代田区永田町2-11-1)\nPGW 16台を1点に集約 — 実際のPGW位置ではない\nクリックするとSGWから集まる線が出る",
+    "조각 {n}건": "断片 {n}件", "일반": "一般", "이 탭에 장애가 없다": "このタブに障害はない", "선 = 사건 전체 범위": "線 = 事象全体の範囲", "칸 = 조각이 판정한 메시·구역 {n}곳": "マス = 断片が判定したメッシュ・区域 {n}か所", "graphio 가 조각마다 {n}곳까지만 넘긴다 — 더 있을 수 있다": "graphioは断片ごとに{n}か所までしか渡さない — さらにある可能性がある", "사건 범위 eNB {e} · 셀 {c}": "事象範囲 eNB {e} · セル {c}",
+    "외부(APP·PAY) · docomo 本社": "外部(APP·PAY) · docomo 本社", "APN · docomo 本社": "APN · docomo 本社",
+    "외부(APP·PAY) · {d}": "外部(APP·PAY) · {d}", "외부(APP·PAY) · DNS": "外部(APP·PAY) · DNS",
+    "도코모 본사 PGW 에 붙였다 — graphio 가 PGW 를 지목한 것은 아니다": "ドコモ本社PGWに表示 — graphioがPGWを指定したわけではない",
     "장애 이력": "障害履歴", "펼치기": "展開", "접기": "折りたたむ",
     "graphio 에 묻는 중": "graphioに問い合わせ中",
     "지도 불러오는 중…": "地図を読み込み中…",
@@ -6943,6 +7356,12 @@ _JA_MAP = {
 #: 장애 종류(`KIND_LABELS`), 지역 이름(`region.LOCALES`). **원문은 서버 상수다** —
 #: 그쪽 문구를 고치면 여기 키도 따라 고쳐야 하고, 못 따라오면 한국어로 보인다
 _JA_COMMON = {
+    # 주입 시간 안내
+    "권장 {r}분 — 이보다 짧으면 탐지되지 않을 수 있습니다": "推奨 {r}分 — これより短いと検知されない場合があります",
+    "권장 {r}분 · 최소 {m}분 · {w}": "推奨 {r}分 · 最小 {m}分 · {w}",
+    " (모양 기준 초기값)": " (形状基準の初期値)",
+    " — 주입 종료 후 결과 확정까지 약 +{s}분 (주입 시간에 포함 안 됨)":
+        " — 注入終了後、結果確定まで約 +{s}分 (注入時間に含まれない)",
     # 시나리오 이름
     "SGW 자원 소진": "SGWリソース枯渇", "무선 구간 열화": "無線区間劣化",
     "SGW 노드 무응답": "SGWノード無応答", "인증(S6a) 거절": "認証(S6a)拒否",
@@ -6964,6 +7383,8 @@ _JA_COMMON = {
     "SON 파라미터 변경 후 계단형 저하": "SONパラメータ変更後の階段状劣化",
     "특정 단말 SW 업데이트 후 등록 실패 → 기종 장애 재현": "特定端末SW更新後の登録失敗 → 機種障害で再現",
     "지진 — 국지 다수 셀 정지 + 주변 부하 유입": "地震 — 局地的な多数セル停止 + 周辺への負荷流入",
+    "자연재해 — 호 폭주 + 기지국 장애": "自然災害 — 呼の輻輳 + 基地局障害",
+    "SA→LTE 폴백 급증 (5G 측 장애 추정)": "SA→LTEフォールバック急増 (5G側障害の推定)",
     # 시나리오 설명
     "S11 Create Session 이 73(No resources)으로 거절된다 — 하류 ESM 26":
         "S11 Create Sessionが73(No resources)で拒否される — 下流ESM 26",
@@ -7009,7 +7430,7 @@ _JA_COMMON = {
     "PGW 재기동 통보": "PGW再起動通知", "외부 경로 지연 (백본)": "外部経路遅延 (バックボーン)",
     "DCNR 정책 제한": "DCNRポリシー制限", "5G 체감 품질 저하 (앵커 경합)": "5G体感品質低下 (アンカー競合)",
     "SON 변경 후 계단형 저하 (H/O)": "SON変更後の階段状劣化 (H/O)",
-    "무선 용량 혼잡 (활성 가입자 증가)": "無線容量混雑 (アクティブ加入者増加)",
+    "무선 용량 혼잡 (기존 가입자 품질 저하)": "無線容量混雑 (既存加入者の品質低下)",
     "전환 직후 정체 (코리도 4G↔5G)": "切替直後の停滞 (コリドー 4G↔5G)",
     "국지 다수 셀 정지 + 주변 부하 유입 (지진)": "局地的な多数セル停止 + 周辺への負荷流入 (地震)",
     "대형 이벤트 군중 혼잡 + 업링크": "大型イベント群衆混雑 + アップリンク",
@@ -7056,6 +7477,7 @@ _JA_MAIN = {
     "넷 모두 생성 중 — 끄면 그 xDR 은 파일 자체를 만들지 않는다(0 건이 아니라 없음)":
         "4つとも生成中 — オフにするとそのxDRはファイル自体を作らない(0件ではなく無し)",
     " 멈춤 — ": " 停止 — ", "{b} 멈춤": "{b} 停止", "지도에서 주입": "地図から注入",
+    "자동 선택 (전국)": "自動選択 (全国)",
     "종류": "種類", "대상": "対象", "자동 선택": "自動選択", "지속시간(분)": "継続時間(分)",
     "메모": "メモ", "(옵션)": "(任意)",
     "인입 현황": "取込状況", "최근 60분": "直近60分", "불러오는 중…": "読み込み中…",
@@ -7205,6 +7627,8 @@ _SHELL_NAV = (
      '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>'),
     ("map", "/map", "지도", "장비 지도",
      '<path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2z"/><path d="M9 4v14M15 6v14"/>'),
+    ("scen", "/scenarios", "시나리오", "시나리오 현황",
+     '<path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4M9 12h7M9 16h7"/>'),
     ("topo", "/topo", "토폴로지", "마스터 토폴로지",
      '<circle cx="12" cy="5" r="2.2"/><circle cx="5" cy="19" r="2.2"/>'
      '<circle cx="19" cy="19" r="2.2"/><path d="M12 7.2v4.3M12 11.5 6.4 17.2M12 11.5l5.6 5.7"/>'),
@@ -7252,6 +7676,8 @@ def _shell_html(page: str) -> str:
 _SHELL_JS = r"""
 (function(){
   const g=id=>document.getElementById(id);
+  // 주입 화면은 같은 조회를 먼저 내 두었다 — 그 응답을 함께 받는다(`getJson`). 다른 화면엔 없다
+  const gj=window.getJson||(u=>fetch(u).then(r=>r.json()));
   langSelect('gp-lang');
   const pad=n=>String(n).padStart(2,'0');
   //: 가상 시각 오프셋(초) — `/api/status` 가 곡선 켬일 때만 준다. 시계 옆에 "가상 HH:MM"
@@ -7265,7 +7691,7 @@ _SHELL_JS = r"""
   // 세 화면 공통이라 가볍게 5초다
   const tick=async()=>{
     try{
-      const st=await (await fetch('/api/status')).json();
+      const st=await gj('/api/status');
       vo=Number(st.virtual_offset_sec||0);
       const on=st.gen_enabled!==false, act=(st.active||[]).length;
       g('gp-gen-t').textContent=on ? T('생성 중') : T('정지');
@@ -7292,7 +7718,7 @@ _SHELL_JS = r"""
   const fmt=n=>Number(n||0).toLocaleString();
   const today=async()=>{
     try{
-      const d=await (await fetch('/api/ingest?minutes=60')).json();
+      const d=await gj('/api/ingest?minutes=60');
       const lx=new Date(), ymd=`${lx.getFullYear()}-${pad(lx.getMonth()+1)}-${pad(lx.getDate())}`;
       const t0=(d.by_day||[])[0], isT=t0&&String(t0.d).slice(0,10)===ymd;
       const ts=d.today_series||[], tsum=ts.reduce((a,x)=>a+(x.recs||0),0);
@@ -7314,7 +7740,7 @@ _SHELL_JS = r"""
   };
   today(); setInterval(today, 60000);
   // 생성 지역 — 저장값이 정본이다(graphio 상단 바도 같은 키를 본다)
-  fetch('/api/region').then(r=>r.json()).then(r=>{
+  gj('/api/region').then(r=>{
     const v=r.saved||r.file||''; const L={};
     (r.locales||[]).forEach(l=>{ L[l.value]=T(l.label); });
     g('gp-loc').textContent=String(v).toUpperCase()||'—';
@@ -7326,7 +7752,7 @@ _SHELL_JS = r"""
 
 #: 껍데기 문구 — 세 화면 공통
 _JA_SHELL = {
-    "화면": "画面", "주입": "注入", "지도": "地図", "토폴로지": "トポロジ",
+    "화면": "画面", "주입": "注入", "지도": "地図", "시나리오": "シナリオ", "토폴로지": "トポロジ",
     "장애 주입 제어": "障害注入制御", "장비 지도": "装置地図", "마스터 토폴로지": "マスタトポロジ",
     "생성": "生成", "마지막 슬롯": "最終スロット", "생성량": "生成量", "활성 장애": "アクティブ障害",
     "생성 중": "生成中", "정지": "停止", "서버 응답 없음": "サーバ応答なし", "({n}분 전)": "({n}分前)",
@@ -7353,9 +7779,407 @@ def _page(html: str, page: str, ja: dict) -> str:
 
 _SHELL_JS_HOOK = "window.addEventListener('DOMContentLoaded',()=>{" + _SHELL_JS + "});\n"
 
+# ── 시나리오 현황 화면 (`/scenarios`) ───────────────────────────────────────
+#
+# 1~27번의 설정·판정 기준·최신 결과를 누구나 보게 한다(사용자 11-06). 자료는 코드가 아니라
+# `config/scenario_report.json` 이다 — 판정이 끝날 때마다 그 파일만 고치면 되고, 로컬은
+# `config` 가 마운트라 재시작 없이 다음 요청부터 보인다. 화면은 값을 계산하지 않고 적힌 대로
+# 보인다(불변규칙 18). 값이 `null` 이면 "미확인"이다 — 0 이나 없음으로 읽히면 안 된다(불변규칙 17)
+_HTML_SCEN = r"""<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>probe-datagen 시나리오 현황</title>
+<style>
+  /* **읽는 화면이라 본문은 밝다**(사용자 11-06). 단 순백은 어두운 틀(레일·상단 바)과 대비가 너무
+     세서 옅은 회색으로 낮췄다. 틀은 자기 색을 직접 들고 있어 이 값을 받지 않는다.
+     색·글자 크기·폭은 초기값이고, 글자는 카드 바탕 대비 4.5:1 이상이다 */
+  :root { --bg:#d6dae0; --panel:#e6e9ed; --line:#c3c9d1; --fg:#262c35;
+          --dim:#505a67; --accent:#2f5c8f; --red:#94403a; --yellow:#6f561c;
+          --green:#37664c; --hover:#dde1e6; --on:#d0dbe8; }
+  * { box-sizing:border-box; }
+  /* 위 44px 상단 바 · 왼쪽 60px 레일(`_SHELL_CSS`) 자리를 비운다 */
+  body { margin:0; padding:64px 20px 20px 80px; background:var(--bg); color:var(--fg);
+         font:13px/1.55 "Pretendard","Apple SD Gothic Neo","Malgun Gothic",sans-serif; }
+  #doc { max-width:960px; margin:0 auto; }
+  h1 { font-size:16px; margin:2px 0 12px; }
+  h1 small { color:var(--dim); font-weight:normal; margin-left:8px; font-size:11.5px; }
+  h3 { margin:0 0 5px; font-size:11.5px; font-weight:600; color:var(--dim); }
+  button { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:6px;
+           padding:3px 9px; font:inherit; font-size:12px; cursor:pointer; }
+  button:hover { border-color:var(--dim); }
+  button.on { border-color:var(--accent); background:var(--on); }
+  button b { margin-left:5px; font-variant-numeric:tabular-nums; }
+  .chips { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-bottom:8px; }
+  .chips .lb { color:var(--dim); font-size:11.5px; margin-right:2px; }
+  /* 맨 위 요약 — 문장, 판정·도달 아이콘 칩, 단계별 표(사용자 11-06). 누르면 그것만 거른다 */
+  #sum { margin:0 0 8px; font-size:13px; }
+  #msg { display:none; border:1px solid var(--yellow); border-radius:8px; padding:10px 14px;
+         margin-bottom:12px; background:#e6dfc9; }
+  #notes { margin-top:18px; }
+  #notes ol { margin:8px 0 0; padding-left:20px; font-size:12.5px; }
+  .s-ok { color:var(--green); } .s-warn { color:var(--yellow); } .s-bad { color:var(--red); }
+  .s-acc { color:var(--accent); } .s-dim { color:var(--dim); }
+  .unk { color:var(--yellow); }
+  .dim { color:var(--dim); }
+  details.sc { background:var(--panel); border:1px solid var(--line); border-radius:8px; margin-bottom:6px; }
+  details.sc>summary { display:grid; grid-template-columns:24px minmax(130px,1fr) 58px 136px minmax(0,2.4fr); gap:10px;
+            align-items:baseline; padding:6px 12px; cursor:pointer; list-style:none; }
+  summary::-webkit-details-marker { display:none; }
+  details.sc>summary:hover { background:var(--hover); border-radius:8px; }
+  summary .no { color:var(--dim); font-variant-numeric:tabular-nums; }
+  summary .nm { font-weight:600; }
+  summary .st { font-size:12px; font-weight:600; }
+  /* 단계 네 칸 — 색만으로 말하지 않게 기호를 함께 둔다 */
+  .sgs { display:flex; gap:3px; }
+  .sg { display:inline-block; min-width:31px; padding:0 3px; border-radius:4px; font-size:10.5px; line-height:16px;
+        text-align:center; white-space:nowrap; border:1px solid transparent; }
+  .g-ok { background:#c9dacf; color:#234a35; } .g-warn { background:#e0d6b8; color:#54410f; }
+  .g-bad { background:#e3c9c6; color:#6f2b26; } .g-dim { border-color:var(--line); color:var(--dim); }
+  /* 한 줄로 자른다 — 전체는 마우스를 올리면 나온다(`#tip`) */
+  summary .ln { font-size:12px; color:#3b434f; line-height:1.45; min-width:0;
+                white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  /* 접는 칸 — 처음에는 접혀 있다 */
+  details.fold { margin-top:12px; }
+  details.fold>summary { cursor:pointer; list-style:none; font-size:12.5px; font-weight:600; color:var(--accent); }
+  details.fold>summary::before { content:'▸'; display:inline-block; width:16px; }
+  details.fold[open]>summary::before { content:'▾'; }
+  details.box { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 12px; }
+  .how { margin-top:8px; padding-left:16px; border-left:2px solid var(--line); }
+  .how ol { margin:0; padding-left:20px; }
+  .body { border-top:1px solid var(--line); padding:12px 14px 14px; }
+  /* 펼친 카드는 **한 단**이다(사용자 11-06 — 두 단은 어느 칸에 무엇이 있는지 찾기 어려웠다).
+     구역마다 제목 막대로 나눈다 */
+  .sec { margin-top:18px; } .sec:first-child { margin-top:0; }
+  .sec>h2 { margin:0 0 8px; padding:3px 0 3px 9px; font-size:13px; font-weight:700; color:var(--fg);
+            border-left:3px solid var(--accent); background:var(--hover); }
+  .desc p { margin:0 0 3px; }
+  .stg td:first-child { white-space:nowrap; } .stg td:nth-child(2) { white-space:nowrap; }
+  @media (max-width:980px) {
+    details.sc>summary { grid-template-columns:24px minmax(0,1fr) 58px; }
+    summary .sgs, summary .ln { grid-column:1/-1; } }
+  ul { margin:0; padding-left:18px; }
+  /* 표는 테두리·머리글 바탕·칸 구분을 모두 둔다 — 밝은 바탕에서 선만으로는 묻혔다. 색은 초기값 */
+  table { width:100%; border-collapse:collapse; font-size:12.5px; margin-top:4px; background:#f1f3f5;
+          border:1px solid #8f99a6; }
+  th, td { text-align:left; padding:4px 9px; border:1px solid #a4adb9; vertical-align:top; overflow-wrap:anywhere; }
+  th { background:#c6ced8; color:#1f252d; font-weight:700; }
+  table.kv th { width:112px; white-space:nowrap; }
+  .how td:first-child { white-space:nowrap; }
+  #mx { table-layout:fixed; margin:0 0 12px; }
+  #mx th, #mx td { padding:0; }
+  #mx th { padding:3px 9px; font-size:12px; }
+  #mx th.rw { width:118px; white-space:nowrap; }
+  #mx td.no { background:none; }
+  #mx button { display:flex; justify-content:space-between; gap:6px; width:100%; height:100%; padding:3px 9px;
+               border:0; border-radius:0; background:none; text-align:left; white-space:nowrap; }
+  #mx button:hover { background:var(--hover); }
+  #mx button.on { background:var(--on); box-shadow:inset 0 0 0 2px var(--accent); }
+  #mx button b { margin:0; }
+  #mx th:not(.rw) { text-align:center; }
+  #mx button { justify-content:center; background:none; }
+  /* 건수가 있는 칸만 색을 칠한다 — 어디가 잘되고 잘못됐는지 색으로 먼저 읽히게(사용자 11-06) */
+  #mx td.m-ok { background:#cfe6d6; } #mx td.m-warn { background:#f2e3b6; } #mx td.m-bad { background:#f4c6bf; }
+  #mx td.m-dim { background:#e3e6ea; } #mx td.m-z button b { color:var(--dim); font-weight:400; }
+  .chips button i { font-style:normal; font-weight:700; margin-right:4px; }
+  .chips button b.z { color:var(--dim); font-weight:400; }
+  .stg tr:has(.g-ok)>td { background:#e6f2ea; } .stg tr:has(.g-warn)>td { background:#f9f0d6; }
+  .stg tr:has(.g-bad)>td { background:#f9dfdb; }
+  .stg tr:has(.g-ok)>td:first-child { box-shadow:inset 4px 0 0 var(--green); }
+  .stg tr:has(.g-warn)>td:first-child { box-shadow:inset 4px 0 0 var(--yellow); }
+  .stg tr:has(.g-bad)>td:first-child { box-shadow:inset 4px 0 0 var(--red); }
+  /* 용어 — 값 옆의 짧은 뜻은 그대로 보이고, 문장 안의 코드는 점선이라 올리면 뜻이 나온다 */
+  .gl { border-bottom:1px dotted var(--dim); cursor:help; }
+  .mean { margin-left:7px; color:var(--dim); font-size:12px; }
+  #tip { display:none; position:fixed; z-index:60; max-width:440px; padding:6px 9px; border-radius:6px;
+         background:#262c35; color:#f1f3f5; font-size:12px; line-height:1.5; pointer-events:none; white-space:pre-line; }
+  .tag { display:inline-block; margin-left:6px; padding:0 6px; border:1px solid var(--yellow);
+         border-radius:999px; font-size:10.5px; color:var(--yellow); white-space:nowrap; }
+  .sub { margin-top:12px; }
+</style>
+</head>
+<body>
+<main id=doc>
+<h1>시나리오 현황 <small id=stamp></small></h1>
+<div id=msg></div>
+<div id=filters></div>
+<div id=list></div>
+<div id=notes></div>
+</main>
+<div id=tip></div>
+<script>
+/*__I18N__*/
+//: 상태 — 자료의 `status` 값, 이름, 색. 표에 없는 값은 "상태 미확인"으로 따로 센다
+const STATUS=[['pass','통과','ok'],['partial','일부 통과','warn'],['missed','못 잡음','bad'],
+              ['pending','판정 대기','acc'],['not_run','미실행','dim'],['excluded','제외','dim']];
+const NO_STATUS='?';
+const stOf=s=>STATUS.some(x=>x[0]===s.status) ? s.status : NO_STATUS;
+const stName=k=>{ const x=STATUS.find(y=>y[0]===k); return T(x?x[1]:'상태 미확인'); };
+const ST_ICON={pass:'✓',partial:'△',missed:'✕',pending:'◷',not_run:'○',excluded:'–'};
+const stCls=k=>{ const x=STATUS.find(y=>y[0]===k); return 's-'+(x?x[2]:'warn'); };
+//: 단계 — D 탐지 → L1 판정 → L2 묶음 → L3 결과. 값이 없으면 "미평가"다. 평가 전을 실패로 읽으면 안 된다
+const STAGES=[['D','D 장애 검출'],['L1','L1 판정'],['L2','L2 묶음'],['L3','L3 결과']];
+const SG_STATE=[['ok','정상','✓','ok'],['partial','일부','△','warn'],['fail','실패','✕','bad'],
+                ['na','해당 없음','–','dim'],['unknown','미평가','?','dim']];
+const REACHED=[['none','도달 없음'],['D','D'],['L1','L1'],['L2','L2'],['L3','L3']];
+const sgOf=(s,k)=>(s.stages&&typeof s.stages==='object'&&s.stages[k])||null;
+const sgState=(s,k)=>{ const x=sgOf(s,k); return x&&SG_STATE.some(y=>y[0]===x.state) ? x.state : 'unknown'; };
+const sgInfo=st=>SG_STATE.find(y=>y[0]===st);
+const reachedOf=s=>REACHED.some(y=>y[0]===s.reached) ? s.reached : '?';
+const reachedName=k=>{ const x=REACHED.find(y=>y[0]===k); return T(x?x[1]:'미평가'); };
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const unk=()=>`<span class=unk>${esc(T('미확인'))}</span>`;
+//: 용어집(`scenario_glossary.json`). `Cause 73`·`S11 Cause 73`·`ESM 26` 은 번호 하나로 찾는다
+let GL={}, GL_RE=null;
+function setGloss(g){
+  GL=g||{};
+  const keys=Object.keys(GL).filter(k=>GL[k].kind!=='field'&&GL[k].kind!=='cause_no')
+    .sort((a,b)=>b.length-a.length).map(k=>k.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'));
+  GL_RE=new RegExp('(?<![A-Za-z0-9_-])(?:(?:S11|S1AP|ESM|EMM)(?: Cause)? \\d+|Cause \\d+'
+    +keys.map(k=>'|'+k).join('')+')(?![A-Za-z0-9_-])','g');
+}
+const glOf=m=>{ const n=/^(?:S11|S1AP|ESM|EMM|Cause)\b.*?(\d+)$/.exec(m), t=GL[n?'Cause '+n[1]:m];
+  return t ? (t[LANG]||t.ko) : null; };
+const glTip=(m,t)=>t.l ? `${m} — ${t.s}\n${t.l}` : `${m} — ${t.s}`;
+//: 이미 이스케이프한 글에 쓴다. 코드는 그대로 두고 뜻만 얹는다
+const gl=h=>GL_RE ? h.replace(GL_RE,m=>{ const t=glOf(m);
+  return t ? `<span class=gl data-tip="${esc(glTip(m,t))}">${m}</span>` : m; }) : h;
+const val=v=>v==null||v==='' ? unk() : gl(esc(typeof v==='object' ? JSON.stringify(v) : v));
+//: 값 옆에 짧은 뜻을 붙인다 — 판정 기준·최신 결과처럼 코드만 덩그러니 있는 칸에 쓴다
+const mean=v=>{ if(v==null||!GL_RE) return ''; const got=[];
+  String(v).replace(GL_RE,m=>{ const t=glOf(m); if(t&&!got.includes(t.s)) got.push(t.s); return m; });
+  return got.length ? `<span class=mean>${esc(got.join(' · '))}</span>` : ''; };
+const coded=v=>val(v)+mean(v);
+//: 칸의 뜻 — 값 자체는 코드가 아니고 값을 읽는 기준이 필요할 때(신뢰도·탐지까지)
+const hint=k=>{ const t=GL[k]&&(GL[k][LANG]||GL[k].ko); if(!t) return '';
+  return `<span class="mean${t.l?' gl':''}"${t.l?` data-tip="${esc(t.l)}"`:''}>${esc(t.s)}</span>`; };
+// 목록 — `null` 은 모르는 것이고 `[]` 는 없다고 적은 것이다
+const list=v=>{
+  if(v==null) return unk();
+  if(!Array.isArray(v)) return val(v);
+  if(!v.length) return `<span class=dim>${esc(T('없음'))}</span>`;
+  return '<ul>'+v.map(x=>`<li>${val(x)}</li>`).join('')+'</ul>';
+};
+//: 셋째 값은 그 칸의 뜻이다 — 칸 이름에 마우스를 올리면 나온다
+const dl=rows=>'<table class=kv>'+rows.map(([k,v,f])=>{ const t=f&&GL[f]&&(GL[f][LANG]||GL[f].ko);
+  return `<tr><th${t?` class=gl data-tip="${esc(t.l?t.s+'\n'+t.l:t.s)}"`:''}>${esc(T(k))}</th><td>${v}</td></tr>`; }).join('')+'</table>';
+//: 구역 — 제목 막대로 나눈다
+const sec=(title,body)=>`<section class=sec><h2>${title}</h2>${body}</section>`;
+//: 설명 자료의 언어 — 일본어 칸이 없으면 한국어로 둔다
+const tr=(h,k)=>LANG==='ja'&&h&&h.ja&&h.ja[k]!=null ? h.ja[k] : (h||{})[k];
+//: 코드 목록 — `list` 에 뜻을 붙인 것
+const codedList=v=>Array.isArray(v)&&v.length ? '<ul>'+v.map(x=>`<li>${coded(x)}</li>`).join('')+'</ul>' : list(v);
+const table=(v,cols,row)=>{
+  if(!Array.isArray(v)) return `<div>${list(v)}</div>`;
+  if(!v.length) return `<div>${list(v)}</div>`;
+  return '<table><tr>'+cols.map(c=>`<th>${esc(T(c))}</th>`).join('')+'</tr>'
+    +v.map(x=>'<tr>'+row(x||{}).map(c=>`<td>${c}</td>`).join('')+'</tr>').join('')+'</table>';
+};
+// `2026-11-06T11:31:05` → `11-06 11:31`. 그 모양이 아니면 적힌 대로 둔다
+const stamp=v=>{ const m=/^\d{4}-(\d\d)-(\d\d)[T ](\d\d):(\d\d)/.exec(v==null?'':v);
+  return m ? esc(`${m[1]}-${m[2]} ${m[3]}:${m[4]}`) : val(v); };
+//: 접는 칸. 다시 그려도 펼친 칸은 그대로다(`OPEN`)
+const fold=(k,title,body,cls='')=>`<details class="fold ${cls}" data-k="${esc(k)}"${OPEN.has(k)?' open':''}>`
+  +`<summary>${esc(title)}</summary>${body}</details>`;
+//: 만드는 방법 — `scenario_how.json`. 없는 항목은 뺀다(결과가 아니라 설명이라 "미확인"을 적지 않는다)
+function howBlock(no, h){
+  if(!h||typeof h!=='object') return '';
+  const part=(t,b)=>`<div class=sub><h3>${esc(T(t))}</h3>${b}</div>`;
+  const parts=[], steps=tr(h,'steps'), traces=tr(h,'traces'), same=tr(h,'unchanged'), lim=tr(h,'limits');
+  if(Array.isArray(steps)&&steps.length)
+    parts.push(part('만드는 순서','<ol>'+steps.map(x=>`<li>${val(x)}</li>`).join('')+'</ol>'));
+  if(Array.isArray(traces)&&traces.length)
+    parts.push(part('데이터에 남는 흔적',table(traces,['위치','내용'],x=>[val(x.where),val(x.what)])));
+  if(same!=null&&same!=='') parts.push(part('건드리지 않는 것',val(same)));
+  if(lim!=null&&lim!=='') parts.push(part('실제와 다른 점',val(lim)));
+  return parts.length ? fold(no+':how',T('만드는 순서와 데이터 흔적 보기'),`<div class=how>${parts.join('')}</div>`) : '';
+}
+const minutes=v=>v==null||v==='' ? unk() : esc(T('{n}분',{n:v}));
+// 목록 줄의 네 칸
+const sgCells=s=>'<span class=sgs>'+STAGES.map(([k,name])=>{ const [st,lb,mark,c]=sgInfo(sgState(s,k));
+  return `<span class="sg g-${c}" title="${esc(T(name))}: ${esc(T(lb))}">${esc(k)} ${mark}</span>`; }).join('')+'</span>';
+// 펼친 카드 맨 위의 단계 표
+const sgTable=s=>`<div class=stg>`
+  +table(STAGES,['단계','상태','내용'],([k,name])=>{
+    const x=sgOf(s,k), [st,lb,mark,c]=sgInfo(sgState(s,k));
+    const det=x&&Array.isArray(x.detectors)&&x.detectors.length ? esc(x.detectors.join(', '))+' · ' : '';
+    return [esc(T(name)), `<span class="sg g-${c}">${mark}</span> <b class=s-${c}>${esc(T(lb))}</b>`,
+            x ? det+val(x.detail) : `<span class=dim>${esc(T('평가 전'))}</span>`];
+  })+'</div>';
+function detail(s){
+  const u=s.setup||{}, e=s.expect||{}, l=s.latest||{}, h=HOW[String(s.no)]||{};
+  const lines=tr(h,'detail');
+  const desc=Array.isArray(lines)&&lines.length
+    ? '<div class=desc>'+lines.map(x=>`<p>${val(x)}</p>`).join('')+'</div>' : `<p>${val(s.what)}</p>`;
+  const same=h.same_as!=null ? `<span class=tag>${esc(T('{n}번과 같은 데이터',{n:h.same_as}))}</span>` : '';
+  return `<div class=body>`
+    +sec(esc(T('시나리오 설명')),desc)
+    +sec(`${esc(T('단계별 상태'))} · ${esc(T('도달 단계'))} ${esc(reachedName(reachedOf(s)))}`+hint('field:reached'),sgTable(s))
+    +sec(esc(T('만드는 법'))+same,
+      dl([['종류',val(s.kind)],['출처',val(s.source)],['대상',val(u.target)],
+          ['길이',minutes(u.duration_min)],['강도',val(u.intensity)]])
+      +`<div class=sub><h3>${esc(T('진행'))}</h3>`
+      +table(u.phases,['시점','일어나는 일'],x=>[val(x.at),val(x.what)])+`</div>`
+      +`<div class=sub><h3>${esc(T('설정값'))}</h3>`
+      +table(u.params,['이름','값'],x=>[val(x.name),
+          val(x.value)+(x.initial===true?`<span class=tag>${esc(T('초기값'))}</span>`:'')])+`</div>`
+      +howBlock(s.no,h))
+    +sec(esc(T('판정 기준')),
+      dl([['원인',coded(e.cause),'field:cause'],['룰',codedList(e.rules),'field:rules'],
+          ['허용 대안',codedList(e.alternatives),'field:alternatives'],
+          ['KPI',coded(e.kpi),'field:kpi'],['지리 모양',coded(e.geo),'field:geo']]))
+    +sec(esc(T('최신 결과')),
+      dl([['장애 ID',val(l.fault),'field:fault'],['실행',val(l.run),'field:run'],['시각',val(l.at)],
+          ['탐지까지',minutes(l.detect_min)+hint('field:detect_min')],
+          ['판정 원인',coded(l.cause),'field:latest_cause'],
+          ['신뢰도',val(l.confidence)+hint('field:confidence')],['요약',val(l.summary)]]))
+    +sec(esc(T('남은 문제와 다음 할 일')),
+      `<h3>${esc(T('남은 문제'))}</h3>${list(l.issues)}`
+      +`<div class=sub><h3>${esc(T('다음 할 일'))}</h3>${val(s.next)}</div>`)
+    +(Array.isArray(s.history)&&s.history.length ? sec(esc(T('이전 회차 {n}건',{n:s.history.length})),
+      table(s.history,['장애 ID','시각','상태','요약'],x=>[val(x.fault),val(x.at),
+        x.status==null?unk():`<span class="${stCls(x.status)}">${esc(stName(x.status))}</span>`,val(x.summary)])) : '')
+    +`</div>`;
+}
+let DOC=null, HOW={}, RAW=null, PICK='all', JA_LEFT=0;
+const OPEN=new Set();
+function render(){
+  const all=(DOC.scenarios||[]).filter(s=>s&&typeof s==='object').slice()
+    .sort((a,b)=>(Number(a.no)||1e9)-(Number(b.no)||1e9));
+  document.getElementById('stamp').innerHTML=esc(T('갱신'))+' '+stamp(DOC.updated_at);
+  const n={}; for(const s of all) n[stOf(s)]=(n[stOf(s)]||0)+1;
+  const keys=[...STATUS.map(x=>x[0]), ...(n[NO_STATUS]?[NO_STATUS]:[])];
+  if(PICK===NO_STATUS&&!n[NO_STATUS]) PICK='all';
+  const cnt=f=>all.filter(f).length;
+  const rk=[...REACHED.map(x=>x[0]),'?'];
+  const chip=(k,icon,name,c,cls)=>`<button data-k="${esc(k)}" class="${PICK===k?'on':''}">`
+    +`<i class="${c?cls:'s-dim'}">${icon}</i>${esc(name)}<b class="${c?cls:'z'}">${c}</b></button>`;
+  const other=all.length-(n.pass||0)-(n.partial||0)-(n.missed||0);
+  document.getElementById('filters').innerHTML=
+    `<p id=sum>${esc(T('{a}건 중 통과 {p}건, 일부 통과 {q}건, 못 잡음 {m}건입니다.',{a:all.length,p:n.pass||0,q:n.partial||0,m:n.missed||0}))}`
+    +(other>0?' '+esc(T('그 밖에 {n}건은 판정 전이거나 제외했습니다.',{n:other})):'')
+    +' '+esc(T('L3까지 모두 정상인 것은 {a}건이고, {b}건은 D 단계부터 막혔습니다.',{a:cnt(s=>reachedOf(s)==='L3'),b:cnt(s=>reachedOf(s)==='none')}))+`</p>`
+    +(LANG==='ja'&&JA_LEFT ? `<p id=sum class=unk>${esc(T('번역이 없거나 낡은 칸 {n}건은 한국어로 보입니다',{n:JA_LEFT}))}</p>` : '')
+    +`<div class=chips><span class=lb>${esc(T('판정'))}</span>`+chip('all','≡',T('전체'),all.length,'')
+    +keys.map(k=>chip(k,ST_ICON[k]||'?',stName(k),n[k]||0,stCls(k))).join('')+`</div>`
+    +`<div class=chips><span class="lb gl" data-tip="${esc((GL['field:reached']?.[LANG]||GL['field:reached']?.ko||{}).l||'')}">${esc(T('도달 단계'))}</span>`
+    +rk.map(k=>chip('r:'+k,'▸',reachedName(k),cnt(s=>reachedOf(s)===k),'')).join('')+`</div>`
+    +`<table id=mx><tr><th class=rw>${esc(T('단계별'))}</th>${SG_STATE.map(x=>`<th class="s-${x[3]}">${x[2]} ${esc(T(x[1]))}</th>`).join('')}</tr>`
+    +STAGES.map(([k,name])=>`<tr><th class=rw>${esc(T(name))}</th>`+SG_STATE.map(([st,,,c])=>{ const key=`s:${k}:${st}`, v=cnt(s=>sgState(s,k)===st);
+      return `<td class=m-${v?c:'z'}><button data-k="${key}" class="${PICK===key?'on':''}"><b>${v}</b></button></td>`;
+    }).join('')+`</tr>`).join('')+`</table>`;
+  const notes=Array.isArray(DOC.notes)?DOC.notes:[];
+  document.getElementById('notes').innerHTML=notes.length
+    ? fold('notes',T('판정 기준과 참고 사항'),'<ol>'+notes.map(x=>`<li>${val(x)}</li>`).join('')+'</ol>','box') : '';
+  const hit=s=>{
+    if(PICK==='all') return true;
+    if(PICK.startsWith('r:')) return reachedOf(s)===PICK.slice(2);
+    if(PICK.startsWith('s:')){ const [,k,st]=PICK.split(':'); return sgState(s,k)===st; }
+    return stOf(s)===PICK;
+  };
+  const rows=all.filter(hit);
+  document.getElementById('list').innerHTML=rows.length ? rows.map(s=>{ const k=stOf(s);
+    const ln=tr(HOW[String(s.no)],'brief')??s.what;
+    return `<details class=sc data-k="${esc(s.no)}"${OPEN.has(String(s.no))?' open':''}><summary>`
+      +`<span class=no>${esc(s.no)}</span><span class=nm>${s.name==null?unk():esc(s.name)}</span>`
+      +`<span class="st ${stCls(k)}">${esc(stName(k))}</span>`+sgCells(s)
+      +`<span class=ln data-tip="${esc(ln??'')}">${ln==null?unk():esc(ln)}</span></summary>${detail(s)}</details>`;
+  }).join('') : `<p class=dim>${esc(T('해당하는 시나리오가 없습니다'))}</p>`;
+}
+function warn(text, stale){
+  const m=document.getElementById('msg');
+  m.style.display=text?'block':'none';
+  m.textContent=!text ? '' : text+(stale&&DOC?' · '+T('아래는 마지막으로 읽은 내용입니다'):'');
+}
+async function load(){
+  let d;
+  try{ d=await (await fetch('/api/scenario-report',{cache:'no-store'})).json(); }
+  catch(e){ warn(T('서버 응답 없음'),true); return; }
+  if(!d.ok){ warn(d.reason==='missing' ? T('자료 파일이 없습니다 — {p}',{p:d.path})
+                                       : T('자료 파일이 깨졌습니다 — {p} · {e}',{p:d.path,e:d.detail}), true); return; }
+  // 만드는 방법은 없으면 칸만 숨긴다. 깨진 것은 말한다 — 조용히 숨기면 없는 것으로 읽힌다
+  warn(d.how_error ? T('자료 파일이 깨졌습니다 — {p} · {e}',{p:d.how_error.path,e:d.how_error.detail}) : '');
+  // 내용이 그대로면 다시 그리지 않는다 — 읽던 자리와 스크롤을 건드리지 않게
+  const raw=JSON.stringify([d.report,d.how,d.report_ja,d.glossary]); if(raw===RAW) return;
+  RAW=raw; DOC=LANG==='ja'&&d.report_ja||d.report; HOW=d.how||{}; JA_LEFT=d.ja_left||0;
+  setGloss(d.glossary); render();
+}
+document.getElementById('filters').addEventListener('click',e=>{
+  const b=e.target.closest('button'); if(!b||!DOC) return;
+  // 거르면 보던 카드는 닫는다. 참고 사항 칸은 카드가 아니라 둔다
+  PICK=b.dataset.k;
+  for(const k of [...OPEN]) if(k!=='notes') OPEN.delete(k);
+  render();
+});
+// `toggle` 은 거슬러 오르지 않는다 — 잡는 단계에서 받는다
+document.getElementById('doc').addEventListener('toggle',e=>{
+  const q=e.target; if(q.tagName!=='DETAILS') return;
+  const card=q.classList.contains('sc');
+  if(!q.open){
+    OPEN.delete(q.dataset.k);
+    if(card) for(const f of q.querySelectorAll('details.fold[open]')) f.open=false;
+    return;
+  }
+  if(OPEN.has(q.dataset.k)) return;      // 다시 그리면서 열린 것이다
+  OPEN.add(q.dataset.k);
+  if(!card) return;
+  // 카드는 하나만 연다. 위의 카드가 닫히면 누른 줄이 화면 밖으로 밀리니 제자리로 데려온다
+  for(const o of document.querySelectorAll('details.sc[open]')) if(o!==q) o.open=false;
+  const top=q.getBoundingClientRect().top;
+  if(top<52) window.scrollBy(0, top-52);
+},true);
+//: 마우스를 올린 칸의 전체 글 — 브라우저 `title` 은 1초쯤 늦게 뜨고 줄바꿈을 못 믿는다
+const TIP=document.getElementById('tip');
+document.getElementById('doc').addEventListener('mouseover',e=>{
+  const q=e.target.closest('[data-tip]');
+  if(!q||!q.dataset.tip){ TIP.style.display='none'; return; }
+  TIP.textContent=q.dataset.tip; TIP.style.display='block';
+  const r=q.getBoundingClientRect(), w=TIP.offsetWidth, h=TIP.offsetHeight;
+  TIP.style.left=Math.max(8,Math.min(e.clientX-12,innerWidth-w-8))+'px';
+  TIP.style.top=(r.bottom+6+h>innerHeight ? r.top-h-6 : r.bottom+6)+'px';
+});
+document.getElementById('doc').addEventListener('mouseleave',()=>{ TIP.style.display='none'; });
+applyLang();
+load(); setInterval(load, 60000);
+</script>
+</body>
+</html>
+"""
+
+_JA_SCEN = {
+    "시나리오 설명": "シナリオ説明", "만드는 법": "作り方", "만드는 순서와 데이터 흔적 보기": "作成手順とデータの痕跡を見る",
+    "남은 문제와 다음 할 일": "残課題と次の作業", "{n}번과 같은 데이터": "{n}番と同じデータ",
+    "probe-datagen 시나리오 현황": "probe-datagen シナリオ状況", "시나리오 현황": "シナリオ状況",
+    "통과": "合格", "일부 통과": "一部合格", "못 잡음": "未検出", "판정 대기": "判定待ち",
+    "미실행": "未実行", "제외": "除外", "상태 미확인": "状態未確認", "미확인": "未確認", "없음": "なし",
+    "전체": "全体", "갱신": "更新", "설정": "設定", "종류": "種類", "출처": "出典", "대상": "対象",
+    "길이": "長さ", "강도": "強度", "진행": "進行", "시점": "時点", "일어나는 일": "発生すること",
+    "설정값": "設定値", "이름": "名前", "값": "値", "초기값": "初期値", "판정 기준": "判定基準",
+    "원인": "原因", "룰": "ルール", "허용 대안": "許容代替", "지리 모양": "地理形状",
+    "최신 결과": "最新結果", "장애 ID": "障害ID", "실행": "実行", "시각": "時刻", "탐지까지": "検知まで",
+    "판정 원인": "判定原因", "신뢰도": "信頼度", "요약": "要約", "남은 문제": "残る問題",
+    "다음 할 일": "次の作業", "상태": "状態", "이전 회차 {n}건": "過去の実行 {n}件",
+    "정상": "正常", "일부": "一部", "실패": "失敗", "해당 없음": "該当なし", "미평가": "未評価",
+    "단계": "段階", "단계별 상태": "段階別状態", "도달 단계": "到達段階", "도달 없음": "到達なし", "평가 전": "評価前",
+    "D 장애 검출": "D 障害検出", "L1 판정": "L1 判定", "L2 묶음": "L2 まとめ", "L3 결과": "L3 結果",
+    "판정 기준과 참고 사항": "判定基準と参考事項",
+    "만드는 순서": "作成手順", "데이터에 남는 흔적": "データに残る痕跡", "위치": "場所", "내용": "内容",
+    "건드리지 않는 것": "変更しないもの", "실제와 다른 점": "実際との違い",
+    "해당하는 시나리오가 없습니다": "該当するシナリオがありません",
+    "아래는 마지막으로 읽은 내용입니다": "以下は最後に読み込んだ内容です",
+    "자료 파일이 없습니다 — {p}": "資料ファイルがありません — {p}",
+    "자료 파일이 깨졌습니다 — {p} · {e}": "資料ファイルが壊れています — {p} · {e}",
+    "판정": "判定", "단계별": "段階別",
+    "{a}건 중 통과 {p}건, 일부 통과 {q}건, 못 잡음 {m}건입니다.": "{a}件のうち合格 {p}件、一部合格 {q}件、未検出 {m}件である。",
+    "그 밖에 {n}건은 판정 전이거나 제외했습니다.": "ほかの {n}件は判定前または除外である。",
+    "L3까지 모두 정상인 것은 {a}건이고, {b}건은 D 단계부터 막혔습니다.": "L3 まですべて正常なのは {a}件で、{b}件は D 段階で止まっている。",
+    "번역이 없거나 낡은 칸 {n}건은 한국어로 보입니다": "翻訳がない、または古い {n}件は韓国語のまま表示される",
+}
+
 _HTML = _page(_HTML, "main", {**_JA_MAP, **_JA_MAIN})
 _HTML_MAP = _page(_HTML_MAP, "map", _JA_MAP)
 _HTML_TOPO = _page(_HTML_TOPO, "topo", {})
+_HTML_SCEN = _page(_HTML_SCEN, "scen", _JA_SCEN)
 
 
 @app.get("/map", response_class=HTMLResponse)
@@ -7366,6 +8190,67 @@ def map_page():
 @app.get("/topo", response_class=HTMLResponse)
 def topo_page():
     return _HTML_TOPO
+
+
+@app.get("/scenarios", response_class=HTMLResponse)
+def scenarios_page():
+    return _HTML_SCEN
+
+
+#: 시나리오 현황 자료 — 판정이 끝날 때마다 사람이 고친다. 로컬은 `config` 마운트라 바로 보이고,
+#: 운영 compose 는 설정 파일 하나만 걸므로 이미지를 구운 시점의 파일을 본다
+SCENARIO_REPORT = HERE / "config" / "scenario_report.json"
+#: 시나리오를 만드는 방법 — 코드가 바뀔 때만 고친다. 판정마다 고치는 위 파일과 주기가 달라 나눴다
+SCENARIO_HOW = HERE / "config" / "scenario_how.json"
+#: 결과 자료의 일본어 — 칸마다 원문 해시를 함께 둔다(`scenario_ja`). 용어 뜻 — 코드 옆에 붙는 쉬운 말
+SCENARIO_REPORT_JA = HERE / "config" / "scenario_report_ja.json"
+SCENARIO_GLOSSARY = HERE / "config" / "scenario_glossary.json"
+
+
+def _read_report(file: Path, key: str, kind: type) -> dict:
+    """자료 파일을 읽는다 — 없거나 깨진 것은 서버 오류가 아니라 자료의 상태라 사유로 돌려준다."""
+    path = f"config/{file.name}"
+    try:
+        doc = json.loads(file.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"ok": False, "reason": "missing", "path": path}
+    except (OSError, ValueError) as e:      # JSON·UTF-8 오류는 ValueError 다
+        return {"ok": False, "reason": "broken", "path": path, "detail": str(e)}
+    if not isinstance(doc, dict) or not isinstance(doc.get(key), kind):
+        return {"ok": False, "reason": "broken", "path": path, "detail": f"{key} 항목이 없다"}
+    return {"ok": True, "doc": doc}
+
+
+@app.get("/api/scenario-report")
+def api_scenario_report():
+    """요청마다 파일을 읽는다 — 캐시하면 재시작 전까지 옛 판정이 보인다.
+
+    파일이 없거나 깨지면 200 으로 사유를 내리고 화면이 그대로 적는다. 빈 목록으로 내리면
+    "시나리오가 없다"로 읽힌다. 만드는 방법은 없어도 결과는 보여 준다 — 그 칸만 빠진다.
+    """
+    from .scenario_ja import merge as merge_ja
+    rep = _read_report(SCENARIO_REPORT, "scenarios", list)
+    if not rep["ok"]:
+        return rep
+    out = {"ok": True, "report": rep["doc"], "how": {}}
+    how = _read_report(SCENARIO_HOW, "scenarios", dict)
+    if how["ok"]:
+        out["how"] = how["doc"]["scenarios"]
+    elif how["reason"] == "broken":
+        out["how_error"] = how
+    # 번역·용어집도 없으면 칸만 빠지고, 깨진 것은 같은 자리로 말한다
+    ja = _read_report(SCENARIO_REPORT_JA, "scenarios", dict)
+    if ja["ok"]:
+        out["report_ja"], left = merge_ja(rep["doc"], ja["doc"])
+        out["ja_left"] = len(left["missing"]) + len(left["stale"])
+    elif ja["reason"] == "broken":
+        out.setdefault("how_error", ja)
+    gloss = _read_report(SCENARIO_GLOSSARY, "terms", dict)
+    if gloss["ok"]:
+        out["glossary"] = gloss["doc"]["terms"]
+    elif gloss["reason"] == "broken":
+        out.setdefault("how_error", gloss)
+    return out
 
 # ── 기동 ────────────────────────────────────────────────────────────────────
 

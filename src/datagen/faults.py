@@ -55,7 +55,11 @@ _AUTO_NODE = {
     # 시나리오 목록이 말하는 장비에 건다 — 가장 바쁜 것을 고른다.
     "auth_failure": "mme_id",       # MME–HSS 구간
     "dns_degradation": "sgw_id",    # 사용자 평면 경로
-    "external_server": "sgw_id",
+    # "external_server" — **자동 선택은 전국이다**(2026-11-05 · 6번 · 케이 수정안 A). 외부 서버 장애는
+    # 그 도메인을 쓰는 전국 가입자에게 동시에 보인다(정답지도 `WIDE`). SGW 하나로 좁히면 도메인
+    # 축(U-25 · 셀 조건 없음)에서 5xx 가 그 SGW 의 트래픽 몫만큼 묽어져 F-108 이 3.4%(임계 5%)로
+    # 미탐지였고, ext1(6.07%)·ext2(4.84%)가 고른 SGW 의 몫에 따라 갈렸다 — 결과가 운이었다.
+    # `SGW-n`·`ENB:`·`BOX:` 를 지정하면 지금처럼 그 범위로 좁힌다(`_resolve_target`)
     "ue_model": "sgw_id",           # SGW 아래 여러 셀에 흩어진다(R-10)
     "ims_pdn": "sgw_id",            # PGW 번호 = SGW 번호(구 SPGW)
     "cdn_degradation": "sgw_id",    # 6번과 같은 자리
@@ -72,7 +76,9 @@ _CROWD_KINDS = ("ran_congestion",)
 
 #: 한 지역 셀 25개를 범위로 잡는 kind — 지진(27번). 그중 40% 가 정지하고
 #: 나머지가 그 가입자를 받는다. eNB 하나로는 "받을 이웃"이 없다.
-_AREA_KINDS = ("earthquake",)
+_AREA_KINDS = ("earthquake", "natural_disaster",
+               # 17번 SA 폴백 — 한 지역(셀 25개)의 5G 측 장애. 정지는 없고 범위만 같은 모양이다
+               "sa_fallback")
 
 #: 행사장 kind — 가까운 셀 8개(`area_cells`). 공연장은 한산한 셀일 수도
 #: 있다 — 3배면 분모 걱정이 적다(확정대장 §11.1).
@@ -120,7 +126,26 @@ def _sgg_all(cells: list[Cell], code: str) -> set[str]:
     return {c.cell_key for c in cells if c.adm_sgg_cd == code}
 
 
-def _auto_target(kind: str, cells: list[Cell], rng: random.Random) -> Target | None:
+def _route_target(routes, rng: random.Random) -> Target | None:
+    """15번 자동 대상 — 노선 연속 구간(`scenarios.route_segment`). 쌍은 이웃 칸끼리다.
+
+    노선이 없거나(한국 locale · `routes_file` 없음) 모양을 넘는 구간이 없으면 `None` 이고, 호출부가
+    `corridor_cells` 로 돌아간다. **조용히 돌아가지 않는다** — 야마노테선 시나리오가 노선 밖에
+    걸린 것을 F-133 뒤에야 알았다
+    """
+    got = S.route_segment(routes, rng) if routes else None
+    if got is None:
+        print("  ! 15번 노선 구간을 못 골랐다 — 노선 "
+              + ("모양 미달" if routes else "없음") + " · `corridor_cells` 로 돌아간다", flush=True)
+        return None
+    seg, info = got
+    return Target(cell_keys={c.cell_key for c in seg},
+                  cell_pairs=[(a.cell_key, b.cell_key) for a, b in zip(seg, seg[1:])],
+                  route_seg=info)
+
+
+def _auto_target(kind: str, cells: list[Cell], rng: random.Random,
+                 routes=None) -> Target | None:
     """target 미지정 시 kind 별 기본 범위."""
     field = _AUTO_NODE.get(kind)
     if field:
@@ -149,6 +174,9 @@ def _auto_target(kind: str, cells: list[Cell], rng: random.Random) -> Target | N
         # (U-15 셀 스펙) 정본이 50개다
         # 2026-11-03: 시군구 첫 추첨 셀을 앵커로 **인접 eNB 10~15셀 군집**
         # (`enb_cluster`) — 정본과 같은 함수다
+        # 후보가 없으면(NR 가능 eNB 0개 · `build`) 추첨이 빈 목록에서 죽는다 — 호출부가 취소한다
+        if not any(c.geo_status == "MAPPED" for c in cells):
+            return None
         picked, code = _cells_in_one_sgg(cells, rng, 50)
         keys = {c.cell_key for c in enb_cluster(cells, picked[0])} if picked else set()
         return Target(cell_keys=keys, sgg_codes={code}) if keys else None
@@ -166,6 +194,10 @@ def _auto_target(kind: str, cells: list[Cell], rng: random.Random) -> Target | N
     if kind in _VENUE_KINDS:
         keys = {c.cell_key for c in area_cells(cells, rng, want=8)}
         return Target(cell_keys=keys) if keys else None
+    if kind == "ho_interruption":
+        target = _route_target(routes, rng)
+        if target is not None:
+            return target
     if kind in _PAIR_KINDS:
         # **방위각 ±25° 제약**을 쓴다 — `build_scenarios` 와 같은 함수다.
         # GPS 최근접 N셀은 등방 분포가 되어 `CORRIDOR` 가 아니라 `CLUSTER` 로
@@ -187,11 +219,11 @@ def _auto_target(kind: str, cells: list[Cell], rng: random.Random) -> Target | N
 
 
 def _resolve_target(raw: str | None, kind: str, cells: list[Cell],
-                    rng: random.Random) -> Target | None:
+                    rng: random.Random, routes=None) -> Target | None:
     """target 문자열 → Target. 해석 불능이나 일치 셀 0개면 None (호출부가 cancelled 처리)."""
     text = (raw or "").strip()
     if not text:
-        return _auto_target(kind, cells, rng)
+        return _auto_target(kind, cells, rng, routes)
 
     if text.upper().startswith("SGG:"):
         code = text.split(":", 1)[1].strip()
@@ -345,8 +377,45 @@ def target_rng(seed: int, fault_id: int) -> random.Random:
     return random.Random(seed * 1_000_003 + fault_id)
 
 
+def _busy_disaster_area(cells: list[Cell], rate: dict[str, float], want: int,
+                        mode: str, sid: str, top: int = 40) -> set[str] | None:
+    """자연재해 자동 대상 — **정지할 eNB 들의 평소 호율이 가장 높은 지역**(2026-11-05 · F-111).
+
+    15% 생산량에서는 eNB 대부분이 분당 1호 미만이라 graphio D4 가 20분 정지를 확정하지 못했다
+    (λ 0.76~0.88 → 확정 24~27분 · 리오 실측). `gw_node_down` 이 표본이 가장 두터운 SGW 를 고르는
+    것과 같은 원칙이다 — 임계·생산량은 건드리지 않는다.
+
+    후보는 호율 상위 `top` 개 eNB 를 각각 중심으로 한 지역(`area_cells` + `whole_enbs` · 지금과 같은
+    모양)이고, 그 지역에서 **실제로 정지할 eNB**(`disaster_rank_of` · 순위 규칙은 그대로)의
+    호율 최솟값이 가장 큰 곳을 고른다 — D4 는 eNB 마다 확정하므로 가장 느린 eNB 가 판정을 늦춘다.
+    같으면 합이 큰 쪽, 그다음 eNB 번호. 난수를 쓰지 않는다 — 같은 창고면 같은 지역이다
+    """
+    first: dict[str, Cell] = {}
+    for c in cells:
+        if c.geo_status == "MAPPED":
+            first.setdefault(c.enb_id, c)
+    cand = sorted((e for e in first if rate.get(e, 0.0) > 0.0),
+                  key=lambda e: (-rate[e], e))[:top]
+    best, best_key = None, None
+    for e in cand:
+        picked = whole_enbs(cells, area_cells(cells, random.Random(0), want=want,
+                                              anchor=first[e]))
+        keys = {c.cell_key for c in picked}
+        rank = S.disaster_rank_of(keys, picked, mode, sid)
+        n = S.disaster_dead_n(len(rank))
+        dead = [x for x, r in rank.items() if r < n]
+        if not dead:
+            continue
+        lams = [rate.get(x, 0.0) for x in dead]
+        score = (min(lams), sum(lams), -int(e) if e.isdigit() else 0)
+        if best_key is None or score > best_key:
+            best, best_key = keys, score
+    return best
+
+
 def build(fault: dict, cells: list[Cell], anchor: datetime,
-          rng: random.Random, seed: int | None = None) -> Scenario | None:
+          rng: random.Random, seed: int | None = None,
+          enb_rate=None, routes=None, nr_on=None) -> Scenario | None:
     """CM_DATAGEN_FAULT 한 행을 Scenario 로 바꾼다.
 
     시간창은 anchor(분 인덱스 0의 시각) 기준 분 좌표로 옮긴다 — Scenario 가
@@ -361,40 +430,137 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
     if spec is None:
         return None
     like = like_fault_id(fault.get("target"))
+    # 16번은 NR 가능 eNB 안에서만 고른다(2026-11-05 사용자 결정) — 불가 eNB 에는 SA 세션이 없어
+    # 걸어도 아무 일이 없다. 자동·`ENB:`·`BOX:`·`TAC:`·`SGG:` 가 한 길로 지나게 후보 셀을 좁힌다
+    pick = cells
+    if fault["kind"] == "anchor_saturation" and nr_on is not None:
+        pick = [c for c in cells if nr_on(str(c.enb_id))]
+    mode = None
+    raw_target = fault.get("target")
+    if fault["kind"] == "natural_disaster":
+        # 기지국 정지 배치 — 대상 앞머리 `LOCAL:`·`WIDE:`(또는 그 낱말만). 장애 테이블에 인자 칸이
+        # 없어(DDL 없이) 대상 문자열로 받는다. 기본 ``local``
+        mode, raw_target = _disaster_mode(raw_target)
     if fault["kind"] == "capacity_shift":
         target = _shift_target(fault.get("target"), fault["start_ts"], cells)
+    elif fault["kind"] == "natural_disaster" and not (raw_target or "").strip() and like is None:
+        # 자동 선택 — 지역 크기가 배치를 따른다(국소 25셀 · 넓은 80셀 · 초기값)
+        # 창고의 eNB 호율이 있으면 **정지 eNB 호율이 가장 높은 지역**(`_busy_disaster_area`), 없으면
+        # 전처럼 무작위 지역이다
+        want = S.DISASTER_AREA_CELLS.get(mode, 25)
+        rate = _rate_at(enb_rate, fault)
+        keys = (_busy_disaster_area(cells, rate, want, mode, f"F-{fault['fault_id']}")
+                if rate else None)
+        if not keys:
+            keys = {c.cell_key for c in whole_enbs(cells, area_cells(cells, rng, want=want))}
+        target = Target(cell_keys=keys) if keys else None
     elif like is not None:
         # 원본 fault 의 rng 는 **대상 해석에만** 쓴다(조이 결정). 나머지 난수
         # (`place` 의 파형·셀 순서 등)는 이 fault 의 rng 다 — 회차가 독립이다
         if seed is None:
             return None
-        target = _resolve_target(None, fault["kind"], cells, target_rng(seed, like))
+        target = _resolve_target(None, fault["kind"], pick, target_rng(seed, like), routes)
     else:
-        target = _resolve_target(fault.get("target"), fault["kind"], cells, rng)
+        target = _resolve_target(raw_target, fault["kind"], pick, rng, routes)
     if target is None:
+        if len(pick) < len(cells):
+            print(f"  ! 16번 대상 {raw_target or '자동'} — NR 가능 eNB 셀이 없어 걸지 않는다", flush=True)
         return None
+    if mode is not None:
+        target.outage_mode = mode
     s = dict(spec)
     s["kind"] = fault["kind"]
     s["target"] = target
     s["peak"] = float(fault["intensity"])
     dur = int(fault["duration_min"])
     if fault["kind"] == "capacity_shift":
-        # **길이는 시나리오가 정한다** — 상승·분산·분석 세 국면이 30분이다.
+        # **길이는 시나리오가 정한다** — 상승·분산·분석 세 국면이 `SHIFT_TOTAL` 분이다.
         # 화면 기본값(10분)으로 자르면 B 가 켜지는 순간 창이 끝난다.
         dur = S.SHIFT_TOTAL
+    if fault["kind"] == "natural_disaster":
+        # 국면(폭주 → 다운 → 다운만 → 정상화)이 23분이다 — 짧게 주면 다운만 남는 국면이 잘린다
+        dur = max(dur, S.DISASTER_DOWN_END)
     steps = s.get("steps") or ()
     if steps:
         dur = max(dur, steps[-1][0])
     dur += max((s.get("series_offset") or {}).values(), default=0)
-    return place(
+    sc = place(
         f"F-{fault['fault_id']}", s,
         int((fault["start_ts"] - anchor).total_seconds() // 60), dur, rng,
     )
+    # **초 단위 시작 시각** — 시작 분은 버림이라(19:07:18 → 19:07 분) 그 분 전체가 장애로
+    # 보인다. 노드 다운은 이 시각 전의 호·세션을 건드리지 않는다(`scenarios.node_down_set`
+    # 의 `AT` · 2026-11-04 F-110). epoch 는 레코드 시각(`slot_start = ts.timestamp()`)과 같은 기준이다
+    sc.start_ts = fault["start_ts"].timestamp()
+    if fault["kind"] in ("natural_disaster", "earthquake"):
+        # 정지 순위(`_disaster_rank` local)가 좌표를 본다 — 대상 셀을 실어 둔다
+        by_key = {c.cell_key: c for c in cells}
+        sc._pool = [by_key[k] for k in sorted(target.cell_keys) if k in by_key]
+    if fault["kind"] == "natural_disaster":
+        # 정답지의 `down_enbs_rate` — 지정 대상(ENB:·BOX:)이어도 싣는다. 못 읽으면 None
+        sc._enb_rate = _rate_at(enb_rate, fault)
+        # 폭주 기준값 — 같은 조회의 분당 평균(`EnbRate.mean`)에서 셀 몫으로 나눈다
+        # 합이 0 이면 **모름**이다 — 폭주는 그 분 평소 호로 후퇴하고(`pemdb1._surge_drafts` 의 같은
+        # 판정), 정답지에도 0.0 이 아니라 null 을 싣는다(불변규칙 17 · 에스터 xfail 11-05)
+        base = _surge_base(cells, target.cell_keys, sc._enb_rate)
+        total = sum(base.values())
+        sc._surge_cell_base = base if total > 0 else {}
+        sc._surge_base = total if total > 0 else None
+    if fault["kind"] == "enb_s1_outage":
+        # 세션을 이웃 eNB 셀로 잇는다(`scenarios._outage_relocate`) — 이웃은 대상 밖이다
+        sc._pool_all = cells
+    return sc
+
+
+def _surge_base(cells: list[Cell], keys, rate) -> dict[str, float]:
+    """대상 셀 → **장애 시작 앞 60분의 분당 평균 호**(자연재해 폭주의 기준값 · 2026-11-05 F-112).
+
+    창고 값은 eNB 단위(`PM_ENB_KPI_1M`)라 셀 몫은 eNB 평균을 그 eNB 의 셀 수로 나눈다. `BOX:` 처럼
+    eNB 를 자른 대상이면 대상 안 셀 몫만 들어간다. 평균이 없으면(조회 실패 · 공급자가 λ 만 준다)
+    빈 사전이고, 폭주는 그 분 평소 호로 돌아간다(`pemdb1._surge_drafts`)
+    """
+    mean = getattr(rate, "mean", None) if rate else None
+    if not mean:
+        return {}
+    per_enb: dict[str, int] = {}
+    for c in cells:
+        per_enb[c.enb_id] = per_enb.get(c.enb_id, 0) + 1
+    by_key = {c.cell_key: c for c in cells}
+    out: dict[str, float] = {}
+    for k in keys:
+        c = by_key.get(k)
+        if c is not None and per_enb.get(c.enb_id):
+            out[k] = mean.get(str(c.enb_id), 0.0) / per_enb[c.enb_id]
+    return out
+
+
+def _rate_at(enb_rate, fault: dict) -> dict[str, float] | None:
+    """eNB 호율 공급자(`pemdb1.enb_call_rate` 를 감싼 것)를 장애 시작 시각으로 부른다 — 한 fault 에
+    한 번만(결과를 fault 사전에 들고 있는다). 공급자가 없거나 창고를 못 읽으면 None"""
+    if enb_rate is None:
+        return None
+    if "_enb_rate" not in fault:
+        try:
+            fault["_enb_rate"] = enb_rate(fault["start_ts"]) or None
+        except Exception as e:          # 창고 장애로 생성을 멈추지 않는다 — 무작위 지역으로 간다
+            print(f"  ! eNB 호율 조회 실패 — 자연재해 자동 대상은 무작위 지역({e})", flush=True)
+            fault["_enb_rate"] = None
+    return fault["_enb_rate"]
+
+
+def _disaster_mode(raw: str | None) -> tuple[str, str | None]:
+    """`WIDE:BOX:…` → (``wide``, ``BOX:…``). 앞머리가 없으면 ``local``."""
+    text = (raw or "").strip()
+    head, sep, rest = text.partition(":")
+    if head.upper() in ("LOCAL", "WIDE"):
+        return head.lower(), (rest.strip() or None) if sep else None
+    return "local", (text or None)
 
 
 def resolve_active(cells: list[Cell], anchor: datetime, seed: int,
                    active: list[dict],
                    cache: dict[int, tuple[tuple, Scenario]],
+                   enb_rate=None, routes=None, nr_on=None,
                    ) -> tuple[list[Scenario], list[int]]:
     """활성 fault 행 목록 → (Scenario 목록, 해석 실패한 fault_id 목록).
 
@@ -420,7 +586,8 @@ def resolve_active(cells: list[Cell], anchor: datetime, seed: int,
             scs.append(cached[1])
             continue
         frng = target_rng(seed, fid)
-        sc = build(f, cells, anchor, frng, seed=seed)
+        sc = build(f, cells, anchor, frng, seed=seed, enb_rate=enb_rate, routes=routes,
+                   nr_on=nr_on)
         if sc is None:
             bad.append(fid)
         else:

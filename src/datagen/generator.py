@@ -1313,7 +1313,13 @@ class Generator:
         `-1` 의 비율은 프로파일 그대로다(`lte_call` 의 `ue_dcnr` 분포에서
         `-1` 의 몫). 전에는 가입자 단위로 `-1/0/1` 을 뽑아 `-1` 이 단말
         속성처럼 굳었다 — 현업 답(2026-11-02)은 그것이 절차의 IE 부재다.
+
+        **End 기록에는 `-1` 이 없다**(2026-11-05 현장 추출 1,249행). `-1` 은 Start·Interim 기록의
+        값이고, 프로파일의 `-1` 약 61% 는 그 몫이다. 상용 경로는 End 만 만드므로(`end_only`) 단말
+        능력을 그대로 적는다 — `-1` 을 섞으면 5G 호의 약 60% 가 N-02 분모에서 빠졌다
         """
+        if self.end_only:
+            return sub.dcnr
         p = self._p_dcnr_absent
         if p is None:
             smp = self.samplers.get("lte_call")
