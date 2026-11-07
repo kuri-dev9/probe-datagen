@@ -2069,6 +2069,8 @@ class PemdbGen:
         #: 장애 공통 설정(`pemdb1.fault`) — TIMEOUT 대기시간. mutator 가
         #: 모듈 전역(`scenarios.FAULT`)으로 읽는다(서명에 설정을 받을 자리가 없다).
         self.fault = set_fault_cfg(fault)
+        #: 5G 능력 가입자 번호 — `floor_sa_kinds` 의 하한이 뽑는다. 처음 쓸 때 만든다
+        self._dcnr_pool: list[int] | None = None
         #: 하한을 채운 셀의 마지막 분과 그때의 하한 — `_floor_drafts` 의 꼬리가
         #: 읽는다. 장애가 끝나면 시나리오가 `active` 에서 빠지므로(라이브는
         #: 활성 fault 행만 걸린다) 끝난 뒤의 하한은 여기 남은 값으로만 안다.
@@ -2142,6 +2144,10 @@ class PemdbGen:
         #: NR 가능 eNB 비율(`net_mode.nr_enb_share`) — 현장은 호가 있는 eNB 의 41%(치우친 표본).
         #: 초기값 0.4 · 사용자 결정 대기. `_nr_fields` 가 eNB 해시로 쓴다
         self._nr_enb_share = float((net_mode or {}).get("nr_enb_share", 0.4))
+        #: `net_mode.nr_by_length` 가 있으면 클래스 기본값(현장 모양)을 덮는다
+        by_len = (net_mode or {}).get("nr_by_length")
+        if by_len:
+            self.NR_BY_LENGTH = tuple((float(lim), float(p)) for lim, p in by_len)
         self._nr_rng = random.Random(seed + 5050)
         #: 평시 절단의 요청 간격 — 본 난수 흐름을 밀지 않게 따로 둔다
         self._drop_rng = random.Random(seed + 5051)
@@ -2415,6 +2421,9 @@ class PemdbGen:
         pool = gen._fixed or range(len(gen.subs))
         done: set[str] = set()
         for sc in active:
+            sa_only = sc.kind in cfg.floor_sa_kinds
+            if sa_only and self._dcnr_pool is None:
+                self._dcnr_pool = [i for i in pool if gen.subs[i].dcnr == "1"]
             if sc.kind == "natural_disaster":
                 # **자연재해는 하한을 채우지 않는다**(2026-11-05 · F-111 · 케이 (가)). 하한은 대상 셀을
                 # 셀당 8호까지 채워 국소 25셀을 평소 14호 → 200호로 올렸다 — 폭주가 끝난 "다운만"
@@ -2446,6 +2455,17 @@ class PemdbGen:
                     # 무호 장애 셀은 꼬리도 걸지 않는다 — 복구 뒤 호가 돌아오는
                     # 모양이 그 장애의 서명이다
                     self._floor_last.pop(k, None)
+                    continue
+                if sa_only:
+                    # 호 수가 아니라 **5G 단말 표본**을 채운다 — 평소 호에서 옮겨 오고(`_sa_floor_calls`)
+                    # 일반 호를 끼우지 않는다. NR 시각은 `_nr_fields` 가 평소 규칙대로 붙이고, 붙은 호만 SA 다. 안 붙은 호는
+                    # LTE 로 세어진다. 끝나면 단말이 떠난 것이라 꼬리를 남기지 않는다 — 일반 호로 거두면
+                    # 끝난 뒤 그 셀의 LTE 만 는다
+                    self._floor_last.pop(k, None)
+                    sa_pool = self._dcnr_pool or pool
+                    for _ in range(int(want + gen.rng.random())):
+                        sub = gen.subs[sa_pool[gen.rng.randrange(len(sa_pool))]]
+                        yield gen.base_lte_call(ts, slot_start, at=(sub, cell))
                     continue
                 if sc.kind == "capacity_shift" and shift_split(sc) > 0:
                     # **B 가 켜진 뒤에는 꼬리를 남기지 않는다.** 하한 호의 60% 는 B 로 가서 A 는 이미
@@ -2491,6 +2511,17 @@ class PemdbGen:
         h = max(cfg.floor_tail_half_min, 1e-9)
         return min(int(cfg.floor_tail_min),
                    math.ceil(h * math.log2(peak / max(cfg.floor_tail_eps, 1e-9))))
+
+    def _sa_floor_calls(self, minute: int, active: list[Scenario]) -> int:
+        """이 분에 `floor_sa_kinds` 가 낼 호 수의 기대값 — 평소 호 추첨에서 그만큼 뺀다."""
+        cfg = self.fault
+        n = 0.0
+        for sc in active:
+            keys = sc.target.cell_keys
+            if sc.kind in cfg.floor_sa_kinds and keys and len(keys) <= cfg.floor_max_cells:
+                n += (cfg.floor_by_kind.get(sc.kind, cfg.floor_per_cell) * visible_level(sc, minute)
+                      * len(sc.active_cells_cache))
+        return int(n)
 
     def _floor_tail(self, minute: int, done: set[str], landed, suppress,
                     ts, slot_start):
@@ -2826,9 +2857,12 @@ class PemdbGen:
         # 호도 아래 같은 경로(이동·덮기·장애 변형·세션 파생)를 탄다.
         # 세는 것은 **이동 전 셀**이다 — 24번은 A 에 채운 뒤 60% 가 B 로 간다.
         landed: collections.Counter = collections.Counter()
+        # `floor_sa_kinds` 는 호를 **더하지 않고 평소 호에서 옮긴다** — 전국 호 수가 그대로다. `n_calls`
+        # 는 폭주·폴백 상한의 기준이라 그대로 두고 평소 호 추첨 횟수만 줄인다
+        plain_calls = max(0, n_calls - self._sa_floor_calls(minute, active))
 
         def drafts():
-            for _ in range(n_calls):
+            for _ in range(plain_calls):
                 if suppress is None:
                     rec, cell = gen.base_lte_call(ts, slot_start)
                 else:
@@ -3866,7 +3900,7 @@ class PemdbGen:
         self.gen.scenarios = scenarios
         self.gen._bind_scenario_targets()
 
-    def set_fault_rows(self, active: list[dict], enb_rate=None
+    def set_fault_rows(self, active: list[dict], enb_rate=None, mesh_load=None
                        ) -> tuple[list[Scenario], list[int]]:
         """`CM_DATAGEN_FAULT` 활성 행 목록을 걸어 둔다 — 실시간 틱(`cli.cmd_run`)용.
 
@@ -3878,7 +3912,7 @@ class PemdbGen:
             raise RuntimeError("anchor 미설정 — set_fault_rows 전에 anchor 를 정해야 한다")
         scs, bad = resolve_active_faults(
             self.cells, self.anchor, self.seed, active, self._fault_cache, enb_rate=enb_rate,
-            routes=self.gen.routes, nr_on=self._nr_on)
+            routes=self.gen.routes, nr_on=self._nr_on, mesh_load=mesh_load)
         self.set_faults(scs)
         return scs, bad
 
@@ -3926,6 +3960,36 @@ def enb_call_rate(conn, end: datetime, minutes: int = 60) -> dict[str, float]:
         out[str(enb)] = min(mean, lam)
         out.mean[str(enb)] = mean
     return out
+
+
+def mesh_people(conn, end: datetime, minutes: int = 60) -> dict[str, tuple[float, list[str]]]:
+    """1km 메시 → `(평소 15분 VIDEO 고유 인원 평균, 셀 키 목록)` — `[end − minutes, end)`.
+
+    16번 자동 대상(`faults._anchor_target`)이 쓴다. 셀은 graphio 판정과 같은 **주 메시 하나**
+    (`WEIGHT` 최대)에 넣는다. `IMSI` 는 이 질의 밖으로 나가지 않는다. 창이 장애 시작 앞이라 gen 이
+    다시 떠도 같은 값이다(`enb_call_rate` 와 같다). 체감 표는 graphio 가 쓴다 — 없으면 예외이고
+    호출부가 군집 추첨으로 돌아간다
+    """
+    lo = end - timedelta(minutes=minutes)
+    primary = """(SELECT ENB_ID, CELLNUM, AREA_CD FROM (
+        SELECT ENB_ID, CELLNUM, AREA_CD, ROW_NUMBER() OVER (
+                 PARTITION BY ENB_ID, CELLNUM ORDER BY WEIGHT DESC, AREA_CD) AS rn
+        FROM CM_CELL_GEO_MAP WHERE AREA_LEVEL = 'MESH1K') AS m WHERE m.rn = 1)"""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT ENB_ID, CELLNUM, AREA_CD FROM {primary} AS g")
+        cells: dict[str, list[str]] = {}
+        for enb, cellnum, mesh in cur.fetchall():
+            cells.setdefault(str(mesh), []).append(f"{enb}-{cellnum}")
+        cur.execute(
+            f"SELECT t.AREA_CD, COUNT(*) FROM (SELECT g.AREA_CD, "
+            f"FLOOR(UNIX_TIMESTAMP(k.EVENT_TIME) / 900) AS b, k.IMSI "
+            f"FROM PM_COR_XP_SUB_1M k JOIN {primary} AS g "
+            f"ON g.ENB_ID = k.ENB_ID AND g.CELLNUM = k.CELLNUM "
+            f"WHERE k.EVENT_TIME >= %s AND k.EVENT_TIME < %s AND k.JUDGED = 1 "
+            f"AND k.APP_CLASS = 'VIDEO' GROUP BY 1, 2, 3) AS t GROUP BY 1", (lo, end))
+        rows = cur.fetchall()
+    per = max(1.0, minutes / 15.0)
+    return {str(m): (float(n) / per, cells.get(str(m), [])) for m, n in rows}
 
 
 class EnbRate(dict):

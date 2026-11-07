@@ -10,6 +10,50 @@
       "to_correct_min": null,
       "to_first_event_min": null,
       "to_incident_min": null
+    },
+    {
+      "duration_min": 35.0,
+      "end_to_final_min": null,
+      "fault": "F-153",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-06T18:34:46",
+      "result": "missed",
+      "to_correct_min": null,
+      "to_first_event_min": null,
+      "to_incident_min": null
+    },
+    {
+      "duration_min": 30.0,
+      "end_to_final_min": null,
+      "fault": "F-156",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-06T23:25:22",
+      "result": "correct",
+      "to_correct_min": 12.0,
+      "to_first_event_min": 11.0,
+      "to_incident_min": 11.0
+    },
+    {
+      "duration_min": 30.0,
+      "end_to_final_min": null,
+      "fault": "F-160",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T02:47:27",
+      "result": "correct",
+      "to_correct_min": 12.0,
+      "to_first_event_min": 11.0,
+      "to_incident_min": 11.0
+    },
+    {
+      "duration_min": 30.0,
+      "end_to_final_min": null,
+      "fault": "F-164",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T06:32:25",
+      "result": "correct",
+      "to_correct_min": 15.3,
+      "to_first_event_min": 12.6,
+      "to_incident_min": 12.6
     }
   ],
   "capacity_shift": [
@@ -19,6 +63,41 @@
       "fault": "F-152",
       "intensity": 1.0,
       "recorded_at": "2026-11-06T17:33:56",
+      "result": "missed",
+      "to_correct_min": null,
+      "to_first_event_min": null,
+      "to_incident_min": null
+    },
+    {
+      "duration_min": 40.0,
+      "end_to_final_min": null,
+      "fault": "F-162",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T04:55:24",
+      "result": "missed",
+      "to_correct_min": null,
+      "to_first_event_min": null,
+      "to_incident_min": null
+    },
+    {
+      "duration_min": 40.0,
+      "end_to_final_min": null,
+      "fault": "F-166",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T08:48:03",
+      "result": "correct",
+      "to_correct_min": 17.5,
+      "to_first_event_min": 17.0,
+      "to_incident_min": 17.0
+    }
+  ],
+  "event_crowd": [
+    {
+      "duration_min": 60.0,
+      "end_to_final_min": null,
+      "fault": "F-165",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T07:51:30",
       "result": "missed",
       "to_correct_min": null,
       "to_first_event_min": null,
@@ -184,6 +263,41 @@
       "to_incident_min": null
     }
   ],
+  "ran_congestion": [
+    {
+      "duration_min": 30.0,
+      "end_to_final_min": null,
+      "fault": "F-155",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-06T22:34:06",
+      "result": "missed",
+      "to_correct_min": null,
+      "to_first_event_min": null,
+      "to_incident_min": null
+    },
+    {
+      "duration_min": 30.0,
+      "end_to_final_min": null,
+      "fault": "F-157",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T00:18:49",
+      "result": "wrong",
+      "to_correct_min": null,
+      "to_first_event_min": 13.0,
+      "to_incident_min": 13.0
+    },
+    {
+      "duration_min": 30.0,
+      "end_to_final_min": null,
+      "fault": "F-159",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T02:03:16",
+      "result": "correct",
+      "to_correct_min": 15.0,
+      "to_first_event_min": 9.0,
+      "to_incident_min": 9.0
+    }
+  ],
   "sa_fallback": [
     {
       "duration_min": 15.0,
@@ -195,6 +309,39 @@
       "to_correct_min": null,
       "to_first_event_min": null,
       "to_incident_min": null
+    },
+    {
+      "duration_min": 30.0,
+      "end_to_final_min": null,
+      "fault": "F-158",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T01:11:06",
+      "result": "wrong",
+      "to_correct_min": null,
+      "to_first_event_min": 8.0,
+      "to_incident_min": 8.0
+    },
+    {
+      "duration_min": 30.0,
+      "end_to_final_min": null,
+      "fault": "F-161",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T03:34:21",
+      "result": "correct",
+      "to_correct_min": 10.0,
+      "to_first_event_min": 9.0,
+      "to_incident_min": 9.0
+    },
+    {
+      "duration_min": 30.0,
+      "end_to_final_min": null,
+      "fault": "F-163",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T05:48:00",
+      "result": "correct",
+      "to_correct_min": 17.3,
+      "to_first_event_min": 15.6,
+      "to_incident_min": 15.6
     }
   ],
   "ue_model": [

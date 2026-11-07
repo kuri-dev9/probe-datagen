@@ -102,16 +102,25 @@ def todo() -> dict:
 
 
 def apply(done: dict) -> int:
-    """번역을 넣는다 — `{"<묶음>:<칸>": 일본어}`. 지금 원문의 해시를 함께 적고, 없어진 칸은 지운다."""
+    """번역을 넣는다 — `{"<묶음>:<칸>": 일본어}`. 지금 원문의 해시를 함께 적고, 없어진 칸은 지운다.
+
+    **받지 않은 칸도 같은 원문의 번역이 있으면 지금 칸으로 옮긴다.** `latest` 가 새 회차로 바뀌면 옛
+    `latest` 가 `history` 맨 앞으로 들어가 뒤 칸이 전부 밀리는데, 칸만 보고 덮으면 밀린 칸의 번역이
+    사라졌다(11-06 16번 갱신 · 세 번에 나눠 맞췄다). 그래서 쓰기 전에 해시로 먼저 모아 둔다.
+    """
     report, ja = _load(REPORT), _load_ja()
     table = ja.setdefault("scenarios", {})
+    by_hash = {e["h"]: e["ja"] for group in table.values() for e in group.values()}
     live: dict[str, set] = {}
     n = 0
     for group, cell, _, text in strings(report):
         live.setdefault(group, set()).add(cell)
+        h = src_hash(text)
         if f"{group}:{cell}" in done:
-            table.setdefault(group, {})[cell] = {"h": src_hash(text), "ja": done[f"{group}:{cell}"]}
+            table.setdefault(group, {})[cell] = {"h": h, "ja": done[f"{group}:{cell}"]}
             n += 1
+        elif h in by_hash:
+            table.setdefault(group, {})[cell] = {"h": h, "ja": by_hash[h]}
     for group in list(table):
         for cell in list(table[group]):
             if cell not in live.get(group, ()):
@@ -125,6 +134,7 @@ _WHY_JA = (
     (r"국면 3개\(몰림·분산·분석\)", "3局面(集中・分散・分析)"),
     ("즉시 시작·종료 · 정점 유지", "即時開始・終了・ピーク維持"),
     (r"열화·회복 (\d+)주기\((\d+)분 주기\)", r"劣化・回復 \1周期(\2分周期)"),
+    (r"주입 (\d+)분 뒤 탐지 \+ 여유 (\d+)", r"注入 \1分後に検知 + 余裕 \2"),
     (r"늦게 시작하는 계열", "遅れて始まる系列"),
     (r"\((\d+)회부터 반영\)", r"(\1回から反映)"),
     (r"실측 (\d+)회 정답 없음", r"実測 \1回 正解なし"),

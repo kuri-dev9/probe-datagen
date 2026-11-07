@@ -413,9 +413,83 @@ def _busy_disaster_area(cells: list[Cell], rate: dict[str, float], want: int,
     return best
 
 
+def _meshes(cells: list[Cell], fault: dict, load) -> list[tuple[str, float, list[Cell]]]:
+    """`(메시, 평소 15분 인원, 그 메시의 셀)` 목록. 창고를 못 읽으면 빈 목록이다 — 호출부가 추첨으로 돌아간다."""
+    if load is None:
+        return []
+    try:
+        got = load(fault["start_ts"])
+    except Exception as e:              # 창고 장애로 생성을 멈추지 않는다
+        print(f"  ! 메시 인원 조회 실패 — 자동 대상은 군집 추첨({e})", flush=True)
+        return []
+    by_key = {c.cell_key: c for c in cells if c.geo_status == "MAPPED"}
+    out = []
+    for mesh in sorted(got or {}):
+        people, keys = got[mesh]
+        mine = [by_key[k] for k in sorted(keys) if k in by_key]
+        if mine:
+            out.append((mesh, people, mine))
+    return out
+
+
+def _busy_mesh(people: float, mine: list[Cell]) -> bool:
+    return people >= S.FAULT.anchor_min_people and len(mine) >= S.FAULT.anchor_min_cells
+
+
+def _congestion_target(cells: list[Cell], rng: random.Random, fault: dict, load) -> Target | None:
+    """14번 자동 대상 — 평소 사람이 있는 메시 하나와 가장 가까운 메시들의 **셀 전부**(2026-11-06 · F-155).
+
+    Q-11 은 메시·정목 칸의 비율이라 칸 안 사람의 상당수가 나빠져야 선다. `busy_cluster` 의 8셀은
+    메시 6칸에 흩어져 주입이 먹힌 셀(불량 51%)이 칸의 RTT 표본 1~11% 뿐이었고, 칸 비율이 0~7.9%
+    에 그쳐 미탐이었다(F-129·F-155). 칸을 통째로 잡은 F-136(BOX · 776셀)은 칸 비율 40~57% 로 섰다.
+    호는 늘리지 않으므로 범위가 넓어져도 생성량은 그대로다. 주입마다 후보 안에서 돌려 고른다.
+    후보가 없거나 창고를 못 읽으면 None 이고 호출부가 kind 의 예전 추첨으로 돌아간다.
+
+    17번도 쓴다 — N-01 도 칸의 비율인데 25셀은 셀이 많은 칸에서 몫이 절반 아래다(메시 셀 수로 본
+    확률 61%). 칸을 통째로 잡으면 넘어오는 단말과 평소 단말의 비가 칸 크기와 상관없이 같다.
+    """
+    from .geo_lite import haversine_km
+
+    meshes = _meshes(cells, fault, load)
+    cand = [m for m in meshes if _busy_mesh(m[1], m[2])]
+    if not cand:
+        return None
+    first = cand[rng.randrange(len(cand))]
+
+    def centre(mine: list[Cell]) -> tuple[float, float]:
+        return (sum(c.latitude for c in mine) / len(mine), sum(c.longitude for c in mine) / len(mine))
+
+    at = centre(first[2])
+    near = sorted(meshes, key=lambda m: (haversine_km(*at, *centre(m[2])), m[0]))
+    picked = near[:S.FAULT.congestion_meshes]
+    print(f"  · 14번 대상 메시 {[m[0] for m in picked]} (후보 {len(cand)}칸)", flush=True)
+    return Target(cell_keys={c.cell_key for m in picked for c in m[2]})
+
+
+def _anchor_target(cells: list[Cell], rng: random.Random, fault: dict, load) -> Target | None:
+    """16번 자동 대상 — 평소 사람이 있는 1km 메시들 중에서 **주입마다 돌려** 고른다(2026-11-06).
+
+    앵커 경합은 5G 단말이 있는 곳의 장애이고, 평소 한산한 칸에 걸면 대상 셀의 사람이 전부 장애가
+    만든 사람이 된다(F-153). 가장 붐비는 칸으로 고정하지 않는다 — 바쁜 칸에서만 동작을 확인한 셈이
+    되지 않게 조건을 넘는 칸 안에서 추첨한다. 군집은 그 메시 안에서만 짓는다 — 메시를 넘으면 표본이
+    두 칸으로 갈려 어느 칸도 판정 표본에 닿지 못한다(F-153 · 53393575·53393584).
+    후보가 없거나 창고를 못 읽으면 None 이고, 호출부가 전처럼 군집 추첨을 한다.
+    """
+    cand = [(mesh, mine) for mesh, people, mine in _meshes(cells, fault, load)
+            if _busy_mesh(people, mine)]
+    if not cand:
+        print("  ! 16번 후보 메시가 없다 — 군집 추첨으로 돌아간다", flush=True)
+        return None
+    mesh, mine = cand[rng.randrange(len(cand))]
+    first = mine[rng.randrange(len(mine))]
+    print(f"  · 16번 대상 메시 {mesh} (후보 {len(cand)}칸)", flush=True)
+    return Target(cell_keys={c.cell_key for c in enb_cluster(mine, first)},
+                  sgg_codes={first.adm_sgg_cd})
+
+
 def build(fault: dict, cells: list[Cell], anchor: datetime,
           rng: random.Random, seed: int | None = None,
-          enb_rate=None, routes=None, nr_on=None) -> Scenario | None:
+          enb_rate=None, routes=None, nr_on=None, mesh_load=None) -> Scenario | None:
     """CM_DATAGEN_FAULT 한 행을 Scenario 로 바꾼다.
 
     시간창은 anchor(분 인덱스 0의 시각) 기준 분 좌표로 옮긴다 — Scenario 가
@@ -461,7 +535,14 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
             return None
         target = _resolve_target(None, fault["kind"], pick, target_rng(seed, like), routes)
     else:
-        target = _resolve_target(raw_target, fault["kind"], pick, rng, routes)
+        target = None
+        if not (raw_target or "").strip():
+            if fault["kind"] == "anchor_saturation":
+                target = _anchor_target(pick, rng, fault, mesh_load)
+            elif fault["kind"] in _CROWD_KINDS or fault["kind"] == "sa_fallback":
+                target = _congestion_target(pick, rng, fault, mesh_load)
+        if target is None:
+            target = _resolve_target(raw_target, fault["kind"], pick, rng, routes)
     if target is None:
         if len(pick) < len(cells):
             print(f"  ! 16번 대상 {raw_target or '자동'} — NR 가능 eNB 셀이 없어 걸지 않는다", flush=True)
@@ -560,7 +641,7 @@ def _disaster_mode(raw: str | None) -> tuple[str, str | None]:
 def resolve_active(cells: list[Cell], anchor: datetime, seed: int,
                    active: list[dict],
                    cache: dict[int, tuple[tuple, Scenario]],
-                   enb_rate=None, routes=None, nr_on=None,
+                   enb_rate=None, routes=None, nr_on=None, mesh_load=None,
                    ) -> tuple[list[Scenario], list[int]]:
     """활성 fault 행 목록 → (Scenario 목록, 해석 실패한 fault_id 목록).
 
@@ -587,7 +668,7 @@ def resolve_active(cells: list[Cell], anchor: datetime, seed: int,
             continue
         frng = target_rng(seed, fid)
         sc = build(f, cells, anchor, frng, seed=seed, enb_rate=enb_rate, routes=routes,
-                   nr_on=nr_on)
+                   nr_on=nr_on, mesh_load=mesh_load)
         if sc is None:
             bad.append(fid)
         else:

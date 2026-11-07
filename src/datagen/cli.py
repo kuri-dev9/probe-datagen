@@ -956,8 +956,10 @@ def cmd_run(args) -> int:
 
             active = control.poll_transitions(conn, datetime.now())
             # 자연재해 자동 대상이 창고의 eNB 호율을 본다(`pemdb1.enb_call_rate` · 한 fault 에 한 번)
+            # 16번 자동 대상은 메시의 평소 인원을 본다(`pemdb1.mesh_people`)
             scs, bad = gen.set_fault_rows(
-                active, enb_rate=lambda t: P.enb_call_rate(conn, t))
+                active, enb_rate=lambda t: P.enb_call_rate(conn, t),
+                mesh_load=lambda t: P.mesh_people(conn, t))
             if bad:
                 _cancel_faults(conn, bad, _CANCEL_NOTE)
             _aside("정답 기록", _live_truth, P, gen, scs)
@@ -1289,7 +1291,8 @@ def _pem_follow(conn, P, gen, w, last_done, *, umaps: dict,
             if gen.anchor is None:
                 gen.anchor = pending
             scs, bad = gen.set_fault_rows(
-                active, enb_rate=lambda t: P.enb_call_rate(conn, t))
+                active, enb_rate=lambda t: P.enb_call_rate(conn, t),
+                mesh_load=lambda t: P.mesh_people(conn, t))
             for fid in bad:
                 print(f"  ! fault {fid} 해석 실패 — 건너뛴다", flush=True)
             _aside("정답 기록", _live_truth, P, gen, scs)

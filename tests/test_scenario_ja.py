@@ -133,6 +133,25 @@ def test_apply_writes_the_hash_of_the_current_source_and_clears_the_todo(files):
     assert J.todo() == {}
 
 
+def test_apply_keeps_translations_when_history_shifts_by_one(files):
+    """`latest` 가 새 회차로 바뀌면 옛 `latest` 가 history 맨 앞으로 밀린다 — 밀린 칸의 번역이 지워지면 안 된다(11-06)."""
+    rep, ja = files
+    base = {"no": 1, "name": "n", "kind": "k", "count": 1, "evidence": [],
+            "latest": {"summary": "첫 회차", "issues": []}, "history": [{"summary": "옛 회차", "issues": []}]}
+    rep.write_text(json.dumps({"notes": [], "scenarios": [base]}, ensure_ascii=False), encoding="utf-8")
+    J.apply({k: "JA:" + t for k, t in J.todo().items()})
+    shifted = dict(base, latest={"summary": "새 회차", "issues": []},
+                   history=[base["latest"]] + base["history"])
+    rep.write_text(json.dumps({"notes": [], "scenarios": [shifted]}, ensure_ascii=False), encoding="utf-8")
+    todo = J.todo()
+    assert list(todo.values()) == ["새 회차"], "밀린 두 칸은 같은 원문의 번역을 쓴다"
+    J.apply({k: "JA:" + t for k, t in todo.items()})
+    assert J.todo() == {}
+    out, info = J.merge(json.loads(rep.read_text(encoding="utf-8")), json.loads(ja.read_text(encoding="utf-8")))
+    assert info == {"missing": [], "stale": []}
+    assert out["scenarios"][0]["history"][0]["summary"] == "JA:첫 회차"
+
+
 def test_apply_drops_translations_of_cells_that_no_longer_exist(files):
     rep, ja = files
     J.apply({k: "x" for k in J.todo()})

@@ -32,7 +32,7 @@ def test_truth_expects_q11_and_keeps_the_cause_code():
     spec = S.KIND_SPECS[KIND]
     assert spec["expect_kpi"] == "Q-11"
     assert spec["truth_code"] == "RAN_CAPACITY_CONGESTION" and spec["expect_geo"] == "CLUSTER"
-    assert spec["expect_rules"] == () and spec["rule_pending"] is True, "2단계 전까지 판단 보류"
+    assert spec["expect_rules"] == ("R-47",) and not spec.get("rule_pending"), "R-47 이 생겨 판단 보류를 풀었다(11-06)"
 
 
 def test_defaults_in_code_and_yaml_and_unknown_keys_still_stop():
@@ -58,7 +58,7 @@ def test_capacity_shift_a_reads_the_same_setting(monkeypatch, load):
     monkeypatch.setattr(S, "_shift_elapsed", lambda sc: S.SHIFT_RISE + 5)
     assert S._capacity_shift_load(object(), 1.0) == pytest.approx(load)
     monkeypatch.setattr(S, "_shift_elapsed", lambda sc: 0)
-    assert S._capacity_shift_load(object(), 1.0) == pytest.approx(1.0 + (load - 1.0) / S.SHIFT_RISE), "첫 분은 상승 1/RISE"
+    assert S._capacity_shift_load(object(), 1.0) == pytest.approx(1.0 + (load - 1.0) / S.SHIFT_RAMP), "첫 분은 상승 1/RAMP"
 
 
 # ---------------------------------------------------------------- 호 수 배율 · 하한 꼬리
@@ -367,3 +367,58 @@ def test_the_box_string_fits_the_target_column_and_is_parsed():
     s_, w_, n_, e_ = (float(v) for v in arg.split(","))
     assert head == "BOX" and (s_ < n_) and (w_ < e_)
     assert S.KIND_SPECS[KIND]["expect_geo"] == "CLUSTER"
+
+
+# ---------------------------------------------------------------- 24번 혼잡 정점까지 `SHIFT_RAMP` (11-07)
+
+def _at(e):
+    class _Sc:
+        peak = 1.0
+        start_minute = 0
+        _minute = e
+        kind = "capacity_shift"
+    return _Sc()
+
+
+def test_the_ramp_is_shorter_than_the_rise_and_is_an_initial_value():
+    """혼잡이 정점에 닿는 시간(10분)이 B 개통(20분)보다 짧다 — Q-11 의 5분 창 3칸 연속을 채우려 정점을 당겼다(F-152)."""
+    assert S.SHIFT_RAMP == 10 and S.SHIFT_RAMP < S.SHIFT_RISE == 20
+    assert S.SHIFT_RISE - S.SHIFT_RAMP >= 10, "정점 유지 구간이 5분 칸 둘 이상이다"
+
+
+def test_the_congestion_intensity_reaches_one_at_the_ramp_and_holds_until_the_rise():
+    got = [S.shift_congestion(_at(e)) for e in range(S.SHIFT_RISE)]
+    assert got[0] == pytest.approx(1 / S.SHIFT_RAMP)
+    assert got[S.SHIFT_RAMP - 1] == pytest.approx(1.0), "RAMP 번째 분에 정점"
+    assert all(g == pytest.approx(1.0) for g in got[S.SHIFT_RAMP - 1:]), "B 개통 직전까지 유지"
+    assert all(a < b for a, b in zip(got[:S.SHIFT_RAMP - 1], got[1:S.SHIFT_RAMP]))
+
+
+def test_the_intensity_scales_with_the_peak():
+    sc = _at(S.SHIFT_RAMP)
+    sc.peak = 0.5
+    assert S.shift_congestion(sc) == pytest.approx(0.5)
+
+
+def test_after_the_opening_the_congestion_falls_by_the_recover_minutes():
+    start = S.shift_congestion(_at(S.SHIFT_RISE))
+    assert start < 1.0 and S.shift_congestion(_at(S.SHIFT_RISE + S.SHIFT_RECOVER)) == pytest.approx(0.0)
+
+
+def test_the_floor_level_follows_the_same_ramp():
+    sc = _at(0)
+    assert S.visible_level(sc, 0) == pytest.approx(1 / S.SHIFT_RAMP)
+    assert S.visible_level(_at(S.SHIFT_RAMP), S.SHIFT_RAMP) == pytest.approx(1.0)
+
+
+def test_the_call_weight_reaches_the_load_at_the_ramp_and_holds_to_the_end(monkeypatch):
+    monkeypatch.setattr(S, "FAULT", S.FaultCfg.from_cfg({"congestion_load": 1.8}))
+    for e in (S.SHIFT_RAMP - 1, S.SHIFT_RAMP, S.SHIFT_RISE - 1, S.SHIFT_RISE + 5):
+        monkeypatch.setattr(S, "_shift_elapsed", lambda sc, e=e: e)
+        assert S._capacity_shift_load(object(), 1.0) == pytest.approx(1.8)
+    monkeypatch.setattr(S, "_shift_elapsed", lambda sc: 4)
+    assert 1.0 < S._capacity_shift_load(object(), 1.0) < 1.8
+
+
+def test_the_opening_time_and_split_do_not_move_with_the_ramp():
+    assert S.shift_split(_at(S.SHIFT_RISE - 1)) == 0.0 and S.shift_split(_at(S.SHIFT_RISE)) == S.SHIFT_SPLIT

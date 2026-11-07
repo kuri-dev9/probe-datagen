@@ -18,7 +18,7 @@ from datagen import cli, measured
 from datagen import scenarios as S
 
 REAL = Path(measured.PATH)
-RAMP = "ran_congestion"                    # 모양 기준 권장 11 · 최소 6 · 하강 3
+RAMP = "ran_radio"                         # 모양 기준 권장 11 · 최소 6 · 하강 3 (`detect_min` 없는 RAMP — 14번은 detect_min 15 로 20분이 됐다)
 
 
 def _digest():

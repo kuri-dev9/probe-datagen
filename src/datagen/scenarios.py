@@ -83,6 +83,18 @@ class FaultCfg:
     #: kind 별 하한 — 없는 kind 는 `floor_per_cell` 이다. 9번은 전환이 붙는 호가 절반 정도라
     #: 셀 5분 창의 PathSwitch 표본이 8호로는 최소 표본(20)에 못 미친다(2026-11-06 · 값은 yaml)
     floor_by_kind: dict[str, float] = field(default_factory=dict)
+    #: 하한을 **5G 능력 단말로만** 채우는 kind(2026-11-06 · 16번). 평소 호가 얼마이든 그만큼 더 낸다.
+    #: 판정이 SA 인원을 세는 시나리오라 일반 호로 채우면 SA 는 안 늘고 LTE 만 는다(F-153 · 대상 eNB 평소
+    #: 15분 1명 → LTE 189명·SA 14명). 평소 호에서 옮겨 오므로 전국 호 수는 그대로이고(`_sa_floor_calls`),
+    #: 옮기는 양은 `floor_by_kind` 가 정한다
+    floor_sa_kinds: tuple[str, ...] = ()
+    #: 16번 자동 대상 후보 — 1km 메시의 평소 15분 VIDEO 인원 하한과 그 안 NR 가능 셀 수 하한. 평소 사람이
+    #: 없는 칸은 걸어도 LTE 표본이 없고, 셀이 적으면 하한 호로 SA 를 채우지 못한다. **초기값**
+    anchor_min_people: int = 40
+    anchor_min_cells: int = 8
+    #: 14번 자동 대상의 메시 수 — 후보 하나와 가장 가까운 칸들이고 `anchor_min_*` 를 후보 조건으로 같이
+    #: 쓴다. 역 일대가 칸 하나로 끝나지 않고, 인접 칸이 함께 서야 CLUSTER 로 묶인다. **초기값**
+    congestion_meshes: int = 4
     #: 17번 — 넘어온 단말의 호 빈도 배수(평소 1인당 빈도 기준). 폴백 직후에는 재등록과 밀린 전송으로
     #: 호가 평소보다 많다고 본다. 표본은 **넘어온 단말의 호로만** 늘린다 — 일반 호로 채우면 N-01(5G 단말
     #: 비중)이 묻힌다(F-115 · `_floor_drafts`). 전체 상한은 `SA_FALLBACK_CAP` 그대로다. **초기값**(실측 근거 없음)
@@ -146,7 +158,8 @@ class FaultCfg:
                 continue
             if k in ("floor_per_cell", "floor_max_cells", "floor_tail_min",
                      "floor_tail_half_min", "floor_tail_eps", "disaster_emergency_share",
-                     "congestion_load", "congestion_user_share", "crowd_user_share"):
+                     "congestion_load", "congestion_user_share", "crowd_user_share",
+                     "anchor_min_people", "anchor_min_cells", "congestion_meshes"):
                 setattr(f, k, type(getattr(f, k))(v))
                 continue
             if k == "sa_fallback_call_boost":
@@ -159,6 +172,12 @@ class FaultCfg:
                     if ik not in KIND_SPECS:
                         raise RuntimeError(f"pemdb1.fault.floor_by_kind 의 모르는 kind: {ik}")
                 f.floor_by_kind = {str(ik): float(iv) for ik, iv in (v or {}).items()}
+                continue
+            if k == "floor_sa_kinds":
+                for ik in (v or ()):
+                    if ik not in KIND_SPECS:
+                        raise RuntimeError(f"pemdb1.fault.floor_sa_kinds 의 모르는 kind: {ik}")
+                f.floor_sa_kinds = tuple(str(ik) for ik in (v or ()))
                 continue
             if k == "timeout_wait":
                 for ik, iv in (v or {}).items():
@@ -417,6 +436,9 @@ class Scenario:
     #: 기대 룰이 **아직 배정되지 않았다**(확정대장 §2.3 · 일본 시나리오).
     #: `expect_rules` 가 비어 있는 것이 누락이 아니라는 표시다
     rule_pending: bool = False
+    #: 주입 뒤 탐지까지 걸리는 최소 시간(분) — `recommended_duration` 이 본다. 0 이면 모양만 본다.
+    #: 15분 창 판정은 창이 장애 안에 다 들어오고 다음 밀기까지 기다린다(창 15 + 밀기 5)
+    detect_min: int = 0
     #: **정답 원인이 아닌 코드를 내지만 설 것으로 예상되는 룰** — `{룰: 그 룰의 원인 코드}`(2026-11-05
     #: 케이 잠정 결정). `expect_rules` 는 정답 원인 코드를 내는 룰만 둔다. 경쟁 후보·심각도 보조 룰은
     #: 여기다. graphio 채점은 둘 다 읽지 않는다 — 카드·사람 확인용이다
@@ -759,9 +781,12 @@ KIND_SPECS: dict[str, dict] = {
     "anchor_saturation": dict(
         title="5G 체감 품질 저하 (앵커 경합)",
         truth_code="SA_QUALITY_LOW", truth_category="5G",
-        expect_rules=("R-39",), expect_geo="CLUSTER",
+        # POINT — 메시 한 칸에서 대상을 뽑으면 셀 반경이 0.9km 미만이다(F-156 · 0.61km)
+        expect_rules=("R-39",), expect_geo="POINT",
         shape="RAMP", series=("transport",),
         scope_kind="CELL", expect_kpi="U-15",
+        # F-137 이 주입 25분 뒤에 섰다 — 15분 창에 SA 인원이 차는 시간까지다. 초기값
+        detect_min=25,
     ),
     # 일본 시연 `j-sc-25` — **`change_suspected` 의 정답에 `mobility` 의 주입을
     # 얹는다**(확정대장 §12.4.1). SON 이 바꾸는 것은 H/O 파라미터라 `C-04`
@@ -786,16 +811,17 @@ KIND_SPECS: dict[str, dict] = {
     "ran_congestion": dict(
         title="무선 용량 혼잡 (기존 가입자 품질 저하)",
         truth_code="RAN_CAPACITY_CONGESTION", truth_category="RAN",
-        expect_rules=(), rule_pending=True, expect_geo="CLUSTER",
+        expect_rules=("R-47",), expect_geo="CLUSTER",
         shape="RAMP", series=("transport", "http"),
         scope_kind="CELL", expect_kpi="Q-11",
+        detect_min=15,          # Q-11 은 5분 창 3칸 연속 — F-136 이 주입 13분 뒤에 섰다. 초기값
     ),
     # 일본 시연 `j-sc-15` — 야마노테선 전환 정체. 원인 코드·`Q-08`·
     # `CELL_PAIR` 축·룰이 전부 graphio 에 아직 없다(확정대장 §7.3 NEW 4).
     "ho_interruption": dict(
         title="전환 직후 정체 (코리도 4G↔5G)",
         truth_code="RAN_HO_INTERRUPTION", truth_category="RAN",
-        expect_rules=(), rule_pending=True, expect_geo="CORRIDOR",
+        expect_rules=("R-40",), expect_geo="CORRIDOR",
         shape="RAMP", series=("lte_call", "transport"),
         scope_kind="CELL", expect_kpi="Q-08",
     ),
@@ -836,10 +862,11 @@ KIND_SPECS: dict[str, dict] = {
     "sa_fallback": dict(
         title="SA→LTE 폴백 급증 (5G 측 장애 추정)",
         truth_code="SA_FALLBACK_SUSPECTED", truth_category="5G",
-        expect_rules=(), rule_pending=True, expect_geo="CLUSTER",
+        expect_rules=("R-48",), expect_geo="CLUSTER",
         shape="HOLD", onset="instant", offset="instant",
         series=("lte_call", "transport"),
         scope_kind="CELL", expect_kpi="N-01",
+        detect_min=20,          # N-01 은 15분 창 — 창 15 + 밀기 5. 초기값
     ),
     # 일본 시연 `j-sc-21` — CDN 서버측 열화. **지역 문제가 아니다**가 메시지
     # 이고(투자 ❌), 그 판정에 필요한 앱 축·`Q-06` 이 graphio 에 없다(§12.6 X-3·4).
@@ -870,6 +897,7 @@ KIND_SPECS: dict[str, dict] = {
         shape="STEPS", steps=((10, 0.50), (110, 1.00), (120, 0.40)),
         series=("transport",),
         scope_kind="CELL", expect_kpi="Q-09",
+        detect_min=20,          # Q-09 한 표는 15분 창 — 창 15 + 밀기 5. 초기값
     ),
     # 일본 시연 `j-sc-24` — 기지국 증설 후 부하 이동. **장애가 아니다** —
     # 스펙 §8.3 투자 효과 검증이고 정답 원인이 `—` 다. 그래서 `scored=False`
@@ -2828,7 +2856,7 @@ def _outage_relocate(sc, cell, intensity, pool):
 # **장애 주입이 아니라 증설 재현이다**(2026-10-29 사람 결정). 스펙 §8.3 은
 # 변경 전후 4주를 비교하지만 시연은 40분에 압축한다 —
 #
-#   0–20분   A 에 호가 서서히 몰린다(`congestion_load` 까지) · A 혼잡
+#   0–20분   A 에 호가 10분에 걸쳐 몰리고 10분 유지한다(`congestion_load` 까지) · A 혼잡
 #   20분     B 개통 — A 로 오던 호의 60% 가 B 로 간다. A 가 서서히 회복
 #   30–40분  분석 시간. 40분에 B 가 다시 꺼진다
 #
@@ -2844,6 +2872,10 @@ def _outage_relocate(sc, cell, intensity, pool):
 #: 국면 길이(분). **바꾸면 아래 B 순환의 안전 간격도 같이 움직인다.**
 SHIFT_RISE = 20
 SHIFT_TOTAL = 40
+#: 혼잡이 다 차는 데 걸리는 시간(분) — 나머지 `SHIFT_RISE − SHIFT_RAMP` 분은 정점을 유지한다. Q-11 은
+#: 5분 창 3칸 연속이라, 20분에 걸쳐 오르면 칸 비율이 문턱을 넘는 창이 2칸뿐이다(칸 안 A 몫 약 38% ·
+#: F-152 는 A 불량 28% 에 칸 비율 7~11%). 호를 더 몰지 않고 정점에 일찍 닿게 한다. **초기값**
+SHIFT_RAMP = 10
 #: B 개통 뒤 A 품질이 평시로 돌아오는 데 걸리는 시간(분) — "서서히"
 SHIFT_RECOVER = 5
 #: B 개통 뒤 A 로 오던 호 중 B 가 가져가는 몫 — "A 40 · B 60"
@@ -2926,7 +2958,7 @@ def shift_congestion(sc) -> float:
     """A 의 혼잡 강도 — 오르다가 B 개통 뒤 `SHIFT_RECOVER` 분에 걸쳐 내려간다."""
     e = _shift_elapsed(sc)
     if e < SHIFT_RISE:
-        lv = (e + 1) / SHIFT_RISE
+        lv = min(1.0, (e + 1) / SHIFT_RAMP)
     else:
         lv = max(0.0, 1.0 - (e - SHIFT_RISE + 1) / SHIFT_RECOVER)
     return lv * sc.peak
@@ -2937,24 +2969,24 @@ def visible_level(sc, minute: int) -> float:
 
     강도(`peak`)로 나누는 이유: 사람이 강도 0.3 으로 넣었다고 대상 셀의
     사람이 30% 만 보여야 하는 것은 아니다 — 약한 장애도 판정할 표본은
-    있어야 한다. 24번은 "`SHIFT_RISE` 분에 걸쳐 몰린다"가 파형이라 그 국면을 따른다.
+    있어야 한다. 24번은 "`SHIFT_RAMP` 분에 걸쳐 몰린다"가 파형이라 그 국면을 따른다.
     """
     if sc.kind == "capacity_shift":
         sc._minute = minute
-        return min(1.0, (_shift_elapsed(sc) + 1) / SHIFT_RISE)
+        return min(1.0, (_shift_elapsed(sc) + 1) / SHIFT_RAMP)
     return min(1.0, sc.intensity(minute) / max(sc.peak, 1e-9))
 
 
 @booster("capacity_shift")
 def _capacity_shift_load(sc, intensity) -> float:
-    """A 가중 — `SHIFT_RISE` 분에 걸쳐 `congestion_load` 까지 오르고 **창 끝까지 유지한다.**
+    """A 가중 — `SHIFT_RAMP` 분에 걸쳐 `congestion_load` 까지 오르고 **창 끝까지 유지한다.**
 
     사람이 몰린 것은 B 가 개통해도 그대로다. 달라지는 것은 그 사람들이
     어느 셀에 붙느냐이고, 그것은 `PemdbGen._shifter` 가 정한다 — 그래서
     B 개통 뒤 A 의 실제 부하는 `1.8 × 0.4 = 0.72` 배로 평시보다 낮아진다.
     """
     e = _shift_elapsed(sc)
-    frac = min(1.0, (e + 1) / SHIFT_RISE)
+    frac = min(1.0, (e + 1) / SHIFT_RAMP)
     return 1.0 + (FAULT.congestion_load - 1.0) * frac
 
 
@@ -4040,6 +4072,8 @@ _PLATEAU_MIN = 5
 _MIN_FLOOR = 6
 #: 주입 종료 → 최종 판정. graphio 의 해소 대기 5분 + 틱 지연 — 22번 실측 6~7분
 SETTLE_MIN = 7
+#: 탐지 최소 시간(`detect_min`)에 더하는 여유 — 창을 5분마다 미는 판정이 한 번 더 볼 몫이다. 초기값
+DETECT_MARGIN_MIN = 5
 #: 실측이 모양 계산보다 **짧을 때** 권장을 줄이는 데 필요한 정답 횟수. 늘리는 것은 1회로 바로 한다 —
 #: 한 번 잰 값으로 줄이면 운에 좌우되고, 놓치는 쪽이 더 큰 손해다(2026-11-05 케이)
 MEASURED_SHRINK_RUNS = 2
@@ -4058,7 +4092,7 @@ def recommended_duration(kind: str) -> dict | None:
         # 계단의 마지막 경과분이 곧 길이다 — 자르면 뒤 계단이 사라진다(`_duration_for`)
         rec = max(steps[-1][0], 8)
         mn, why = rec, "계단 마지막 구간까지"
-    elif shape == "HOLD":
+    elif shape == "HOLD" and not s.get("detect_min"):
         # 국면형(24번) — 몰림 → 분산 → 분석 세 국면이 정해진 길이다
         rec = mn = SHIFT_TOTAL
         why = "국면 3개(몰림·분산·분석)"
@@ -4076,6 +4110,13 @@ def recommended_duration(kind: str) -> dict | None:
                else f"상승 {r_in} + 정점 {_PLATEAU_MIN} + 하강 {r_out}")
     if off:
         rec, mn, why = rec + off, mn + off, why + f" · 늦게 시작하는 계열 +{off}"
+    detect = int(s.get("detect_min") or 0)
+    if detect:
+        # 권장은 **탐지 최소 시간 + 몇 분**이다(사용자 정의) — 모양이 그보다 짧아도 이 값이 앞선다
+        mn = max(mn, detect)
+        if detect + DETECT_MARGIN_MIN > rec:
+            rec = detect + DETECT_MARGIN_MIN
+            why = f"주입 {detect}분 뒤 탐지 + 여유 {DETECT_MARGIN_MIN}"
     got = measured.summary(kind)
     settle = SETTLE_MIN if got["settle"] is None else got["settle"]
     if got["n"]:

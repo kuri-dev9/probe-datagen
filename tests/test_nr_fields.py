@@ -554,6 +554,7 @@ def test_net_mode_follows_the_nr_time_written_by_nr_fields(gen, hz):
     assert sa > 0 and lt >= 0
 
 
-def test_config_default_for_nr_enb_share_is_documented_as_forty_percent():
+def test_config_default_for_nr_enb_share_is_raised_to_ninety_percent():
+    """사용자 결정 11-06 — 5G 단말 50~70%, SA·LTE 세션 비슷하게. 초기값."""
     text = (Path(__file__).resolve().parents[1] / "config" / "datagen.yaml").read_text(encoding="utf-8")
-    assert "nr_enb_share: 0.4" in text
+    assert "nr_enb_share: 0.9" in text
