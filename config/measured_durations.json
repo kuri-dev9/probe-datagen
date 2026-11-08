@@ -852,6 +852,19 @@
       "to_first_event_min": 0.0,
       "to_incident_min": 0.0,
       "to_l2_min": null
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-213",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T13:30:45",
+      "result": "correct",
+      "start_at": "2026-11-08T13:15:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": null
     }
   ],
   "sa_fallback": [
