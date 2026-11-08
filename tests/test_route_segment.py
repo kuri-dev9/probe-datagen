@@ -289,7 +289,7 @@ def test_no_routes_falls_back_to_corridor_cells_with_one_warning_line(capsys):
     sc = _build("ho_interruption", routes=None)
     out = capsys.readouterr().out
     assert sc is not None and sc.target.route_seg is None
-    assert out.count("15번 노선 구간을 못 골랐다") == 1 and "노선 없음" in out
+    assert out.count("ho_interruption 노선 구간을 못 골랐다") == 1 and "노선 없음" in out
     assert sc.target.cell_pairs, "후퇴해도 셀 쌍은 있다(corridor_cells)"
 
 
@@ -308,13 +308,24 @@ def test_explicit_enb_and_box_targets_are_unchanged_by_routes():
     assert a.target.cell_pairs == b.target.cell_pairs
 
 
-@pytest.mark.parametrize("kind", ["mobility", "son_param_change"])
-def test_other_pair_kinds_ignore_routes(kind):
-    a = _build(kind, routes=None)
-    b = _build(kind, routes=[_line_route()])
-    assert a.target.cell_keys == b.target.cell_keys and a.target.cell_pairs == b.target.cell_pairs
-    assert b.target.route_seg is None
-    assert len(b.target.cell_pairs) == 8, "기존 방식: 앵커 → 띠 안 8셀"
+def test_mobility_uses_the_route_segment_like_ho_interruption():
+    """9번도 노선 구간이다(2026-11-07 · B안) — 정답 CORRIDOR 인데 방위각 띠는 셀 15개가 SCATTER 3.07km 가 됐다."""
+    b = _build("mobility", routes=[_line_route()])
+    assert b.target.route_seg is not None
+    assert len(b.target.cell_pairs) >= 4 and all(x != y for x, y in b.target.cell_pairs)
+
+
+def test_mobility_without_routes_keeps_the_azimuth_band_and_warns(capsys):
+    b = _build("mobility", routes=None)
+    assert b.target.route_seg is None and len(b.target.cell_pairs) == 8, "기존 방식: 앵커 → 띠 안 8셀"
+    assert "mobility 노선 구간을 못 골랐다" in capsys.readouterr().out
+
+
+def test_son_param_change_uses_the_route_segment_like_ho_interruption():
+    """25번도 노선 구간이다(2026-11-07 · B안) — 정답 CORRIDOR 인데 방위각 띠는 도심에서 POINT 가 됐다."""
+    b = _build("son_param_change", routes=[_line_route()])
+    assert b.target.route_seg is not None
+    assert all(x != y for x, y in b.target.cell_pairs) and len(b.target.cell_pairs) >= 4
 
 
 def test_same_fault_id_and_seed_give_the_same_segment_across_builds():
@@ -357,7 +368,7 @@ def test_truth_carries_route_seg_and_cell_pairs_only_for_a_route_target():
 
 
 def test_truth_has_no_route_fields_without_a_route_target():
-    for kind, routes in (("ho_interruption", None), ("mobility", [_line_route()]), ("transport_loss", None)):
+    for kind, routes in (("ho_interruption", None), ("mobility", None), ("transport_loss", None)):
         t = _build(kind, routes=routes).as_truth()
         assert "route_seg" not in t, kind
 

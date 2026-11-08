@@ -57,6 +57,7 @@ from . import raw_parquet
 from .cells import Cell
 from . import handover as HO
 from .faults import resolve_active as resolve_active_faults
+from .faults import TargetHistory
 from .fields import SERIES_FIELDS
 from .generator import Generator, Groups, USER_FIELDS
 from .identity import synth_imei, synth_imsi
@@ -2071,6 +2072,8 @@ class PemdbGen:
         self.fault = set_fault_cfg(fault)
         #: 5G 능력 가입자 번호 — `floor_sa_kinds` 의 하한이 뽑는다. 처음 쓸 때 만든다
         self._dcnr_pool: list[int] | None = None
+        #: `floor_moved_kinds` 하한을 이 분에 얼마나 채우나 — `_moved_floor_calls` 가 정한다
+        self._moved_scale = 1.0
         #: 하한을 채운 셀의 마지막 분과 그때의 하한 — `_floor_drafts` 의 꼬리가
         #: 읽는다. 장애가 끝나면 시나리오가 `active` 에서 빠지므로(라이브는
         #: 활성 fault 행만 걸린다) 끝난 뒤의 하한은 여기 남은 값으로만 안다.
@@ -2446,6 +2449,8 @@ class PemdbGen:
             if not keys or len(keys) > cfg.floor_max_cells:
                 continue
             want = cfg.floor_by_kind.get(sc.kind, cfg.floor_per_cell) * visible_level(sc, minute)
+            if sc.kind in cfg.floor_moved_kinds:
+                want *= self._moved_scale
             for k in sorted(sc.active_cells_cache):
                 cell = by_key.get(k)
                 if cell is None or k in done:
@@ -2467,7 +2472,11 @@ class PemdbGen:
                         sub = gen.subs[sa_pool[gen.rng.randrange(len(sa_pool))]]
                         yield gen.base_lte_call(ts, slot_start, at=(sub, cell))
                     continue
-                if sc.kind == "capacity_shift" and shift_split(sc) > 0:
+                if sc.kind in cfg.floor_moved_kinds:
+                    # 옮겨 온 호다 — 꼬리는 전국 호에 더해지고, 하한이 커서 2시간을 끌며 그 뒤 주입을
+                    # 막는다. 군중이 흩어지는 모양은 계단 마지막 구간이 이미 그린다
+                    self._floor_last.pop(k, None)
+                elif sc.kind == "capacity_shift" and shift_split(sc) > 0:
                     # **B 가 켜진 뒤에는 꼬리를 남기지 않는다.** 하한 호의 60% 는 B 로 가서 A 는 이미
                     # 평시 수준이고 놓아도 계단이 없다. 남기면 B 가 꺼진 뒤 셀당 8호 꼬리가 모두 A 에
                     # 떨어져 평시의 3배로 뛰었다(F-152 · 17:29 80건 · 평시 22건)
@@ -2522,6 +2531,20 @@ class PemdbGen:
                 n += (cfg.floor_by_kind.get(sc.kind, cfg.floor_per_cell) * visible_level(sc, minute)
                       * len(sc.active_cells_cache))
         return int(n)
+
+    def _moved_floor_calls(self, minute: int, active: list[Scenario], n_calls: int) -> int:
+        """이 분에 `floor_moved_kinds` 가 옮겨 올 호 수 — 평소 호 추첨에서 그만큼 뺀다.
+
+        전국 호의 `floor_moved_share` 를 넘으면 하한을 그 몫으로 줄인다(`_moved_scale`). 야간에는 전국
+        호가 곡선으로 줄어 그대로 옮기면 다른 셀이 비고, 없는 트래픽 소멸이 된다.
+        """
+        cfg = self.fault
+        want = sum(cfg.floor_by_kind.get(sc.kind, cfg.floor_per_cell) * visible_level(sc, minute)
+                   * len(sc.active_cells_cache) for sc in active
+                   if sc.kind in cfg.floor_moved_kinds and sc.target.cell_keys
+                   and len(sc.target.cell_keys) <= cfg.floor_max_cells)
+        self._moved_scale = min(1.0, cfg.floor_moved_share * n_calls / want) if want else 1.0
+        return int(want * self._moved_scale)
 
     def _floor_tail(self, minute: int, done: set[str], landed, suppress,
                     ts, slot_start):
@@ -2859,7 +2882,8 @@ class PemdbGen:
         landed: collections.Counter = collections.Counter()
         # `floor_sa_kinds` 는 호를 **더하지 않고 평소 호에서 옮긴다** — 전국 호 수가 그대로다. `n_calls`
         # 는 폭주·폴백 상한의 기준이라 그대로 두고 평소 호 추첨 횟수만 줄인다
-        plain_calls = max(0, n_calls - self._sa_floor_calls(minute, active))
+        plain_calls = max(0, n_calls - self._sa_floor_calls(minute, active)
+                          - self._moved_floor_calls(minute, active, n_calls))
 
         def drafts():
             for _ in range(plain_calls):
@@ -3910,9 +3934,14 @@ class PemdbGen:
         """
         if self.anchor is None:
             raise RuntimeError("anchor 미설정 — set_fault_rows 전에 anchor 를 정해야 한다")
+        # 자동 대상 순환 기록은 정답지 옆에 둔다(같은 마운트) — 경로가 없으면 순환 없이 고른다
+        tp = getattr(self, "truth_path", None)
+        history = TargetHistory(Path(tp).parent / "target_history.json") if tp else None
+        # 기종·APN 은 생성기가 프로파일로 채운다(`_bind_scenario_targets`) — 같은 기록을 넘긴다
+        self.gen.target_history = history
         scs, bad = resolve_active_faults(
             self.cells, self.anchor, self.seed, active, self._fault_cache, enb_rate=enb_rate,
-            routes=self.gen.routes, nr_on=self._nr_on, mesh_load=mesh_load)
+            routes=self.gen.routes, nr_on=self._nr_on, mesh_load=mesh_load, history=history)
         self.set_faults(scs)
         return scs, bad
 

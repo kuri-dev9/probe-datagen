@@ -2297,20 +2297,44 @@ def cmd_patterns(args) -> int:
     return 0
 
 
+def _fault_start(fault: str | None) -> str | None:
+    """`F-167` 의 주입 시작 시각 — 시간대 근거다. 못 읽으면 None 이고 그 기록만 시간대에서 빠진다."""
+    import pymysql
+
+    if not fault or not fault.startswith("F-") or not fault[2:].isdigit():
+        return None
+    try:
+        my = load_cfg(None)["mysql"]
+        conn = pymysql.connect(host=my["host"], port=int(my["port"]), user=my["user"],
+                               password=my["password"], database="pemdb6", connect_timeout=3)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT START_TIME FROM CM_DATAGEN_FAULT WHERE FAULT_ID = %s",
+                            (int(fault[2:]),))
+                row = cur.fetchone()
+        finally:
+            conn.close()
+    except (pymysql.MySQLError, OSError, KeyError) as e:    # 창고 탓만 받는다 — 코드 결함은 그대로 터진다
+        print(f"  ! {fault} 시작 시각을 못 읽었다({e})", file=sys.stderr)
+        return None
+    return row[0].isoformat(timespec="seconds") if row and row[0] else None
+
+
 def cmd_measure(args) -> int:
     """권장 지속시간 실측 한 건을 넣는다. 재지 못한 값은 빼면 `null` 로 남는다(불변규칙 17)."""
     from . import measured
-    from .scenarios import KIND_SPECS, recommended_duration
+    from .scenarios import KIND_SPECS, recommended_duration, recommended_hours
 
     if args.list:
         for kind, runs in sorted(measured.load().items()):
             if args.kind and kind != args.kind:
                 continue
             d = recommended_duration(kind) or {}
-            print(f"{kind}  권장 {d.get('recommended')}분 ({d.get('basis')}) · {d.get('why')}")
+            print(f"{kind}  권장 {d.get('recommended')}분 ({d.get('basis')}) · {d.get('why')} "
+                  f"· {recommended_hours(kind)['text']}")
             for r in runs:
                 print(f"  {r.get('fault')} {r.get('result')} 정답까지 {r.get('to_correct_min')}분 "
-                      f"· 길이 {r.get('duration_min')}분 · 강도 {r.get('intensity')}")
+                      f"· L2까지 {r.get('to_l2_min')}분 · 시작 {r.get('start_at')} · 길이 {r.get('duration_min')}분 · 강도 {r.get('intensity')}")
         return 0
     if args.kind not in KIND_SPECS:
         print(f"모르는 장애 종류다: {args.kind}", file=sys.stderr)
@@ -2321,14 +2345,19 @@ def cmd_measure(args) -> int:
     if args.result == "correct" and args.correct is None:
         print("정답 기록에는 --correct(T0 → 정답 판정)가 필요하다 — 권장의 근거다", file=sys.stderr)
         return 2
+    start = args.start or _fault_start(args.fault)
+    if start is None:
+        print(f"  ! {args.fault} 주입 시각이 없다 — 이 기록은 시작 시간대 근거에서 빠진다. "
+              "`--start` 로 넣을 수 있다", file=sys.stderr)
     measured.add(args.kind, {
         "fault": args.fault, "result": args.result, "intensity": args.intensity,
         "duration_min": args.duration, "to_first_event_min": args.first,
         "to_incident_min": args.incident, "to_correct_min": args.correct,
-        "end_to_final_min": args.settle,
+        "end_to_final_min": args.settle, "start_at": start, "to_l2_min": args.l2,
     })
     d = recommended_duration(args.kind)
-    print(f"{args.kind} {args.fault} 기록 · 권장 {d['recommended']}분 ({d['basis']}) · {d['why']}")
+    print(f"{args.kind} {args.fault} 기록 · 권장 {d['recommended']}분 ({d['basis']}) · {d['why']} "
+          f"· {recommended_hours(args.kind)['text']}")
     return 0
 
 
@@ -2463,6 +2492,8 @@ def main(argv=None) -> int:
     ms.add_argument("--incident", type=float, help="T0 → 사건 열림(분)")
     ms.add_argument("--correct", type=float, help="T0 → 정답 판정(분)")
     ms.add_argument("--settle", type=float, help="주입 끝 → 최종 판정(분)")
+    ms.add_argument("--l2", type=float, help="T0 → L2 사건의 정답(분). L2 가 안 섰으면 빼면 된다")
+    ms.add_argument("--start", help="주입 시작 시각 ISO (기본: `F-n` 이면 장애 표에서 읽는다)")
     ms.set_defaults(fn=cmd_measure)
 
     # 마스터 토폴로지 — **1회성이다.** `pemfill`·`run` 은 상주하며 마스터를

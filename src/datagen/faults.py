@@ -17,8 +17,11 @@ fault_id 로 시드한 rng 를 넘겨 이를 보장한다.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import random
 from datetime import datetime
+from pathlib import Path
 
 from .cells import Cell
 from . import scenarios as S
@@ -39,8 +42,7 @@ from .scenarios import (
 #: 노드 지정 target 접두사 → Cell 의 노드 필드
 _NODE_FIELD = {"SGW": "sgw_id", "MME": "mme_id", "PGW": "pgw_id"}
 
-#: kind → 자동 대상의 노드 축. `_busiest` 로 고른 뒤 그 노드를 거치는 셀 전부를
-#: 범위로 잡는다 — 표본이 가장 두터운 노드라야 최소 표본 규칙(분모 20)을 넘긴다.
+#: kind → 자동 대상의 노드 축. `_pick_node` 로 고른 뒤 그 노드를 거치는 셀 전부를 범위로 잡는다.
 _AUTO_NODE = {
     "gw_resource": "sgw_id",
     "gw_node_down": "sgw_id",
@@ -52,7 +54,7 @@ _AUTO_NODE = {
     "nsa_policy_restrict": "mme_id",
     # ── 발생 장비 고정(2026-10-28 · `control.SCENARIOS`) ──────────────────
     # 전에는 전국(`Target()`)이었다. 지도에서 장비를 찍지 않았을 때도
-    # 시나리오 목록이 말하는 장비에 건다 — 가장 바쁜 것을 고른다.
+    # 시나리오 목록이 말하는 장비에 건다 — 후보 안에서 주입마다 돌려 고른다.
     "auth_failure": "mme_id",       # MME–HSS 구간
     "dns_degradation": "sgw_id",    # 사용자 평면 경로
     # "external_server" — **자동 선택은 전국이다**(2026-11-05 · 6번 · 케이 수정안 A). 외부 서버 장애는
@@ -66,9 +68,16 @@ _AUTO_NODE = {
     "pay_dns_delay": "sgw_id",      # 5번과 같은 자리
 }
 
+#: 장비에 걸지만 **전국 축**(도메인·기종·전국 합)으로 판정하는 kind — 신호가 그 장비 몫만큼 묽어진다.
+_WIDE_AXIS_KINDS = ("auth_failure", "dns_degradation", "ue_model", "ims_pdn",
+                    "cdn_degradation", "pay_dns_delay")
+
 #: 한 시군구 전 셀을 범위로 잡는 kind — 지리적으로 뭉치는 열화다
 #: 셀 쌍을 대상으로 받는 kind — eNB 를 찍으면 이웃과 짝을 짓는다.
 _PAIR_KINDS = ("mobility", "son_param_change", "ho_interruption")
+#: 셀 쌍을 노선 연속 구간으로 고르는 kind — 정답이 CORRIDOR 인 쌍 kind 전부(9·15·25번 · B안). 노선을 못
+#: 쓰면 `corridor_cells` 로 돌아간다. 구간은 fault 마다 다른 rng 로 섞어 고르므로 한 곳에 고정되지 않는다
+_ROUTE_KINDS = ("ho_interruption", "son_param_change", "mobility")
 
 #: 군중 혼잡 kind — **상위 트래픽 대역**의 가까운 셀 8개(`busy_cluster`).
 #: 시군구 전체로 잡으면 한산한 셀이 섞여 ×1.8 을 해도 분모를 못 채운다.
@@ -80,8 +89,7 @@ _AREA_KINDS = ("earthquake", "natural_disaster",
                # 17번 SA 폴백 — 한 지역(셀 25개)의 5G 측 장애. 정지는 없고 범위만 같은 모양이다
                "sa_fallback")
 
-#: 행사장 kind — 가까운 셀 8개(`area_cells`). 공연장은 한산한 셀일 수도
-#: 있다 — 3배면 분모 걱정이 적다(확정대장 §11.1).
+#: 행사장 kind — **eNB 하나**(2026-11-07 사용자 결정 · `_venue_target`). 군중은 한 기지국에 몰린다.
 _VENUE_KINDS = ("event_crowd",)
 
 _AUTO_SGG = ("ran_radio", "transport_loss", "nsa_nr_leg",
@@ -99,16 +107,103 @@ _AUTO_MME_GROUP = {
 }
 
 
-def _busiest(cells: list[Cell], attr: str):
-    """셀 수가 가장 많은 노드 id — 자동 대상의 기본값.
+#: 대상 순환 묶음 — 같은 후보 풀을 쓰는 kind 끼리 한 기록을 본다(2026-11-07 · 2·7번이 연달아 같은 시군구)
+def _rotate_group(kind: str) -> str | None:
+    if kind in _AUTO_NODE:
+        # 노드 자동 대상 — 같은 종류 노드(SGW·MME·…)를 쓰는 kind 끼리 돌린다(5·12·20번이 SGW 를 나눠 쓴다)
+        return f"node:{_AUTO_NODE[kind]}"
+    if kind in _AUTO_SGG:
+        return "sgg"
+    if kind in _ROUTE_KINDS:
+        return "route"
+    # 창고 기반 자동 대상(2026-11-08 · 13번이 2·7번 시군구를 다시 고른 것을 보고 훑었다) — 후보 안에서
+    # rng 로만 골라 연달아 같은 곳이 나올 수 있었다. 14·17번은 같은 고르기(`_congestion_target`)를 쓴다
+    return _WAREHOUSE_GROUP.get(kind)
 
-    표본이 가장 두터운 노드라야 최소 표본 규칙(분모 20)을 넘겨 탐지가 성립한다.
+
+#: 창고(메시 사람 수·eNB 호율)로 후보를 좁히는 자동 대상의 순환 묶음
+_WAREHOUSE_GROUP = {"natural_disaster": "disaster", "ran_congestion": "mesh", "sa_fallback": "mesh",
+                    "anchor_saturation": "anchor", "enb_s1_outage": "outage", "event_crowd": "venue"}
+
+
+def target_key(keys) -> str:
+    """대상 셀 집합의 짧은 지문 — 순환 기록의 키다."""
+    return hashlib.sha1(",".join(sorted(keys)).encode()).hexdigest()[:12]
+
+
+class TargetHistory:
+    """자동 대상 기록 — **대상을 고르는 데만** 쓴다(2026-11-07 사용자 "하나로 고정하지 마라").
+
+    `{fault_id: {"group", "key"}}` 을 파일 하나에 둔다. 한 회차는 **자기보다 앞선 회차**의 기록만
+    보므로 틱마다·gen 재시작마다 같은 대상이 나온다(`resolve_active` 의 결정론). 기록은 처음 한 번만
+    쓴다. 판정·정답에는 쓰지 않는다 — 시나리오는 단독으로 돈다. 못 읽거나 못 쓰면 경고하고 순환 없이
+    지금처럼 고른다
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+
+    def _load(self) -> dict:
+        try:
+            return json.loads(self.path.read_text()) if self.path.exists() else {}
+        except (OSError, ValueError) as e:
+            print(f"  ! 대상 기록을 못 읽었다 — 순환 없이 고른다({e})", flush=True)
+            return {}
+
+    def used(self, group: str, before: int) -> dict[str, int]:
+        """그 묶음에서 `before` 보다 앞선 회차가 쓴 대상 → 마지막으로 쓴 회차 번호."""
+        out: dict[str, int] = {}
+        for k, row in self._load().items():
+            fid = int(str(k).split(":", 1)[0])
+            if row.get("group") == group and fid < before:
+                out[row["key"]] = max(out.get(row["key"], 0), fid)
+        return out
+
+    def record(self, fault_id: int, group: str, key: str) -> None:
+        # 회차 하나가 묶음 여럿을 쓴다(8번은 SGW 와 기종) — 키는 `회차:묶음`. 옛 기록(`회차`)도 읽는다
+        data = self._load()
+        slot = f"{fault_id}:{group}"
+        if slot in data or data.get(str(fault_id), {}).get("group") == group:
+            return
+        data[slot] = {"group": group, "key": key}
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(data, ensure_ascii=False, indent=0, sort_keys=True))
+        except OSError as e:
+            print(f"  ! 대상 기록을 못 썼다 — 다음 회차가 이 대상을 다시 고를 수 있다({e})", flush=True)
+
+
+def _rotating(cands: list, keyf, used: dict[str, int] | None, rng: random.Random | None = None):
+    """후보 중 **앞선 회차가 안 쓴 것**, 다 썼으면 **가장 오래전에 쓴 것**. ``rng`` 가 있으면 안 쓴
+    것 중에서 돌려 고르고, 없으면 순서(이미 좋은 순으로 정렬)의 앞을 쓴다. 기록이 없으면 지금과 같다."""
+    if not cands:
+        return None
+    if not used:
+        return cands[rng.randrange(len(cands))] if rng else cands[0]
+    fresh = [c for c in cands if keyf(c) not in used]
+    if fresh:
+        return fresh[rng.randrange(len(fresh))] if rng else fresh[0]
+    return min(cands, key=lambda c: used[keyf(c)])
+
+
+def _pick_node(cells: list[Cell], attr: str, rng: random.Random, share: float,
+               used: dict[str, int] | None = None):
+    """가장 큰 노드 대비 셀 수 몫이 `share` 이상인 노드 중 하나 — 자동 대상(2026-11-07 사용자 결정).
+
+    셀이 가장 많은 노드로 고정하면 SGW·MME 시나리오가 늘 한 대에서만 검증된다. 추첨은 호출부의
+    rng 라 같은 fault 는 틱마다 같은 노드다. ``used`` 가 있으면 앞선 회차가 쓴 노드를 뒤로 미룬다
+    (`_rotating` · 키는 그 노드 셀 집합의 지문 — `build` 가 기록하는 값과 같다).
     """
     cnt: dict = {}
     for c in cells:
         k = getattr(c, attr)
         cnt[k] = cnt.get(k, 0) + 1
-    return max(cnt, key=lambda k: cnt[k])
+    top = max(cnt.values())
+    cand = sorted(k for k, n in cnt.items() if n >= top * share)
+    if not used:
+        return cand[rng.randrange(len(cand))]
+    return _rotating(cand, lambda n: target_key(c.cell_key for c in cells if getattr(c, attr) == n),
+                     used, rng)
 
 
 def _ranked(cells: list[Cell], attr: str) -> list:
@@ -120,13 +215,40 @@ def _ranked(cells: list[Cell], attr: str) -> list:
     return sorted(cnt, key=lambda k: -cnt[k])
 
 
+def _sgg_of_shape(kind: str, cells: list[Cell], rng: random.Random,
+                  used: dict[str, int] | None = None) -> str | None:
+    """시군구 전 셀의 모양이 정답지 `expect_geo` 인 시군구 하나(2026-11-07 · B안 · 2·7번).
+
+    시군구 전부를 걸면 큰 구는 반경 3km 를 넘어 SCATTER 가 된다 — 도쿄 후보 12곳 중 7곳이었고
+    정답(CLUSTER)과 갈렸다. 후보 크기 기준은 `_cells_in_one_sgg`(want 60)와 같다. 맞는 곳이
+    없으면 None — 호출부가 지금처럼 고르고 그 사실을 남긴다.
+    """
+    want = (KIND_SPECS.get(kind) or {}).get("expect_geo")
+    by: dict[str, list[Cell]] = {}
+    for c in cells:
+        if c.geo_status == "MAPPED":
+            by.setdefault(c.adm_sgg_cd, []).append(c)
+    ok = sorted(k for k, v in by.items() if len(v) >= 20 and S.geo_shape(
+        [c for c in cells if c.adm_sgg_cd == k]) == want)
+    if not ok:
+        print(f"  ! {kind} — 모양이 {want} 인 시군구가 없다 · 모양을 보지 않고 고른다", flush=True)
+        return None
+    # 앞선 회차가 쓴 시군구는 뒤로 — 후보가 5곳뿐이라 2·7번이 연달아 `11110` 을 골랐다(F-187·F-190)
+    return _rotating(ok, lambda k: target_key(_sgg_all(cells, k)), used, rng)
+
+
 def _sgg_all(cells: list[Cell], code: str) -> set[str]:
     """시군구 셀 **전부** — 일부만 고르면 같은 시군구의 정상 셀이 지리 롤업에서
     열화를 희석해 SGG 단위 탐지가 성립하지 않는다 (build_scenarios 와 같은 이유)."""
     return {c.cell_key for c in cells if c.adm_sgg_cd == code}
 
 
-def _route_target(routes, rng: random.Random) -> Target | None:
+#: 노선 구간 순환에서 뽑아 보는 횟수 — 앞선 회차가 안 쓴 구간을 찾는다. 초기값
+ROUTE_ROTATE_DRAWS = 12
+
+
+def _route_target(routes, rng: random.Random, kind: str = "ho_interruption",
+                  used: dict[str, int] | None = None) -> Target | None:
     """15번 자동 대상 — 노선 연속 구간(`scenarios.route_segment`). 쌍은 이웃 칸끼리다.
 
     노선이 없거나(한국 locale · `routes_file` 없음) 모양을 넘는 구간이 없으면 `None` 이고, 호출부가
@@ -134,25 +256,43 @@ def _route_target(routes, rng: random.Random) -> Target | None:
     걸린 것을 F-133 뒤에야 알았다
     """
     got = S.route_segment(routes, rng) if routes else None
+    if got is not None and used:
+        # 구간 후보는 13개 안팎이다(야마노테선) — 몇 번 더 뽑아 앞선 회차가 안 쓴 구간을 고른다
+        seen = {target_key(c.cell_key for c in got[0]): got}
+        for _ in range(ROUTE_ROTATE_DRAWS):
+            if any(k not in used for k in seen):
+                break
+            more = S.route_segment(routes, rng)
+            if more is not None:
+                seen.setdefault(target_key(c.cell_key for c in more[0]), more)
+        got = seen[_rotating(list(seen), lambda k: k, used)]
     if got is None:
-        print("  ! 15번 노선 구간을 못 골랐다 — 노선 "
+        print(f"  ! {kind} 노선 구간을 못 골랐다 — 노선 "
               + ("모양 미달" if routes else "없음") + " · `corridor_cells` 로 돌아간다", flush=True)
         return None
     seg, info = got
+    want = (KIND_SPECS.get(kind) or {}).get("expect_geo")
+    if want and S.geo_shape(seg) != want:
+        # `route_segment` 는 CORRIDOR 문턱에 여유를 두고 고른다 — 여기 걸리면 두 식이 갈라진 것이다
+        print(f"  ! {kind} 노선 구간 모양이 {S.geo_shape(seg)} 다(정답 {want}) · `corridor_cells` 로 돌아간다",
+              flush=True)
+        return None
     return Target(cell_keys={c.cell_key for c in seg},
                   cell_pairs=[(a.cell_key, b.cell_key) for a, b in zip(seg, seg[1:])],
                   route_seg=info)
 
 
 def _auto_target(kind: str, cells: list[Cell], rng: random.Random,
-                 routes=None) -> Target | None:
+                 routes=None, used: dict[str, int] | None = None) -> Target | None:
     """target 미지정 시 kind 별 기본 범위."""
     field = _AUTO_NODE.get(kind)
     if field:
-        busy = _busiest(cells, field)
+        share = (S.FAULT.auto_wide_min_share if kind in _WIDE_AXIS_KINDS
+                 else S.FAULT.auto_node_min_share)
+        node = _pick_node(cells, field, rng, share, used)
         return Target(cell_keys={c.cell_key for c in cells
-                                 if getattr(c, field) == busy},
-                      **{field: busy})
+                                 if getattr(c, field) == node},
+                      **{field: node})
     if kind in _AUTO_MME_GROUP:
         skip, take = _AUTO_MME_GROUP[kind]
         ranked = _ranked(cells, "mme_id")
@@ -162,7 +302,9 @@ def _auto_target(kind: str, cells: list[Cell], rng: random.Random,
     if kind in _AUTO_SGG:
         # _cells_in_one_sgg 는 시군구 "선정"에만 쓴다 — 표본(want개)이 아니라
         # 그 시군구 셀 전부를 가져간다 (롤업 희석 방지).
-        _, code = _cells_in_one_sgg(cells, rng, 60)
+        code = _sgg_of_shape(kind, cells, rng, used)
+        if code is None:
+            _, code = _cells_in_one_sgg(cells, rng, 60)
         keys = _sgg_all(cells, code)
         return Target(cell_keys=keys, sgg_codes={code}) if keys else None
     if kind == "anchor_saturation":
@@ -181,21 +323,27 @@ def _auto_target(kind: str, cells: list[Cell], rng: random.Random,
         keys = {c.cell_key for c in enb_cluster(cells, picked[0])} if picked else set()
         return Target(cell_keys=keys, sgg_codes={code}) if keys else None
     if kind == "enb_s1_outage":
-        busy = _busiest(cells, "enb_id")
-        return Target(cell_keys={c.cell_key for c in cells if c.enb_id == busy},
-                      enb_id=busy)
+        enb = _pick_node(cells, "enb_id", rng, S.FAULT.auto_node_min_share)
+        return Target(cell_keys={c.cell_key for c in cells if c.enb_id == enb}, enb_id=enb)
     if kind in _CROWD_KINDS:
         keys = {c.cell_key for c in busy_cluster(cells, rng, want=8)}
         return Target(cell_keys=keys) if keys else None
     if kind in _AREA_KINDS:
         # 지진은 사이트 단위 정지 — 걸친 eNB 의 셀 전부다(`whole_enbs`)
-        keys = {c.cell_key for c in whole_enbs(cells, area_cells(cells, rng, want=25))}
+        keys = (_disaster_area(cells, rng, 25, used) if kind == "natural_disaster"
+                else {c.cell_key for c in whole_enbs(cells, area_cells(cells, rng, want=25))})
         return Target(cell_keys=keys) if keys else None
     if kind in _VENUE_KINDS:
-        keys = {c.cell_key for c in area_cells(cells, rng, want=8)}
-        return Target(cell_keys=keys) if keys else None
-    if kind == "ho_interruption":
-        target = _route_target(routes, rng)
+        mapped = [c for c in cells if c.geo_status == "MAPPED"]
+        if not mapped:
+            return None
+        enb = mapped[rng.randrange(len(mapped))].enb_id
+        return Target(cell_keys={c.cell_key for c in cells if c.enb_id == enb}, enb_id=enb)
+    if kind in _ROUTE_KINDS:
+        # 25번도 노선 구간이다(2026-11-07 · B안) — 정답 CORRIDOR 인데 방위각 띠(`corridor_cells`)는 도심
+        # 셀 밀도에서 1km 안에 모여 10번 중 8번 POINT 였다. 노선 이웃 칸이 SON 이 손대는 전환 쌍이다.
+        # 9번도 같다 — F-186 의 띠 15셀이 SCATTER 3.07km 였다(정답 CORRIDOR)
+        target = _route_target(routes, rng, kind, used)
         if target is not None:
             return target
     if kind in _PAIR_KINDS:
@@ -219,11 +367,12 @@ def _auto_target(kind: str, cells: list[Cell], rng: random.Random,
 
 
 def _resolve_target(raw: str | None, kind: str, cells: list[Cell],
-                    rng: random.Random, routes=None) -> Target | None:
+                    rng: random.Random, routes=None,
+                    used: dict[str, int] | None = None) -> Target | None:
     """target 문자열 → Target. 해석 불능이나 일치 셀 0개면 None (호출부가 cancelled 처리)."""
     text = (raw or "").strip()
     if not text:
-        return _auto_target(kind, cells, rng, routes)
+        return _auto_target(kind, cells, rng, routes, used)
 
     if text.upper().startswith("SGG:"):
         code = text.split(":", 1)[1].strip()
@@ -260,10 +409,6 @@ def _resolve_target(raw: str | None, kind: str, cells: list[Cell],
                 cell_keys={c.cell_key for c in mine} | {c.cell_key for c in band[:14]},
                 enb_id=num,
                 cell_pairs=[(anchor.cell_key, c.cell_key) for c in band[:8]])
-        if kind in _VENUE_KINDS and anchor0 is not None:
-            near = area_cells(cells, rng, want=8, anchor=anchor0)
-            return Target(cell_keys={c.cell_key for c in mine}
-                          | {c.cell_key for c in near}, enb_id=num)
         if kind in _AREA_KINDS and anchor0 is not None:
             near = whole_enbs(cells, area_cells(cells, rng, want=25, anchor=anchor0))
             return Target(cell_keys={c.cell_key for c in mine}
@@ -377,8 +522,30 @@ def target_rng(seed: int, fault_id: int) -> random.Random:
     return random.Random(seed * 1_000_003 + fault_id)
 
 
+#: 호율 없이 고를 때 모양 맞는 지역을 찾는 추첨 횟수 — 도쿄는 앵커 약 3% 가 맞는다(70/2,177). 초기값
+DISASTER_SHAPE_TRIES = 300
+
+
+def _disaster_area(cells: list[Cell], rng: random.Random, want: int,
+                   used: dict[str, int] | None = None) -> set[str]:
+    """호율을 못 읽을 때의 재해 지역 — 정답 모양(`expect_geo`)이 될 때까지 앵커를 다시 뽑는다(B안).
+
+    못 찾으면 첫 추첨 지역을 쓰고 그 사실을 남긴다(지금과 같은 대상).
+    """
+    shape = (KIND_SPECS.get("natural_disaster") or {}).get("expect_geo")
+    first = None
+    for _ in range(DISASTER_SHAPE_TRIES):
+        picked = whole_enbs(cells, area_cells(cells, rng, want=want))
+        first = first if first is not None else picked
+        if S.geo_shape(picked) == shape and target_key(c.cell_key for c in picked) not in (used or {}):
+            return {c.cell_key for c in picked}
+    print(f"  ! 자연재해 — 모양이 {shape} 인 지역을 못 찾았다 · 첫 추첨 지역을 쓴다", flush=True)
+    return {c.cell_key for c in first or ()}
+
+
 def _busy_disaster_area(cells: list[Cell], rate: dict[str, float], want: int,
-                        mode: str, sid: str, top: int = 40) -> set[str] | None:
+                        mode: str, sid: str, top: int = 40,
+                        used: dict[str, int] | None = None) -> set[str] | None:
     """자연재해 자동 대상 — **정지할 eNB 들의 평소 호율이 가장 높은 지역**(2026-11-05 · F-111).
 
     15% 생산량에서는 eNB 대부분이 분당 1호 미만이라 graphio D4 가 20분 정지를 확정하지 못했다
@@ -395,11 +562,23 @@ def _busy_disaster_area(cells: list[Cell], rate: dict[str, float], want: int,
         if c.geo_status == "MAPPED":
             first.setdefault(c.enb_id, c)
     cand = sorted((e for e in first if rate.get(e, 0.0) > 0.0),
-                  key=lambda e: (-rate[e], e))[:top]
-    best, best_key = None, None
+                  key=lambda e: (-rate[e], e))
+    # 정답 모양(`expect_geo`)이 되는 지역만 본다(2026-11-07 · B안 · 27번) — 도심은 셀 25개가 반경 0.9km
+    # 안에 들어 POINT 였다(앵커 2,177곳 중 2,107곳). 모양이 맞는 지역은 **전부** 본다 — 70곳 안팎이라
+    # 싸고, 앵커 호율 순으로 앞 `top` 곳에서 끊으면 정지 eNB 호율이 더 높은 곳을 놓친다(F-189 는
+    # 2위 지역 λ 최소 1.46 · 1위 1.61 은 앵커 순위 2,115). 맞는 곳이 없으면 지금처럼 호율 상위 `top` 곳이다
+    shape = (KIND_SPECS.get("natural_disaster") or {}).get("expect_geo")
+    areas: list[tuple[str, list[Cell]]] = []
     for e in cand:
-        picked = whole_enbs(cells, area_cells(cells, random.Random(0), want=want,
-                                              anchor=first[e]))
+        picked = whole_enbs(cells, area_cells(cells, random.Random(0), want=want, anchor=first[e]))
+        if S.geo_shape(picked) == shape:
+            areas.append((e, picked))
+    if not areas:
+        print(f"  ! {sid} 자연재해 — 모양이 {shape} 인 지역이 없다 · 호율 상위 지역에서 고른다", flush=True)
+        areas = [(e, whole_enbs(cells, area_cells(cells, random.Random(0), want=want, anchor=first[e])))
+                 for e in cand[:top]]
+    scored: list[tuple[tuple, set[str]]] = []
+    for e, picked in areas:
         keys = {c.cell_key for c in picked}
         rank = S.disaster_rank_of(keys, picked, mode, sid)
         n = S.disaster_dead_n(len(rank))
@@ -407,10 +586,11 @@ def _busy_disaster_area(cells: list[Cell], rate: dict[str, float], want: int,
         if not dead:
             continue
         lams = [rate.get(x, 0.0) for x in dead]
-        score = (min(lams), sum(lams), -int(e) if e.isdigit() else 0)
-        if best_key is None or score > best_key:
-            best, best_key = keys, score
-    return best
+        scored.append(((min(lams), sum(lams), -int(e) if e.isdigit() else 0), keys))
+    # 좋은 순으로 놓고 앞선 회차가 안 쓴 첫 지역 — 다 썼으면 가장 오래전에 쓴 지역(`_rotating`)
+    scored.sort(key=lambda x: x[0], reverse=True)
+    got = _rotating([k for _s, k in scored], target_key, used)
+    return got
 
 
 def _meshes(cells: list[Cell], fault: dict, load) -> list[tuple[str, float, list[Cell]]]:
@@ -436,7 +616,8 @@ def _busy_mesh(people: float, mine: list[Cell]) -> bool:
     return people >= S.FAULT.anchor_min_people and len(mine) >= S.FAULT.anchor_min_cells
 
 
-def _congestion_target(cells: list[Cell], rng: random.Random, fault: dict, load) -> Target | None:
+def _congestion_target(cells: list[Cell], rng: random.Random, fault: dict, load,
+                       used: dict[str, int] | None = None) -> Target | None:
     """14번 자동 대상 — 평소 사람이 있는 메시 하나와 가장 가까운 메시들의 **셀 전부**(2026-11-06 · F-155).
 
     Q-11 은 메시·정목 칸의 비율이라 칸 안 사람의 상당수가 나빠져야 선다. `busy_cluster` 의 8셀은
@@ -454,19 +635,23 @@ def _congestion_target(cells: list[Cell], rng: random.Random, fault: dict, load)
     cand = [m for m in meshes if _busy_mesh(m[1], m[2])]
     if not cand:
         return None
-    first = cand[rng.randrange(len(cand))]
 
     def centre(mine: list[Cell]) -> tuple[float, float]:
         return (sum(c.latitude for c in mine) / len(mine), sum(c.longitude for c in mine) / len(mine))
 
-    at = centre(first[2])
-    near = sorted(meshes, key=lambda m: (haversine_km(*at, *centre(m[2])), m[0]))
-    picked = near[:S.FAULT.congestion_meshes]
+    def around(first) -> list:
+        at = centre(first[2])
+        return sorted(meshes, key=lambda m: (haversine_km(*at, *centre(m[2])), m[0]))[:S.FAULT.congestion_meshes]
+
+    # 앞선 회차가 쓴 범위는 뒤로 — 키는 `build` 가 기록하는 대상 셀 지문과 같다
+    first = _rotating(cand, lambda m: target_key(c.cell_key for n in around(m) for c in n[2]), used, rng)
+    picked = around(first)
     print(f"  · 14번 대상 메시 {[m[0] for m in picked]} (후보 {len(cand)}칸)", flush=True)
     return Target(cell_keys={c.cell_key for m in picked for c in m[2]})
 
 
-def _anchor_target(cells: list[Cell], rng: random.Random, fault: dict, load) -> Target | None:
+def _anchor_target(cells: list[Cell], rng: random.Random, fault: dict, load,
+                   used: dict[str, int] | None = None) -> Target | None:
     """16번 자동 대상 — 평소 사람이 있는 1km 메시들 중에서 **주입마다 돌려** 고른다(2026-11-06).
 
     앵커 경합은 5G 단말이 있는 곳의 장애이고, 평소 한산한 칸에 걸면 대상 셀의 사람이 전부 장애가
@@ -480,16 +665,71 @@ def _anchor_target(cells: list[Cell], rng: random.Random, fault: dict, load) -> 
     if not cand:
         print("  ! 16번 후보 메시가 없다 — 군집 추첨으로 돌아간다", flush=True)
         return None
-    mesh, mine = cand[rng.randrange(len(cand))]
-    first = mine[rng.randrange(len(mine))]
+    # 군집의 첫 셀은 메시마다 미리 정한다 — 순환 키(대상 셀 지문)를 후보마다 알아야 해서다.
+    # 시드는 이 fault 의 rng 에서 한 번 뽑으므로 회차마다 다르고 같은 회차는 같다
+    seed = rng.random()
+
+    def first_of(mine: list[Cell]) -> Cell:
+        return mine[random.Random(f"{seed}:{mine[0].cell_key}").randrange(len(mine))]
+
+    mesh, mine = _rotating(cand, lambda m: target_key(c.cell_key for c in enb_cluster(m[1], first_of(m[1]))),
+                           used, rng)
+    first = first_of(mine)
     print(f"  · 16번 대상 메시 {mesh} (후보 {len(cand)}칸)", flush=True)
     return Target(cell_keys={c.cell_key for c in enb_cluster(mine, first)},
                   sgg_codes={first.adm_sgg_cd})
 
 
+def _outage_target(cells: list[Cell], rng: random.Random, rate,
+                   used: dict[str, int] | None = None) -> Target | None:
+    """eNB 정지 자동 대상 — 셀과 평소 호가 충분한 eNB 를 주입마다 돌려 고른다(2026-11-07).
+
+    호가 적은 eNB 는 멈춰도 D4 가 평소의 빈 분과 가르지 못한다. 호율을 못 읽으면 None 이고
+    호출부가 셀 수로만 고른다.
+    """
+    if not rate:
+        return None
+    per: dict = {}
+    for c in cells:
+        per.setdefault(c.enb_id, []).append(c)
+    cand = sorted(e for e, mine in per.items() if len(mine) >= S.FAULT.outage_min_cells
+                  and rate.get(str(e), 0.0) >= S.FAULT.outage_min_rate)
+    if not cand:
+        print("  ! eNB 정지 후보가 없다 — 셀 수로만 고른다", flush=True)
+        return None
+    enb = _rotating(cand, lambda e: target_key(c.cell_key for c in per[e]), used, rng)
+    print(f"  · eNB 정지 대상 {enb} (후보 {len(cand)}개)", flush=True)
+    return Target(cell_keys={c.cell_key for c in per[enb]}, enb_id=enb)
+
+
+def _venue_target(cells: list[Cell], rng: random.Random, fault: dict, load,
+                  used: dict[str, int] | None = None) -> Target | None:
+    """23번 자동 대상 — 평소 사람이 있는 메시의 **eNB 하나**를 주입마다 돌려 고른다(2026-11-07).
+
+    `_ul_confirm` 은 셀·1분 안 후보의 서버 2곳을 본다. 8셀에 나눠 걸면 후보가 셀·분마다 한 줄뿐이라
+    혼잡이어도 비트가 지워졌다(F-165 · 후보 36행 중 4행). 호를 적은 셀에 몰아 그 조건을 채운다.
+    셀이 많은 eNB 는 같은 호가 다시 나뉘므로 `crowd_enb_cells` 안에서만 고른다.
+    후보가 없거나 창고를 못 읽으면 None 이고 호출부가 무작위 eNB 로 돌아간다.
+    """
+    lo, hi = S.FAULT.crowd_enb_cells
+    per: dict = {}
+    for c in cells:
+        per.setdefault(c.enb_id, []).append(c)
+    busy = {c.enb_id for _, people, mine in _meshes(cells, fault, load)
+            if people >= S.FAULT.anchor_min_people for c in mine}
+    cand = sorted(e for e in busy if lo <= len(per[e]) <= hi)
+    if not cand:
+        print("  ! 23번 후보 eNB 가 없다 — 무작위 eNB 로 돌아간다", flush=True)
+        return None
+    enb = _rotating(cand, lambda e: target_key(c.cell_key for c in per[e]), used, rng)
+    print(f"  · 23번 대상 eNB {enb} (후보 {len(cand)}개)", flush=True)
+    return Target(cell_keys={c.cell_key for c in per[enb]}, enb_id=enb)
+
+
 def build(fault: dict, cells: list[Cell], anchor: datetime,
           rng: random.Random, seed: int | None = None,
-          enb_rate=None, routes=None, nr_on=None, mesh_load=None) -> Scenario | None:
+          enb_rate=None, routes=None, nr_on=None, mesh_load=None,
+          history: TargetHistory | None = None) -> Scenario | None:
     """CM_DATAGEN_FAULT 한 행을 Scenario 로 바꾼다.
 
     시간창은 anchor(분 인덱스 0의 시각) 기준 분 좌표로 옮긴다 — Scenario 가
@@ -515,6 +755,12 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
         # 기지국 정지 배치 — 대상 앞머리 `LOCAL:`·`WIDE:`(또는 그 낱말만). 장애 테이블에 인자 칸이
         # 없어(DDL 없이) 대상 문자열로 받는다. 기본 ``local``
         mode, raw_target = _disaster_mode(raw_target)
+    # 자동 대상 순환(`TargetHistory`) — 앞선 회차가 쓴 대상. 지정 대상·`LIKE:` 는 보지 않는다
+    # (자연재해 `LOCAL:`·`WIDE:` 앞머리는 배치라 떼고 본다)
+    group = _rotate_group(fault["kind"])
+    auto = not (raw_target or "").strip() and like is None
+    used = (history.used(group, int(fault["fault_id"])) if history is not None and group and auto
+            else None)
     if fault["kind"] == "capacity_shift":
         target = _shift_target(fault.get("target"), fault["start_ts"], cells)
     elif fault["kind"] == "natural_disaster" and not (raw_target or "").strip() and like is None:
@@ -523,10 +769,10 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
         # 전처럼 무작위 지역이다
         want = S.DISASTER_AREA_CELLS.get(mode, 25)
         rate = _rate_at(enb_rate, fault)
-        keys = (_busy_disaster_area(cells, rate, want, mode, f"F-{fault['fault_id']}")
+        keys = (_busy_disaster_area(cells, rate, want, mode, f"F-{fault['fault_id']}", used=used)
                 if rate else None)
         if not keys:
-            keys = {c.cell_key for c in whole_enbs(cells, area_cells(cells, rng, want=want))}
+            keys = _disaster_area(cells, rng, want, used)
         target = Target(cell_keys=keys) if keys else None
     elif like is not None:
         # 원본 fault 의 rng 는 **대상 해석에만** 쓴다(조이 결정). 나머지 난수
@@ -538,15 +784,22 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
         target = None
         if not (raw_target or "").strip():
             if fault["kind"] == "anchor_saturation":
-                target = _anchor_target(pick, rng, fault, mesh_load)
+                target = _anchor_target(pick, rng, fault, mesh_load, used)
+            elif fault["kind"] in _VENUE_KINDS:
+                target = _venue_target(pick, rng, fault, mesh_load, used)
+            elif fault["kind"] == "enb_s1_outage":
+                target = _outage_target(pick, rng, _rate_at(enb_rate, fault), used)
             elif fault["kind"] in _CROWD_KINDS or fault["kind"] == "sa_fallback":
-                target = _congestion_target(pick, rng, fault, mesh_load)
+                target = _congestion_target(pick, rng, fault, mesh_load, used)
         if target is None:
-            target = _resolve_target(raw_target, fault["kind"], pick, rng, routes)
+            target = _resolve_target(raw_target, fault["kind"], pick, rng, routes,
+                                     None if (raw_target or "").strip() else used)
     if target is None:
         if len(pick) < len(cells):
             print(f"  ! 16번 대상 {raw_target or '자동'} — NR 가능 eNB 셀이 없어 걸지 않는다", flush=True)
         return None
+    if history is not None and group and auto and target.cell_keys:
+        history.record(int(fault["fault_id"]), group, target_key(target.cell_keys))
     if mode is not None:
         target.outage_mode = mode
     s = dict(spec)
@@ -624,7 +877,7 @@ def _rate_at(enb_rate, fault: dict) -> dict[str, float] | None:
         try:
             fault["_enb_rate"] = enb_rate(fault["start_ts"]) or None
         except Exception as e:          # 창고 장애로 생성을 멈추지 않는다 — 무작위 지역으로 간다
-            print(f"  ! eNB 호율 조회 실패 — 자연재해 자동 대상은 무작위 지역({e})", flush=True)
+            print(f"  ! eNB 호율 조회 실패 — 자동 대상은 호율 없이 고른다({e})", flush=True)
             fault["_enb_rate"] = None
     return fault["_enb_rate"]
 
@@ -642,6 +895,7 @@ def resolve_active(cells: list[Cell], anchor: datetime, seed: int,
                    active: list[dict],
                    cache: dict[int, tuple[tuple, Scenario]],
                    enb_rate=None, routes=None, nr_on=None, mesh_load=None,
+                   history: TargetHistory | None = None,
                    ) -> tuple[list[Scenario], list[int]]:
     """활성 fault 행 목록 → (Scenario 목록, 해석 실패한 fault_id 목록).
 
@@ -668,7 +922,7 @@ def resolve_active(cells: list[Cell], anchor: datetime, seed: int,
             continue
         frng = target_rng(seed, fid)
         sc = build(f, cells, anchor, frng, seed=seed, enb_rate=enb_rate, routes=routes,
-                   nr_on=nr_on, mesh_load=mesh_load)
+                   nr_on=nr_on, mesh_load=mesh_load, history=history)
         if sc is None:
             bad.append(fid)
         else:

@@ -457,11 +457,25 @@ pemdb1:
     floor_per_cell: 8
     # kind 별 하한(없으면 위 값). 9번은 전환이 붙는 호가 절반 정도라 8호로는 셀 5분 창의 PathSwitch
     # 표본이 최소 표본(20)에 못 미친다. 전체 생산량은 그대로다. 초기값
+    # 23번은 eNB 하나에 군중이 몰린다 — 셀 1분 안에 업링크 후보의 서버 2곳이 차는 호 수다(모의 F-165
+    # 이후 · 셀 2~3개 · 2026-11-07). 평소 호에서 옮겨 오므로 전체 생산량은 그대로다(`floor_moved_kinds`).
     floor_by_kind:
       mobility: 16
+      event_crowd: 120
     # 하한을 5G 능력 단말로만 채우는 kind(평소 호에서 옮겨 온다). 지금은 쓰지 않는다 — 5G 단말을 늘려
     # SA 표본이 차면 필요 없다(2026-11-06). 16번 재주입에서 모자라면 anchor_saturation 을 넣는다
     floor_sa_kinds: []
+    # 하한을 평소 호에서 옮겨 채우는 kind 와 옮기는 호의 상한(그 분 전국 호의 몫). 초기값
+    floor_moved_kinds: [event_crowd]
+    floor_moved_share: 0.2
+    # 23번 자동 대상 eNB 의 셀 수 범위 — 하한이 셀마다 차므로 셀이 많으면 옮기는 호가 커진다. 초기값
+    crowd_enb_cells: [2, 3]
+    # 자동 대상 노드 후보 — 가장 큰 노드 대비 셀 수 몫 하한. 전국 축 kind 는 더 좁다. 초기값
+    auto_node_min_share: 0.5
+    auto_wide_min_share: 0.75
+    # eNB 정지 자동 대상 — 셀 수와 평소 호율(λ · 분당) 하한. 초기값
+    outage_min_cells: 3
+    outage_min_rate: 1.5
     # 16번 자동 대상 후보 — 메시 평소 15분 VIDEO 인원과 그 안 NR 가능 셀 수 하한. 초기값
     anchor_min_people: 40
     anchor_min_cells: 8

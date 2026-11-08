@@ -77,8 +77,8 @@ def test_external_server_is_no_longer_in_the_auto_node_table():
 
 @pytest.mark.parametrize("kind,field", [("dns_degradation", "sgw_id"), ("cdn_degradation", "sgw_id"),
                                         ("pay_dns_delay", "sgw_id")])
-def test_other_kinds_still_pick_the_busiest_sgw(kind, field):
-    """5·21·22번은 이번에 바꾸지 않았다 — 자동 선택은 여전히 셀이 가장 많은 SGW 다."""
+def test_other_kinds_pick_a_node_axis_sgw_from_the_candidates(kind, field):
+    """5·21·22번도 노드 축 자동 선택이다(전국 축 하한 0.75). 이 마스터는 SGW 0038 이 압도적이라 후보가 하나다."""
     assert faults._AUTO_NODE[kind] == field
     sc = _build(kind=kind)
     assert sc is not None and sc.target.sgw_id == "0038", sc.target.sgw_id

@@ -88,6 +88,20 @@ class FaultCfg:
     #: 15분 1명 → LTE 189명·SA 14명). 평소 호에서 옮겨 오므로 전국 호 수는 그대로이고(`_sa_floor_calls`),
     #: 옮기는 양은 `floor_by_kind` 가 정한다
     floor_sa_kinds: tuple[str, ...] = ()
+    #: 하한을 **평소 호에서 옮겨 채우는** kind — 전국 호 수가 그대로다(`_moved_floor_calls`). 꼬리도 없다
+    floor_moved_kinds: tuple[str, ...] = ()
+    #: 옮기는 호의 상한 — 그 분 전국 호의 몫. 야간에 다른 셀을 비우지 않게 한다. **초기값**
+    floor_moved_share: float = 0.2
+    #: 자동 대상 노드 후보 — 가장 큰 노드 대비 셀 수 몫 하한. 노드 축 판정은 그 노드 안 비율이라 작은
+    #: 노드도 표본이 찬다(가장 작은 SGW 도 분당 약 130호). **초기값**
+    auto_node_min_share: float = 0.5
+    #: 전국 축으로 판정하는 kind(`faults._WIDE_AXIS_KINDS`)의 같은 하한 — 신호가 노드 몫만큼 묽어진다
+    #: (F-108 · 고른 SGW 몫에 따라 6.07%·4.84% 로 갈렸다). 지금까지 검증한 최대 노드에서 멀지 않게 둔다. **초기값**
+    auto_wide_min_share: float = 0.75
+    #: eNB 정지 자동 대상의 셀 수 하한과 평소 호율 하한(λ · 분당). D4 는 무호 `1 + ln(1/α)/λ` 분을
+    #: 봐야 확정하는데 λ 1.5 면 약 14분이다 — 권장 길이 20분 안에 서야 한다. **초기값**
+    outage_min_cells: int = 3
+    outage_min_rate: float = 1.5
     #: 16번 자동 대상 후보 — 1km 메시의 평소 15분 VIDEO 인원 하한과 그 안 NR 가능 셀 수 하한. 평소 사람이
     #: 없는 칸은 걸어도 LTE 표본이 없고, 셀이 적으면 하한 호로 SA 를 채우지 못한다. **초기값**
     anchor_min_people: int = 40
@@ -129,6 +143,8 @@ class FaultCfg:
     congestion_user_share: float = 0.6
     #: 23번에서 몰려서 무너진 가입자 비율(강도 1.0 일 때). 14번과 같은 몫이다. **초기값**
     crowd_user_share: float = 0.6
+    #: 23번 자동 대상 eNB 의 셀 수 범위 — 하한은 셀마다 차므로 셀이 많으면 옮기는 호가 커진다. 초기값
+    crowd_enb_cells: tuple[int, int] = (2, 3)
     #: 23번 혼잡 몫의 처리율 `(최소, 최대)` bps — 행사장은 100kbps 안팎이 정상이다(2026-11-06 사용자
     #: 결정). 셀 용량 ÷ 동시 가입자로 계산한 값이 아니다 — 셀 마스터에 용량이 없다. **초기값**
     crowd_up_bps: tuple[float, float] = (50_000.0, 150_000.0)
@@ -150,6 +166,12 @@ class FaultCfg:
                     raise RuntimeError(f"pemdb1.fault.congestion_rtt 는 0 < 최소 ≤ 최대: {v}")
                 f.congestion_rtt = (lo, hi)
                 continue
+            if k == "crowd_enb_cells":
+                lo, hi = (int(x) for x in v)
+                if not 0 < lo <= hi:
+                    raise RuntimeError(f"pemdb1.fault.crowd_enb_cells 는 0 < 최소 ≤ 최대: {v}")
+                f.crowd_enb_cells = (lo, hi)
+                continue
             if k in ("crowd_up_bps", "crowd_dn_bps"):
                 lo, hi = (float(x) for x in v)
                 if not 0 < lo <= hi:
@@ -159,7 +181,9 @@ class FaultCfg:
             if k in ("floor_per_cell", "floor_max_cells", "floor_tail_min",
                      "floor_tail_half_min", "floor_tail_eps", "disaster_emergency_share",
                      "congestion_load", "congestion_user_share", "crowd_user_share",
-                     "anchor_min_people", "anchor_min_cells", "congestion_meshes"):
+                     "anchor_min_people", "anchor_min_cells", "congestion_meshes",
+                     "floor_moved_share", "auto_node_min_share", "auto_wide_min_share",
+                     "outage_min_cells", "outage_min_rate"):
                 setattr(f, k, type(getattr(f, k))(v))
                 continue
             if k == "sa_fallback_call_boost":
@@ -178,6 +202,12 @@ class FaultCfg:
                     if ik not in KIND_SPECS:
                         raise RuntimeError(f"pemdb1.fault.floor_sa_kinds 의 모르는 kind: {ik}")
                 f.floor_sa_kinds = tuple(str(ik) for ik in (v or ()))
+                continue
+            if k == "floor_moved_kinds":
+                for ik in v or ():
+                    if ik not in KIND_SPECS:
+                        raise RuntimeError(f"pemdb1.fault.floor_moved_kinds 의 모르는 kind: {ik}")
+                f.floor_moved_kinds = tuple(str(ik) for ik in (v or ()))
                 continue
             if k == "timeout_wait":
                 for ik, iv in (v or {}).items():
@@ -875,7 +905,7 @@ KIND_SPECS: dict[str, dict] = {
         truth_code="EXTERNAL_SERVER", truth_category="EXTERNAL",
         expect_rules=(), rule_pending=True, expect_geo="WIDE",
         shape="RAMP", series=("transport", "http"),
-        scope_kind="SERVICE", expect_kpi="Q-06",
+        scope_kind="SERVICE", expect_kpi="U-12",
     ),
     # 일본 시연 `j-sc-22` — 결제 앱 DNS 지연. `Q-07` 등급별 산식이 없다(X-4).
     "pay_dns_delay": dict(
@@ -887,14 +917,15 @@ KIND_SPECS: dict[str, dict] = {
     ),
     # 일본 시연 `j-sc-23` — 대형 이벤트. 원인 둘(`EVENT_CROWD` 주 +
     # `UPLINK_RADIO_LIMIT` 부) 중 **주 원인만** 적는다(OPEN-35 안 A).
-    # 파형은 2시간 — 모이는 10분 · 공연 100분 · 흩어지는 10분.
+    # 파형은 25분 — 모이는 3분 · 공연 20분 · 흩어지는 2분. 길이가 판정이 아니라 호가 조건을 채운다
+    # (2026-11-07 사용자 결정 · 전에는 2시간). 대상이 eNB 하나라 지리는 POINT 다.
     # 정답 룰은 graphio `R-41`(2026-11-03 · 카드 23). 그 룰의 CLUSTER(⑤)·up 부
     # 근거(⑥)가 14번 `ran_congestion`(셀 하나 혼잡 · 룰 미배정)과의 경계다.
     "event_crowd": dict(
         title="대형 이벤트 군중 혼잡 + 업링크",
         truth_code="EVENT_CROWD", truth_category="RAN",
-        expect_rules=("R-41",), expect_geo="CLUSTER",
-        shape="STEPS", steps=((10, 0.50), (110, 1.00), (120, 0.40)),
+        expect_rules=("R-41",), expect_geo="POINT",
+        shape="STEPS", steps=((3, 0.50), (23, 1.00), (25, 0.40)),
         series=("transport",),
         scope_kind="CELL", expect_kpi="Q-09",
         detect_min=20,          # Q-09 한 표는 15분 창 — 창 15 + 밀기 5. 초기값
@@ -910,7 +941,7 @@ KIND_SPECS: dict[str, dict] = {
         truth_code="", truth_category="", scored=False,
         expect_rules=(), rule_pending=True, expect_geo="POINT",
         shape="HOLD", series=("transport", "http"),
-        scope_kind="CELL", expect_kpi="Q-02",
+        scope_kind="CELL", expect_kpi="Q-11",
     ),
     "enb_s1_outage": dict(
         title="eNB 전송 단절 (무호)",
@@ -3197,7 +3228,10 @@ def _pay_session(plan, sc, intensity, rng, cell) -> bool:
 
 @booster("event_crowd")
 def _event_crowd_load(sc, intensity) -> float:
-    """활성 가입자 **3배**(확정대장 §11.1). 14번 러시(1.8배)와 같은 장치다."""
+    """활성 가입자 **3배**(확정대장 §11.1). 14번 러시(1.8배)와 같은 장치다.
+
+    추첨 비중만 올린다 — 호 대부분은 `floor_moved_kinds` 의 하한이 평소 호에서 옮겨 온다.
+    """
     return 1.0 + 2.0 * intensity
 
 
@@ -3631,6 +3665,33 @@ def corridor_shape(cells: list[Cell]) -> tuple[float, float]:
     tr, det = sxx + syy, sxx * syy - sxy * sxy
     disc = max(0.0, tr * tr / 4 - det)
     return radius, math.sqrt((tr / 2 + math.sqrt(disc)) / max(1e-9, tr / 2 - math.sqrt(disc)))
+
+
+def geo_shape(cells: list[Cell]) -> str:
+    """셀 묶음의 지리 모양 — graphio `detect/detector.py:geo_pattern` 과 **같은 판정**이다(2026-11-07 · B안).
+
+    정답지 `expect_geo` 는 graphio 가 대상 셀을 잰 모양과 같아야 한다. 생성기는 graphio 를 import
+    하지 않으므로 식을 옮겨 둔다 — 문턱(0.9·2.5·3.2·3.0·60km)과 경도 환산(`111.320 × cos(위도)` ·
+    `graphio.geo.km_per_deg_lon`)을 바꾸면 **양쪽을 함께** 바꾼다. 좌표 없는 셀은 뺀다.
+    """
+    from .geo_lite import haversine_km
+
+    pts = [c for c in cells if c.geo_status == "MAPPED"]
+    if not pts:
+        return "UNKNOWN"
+    if len(pts) == 1:
+        return "POINT"
+    lat = sum(c.latitude for c in pts) / len(pts)
+    lon = sum(c.longitude for c in pts) / len(pts)
+    radius = max(haversine_km(lat, lon, c.latitude, c.longitude) for c in pts)
+    if radius < 0.9:
+        return "POINT"
+    _r, elong = corridor_shape(pts)
+    if radius > 60:
+        return "WIDE" if len(pts) >= 12 else "SCATTER"
+    if elong > CORRIDOR_ELONG and radius > CORRIDOR_RADIUS_KM and len(pts) >= 5:
+        return "CORRIDOR"
+    return "CLUSTER" if radius <= 3.0 else "SCATTER"
 
 
 def route_segment(routes: list, rng: random.Random, want: int = ROUTE_SEG_CELLS,
@@ -4079,6 +4140,30 @@ DETECT_MARGIN_MIN = 5
 MEASURED_SHRINK_RUNS = 2
 
 
+#: L2 사건이 서야 하는 kind — 광역 모양(Core·DNS·CDN·APN·재해)의 장애. 권장 길이와 시작 시간대는 L2
+#: 까지로 잰다. 국소 장애는 L1 묶음이 곧 결론이라 여기 없다(`scenario_report.json` 의 L2 `na`)
+L2_KINDS = frozenset({
+    "gw_resource", "ran_radio", "gw_node_down", "auth_failure", "dns_degradation", "external_server",
+    "transport_loss", "mme_overload", "change_suspected", "cdn_degradation", "pay_dns_delay",
+    "natural_disaster"})
+
+
+def recommended_hours(kind: str) -> dict:
+    """kind 의 권장 시작 시간대(`measured.hours`)와 화면 문구 — 안내이고 주입을 막지 않는다."""
+    from .generator import DIURNAL
+
+    h = measured.hours(kind, DIURNAL, need_l2=kind in L2_KINDS)
+    if not h["n"]:
+        return {**h, "text": "시작 시간대 실측 없음", "text_ja": "開始時間帯の実測なし"}
+    if h["all"]:
+        return {**h, "text": "시작 시간대 제약 없음", "text_ja": "開始時間帯の制約なし"}
+    a, b = f"{h['from']:02d}", f"{h['to']:02d}"
+    if (h["to"] - h["from"]) % 24 > 16:
+        # 하루 대부분이면 **뺄 시각**을 말한다 — "05~03시"는 읽히지 않는다
+        return {**h, "text": f"{b}~{a}시 제외", "text_ja": f"{b}〜{a}時を除く"}
+    return {**h, "text": f"호가 많은 {a}~{b}시", "text_ja": f"呼が多い{a}〜{b}時"}
+
+
 def recommended_duration(kind: str) -> dict | None:
     """kind 의 권장·최소 지속(분)과 그 근거. 모르는 kind 면 None."""
     s = KIND_SPECS.get(kind)
@@ -4117,20 +4202,22 @@ def recommended_duration(kind: str) -> dict | None:
         if detect + DETECT_MARGIN_MIN > rec:
             rec = detect + DETECT_MARGIN_MIN
             why = f"주입 {detect}분 뒤 탐지 + 여유 {DETECT_MARGIN_MIN}"
-    got = measured.summary(kind)
+    need_l2 = kind in L2_KINDS
+    got = measured.summary(kind, need_l2=need_l2)
+    goal = "L2까지" if need_l2 else "정답까지"
     settle = SETTLE_MIN if got["settle"] is None else got["settle"]
     if got["n"]:
         # 최소(`mn`)는 시나리오 모양이 정한 길이다 — 계단·국면을 잘라 내는 권장은 내지 않는다
         real = max(got["to_correct"] + r_out, mn)
         if real >= rec or got["n"] >= MEASURED_SHRINK_RUNS:
-            why = f"실측 {got['n']}회 · 정답까지 {got['to_correct']}분 + 하강 {r_out}"
+            why = f"실측 {got['n']}회 · {goal} {got['to_correct']}분 + 하강 {r_out}"
             return {"recommended": int(real), "min": int(mn), "settle": int(settle),
                     "why": why, "basis": "measured"}
-        why = (f"실측 {got['n']}회 · 정답까지 {got['to_correct']}분"
+        why = (f"실측 {got['n']}회 · {goal} {got['to_correct']}분"
                f"({MEASURED_SHRINK_RUNS}회부터 반영) · {why}")
         return {"recommended": int(rec), "min": int(mn), "settle": int(settle),
                 "why": why, "basis": "shape"}
     if got["runs"]:
-        why += f" · 실측 {got['runs']}회 정답 없음"
+        why += f" · 실측 {got['runs']}회 {'L2 없음' if need_l2 else '정답 없음'}"
     return {"recommended": int(rec), "min": int(mn), "settle": int(settle),
             "why": why, "basis": "shape"}

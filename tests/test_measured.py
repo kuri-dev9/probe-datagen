@@ -18,7 +18,7 @@ from datagen import cli, measured
 from datagen import scenarios as S
 
 REAL = Path(measured.PATH)
-RAMP = "ran_radio"                         # 모양 기준 권장 11 · 최소 6 · 하강 3 (`detect_min` 없는 RAMP — 14번은 detect_min 15 로 20분이 됐다)
+RAMP = "ho_interruption"                         # 모양 기준 권장 11 · 최소 6 · 하강 3 (`detect_min` 없는 RAMP — 14번은 detect_min 15 로 20분이 됐다)
 
 
 def _digest():
@@ -162,9 +162,9 @@ def test_fractional_minutes_round_up(tmp_path_measured):
 # ---------------------------------------------------------------- 최소 길이 보호
 
 @pytest.mark.parametrize("kind,floor", [("capacity_shift", 40), ("natural_disaster", 30), ("earthquake", 20),
-                                        ("event_crowd", 120), ("enb_s1_outage", 20), ("dns_flap", 12)])
+                                        ("event_crowd", 25), ("enb_s1_outage", 20), ("dns_flap", 12)])
 def test_phase_step_and_flap_scenarios_are_never_cut_short(tmp_path_measured, kind, floor):
-    _write(tmp_path_measured, {kind: [_run(correct=5, fault="A"), _run(correct=4, fault="B")]})
+    _write(tmp_path_measured, {kind: [_run(correct=5, fault="A", to_l2_min=5), _run(correct=4, fault="B", to_l2_min=4)]})
     d = _rec(kind)
     assert d["basis"] == "measured" and d["recommended"] >= floor, d
     assert d["recommended"] == max(d["min"], floor if kind != "dns_flap" else 12)
@@ -177,7 +177,7 @@ def test_a_long_measurement_extends_even_a_phase_scenario(tmp_path_measured):
 
 def test_instant_offset_has_zero_ramp_out(tmp_path_measured):
     """즉시 종료형(하강 0)은 `정답까지 + 0` 이다 — 하강을 더하지 않는다."""
-    _write(tmp_path_measured, {"auth_failure": [_run(correct=9)]})
+    _write(tmp_path_measured, {"auth_failure": [_run(correct=9, to_l2_min=9)]})   # L2 kind 는 L2 가 선 회차만 근거다
     d = _rec("auth_failure")
     assert d["recommended"] == 9 and d["why"].endswith("하강 0")
 
@@ -257,7 +257,8 @@ def test_the_real_file_holds_only_the_migrated_pay_dns_delay_record_and_keeps_11
     measured.PATH = REAL                                     # (fixture 가 되돌린다)
     measured._cache.update(mtime=None, data={})
     d = S.recommended_duration("pay_dns_delay")
-    assert (d["recommended"], d["basis"], d["settle"]) == (11, "shape", 6)
+    # pay_dns_delay 는 L2 kind 다 — L2 까지 재지 않은 이 기록은 근거가 못 되어 끝→판정 값도 기본값(SETTLE_MIN)이다
+    assert (d["recommended"], d["basis"], d["settle"]) == (11, "shape", S.SETTLE_MIN)
 
 
 # ---------------------------------------------------------------- CLI

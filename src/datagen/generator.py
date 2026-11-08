@@ -1134,10 +1134,17 @@ class Generator:
                     if s.vendor and s.model:
                         cnt[(s.vendor, s.model)] = cnt.get((s.vendor, s.model), 0) + 1
                 if cnt:
-                    ranked = sorted(cnt.items(), key=lambda kv: -kv[1])
-                    sc.target.vendor_model = ranked[min(2, len(ranked) - 1)][0]
+                    ranked = [vm for vm, _n in sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0]))]
+                    # 실시간 주입이면 3위부터 `UE_MODEL_POOL` 개를 돌린다(2026-11-08 · 8번 F-195 와 26번
+                    # F-145 가 둘 다 `100SS/A3VU`). 3위부터인 것은 지금 기준(`ranked[2]`)을 지킨 것이다 —
+                    # 표본이 넉넉한 상위 기종이다. 기록이 없으면(배치) 지금처럼 3위다
+                    pool = ranked[2:2 + self.UE_MODEL_POOL] or ranked[-1:]
+                    sc.target.vendor_model = self._rotate_pick(
+                        sc, "ue_model", pool, lambda vm: f"UE:{vm[0]}/{vm[1]}") or pool[0]
             if sc.kind in self._APN_KINDS and sc.target.apn is None:
-                sc.target.apn = self._top_apn()
+                pool = self._apn_pool_top()
+                sc.target.apn = (self._rotate_pick(sc, "apn", pool, lambda a: f"APN:{a}")
+                                 if pool else None) or self._top_apn()
 
     def _top_traffic_domain(self) -> str | None:
         """사전에서 **기대 트래픽이 가장 큰 대표 도메인**.
@@ -1156,6 +1163,35 @@ class Generator:
             return None
         hit = {c: sum(w for h, w in share.items() if c in h) for c in cand}
         return max(sorted(hit), key=lambda c: hit[c])
+
+    #: 기종 자동 대상 후보 수 — 기종 순위 3위부터. 초기값
+    UE_MODEL_POOL = 5
+
+    def _rotate_pick(self, sc, group: str, cands: list, keyf):
+        """실시간 주입의 자동 대상 순환 — `faults.TargetHistory` 가 있을 때만(2026-11-08).
+
+        앞선 회차가 쓴 후보를 뒤로 미룬다. 같은 회차는 같은 값이다(rng 를 회차 번호로 시드). 기록이
+        없으면 None — 호출부가 지금 규칙으로 고른다. 판정에는 쓰지 않는다
+        """
+        from . import faults as F
+
+        hist = getattr(self, "target_history", None)
+        fid = str(sc.id)[2:] if str(sc.id).startswith("F-") else ""
+        if hist is None or not fid.isdigit() or not cands:
+            return None
+        used = hist.used(group, int(fid))
+        pick = F._rotating(cands, lambda c: F.target_key([keyf(c)]), used,
+                           random.Random(f"{sc.id}:{group}"))
+        if pick is not None:
+            hist.record(int(fid), group, F.target_key([keyf(pick)]))
+        return pick
+
+    def _apn_pool_top(self) -> list[str]:
+        """`_top_apn` 과 같은 후보(트래픽 상위 3) — 순환이 그 안에서 돈다."""
+        pool = getattr(self, "apn_pool", None)
+        if pool:
+            return list(pool[:3])
+        return list((self.profiles.get("lte_call", SeriesProfile()).extras.get("apn_top") or [])[:3])
 
     def _top_apn(self) -> str | None:
         """트래픽 상위 3위 안의 APN 하나.

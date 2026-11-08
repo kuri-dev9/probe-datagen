@@ -39,9 +39,11 @@ def test_repo_yaml_fault_block_is_accepted_by_the_code():
     S.FaultCfg.from_cfg(_repo_fault_cfg())
 
 
-def test_repo_yaml_raises_mobility_floor_to_16_and_nothing_else():
+def test_repo_yaml_raises_only_mobility_and_event_crowd_floors():
+    """9번 16호, 23번 120호(eNB 하나에 몰아 셀 1분 서버 2곳을 채운다 · 평소 호에서 옮겨 온다 `floor_moved_kinds`)."""
     f = S.FaultCfg.from_cfg(_repo_fault_cfg())
-    assert f.floor_by_kind == {"mobility": 16.0}
+    assert f.floor_by_kind == {"mobility": 16.0, "event_crowd": 120.0}
+    assert f.floor_moved_kinds == ("event_crowd",)
     assert f.floor_per_cell == S.FaultCfg().floor_per_cell, "다른 시나리오의 하한을 건드리면 안 된다"
 
 

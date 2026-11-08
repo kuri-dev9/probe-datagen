@@ -166,7 +166,7 @@ def test_recommended_is_detect_min_plus_margin_for_16_and_17():
 def test_shape_based_recommendation_for_16_is_30_and_17_is_25(monkeypatch):
     """실측이 있으면 실측이 앞선다 — 모양 근거만 본다."""
     from datagen import measured
-    monkeypatch.setattr(measured, "summary", lambda k: {"n": 0, "runs": 0, "to_correct": 0, "settle": None})
+    monkeypatch.setattr(measured, "summary", lambda k, **kw: {"n": 0, "runs": 0, "to_correct": 0, "settle": None})
     assert S.recommended_duration("anchor_saturation")["recommended"] == 30
     assert S.recommended_duration("anchor_saturation")["min"] == 25
     assert S.recommended_duration("sa_fallback")["recommended"] == 25

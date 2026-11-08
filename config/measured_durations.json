@@ -7,6 +7,7 @@
       "intensity": null,
       "recorded_at": "2026-11-05T17:48:52",
       "result": "missed",
+      "start_at": "2026-11-05T17:05:23",
       "to_correct_min": null,
       "to_first_event_min": null,
       "to_incident_min": null
@@ -18,6 +19,7 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-06T18:34:46",
       "result": "missed",
+      "start_at": "2026-11-06T17:55:22",
       "to_correct_min": null,
       "to_first_event_min": null,
       "to_incident_min": null
@@ -29,6 +31,7 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-06T23:25:22",
       "result": "correct",
+      "start_at": "2026-11-06T22:48:22",
       "to_correct_min": 12.0,
       "to_first_event_min": 11.0,
       "to_incident_min": 11.0
@@ -40,6 +43,7 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-07T02:47:27",
       "result": "correct",
+      "start_at": "2026-11-07T02:13:22",
       "to_correct_min": 12.0,
       "to_first_event_min": 11.0,
       "to_incident_min": 11.0
@@ -51,9 +55,64 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-07T06:32:25",
       "result": "correct",
+      "start_at": "2026-11-07T05:59:22",
       "to_correct_min": 15.3,
       "to_first_event_min": 12.6,
       "to_incident_min": 12.6
+    },
+    {
+      "duration_min": 35.0,
+      "end_to_final_min": null,
+      "fault": "F-199",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T04:56:51",
+      "result": "correct",
+      "start_at": "2026-11-08T04:17:22",
+      "to_correct_min": 12.0,
+      "to_first_event_min": 12.0,
+      "to_incident_min": 12.0,
+      "to_l2_min": null
+    }
+  ],
+  "auth_failure": [
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-178",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T16:55:45",
+      "result": "correct",
+      "start_at": "2026-11-07T16:39:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": null
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-180",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T17:50:30",
+      "result": "correct",
+      "start_at": "2026-11-07T17:35:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": 0.0
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-208",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T10:51:55",
+      "result": "correct",
+      "start_at": "2026-11-08T10:36:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": 5.0
     }
   ],
   "capacity_shift": [
@@ -64,6 +123,7 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-06T17:33:56",
       "result": "missed",
+      "start_at": "2026-11-06T16:59:22",
       "to_correct_min": null,
       "to_first_event_min": null,
       "to_incident_min": null
@@ -75,6 +135,7 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-07T04:55:24",
       "result": "missed",
+      "start_at": "2026-11-07T04:11:22",
       "to_correct_min": null,
       "to_first_event_min": null,
       "to_incident_min": null
@@ -86,9 +147,81 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-07T08:48:03",
       "result": "correct",
+      "start_at": "2026-11-07T08:03:22",
       "to_correct_min": 17.5,
       "to_first_event_min": 17.0,
       "to_incident_min": 17.0
+    }
+  ],
+  "cdn_degradation": [
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-174",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T15:02:12",
+      "result": "wrong",
+      "start_at": "2026-11-07T14:46:22",
+      "to_correct_min": null,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": null
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-177",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T16:27:36",
+      "result": "correct",
+      "start_at": "2026-11-07T16:12:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": 0.0
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-210",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T12:04:30",
+      "result": "correct",
+      "start_at": "2026-11-08T11:48:22",
+      "to_correct_min": 4.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": 4.0
+    }
+  ],
+  "change_suspected": [
+    {
+      "duration_min": 10.0,
+      "end_to_final_min": null,
+      "fault": "F-192",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T00:33:43",
+      "result": "wrong",
+      "start_at": "2026-11-08T00:19:22",
+      "to_correct_min": null,
+      "to_first_event_min": 2.0,
+      "to_incident_min": 2.0,
+      "to_l2_min": null
+    }
+  ],
+  "dns_degradation": [
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-193",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T01:01:56",
+      "result": "correct",
+      "start_at": "2026-11-08T00:46:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": 0.0
     }
   ],
   "event_crowd": [
@@ -99,9 +232,91 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-07T07:51:30",
       "result": "missed",
+      "start_at": "2026-11-07T06:49:22",
       "to_correct_min": null,
       "to_first_event_min": null,
       "to_incident_min": null
+    },
+    {
+      "duration_min": 25.0,
+      "end_to_final_min": null,
+      "fault": "F-167",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T11:50:57",
+      "result": "correct",
+      "start_at": "2026-11-07T11:22:22",
+      "to_correct_min": 8.2,
+      "to_first_event_min": 6.6,
+      "to_incident_min": 6.6
+    },
+    {
+      "duration_min": 25.0,
+      "end_to_final_min": null,
+      "fault": "F-203",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T08:32:54",
+      "result": "correct",
+      "start_at": "2026-11-08T08:01:22",
+      "to_correct_min": 3.0,
+      "to_first_event_min": 3.0,
+      "to_incident_min": 3.0,
+      "to_l2_min": null
+    }
+  ],
+  "external_server": [
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-179",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T17:22:31",
+      "result": "correct",
+      "start_at": "2026-11-07T17:07:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": null
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-181",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T18:18:34",
+      "result": "correct",
+      "start_at": "2026-11-07T18:03:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": 0.0
+    }
+  ],
+  "gw_node_down": [
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-173",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T14:35:26",
+      "result": "correct",
+      "start_at": "2026-11-07T14:19:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": 0.0
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-211",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T12:33:09",
+      "result": "correct",
+      "start_at": "2026-11-08T12:17:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": 0.0
     }
   ],
   "gw_resource": [
@@ -112,6 +327,7 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-06T13:07:01",
       "result": "correct",
+      "start_at": "2026-11-06T11:44:22",
       "to_correct_min": 0.0,
       "to_first_event_min": 0.0,
       "to_incident_min": 0.0
@@ -123,9 +339,86 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-06T16:18:21",
       "result": "correct",
+      "start_at": "2026-11-06T15:37:22",
       "to_correct_min": 0.0,
       "to_first_event_min": 0.0,
       "to_incident_min": 0.0
+    },
+    {
+      "duration_min": 6.0,
+      "end_to_final_min": null,
+      "fault": "F-170",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T13:11:56",
+      "result": "correct",
+      "start_at": "2026-11-07T13:00:22",
+      "to_correct_min": 4.0,
+      "to_first_event_min": 0.5,
+      "to_incident_min": 0.5
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-168",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T13:13:53",
+      "result": "correct",
+      "start_at": "2026-11-07T12:04:22",
+      "to_correct_min": 2.3,
+      "to_first_event_min": 0.5,
+      "to_incident_min": 0.5
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-172",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T14:06:44",
+      "result": "correct",
+      "start_at": "2026-11-07T13:52:22",
+      "to_correct_min": 1.4,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": 0.0
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-175",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T15:29:35",
+      "result": "correct",
+      "start_at": "2026-11-07T15:16:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": 0.0
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-204",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T08:59:13",
+      "result": "correct",
+      "start_at": "2026-11-08T08:43:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": 0.0
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-206",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T09:54:33",
+      "result": "correct",
+      "start_at": "2026-11-08T09:39:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": 0.0
     }
   ],
   "ho_interruption": [
@@ -136,6 +429,7 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-06T11:39:44",
       "result": "wrong",
+      "start_at": "2026-11-05T17:30:30",
       "to_correct_min": null,
       "to_first_event_min": 4.0,
       "to_incident_min": null
@@ -147,9 +441,23 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-06T14:28:47",
       "result": "correct",
+      "start_at": "2026-11-06T13:53:22",
       "to_correct_min": 2.0,
       "to_first_event_min": 2.0,
       "to_incident_min": 2.0
+    },
+    {
+      "duration_min": 15.0,
+      "end_to_final_min": null,
+      "fault": "F-194",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T01:33:54",
+      "result": "correct",
+      "start_at": "2026-11-08T01:14:22",
+      "to_correct_min": 4.0,
+      "to_first_event_min": 4.0,
+      "to_incident_min": 4.0,
+      "to_l2_min": null
     }
   ],
   "ims_pdn": [
@@ -160,9 +468,75 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-06T13:07:01",
       "result": "wrong",
+      "start_at": "2026-11-06T12:11:22",
       "to_correct_min": null,
       "to_first_event_min": 7.0,
       "to_incident_min": 7.0
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-176",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T15:59:41",
+      "result": "correct",
+      "start_at": "2026-11-07T15:44:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": null
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-182",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T18:46:56",
+      "result": "correct",
+      "start_at": "2026-11-07T18:31:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": null
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-184",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T20:01:42",
+      "result": "correct",
+      "start_at": "2026-11-07T19:46:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": null
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-209",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T11:30:11",
+      "result": "correct",
+      "start_at": "2026-11-08T11:14:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": null
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-212",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T13:02:01",
+      "result": "correct",
+      "start_at": "2026-11-08T12:46:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": null
     }
   ],
   "mme_overload": [
@@ -173,6 +547,7 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-06T13:07:01",
       "result": "correct",
+      "start_at": "2026-11-06T11:57:22",
       "to_correct_min": 2.0,
       "to_first_event_min": 1.0,
       "to_incident_min": 2.0
@@ -184,9 +559,62 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-06T16:25:52",
       "result": "correct",
+      "start_at": "2026-11-06T16:05:22",
       "to_correct_min": 0.0,
       "to_first_event_min": 0.0,
       "to_incident_min": 0.0
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-169",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T13:13:52",
+      "result": "correct",
+      "start_at": "2026-11-07T12:32:22",
+      "to_correct_min": 7.1,
+      "to_first_event_min": 2.6,
+      "to_incident_min": 2.6,
+      "to_l2_min": 7.1
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-171",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T13:40:10",
+      "result": "correct",
+      "start_at": "2026-11-07T13:24:22",
+      "to_correct_min": 4.5,
+      "to_first_event_min": 1.6,
+      "to_incident_min": 1.6,
+      "to_l2_min": 3.7
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-205",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T09:26:32",
+      "result": "correct",
+      "start_at": "2026-11-08T09:11:22",
+      "to_correct_min": 1.0,
+      "to_first_event_min": 1.0,
+      "to_incident_min": 1.0,
+      "to_l2_min": 1.0
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-207",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T10:23:55",
+      "result": "correct",
+      "start_at": "2026-11-08T10:07:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": 0.0
     }
   ],
   "mobility": [
@@ -197,6 +625,7 @@
       "intensity": null,
       "recorded_at": "2026-11-05T17:48:52",
       "result": "missed",
+      "start_at": "2026-11-05T17:05:23",
       "to_correct_min": null,
       "to_first_event_min": null,
       "to_incident_min": null
@@ -208,9 +637,36 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-06T16:54:20",
       "result": "correct",
+      "start_at": "2026-11-06T16:33:22",
       "to_correct_min": 5.0,
       "to_first_event_min": 0.0,
       "to_incident_min": 0.0
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-186",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T21:28:45",
+      "result": "correct",
+      "start_at": "2026-11-07T21:13:22",
+      "to_correct_min": 2.0,
+      "to_first_event_min": 2.0,
+      "to_incident_min": 2.0,
+      "to_l2_min": null
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-191",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T00:06:34",
+      "result": "correct",
+      "start_at": "2026-11-07T23:51:22",
+      "to_correct_min": 2.0,
+      "to_first_event_min": 2.0,
+      "to_incident_min": 2.0,
+      "to_l2_min": null
     }
   ],
   "natural_disaster": [
@@ -221,9 +677,36 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-06T11:39:43",
       "result": "correct",
+      "start_at": "2026-11-06T10:52:23",
       "to_correct_min": 5.0,
       "to_first_event_min": null,
       "to_incident_min": 5.0
+    },
+    {
+      "duration_min": 30.0,
+      "end_to_final_min": null,
+      "fault": "F-183",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T19:33:48",
+      "result": "correct",
+      "start_at": "2026-11-07T18:59:22",
+      "to_correct_min": 5.0,
+      "to_first_event_min": 5.0,
+      "to_incident_min": 5.0,
+      "to_l2_min": 5.0
+    },
+    {
+      "duration_min": 30.0,
+      "end_to_final_min": null,
+      "fault": "F-189",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T23:11:54",
+      "result": "correct",
+      "start_at": "2026-11-07T22:37:22",
+      "to_correct_min": 13.0,
+      "to_first_event_min": 13.0,
+      "to_incident_min": 13.0,
+      "to_l2_min": 13.0
     }
   ],
   "nsa_nr_leg": [
@@ -234,6 +717,7 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-06T11:39:44",
       "result": "missed",
+      "start_at": "2026-11-05T17:45:23",
       "to_correct_min": null,
       "to_first_event_min": null,
       "to_incident_min": null
@@ -245,9 +729,23 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-06T13:52:07",
       "result": "correct",
+      "start_at": "2026-11-06T13:07:22",
       "to_correct_min": 5.0,
       "to_first_event_min": 5.0,
       "to_incident_min": 5.0
+    },
+    {
+      "duration_min": 20.0,
+      "end_to_final_min": null,
+      "fault": "F-197",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T03:25:45",
+      "result": "correct",
+      "start_at": "2026-11-08T03:01:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": null
     }
   ],
   "pay_dns_delay": [
@@ -258,9 +756,23 @@
       "intensity": null,
       "recorded_at": "2026-11-03T18:52:00",
       "result": "correct",
+      "start_at": null,
       "to_correct_min": 3,
       "to_first_event_min": null,
       "to_incident_min": null
+    },
+    {
+      "duration_min": 15.0,
+      "end_to_final_min": null,
+      "fault": "F-198",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T04:05:11",
+      "result": "correct",
+      "start_at": "2026-11-08T03:45:22",
+      "to_correct_min": 3.0,
+      "to_first_event_min": 3.0,
+      "to_incident_min": 3.0,
+      "to_l2_min": 3.0
     }
   ],
   "ran_congestion": [
@@ -271,6 +783,7 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-06T22:34:06",
       "result": "missed",
+      "start_at": "2026-11-06T22:01:22",
       "to_correct_min": null,
       "to_first_event_min": null,
       "to_incident_min": null
@@ -282,6 +795,7 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-07T00:18:49",
       "result": "wrong",
+      "start_at": "2026-11-06T23:42:22",
       "to_correct_min": null,
       "to_first_event_min": 13.0,
       "to_incident_min": 13.0
@@ -293,9 +807,51 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-07T02:03:16",
       "result": "correct",
+      "start_at": "2026-11-07T01:26:22",
       "to_correct_min": 15.0,
       "to_first_event_min": 9.0,
       "to_incident_min": 9.0
+    },
+    {
+      "duration_min": 30.0,
+      "end_to_final_min": null,
+      "fault": "F-200",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T05:44:46",
+      "result": "wrong",
+      "start_at": "2026-11-08T05:09:22",
+      "to_correct_min": null,
+      "to_first_event_min": 11.0,
+      "to_incident_min": 11.0,
+      "to_l2_min": null
+    },
+    {
+      "duration_min": 30.0,
+      "end_to_final_min": null,
+      "fault": "F-202",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T07:20:47",
+      "result": "correct",
+      "start_at": "2026-11-08T06:45:22",
+      "to_correct_min": 11.0,
+      "to_first_event_min": 11.0,
+      "to_incident_min": 11.0,
+      "to_l2_min": null
+    }
+  ],
+  "ran_radio": [
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-187",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T21:56:43",
+      "result": "correct",
+      "start_at": "2026-11-07T21:41:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": null
     }
   ],
   "sa_fallback": [
@@ -306,6 +862,7 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-06T13:07:01",
       "result": "missed",
+      "start_at": "2026-11-06T12:36:22",
       "to_correct_min": null,
       "to_first_event_min": null,
       "to_incident_min": null
@@ -317,6 +874,7 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-07T01:11:06",
       "result": "wrong",
+      "start_at": "2026-11-07T00:36:22",
       "to_correct_min": null,
       "to_first_event_min": 8.0,
       "to_incident_min": 8.0
@@ -328,6 +886,7 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-07T03:34:21",
       "result": "correct",
+      "start_at": "2026-11-07T03:00:22",
       "to_correct_min": 10.0,
       "to_first_event_min": 9.0,
       "to_incident_min": 9.0
@@ -339,9 +898,53 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-07T05:48:00",
       "result": "correct",
+      "start_at": "2026-11-07T05:13:22",
       "to_correct_min": 17.3,
       "to_first_event_min": 15.6,
       "to_incident_min": 15.6
+    },
+    {
+      "duration_min": 30.0,
+      "end_to_final_min": null,
+      "fault": "F-201",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T06:31:00",
+      "result": "correct",
+      "start_at": "2026-11-08T05:56:22",
+      "to_correct_min": 3.0,
+      "to_first_event_min": 3.0,
+      "to_incident_min": 3.0,
+      "to_l2_min": null
+    }
+  ],
+  "son_param_change": [
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-188",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T22:24:41",
+      "result": "correct",
+      "start_at": "2026-11-07T22:09:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": null
+    }
+  ],
+  "transport_loss": [
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": null,
+      "fault": "F-190",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-07T23:39:40",
+      "result": "correct",
+      "start_at": "2026-11-07T23:24:22",
+      "to_correct_min": 0.0,
+      "to_first_event_min": 0.0,
+      "to_incident_min": 0.0,
+      "to_l2_min": null
     }
   ],
   "ue_model": [
@@ -352,9 +955,36 @@
       "intensity": 1.0,
       "recorded_at": "2026-11-06T13:07:01",
       "result": "correct",
+      "start_at": "2026-11-06T12:22:22",
       "to_correct_min": 5.0,
       "to_first_event_min": 5.0,
       "to_incident_min": 5.0
+    },
+    {
+      "duration_min": 15.0,
+      "end_to_final_min": null,
+      "fault": "F-195",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T02:05:56",
+      "result": "correct",
+      "start_at": "2026-11-08T01:46:22",
+      "to_correct_min": 7.0,
+      "to_first_event_min": 7.0,
+      "to_incident_min": 7.0,
+      "to_l2_min": null
+    },
+    {
+      "duration_min": 15.0,
+      "end_to_final_min": null,
+      "fault": "F-196",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-08T02:50:25",
+      "result": "correct",
+      "start_at": "2026-11-08T02:29:22",
+      "to_correct_min": 3.0,
+      "to_first_event_min": 3.0,
+      "to_incident_min": 3.0,
+      "to_l2_min": null
     }
   ]
 }
