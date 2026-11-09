@@ -336,7 +336,8 @@ def _fit_target(kind: str, rec: SC.Rec, cell) -> SC.Target:
         t.pgw_id = rec.get("ims_PGW_ID") or cell.ims_pgw_id
     else:
         t.pgw_id = rec.get("PGW_ID") or cell.pgw_id
-    if kind == "mobility":
+    if kind in ("mobility", "son_param_change"):
+        # 25번은 2026-11-09 부터 쌍의 출발 셀에서 시작한 호만 끊는다(`focus_pairs`) — 이 셀이 출발 셀이다
         t.cell_pairs = [(cell.cell_key, cell.cell_key)]
     return t
 

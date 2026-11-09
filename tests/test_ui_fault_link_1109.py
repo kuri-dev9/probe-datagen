@@ -138,7 +138,7 @@ def test_the_map_url_carries_the_fault_the_first_incident_and_all_ids():
 def test_the_latest_result_and_the_history_table_link_their_fault_ids():
     h = html("scen")
     assert "['장애 ID',fmap(l.fault),'field:fault']" in h
-    assert "table(s.history,['장애 ID','시각','상태','요약'],x=>[fmap(x.fault)," in h
+    assert "table(s.history,['장애 ID','시각','상태','L3','요약'],x=>[fmap(x.fault)," in h
     assert "['장애 ID',val(l.fault)" not in h
     # 실측 소요 표(`to_first_event_min` …)의 장애 ID 는 회차 표가 아니라 링크로 두지 않았다 — 같은 `val(x.fault)` 가 거기 있다
     assert h.count("x=>[val(x.fault)") == 1 and h.count("x=>[fmap(x.fault)") == 1

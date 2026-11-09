@@ -277,7 +277,8 @@ def test_ho_interruption_without_target_uses_the_route_segment():
 
 
 def test_pairs_are_neighbouring_cells_and_count_is_cells_minus_one():
-    sc = _build("ho_interruption", routes=[_line_route()])
+    # 15번은 범위(%) 배치로 바뀌었다(2026-11-09) — 연속 구간(`route_segment`)은 mobility 가 그대로 쓴다
+    sc = _build("mobility", routes=[_line_route()])
     pairs = sc.target.cell_pairs
     assert len(pairs) == len(sc.target.cell_keys) - 1
     keys = [c.cell_key for c in _line_route().cells]
@@ -294,7 +295,8 @@ def test_no_routes_falls_back_to_corridor_cells_with_one_warning_line(capsys):
 
 
 def test_route_without_the_shape_falls_back_and_says_so(capsys):
-    sc = _build("ho_interruption", routes=[_line_route(step_km=0.05)])
+    # 모양을 맞춰 고르는 것은 연속 구간(mobility)이다 — 15번 범위 배치는 모양을 맞추지 않는다(test_route_range_1109)
+    sc = _build("mobility", routes=[_line_route(step_km=0.05)])
     out = capsys.readouterr().out
     assert sc.target.route_seg is None and "모양 미달" in out
 
@@ -325,7 +327,8 @@ def test_son_param_change_uses_the_route_segment_like_ho_interruption():
     """25번도 노선 구간이다(2026-11-07 · B안) — 정답 CORRIDOR 인데 방위각 띠는 도심에서 POINT 가 됐다."""
     b = _build("son_param_change", routes=[_line_route()])
     assert b.target.route_seg is not None
-    assert all(x != y for x, y in b.target.cell_pairs) and len(b.target.cell_pairs) >= 4
+    # 2026-11-09 — 구간은 노선에서 고르되 실패는 출발 셀 하나의 이웃 쌍 2개로 좁힌다(`scenarios.son_focus`)
+    assert all(x != y for x, y in b.target.cell_pairs) and len(b.target.cell_pairs) == 2
 
 
 def test_same_fault_id_and_seed_give_the_same_segment_across_builds():
@@ -339,8 +342,8 @@ def test_same_fault_id_and_seed_give_the_same_segment_across_builds():
 
 def test_like_fault_reproduces_the_original_target_resolution():
     rt = _line_route(n=120, step_km=0.5)
-    orig = _build("ho_interruption", routes=[rt], seed=5, fid=9)
-    row = {"fault_id": 30, "kind": "ho_interruption", "target": "LIKE:9", "start_ts": T0 + timedelta(minutes=2),
+    orig = _build("mobility", routes=[rt], seed=5, fid=9)
+    row = {"fault_id": 30, "kind": "mobility", "target": "LIKE:9", "start_ts": T0 + timedelta(minutes=2),
            "duration_min": 30, "intensity": 1.0}
     like = faults.build(row, _grid_cells(), T0, faults.target_rng(5, 30), seed=5, routes=[rt])
     assert like.target.cell_keys == orig.target.cell_keys
@@ -358,7 +361,7 @@ def test_other_kinds_with_routes_given_are_unaffected():
 
 
 def test_truth_carries_route_seg_and_cell_pairs_only_for_a_route_target():
-    sc = _build("ho_interruption", routes=[_line_route()])
+    sc = _build("mobility", routes=[_line_route()])
     t = sc.as_truth()
     assert t["route_seg"] == sc.target.route_seg
     assert t["cell_pairs"] == [list(p) for p in sc.target.cell_pairs]

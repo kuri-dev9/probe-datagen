@@ -486,6 +486,19 @@ class Scenario:
     flap_low: float = 0.0
     #: 계열별 시작 지연(분) — SC-21 의 "전송망 → 2분 뒤 DNS"
     series_offset: dict[str, int] = field(default_factory=dict)
+    #: 전환 실패를 몰아 넣을 셀 쌍 수 — 25번(`son_param_change`)만 쓴다(2026-11-09). 0 이면 쌍 목록 전부에
+    #: 흩는다(9·15번과 같은 옛 동작). 대상 좁히기는 `faults.son_focus`, 주입은 `_son_param_change`
+    focus_pairs: int = 0
+    #: **이 시간대에만 나오는 장애**의 시작 시간대 `((시작시, 끝시), ...)` — 끝시는 넣지 않는다(2026-11-09
+    #: 사용자 결정). 15번(`ho_interruption`)은 전철 이동 세션이 몰리는 출퇴근에만 선다. 실측 시간대
+    #: (`measured.hours`)보다 앞선다 — 실측은 "선 적이 있는 시각"이고 이것은 "여기서만 선다"는 모양이다.
+    #: 주입을 막지 않는다 — 화면이 가상 시각 버튼(각 구간 가운데 정시)을 보인다. 비면 실측을 따른다
+    rush_hours: tuple[tuple[int, int], ...] = ()
+    #: **대상을 고를 때 맞출 모양** — 비면 `expect_geo` 다. 정답 모양과 고르는 모양이 다른 kind 만 적는다
+    #: (2026-11-09 · 25번). 25번은 노선 구간(CORRIDOR)에서 이웃 관계를 고른 뒤 셀 1~3개로 좁혀
+    #: (`son_focus`) 실제 장애는 점이다. 둘을 한 키로 두면 정답을 POINT 로 고치는 순간 `_route_target`
+    #: 이 "구간 모양 ≠ POINT" 로 늘 후퇴해 대상 선택이 방위각 띠로 바뀐다
+    select_geo: str | None = None
 
     def intensity(self, minute: int) -> float:
         """분 슬롯에서의 장애 강도 0~peak."""
@@ -827,11 +840,18 @@ KIND_SPECS: dict[str, dict] = {
         title="SON 파라미터 변경 후 계단형 저하 (H/O)",
         truth_code="CHANGE_SUSPECTED", truth_category="CHANGE",
         # R-17 은 셀 쌍 전환 실패로 서지만 RAN_MOBILITY_ISSUE 를 낸다(11-04 25r4 에서 1위였다)
-        expect_rules=("R-11",), expect_geo="CORRIDOR",
+        # 정답 모양은 POINT 다(2026-11-09 사용자 결정) — 실패가 출발 셀 하나와 이웃 1~2곳에만 난다
+        # (`focus_pairs`). F-229 실측도 셀 1개 POINT 였다. 대상은 지금처럼 노선 구간에서 고른다(`select_geo`)
+        expect_rules=("R-11",), expect_geo="POINT", select_geo="CORRIDOR",
         expect_alternatives={"R-17": "RAN_MOBILITY_ISSUE"},
         shape="STEP", ramp_in=1, scope_kind="CELL", expect_kpi="C-04",
         onset="instant", offset="instant",
         grade="TOP3",
+        # **실패를 셀 하나의 이웃 관계 1~2개에 몰아 넣는다**(2026-11-09). SON 은 셀 쌍마다(이웃 관계마다)
+        # 핸드오버 파라미터를 바꾼다 — 잘못 바꾸면 그 셀에서 그 이웃으로 가는 전환만 실패한다. 전에는
+        # 출발 셀을 버리고 도착 셀 8곳에 고르게 뽑아 실패가 최대 15×8 쌍으로 퍼졌고, "한 이웃 관계에
+        # 몰렸다"는 설정 변경의 지문이 데이터에 없었다(리오 확인 · `scenarios.py:2141`). **초기값이다**
+        focus_pairs=2,
     ),
     # 일본 시연 `j-sc-14` — 도심 역 저녁 러시. **원인 코드와 룰은 graphio
     # 에 아직 없다**(확정대장 §4.2 A-4 · 룰 번호 미정). gen 은 XDR 과 정답만
@@ -854,6 +874,9 @@ KIND_SPECS: dict[str, dict] = {
         expect_rules=("R-40",), expect_geo="CORRIDOR",
         shape="RAMP", series=("lte_call", "transport"),
         scope_kind="CELL", expect_kpi="Q-08",
+        # 출퇴근에만 나온다 — 노선 셀에 이동 세션이 몰려야 전환이 잦다. 낮·밤에는 표본이 모자라
+        # 서지 않는다(2026-11-09 사용자: "지금 시간대나 일반 시간에는 안 나올 아이"). **초기값이다**
+        rush_hours=((7, 9), (17, 19)),
     ),
     # 일본 시연 `j-sc-27` — 지진. 정지는 `g-sc-17` 과 같은 원인(R-36)이고
     # 다른 점은 **정지 셀의 가입자가 이웃 셀로 옮겨 붙는다**는 것이다.
@@ -2090,19 +2113,29 @@ def _son_param_change(rec, sc, intensity, rng, cell) -> bool:
 
     주입은 SC-09 와 **같은 한 건**이다(`_handover_failure`). 다른 것은 시간
     모양(`STEP` · `ramp_in=1`)과 정답(`CHANGE_SUSPECTED`)뿐이다.
+
+    **`focus_pairs` 가 있으면 그 쌍의 출발 셀에서 시작한 호만 끊는다**(2026-11-09). 실패는 그 호의
+    `First_*`(출발 셀)에서 쌍의 도착 셀(`Last_*`)로 간다 — 호 안의 전환 기록 규칙이 그렇다
+    (`pemdb1._apply_handover` · First = 전환 전, Last = 전환 후). 강도·확률·106 절단·PSF 비율은 그대로고,
+    실패가 퍼지던 자리만 모은다. 9·15번(`mobility`·`ho_interruption`)은 이 분기를 지나지 않는다
     """
     if cell.cell_key not in sc.active_cells_cache:
         return False
+    pairs = None
+    if sc.focus_pairs:
+        pairs = [p for p in sc.target.cell_pairs if p[0] == cell.cell_key]
+        if not pairs:
+            return False
     if rng.random() >= intensity * 0.50:
         return False
-    return _handover_failure(rec, sc, rng)
+    return _handover_failure(rec, sc, rng, pairs=pairs)
 
 
 #: 전환 실패가 실리는 절차 — 실측 해제 `106` 14호의 `call_type` 전수.
 _HO_CALL_TYPES = frozenset({"3", "4", "5"})
 
 
-def _handover_failure(rec, sc, rng) -> bool:
+def _handover_failure(rec, sc, rng, pairs=None) -> bool:
     """셀 쌍의 핸드오버 실패 한 건 — SC-09 와 J-SC-25 가 같이 쓴다.
 
     **실측 모양이다**(2026-10-28 · R1+FAIL 의 해제 `106` 14호 + PSF 1호).
@@ -2136,9 +2169,11 @@ def _handover_failure(rec, sc, rng) -> bool:
         rec.set("PathSwitchFailure_count", 1)
         _set_first(rec, 2, 100, 3, t)       # Unspecified · PathSwitchRequest
     set_nr_change(rec, nr)
-    if sc.target.cell_pairs and rng.random() < 0.80:
-        # 실측 14호 중 11호가 Last 셀이 First 와 다르다 — 옮겨 간 쪽에서 끊긴다
-        _src, dst = rng.choice(sc.target.cell_pairs)
+    pool = pairs if pairs is not None else sc.target.cell_pairs
+    if pool and rng.random() < 0.80:
+        # 실측 14호 중 11호가 Last 셀이 First 와 다르다 — 옮겨 간 쪽에서 끊긴다.
+        # ``pairs`` 를 주면(25번) 그 호의 출발 셀에서 나가는 쌍만이다 — 출발 셀은 그 호의 First 다
+        _src, dst = rng.choice(pool)
         enb, _, cid = dst.rpartition("-")
         rec.set("Last_eNB_ID", enb)
         rec.set("Last_Cell_ID", cid)
@@ -3736,12 +3771,200 @@ def route_segment(routes: list, rng: random.Random, want: int = ROUTE_SEG_CELLS,
     return None
 
 
+#: 15번 **범위(%)** — 노선 셀 중 몇 %에 넣나(2026-11-09 사용자 결정 · 강도를 범위로 바꾼다). 기본·하한·상한.
+#: 셀 수는 `max(ROUTE_SEG_CELLS, round(노선 셀 × 범위))` 라 10% 여도 예전 회차(15셀)와 같은 규모다. 초기값
+ROUTE_RANGE_DEFAULT = 50
+ROUTE_RANGE_MIN = 10
+ROUTE_RANGE_MAX = 100
+#: 100% 미만일 때 조각 하나의 셀 수 — 역 1~2구간. 조각 사이에는 최소 한 역을 비운다. 초기값
+ROUTE_PIECE_MIN = 3
+ROUTE_PIECE_MAX = 6
+
+
+def route_range(pct) -> int:
+    """범위 값을 [하한, 상한] 정수 %로 — 못 읽으면 기본값."""
+    try:
+        v = round(float(pct))
+    except (TypeError, ValueError):
+        return ROUTE_RANGE_DEFAULT
+    return max(ROUTE_RANGE_MIN, min(ROUTE_RANGE_MAX, v))
+
+
+def _split(total: int, k: int, lo: int, hi: int | None, rng: random.Random) -> list[int]:
+    """``total`` 을 ``k`` 개로 — 각각 ``lo`` 이상(``hi`` 가 있으면 이하), 나머지는 무작위로 얹는다."""
+    out = [lo] * k
+    left = total - lo * k
+    while left > 0:
+        room = [i for i in range(k) if hi is None or out[i] < hi]
+        if not room:
+            break
+        out[rng.choice(room)] += 1
+        left -= 1
+    return out
+
+
+def route_spread(routes: list, rng: random.Random, pct: int = ROUTE_RANGE_DEFAULT,
+                 ) -> tuple[list[Cell], list[tuple[str, str]], dict] | None:
+    """15번 대상 — 노선 하나에서 **범위(%)만큼의 셀을 떨어진 조각 여러 개**로 고른다(2026-11-09).
+
+    시나리오 원문(PPT 9쪽 노선 스트립)은 노선 위 **여러 역에서 산발적으로** 나는 전환 정체다. 예전
+    `route_segment` 는 연속 15셀 한 덩어리였다. 사용자 결정: 강도를 범위로 바꾸고, 100% 는 한 바퀴 전체,
+    그 아래는 셀 3~6개(역 1~2개) 조각을 **사이에 최소 한 역을 비우고** 흩어 놓는다.
+
+    * **역 단위로 자른다.** 칸 수로 간격을 두면 역 경계와 어긋나 "사이에 다른 역이 없는" 간격이 생겼다
+      (범위 60% 에서 60회 중 40회). 조각은 역 1~2개이고, 3셀이 안 되면 이웃 역을 하나 붙인다.
+    * 셀 수 목표 = ``max(ROUTE_SEG_CELLS, round(노선 셀 × pct))`` — 역 단위라 몇 셀 넘칠 수 있다.
+      목표보다 적으면 간격을 줄여 조각을 넓힌다.
+    * 조각 수는 간격(역 하나 이상)이 들어갈 만큼만이다. 범위가 크면(야마노테선 약 50% 초과) 간격이
+      모자라 조각이 **역 2개보다 커진다** — 조각 크기보다 범위를 지킨다.
+    * 노선 칸에는 같은 셀이 두 번 오는 자리가 있다(야마노테선 90칸 · 고유 88셀) — 처음 나온 칸만 쓴다.
+    * 쌍은 조각 안의 이웃 칸끼리다. 한 바퀴 전체면 끝 칸과 첫 칸도 잇는다.
+    * 모양을 맞춰 고르지 않는다 — 고른 셀 전체의 모양(`geo_shape`)을 그대로 적는다(정답지 `expect_geo`).
+
+    반환은 ``(셀 목록, 쌍 목록, 정보)`` 이고, 노선이 없으면 ``None`` 이다.
+    """
+    if not routes:
+        return None
+    pct = route_range(pct)
+    rt = routes[rng.randrange(len(routes))]
+    first: dict[str, int] = {}
+    for i, c in enumerate(rt.cells):
+        first.setdefault(c.cell_key, i)
+    order = sorted(first.values())
+    seq = [rt.cells[i] for i in order]
+    n = len(seq)
+    st_all = (list(rt.station_of) if len(rt.station_of) == len(rt.cells)
+              else [str(i) for i in range(len(rt.cells))])
+    st = [st_all[i] for i in order]
+    # 역 덩어리 — 이어진 같은 역 칸. 순환선이면 끝과 처음이 같은 역일 때 하나로 잇는다
+    blocks: list[list[int]] = []
+    for i in range(n):
+        if blocks and st[blocks[-1][-1]] == st[i]:
+            blocks[-1].append(i)
+        else:
+            blocks.append([i])
+    if rt.loop and len(blocks) > 1 and st[blocks[0][0]] == st[blocks[-1][-1]]:
+        blocks[0] = blocks.pop() + blocks[0]
+    m = len(blocks)
+    loop = rt.loop
+    want = min(n, max(ROUTE_SEG_CELLS, round(n * pct / 100)))
+    per = n / m
+    want_st = min(m, math.ceil(want / per))                 # 목표 셀을 덮는 역 수(올림)
+    whole = want >= n or want_st >= m
+    name = lambda b: rt.stations.get(st[blocks[b][0]], st[blocks[b][0]])  # noqa: E731
+    if whole:
+        pieces_b = [list(range(m))]
+    else:
+        free = m - want_st
+        k_max = min(want_st, free if loop else free + 1)
+        k_min = -(-want_st // 2)                           # 역 2개 이하가 되는 최소 조각 수
+        kk = rng.randint(min(k_min, k_max), k_max) if k_max >= 1 else 1
+        sizes = _split(want_st, kk, 1, 2 if kk * 2 >= want_st else None, rng)
+        inner = kk if loop else kk - 1
+        gaps = _split(free, inner, 1, None, rng) if inner else []
+        pos = rng.randrange(m) if loop else rng.randint(0, max(0, free - sum(gaps)))
+        pieces_b = []
+        for i, sz in enumerate(sizes):
+            pieces_b.append([(pos + j) % m for j in range(sz)])
+            pos += sz + (gaps[i] if i < len(gaps) else 0)
+
+        def cells_of(pb):
+            return sum(len(blocks[b]) for b in pb)
+
+        def grow(i) -> bool:
+            # 조각 i 를 뒤 간격 쪽으로 한 역 넓힌다 — 간격이 2역 이상일 때만(한 역은 남긴다)
+            if not loop and i == len(pieces_b) - 1:
+                return False
+            if i >= len(gaps) or gaps[i] < 2:
+                return False
+            pieces_b[i].append((pieces_b[i][-1] + 1) % m)
+            gaps[i] -= 1
+            return True
+        def grow_back(i) -> bool:
+            # 앞 간격 쪽으로 한 역 — 뒤 간격이 한 역뿐일 때 쓴다
+            j = i - 1 if i > 0 else (len(gaps) - 1 if loop else -1)
+            if j < 0 or j >= len(gaps) or gaps[j] < 2:
+                return False
+            pieces_b[i].insert(0, (pieces_b[i][0] - 1) % m)
+            gaps[j] -= 1
+            return True
+        # 3셀이 안 되는 조각은 이웃 역을 붙인다 → 목표 셀 수에 못 미치면 조각을 넓힌다
+        for i in range(len(pieces_b)):
+            while cells_of(pieces_b[i]) < ROUTE_PIECE_MIN and (grow(i) or grow_back(i)):
+                pass
+        idx = list(range(len(pieces_b)))
+        while sum(cells_of(pb) for pb in pieces_b) < want:
+            rng.shuffle(idx)
+            if not any(grow(i) for i in idx):
+                break
+    cells: list[Cell] = []
+    pairs: list[tuple[str, str]] = []
+    info_pieces = []
+    for pb in pieces_b:
+        mine = [seq[i] for b in pb for i in blocks[b]]
+        cells += mine
+        pairs += [(a.cell_key, b.cell_key) for a, b in zip(mine, mine[1:])]
+        if whole and loop and len(mine) > 1:
+            pairs.append((mine[-1].cell_key, mine[0].cell_key))
+        info_pieces.append({
+            "stations": [name(pb[0]), name(pb[-1])], "station_cnt": len(pb), "cells": len(mine),
+            "shape": geo_shape(mine),
+            "sgw_changes": sum(a.sgw_id != b.sgw_id for a, b in zip(mine, mine[1:])),
+        })
+    mapped = [c for c in cells if c.geo_status == "MAPPED"]
+    radius, elong = corridor_shape(mapped) if len(mapped) >= 2 else (0.0, 0.0)
+    return cells, pairs, {
+        "route_id": rt.id, "range_pct": pct, "route_cells": n, "cells": len(cells),
+        "whole": whole, "pieces": info_pieces,
+        "stations": [p["stations"][0] for p in info_pieces],
+        "shape": geo_shape(cells),
+        "sgw_changes": sum(p["sgw_changes"] for p in info_pieces),
+        "radius_km": round(radius, 2), "elong": round(elong, 2),
+    }
+
+
 def _route_truth(sc) -> dict:
     """15번 정답지 덧붙임 — 고른 노선 구간과 이웃 칸 쌍. 노선을 못 쓴 대상이면 없다."""
     seg = sc.target.route_seg
     if not seg:
         return {}
-    return {"route_seg": dict(seg), "cell_pairs": [list(p) for p in sc.target.cell_pairs]}
+    out = {"route_seg": dict(seg), "cell_pairs": [list(p) for p in sc.target.cell_pairs]}
+    # 범위 배치(`route_spread`)는 모양을 맞춰 고르지 않는다 — 정답 모양은 **고른 셀 전체의 실제 모양**이다
+    # (100% 는 고리라 CORRIDOR 가 아니다 · 2026-11-09). 이 키가 `as_truth` 의 `expect_geo` 를 덮는다
+    if seg.get("range_pct") is not None and seg.get("shape"):
+        out["expect_geo"] = seg["shape"]
+        out["range_pct"] = seg["range_pct"]
+    return out
+
+
+def son_focus(target: Target, n: int) -> Target:
+    """25번 대상 좁히기 — **출발 셀 하나와 그 이웃 1~``n`` 곳**만 남긴다(2026-11-09).
+
+    SON 은 이웃 관계(셀 쌍)마다 핸드오버 파라미터를 바꾼다. 잘못 바꾸면 그 셀에서 그 이웃으로 가는
+    전환만 실패한다 — 실패가 셀 띠 전체로 퍼지지 않는다. 쌍 목록 모양은 둘이다.
+
+    * **노선 구간**(`_route_target`) — 이웃 칸이 줄지어 이어진 쌍(a→b, b→c …). 가운데 칸을 출발 셀로
+      두고 노선 앞뒤 칸을 도착 셀로 둔다 — 같은 출발 셀의 이웃 관계 둘이다.
+    * **기준 셀 → 띠**(`corridor_cells`) — 출발 셀이 이미 하나다. 가까운 순 앞 ``n`` 개.
+
+    대상 셀은 출발·도착 셀뿐이다 — 셀 채움·정답지 셀·활성 셀이 실패가 실제로 난 자리와 같아진다.
+    ``n`` 이 0 이거나 쌍이 없으면 그대로 돌려준다.
+    """
+    import dataclasses
+
+    pairs = [tuple(p) for p in target.cell_pairs or ()]
+    if n <= 0 or not pairs:
+        return target
+    if len({a for a, _ in pairs}) > 1:
+        chain = [pairs[0][0]] + [b for _, b in pairs]
+        k = len(chain) // 2
+        src = chain[k]
+        nbrs = [chain[i] for i in (k + 1, k - 1) if 0 <= i < len(chain)]
+        picked = [(src, c) for c in nbrs][:n]
+    else:
+        picked = pairs[:n]
+    keys = {picked[0][0]} | {b for _, b in picked}
+    return dataclasses.replace(target, cell_keys=keys, cell_pairs=picked)
 
 
 def busy_cluster(cells: list[Cell], rng: random.Random, want: int = 8,
@@ -4001,10 +4224,12 @@ def build_scenarios(
         spec("J-SC-16", "anchor_saturation",
              target=Target(cell_keys={c.cell_key for c in anchor_cells},
                            sgg_codes={anchor_sgg})),
+        # 배치도 UI 주입과 같은 좁히기(`son_focus`) — 한쪽만 좁히면 같은 kind 의 정답 셀이 갈린다
         spec("J-SC-25", "son_param_change",
-             target=Target(cell_keys={son_anchor.cell_key}
-                           | {c.cell_key for c in son_band[:14]},
-                           cell_pairs=son_pairs)),
+             target=son_focus(Target(cell_keys={son_anchor.cell_key}
+                                     | {c.cell_key for c in son_band[:14]},
+                                     cell_pairs=son_pairs),
+                              int(KIND_SPECS["son_param_change"].get("focus_pairs") or 0))),
         spec("SC-13b", "nsa_policy_restrict",
              target=Target(cell_keys={c.cell_key for c in by_mme[other_mme]},
                            mme_id=other_mme)),
@@ -4151,6 +4376,17 @@ L2_KINDS = frozenset({
 def recommended_hours(kind: str) -> dict:
     """kind 의 권장 시작 시간대(`measured.hours`)와 화면 문구 — 안내이고 주입을 막지 않는다."""
     from .generator import DIURNAL
+
+    s = KIND_SPECS.get(kind) or {}
+    if s.get("rush_hours"):
+        # 이 시간대에만 서는 장애 — 실측 시간대 대신 정해 둔 구간을 말한다. `clock` 은 화면의
+        # 가상 시각 버튼(구간 가운데 정시) · `rush` 는 지금 시각이 구간 안인지 화면이 가린다
+        rush = [[int(a), int(b)] for a, b in s["rush_hours"]]
+        span = "·".join(f"{a:02d}~{b:02d}" for a, b in rush)
+        span_ja = span.replace("~", "〜")
+        return {"n": 0, "rush": rush,
+                "clock": [f"{(a + ((b - a) % 24) // 2) % 24:02d}:00" for a, b in rush],
+                "text": f"출퇴근 시간대 {span}시 권장", "text_ja": f"通勤時間帯 {span_ja}時を推奨"}
 
     h = measured.hours(kind, DIURNAL, need_l2=kind in L2_KINDS)
     if not h["n"]:

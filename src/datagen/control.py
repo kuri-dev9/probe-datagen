@@ -360,7 +360,7 @@ def add_fault(conn, kind: str, target: str | None, start_ts: datetime,
         # 경로로 들어와도 이 함수를 지난다.
         from .scenarios import SHIFT_TOTAL
         duration_min = SHIFT_TOTAL
-    _check_like(conn, kind, target)
+    target = _check_like(conn, kind, target)
     now = datetime.now()
     with conn.cursor() as cur:
         cur.execute(
@@ -374,7 +374,7 @@ def add_fault(conn, kind: str, target: str | None, start_ts: datetime,
     return fid
 
 
-def _check_like(conn, kind: str, target: str | None) -> None:
+def _check_like(conn, kind: str, target: str | None) -> str | None:
     """`LIKE:<fault_id>` 를 받기 전에 원본을 확인한다 (2026-11-02 · 카드 15r2).
 
     해석(`faults.build`)은 DB 를 보지 않으므로 여기서 막는다 — 틀린 원본을
@@ -385,12 +385,28 @@ def _check_like(conn, kind: str, target: str | None) -> None:
       다른 셀이 나온다
     * 원본이 **자동 대상**(TARGET 비어 있음)이 아니면 거부 — 그때는 원본의
       TARGET 을 그대로 쓰면 된다
+
+    **저장할 대상 문자열을 돌려준다**(2026-11-09). 15번(범위 kind)은 —
+
+    * 대상이 비면 `ROUTE%:<기본>` 으로 적는다. 비어 있는 15번 행은 **범위 도입 전 회차**만 남게 해서
+      `LIKE:` 가 그 원본을 예전 연속 구간으로 재현할 수 있게 한다.
+    * 원본이 `ROUTE%:N` 이면 자동 대상으로 보고 `ROUTE%:N:LIKE:<원본>` 으로 적는다 — 해석(`faults.build`)은
+      DB 를 보지 않으므로 원본 범위를 대상 문자열에 실어야 같은 셀이 나온다. 다른 범위를 함께 주면 거부한다.
     """
-    from .faults import LIKE_PREFIX, like_fault_id
+    from .faults import LIKE_PREFIX, ROUTE_RANGE_KINDS, like_fault_id, route_range_of
+    from .scenarios import ROUTE_RANGE_DEFAULT
 
     text = (target or "").strip()
+    ranged = kind in ROUTE_RANGE_KINDS
+    pct = None
+    if ranged:
+        pct, rest = route_range_of(text)
+        if not rest:
+            return f"ROUTE%:{pct if pct is not None else ROUTE_RANGE_DEFAULT}"
+        if pct is not None:
+            text = rest
     if not text.upper().startswith(LIKE_PREFIX):
-        return
+        return target if pct is None else f"ROUTE%:{pct}:{text}"
     src = like_fault_id(text)
     if src is None:
         raise ValueError(f"LIKE 형식 오류: {text!r} — LIKE:<fault_id>")
@@ -401,9 +417,22 @@ def _check_like(conn, kind: str, target: str | None) -> None:
         raise ValueError(f"LIKE 원본 fault {src} 가 없다")
     if row[0] != kind:
         raise ValueError(f"LIKE 원본 fault {src} 의 kind 는 {row[0]!r} — {kind!r} 와 다르다")
-    if (row[1] or "").strip():
+    orig = (row[1] or "").strip()
+    if ranged:
+        o_pct, o_rest = route_range_of(orig)
+        if o_rest:
+            raise ValueError(
+                f"LIKE 원본 fault {src} 는 대상 {row[1]!r} 를 지정했다 — 그 값을 그대로 쓴다")
+        if pct is not None and o_pct is not None and pct != o_pct:
+            raise ValueError(f"LIKE 원본 fault {src} 의 범위는 {o_pct}% — {pct}% 로는 같은 셀이 나오지 않는다")
+        if pct is not None and o_pct is None:
+            raise ValueError(f"LIKE 원본 fault {src} 는 범위 도입 전 회차다 — 범위를 주지 않는다")
+        # 범위 원본은 범위를 싣고, 빈 원본(범위 도입 전)은 그대로 — 해석이 예전 연속 구간으로 간다
+        return f"ROUTE%:{o_pct}:LIKE:{src}" if o_pct is not None else f"LIKE:{src}"
+    if orig:
         raise ValueError(
             f"LIKE 원본 fault {src} 는 대상 {row[1]!r} 를 지정했다 — 그 값을 그대로 쓴다")
+    return target
 
 
 def cancel_fault(conn, fault_id: int) -> bool:

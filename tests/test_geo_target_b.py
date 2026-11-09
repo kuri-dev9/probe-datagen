@@ -264,7 +264,10 @@ def test_busy_disaster_area_is_deterministic_and_needs_rates():
 def test_route_kinds_cover_the_three_corridor_scenarios():
     assert set(faults._ROUTE_KINDS) == {"ho_interruption", "son_param_change", "mobility"}
     for k in faults._ROUTE_KINDS:
-        assert faults.KIND_SPECS[k]["expect_geo"] == "CORRIDOR", k
+        # 구간을 고르는 모양(`select_geo`)이 CORRIDOR 다. 25번은 정답 모양(`expect_geo`)이 POINT 로 갈렸다(2026-11-09)
+        sp = faults.KIND_SPECS[k]
+        assert (sp.get("select_geo") or sp["expect_geo"]) == "CORRIDOR", k
+    assert faults.KIND_SPECS["son_param_change"]["expect_geo"] == "POINT"
 
 
 def test_mobility_auto_target_uses_the_route_segment(monkeypatch):

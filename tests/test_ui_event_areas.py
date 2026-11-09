@@ -109,10 +109,10 @@ def _serve(monkeypatch, doc):
     return urls
 
 
-def test_the_request_asks_for_cells_only_plus_areas(monkeypatch):
+def test_the_request_asks_for_cells_only_plus_areas_and_members(monkeypatch):
     urls = _serve(monkeypatch, {"cells": [], "unmapped": 0})
     ui.api_map_event("IX2611061355d97e")
-    assert urls == ["http://graphio.test/api/incidents/IX2611061355d97e/map?cells_only=true&with_areas=true"]
+    assert urls == ["http://graphio.test/api/incidents/IX2611061355d97e/map?cells_only=true&with_areas=true&with_members=true"]
 
 
 def test_an_old_graphio_answer_without_areas_gives_an_empty_list(monkeypatch):
@@ -143,3 +143,10 @@ def test_a_missing_graphio_address_is_an_error_not_an_empty_map(monkeypatch):
     monkeypatch.setattr(ui, "_pem_cfg", lambda: {})
     out = ui.api_map_event("IX1")
     assert "graphio_api" in out["error"] and out["enbs"] == [] and out["pts"] == []
+
+
+def test_an_old_graphio_answer_without_members_gives_an_empty_list(monkeypatch):
+    """web 재시작 전 — 조각 칩이 없을 뿐 사건 범위는 그대로 그린다(2026-11-09)."""
+    _serve(monkeypatch, {"cells": [{"key": "131157-1", "lat": 35.6, "lon": 139.7}], "unmapped": 0})
+    out = ui.api_map_event("IX1")
+    assert out["members"] == [] and out["cells"] == 1

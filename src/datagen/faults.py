@@ -243,6 +243,9 @@ def _sgg_all(cells: list[Cell], code: str) -> set[str]:
     return {c.cell_key for c in cells if c.adm_sgg_cd == code}
 
 
+#: 시나리오 몫 순환 — 이 시나리오가 쓴 노드를 다른 시나리오가 쓴 노드보다 뒤로 미는 값(회차 번호보다 크면 된다)
+OWN_ROTATE_OFFSET = 10 ** 9
+
 #: 노선 구간 순환에서 뽑아 보는 횟수 — 앞선 회차가 안 쓴 구간을 찾는다. 초기값
 ROUTE_ROTATE_DRAWS = 12
 
@@ -271,7 +274,9 @@ def _route_target(routes, rng: random.Random, kind: str = "ho_interruption",
               + ("모양 미달" if routes else "없음") + " · `corridor_cells` 로 돌아간다", flush=True)
         return None
     seg, info = got
-    want = (KIND_SPECS.get(kind) or {}).get("expect_geo")
+    # 고르는 모양 — 정답 모양과 다른 kind 는 `select_geo` 를 둔다(25번: 구간은 CORRIDOR · 정답은 POINT)
+    sp = KIND_SPECS.get(kind) or {}
+    want = sp.get("select_geo") or sp.get("expect_geo")
     if want and S.geo_shape(seg) != want:
         # `route_segment` 는 CORRIDOR 문턱에 여유를 두고 고른다 — 여기 걸리면 두 식이 갈라진 것이다
         print(f"  ! {kind} 노선 구간 모양이 {S.geo_shape(seg)} 다(정답 {want}) · `corridor_cells` 로 돌아간다",
@@ -280,6 +285,35 @@ def _route_target(routes, rng: random.Random, kind: str = "ho_interruption",
     return Target(cell_keys={c.cell_key for c in seg},
                   cell_pairs=[(a.cell_key, b.cell_key) for a, b in zip(seg, seg[1:])],
                   route_seg=info)
+
+
+#: 범위(%)로 대상을 고르는 kind — 지금은 15번만이다(사용자 11-09 "15번만 먼저")
+ROUTE_RANGE_KINDS = ("ho_interruption",)
+
+
+def _route_spread_target(routes, rng: random.Random, kind: str, pct: int | None,
+                         used: dict[str, int] | None = None) -> Target | None:
+    """15번 자동 대상 — 노선 위 범위(%)만큼 떨어진 조각들(`scenarios.route_spread`, 2026-11-09).
+
+    모양을 맞춰 고르지 않으므로 `_route_target` 의 모양 검사가 없다 — 정답지가 실제 모양을 적는다.
+    순환은 고른 셀 전체의 키로 본다. 노선이 없으면 `None` 이고 호출부가 예전 길로 돌아간다(경고를 남긴다).
+    """
+    pct = S.route_range(S.ROUTE_RANGE_DEFAULT if pct is None else pct)
+    got = S.route_spread(routes, rng, pct) if routes else None
+    if got is not None and used:
+        seen = {target_key(c.cell_key for c in got[0]): got}
+        for _ in range(ROUTE_ROTATE_DRAWS):
+            if any(k not in used for k in seen):
+                break
+            more = S.route_spread(routes, rng, pct)
+            if more is not None:
+                seen.setdefault(target_key(c.cell_key for c in more[0]), more)
+        got = seen[_rotating(list(seen), lambda k: k, used)]
+    if got is None:
+        print(f"  ! {kind} 노선이 없다 — 범위 {pct}% 를 못 쓰고 예전 대상으로 돌아간다", flush=True)
+        return None
+    cells_, pairs, info = got
+    return Target(cell_keys={c.cell_key for c in cells_}, cell_pairs=pairs, route_seg=info)
 
 
 def _auto_target(kind: str, cells: list[Cell], rng: random.Random,
@@ -755,12 +789,25 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
         # 기지국 정지 배치 — 대상 앞머리 `LOCAL:`·`WIDE:`(또는 그 낱말만). 장애 테이블에 인자 칸이
         # 없어(DDL 없이) 대상 문자열로 받는다. 기본 ``local``
         mode, raw_target = _disaster_mode(raw_target)
+    rng_pct = None
+    if fault["kind"] in ROUTE_RANGE_KINDS:
+        # 15번 범위(%) — 앞머리를 떼고 본다. 앞머리 없는 자동 대상(API 직접 호출)도 기본 범위다.
+        # `LIKE:` 는 앞머리 **뒤**에 온다(`ROUTE%:50:LIKE:9` · `control._check_like` 가 그렇게 적는다)
+        rng_pct, raw_target = route_range_of(raw_target)
+        like = like_fault_id(raw_target)
     # 자동 대상 순환(`TargetHistory`) — 앞선 회차가 쓴 대상. 지정 대상·`LIKE:` 는 보지 않는다
     # (자연재해 `LOCAL:`·`WIDE:` 앞머리는 배치라 떼고 본다)
     group = _rotate_group(fault["kind"])
     auto = not (raw_target or "").strip() and like is None
     used = (history.used(group, int(fault["fault_id"])) if history is not None and group and auto
             else None)
+    if used is not None and fault["kind"] in _AUTO_NODE:
+        # **이 시나리오가 앞서 쓴 노드는 가장 최근에 쓴 것으로 친다**(2026-11-09 · 20번 F-209·F-226 이 둘 다
+        # SGW-6). 순환 기록은 같은 종류 노드를 쓰는 시나리오끼리 나눠 써서, 후보가 적은 전국형(SGW 5대 ·
+        # `auto_wide_min_share`)은 다른 시나리오가 나머지를 최근에 쓰면 "가장 오래전에 쓴" 자기 노드로
+        # 돌아왔다. 시나리오 몫 기록(`kind:<kind>`)의 노드를 맨 뒤로 민다 — 후보가 하나면 그대로 고른다
+        own = history.used(f"kind:{fault['kind']}", int(fault["fault_id"]))
+        used = {**used, **{k: OWN_ROTATE_OFFSET + f for k, f in own.items()}}
     if fault["kind"] == "capacity_shift":
         target = _shift_target(fault.get("target"), fault["start_ts"], cells)
     elif fault["kind"] == "natural_disaster" and not (raw_target or "").strip() and like is None:
@@ -779,7 +826,17 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
         # (`place` 의 파형·셀 순서 등)는 이 fault 의 rng 다 — 회차가 독립이다
         if seed is None:
             return None
-        target = _resolve_target(None, fault["kind"], pick, target_rng(seed, like), routes)
+        lrng = target_rng(seed, like)
+        if fault["kind"] in ROUTE_RANGE_KINDS:
+            # **원본이 고른 길을 그대로 탄다**(2026-11-09 · 에스터 발견). 원본은 자동 대상이라 순환 기록
+            # (`used`)을 보고 골랐다 — 같은 rng 라도 `used` 가 다르면 다른 구간이 된다. 원본 번호의 기록을 쓴다.
+            # 범위가 있으면 범위 배치, 없으면 **범위 도입 전 원본**(연속 구간 · `_route_target`)이다
+            lused = history.used(group, like) if history is not None and group else None
+            target = (_route_spread_target(routes, lrng, fault["kind"], rng_pct, lused)
+                      if rng_pct is not None
+                      else _resolve_target(None, fault["kind"], pick, lrng, routes, lused))
+        else:
+            target = _resolve_target(None, fault["kind"], pick, lrng, routes)
     else:
         target = None
         if not (raw_target or "").strip():
@@ -791,6 +848,8 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
                 target = _outage_target(pick, rng, _rate_at(enb_rate, fault), used)
             elif fault["kind"] in _CROWD_KINDS or fault["kind"] == "sa_fallback":
                 target = _congestion_target(pick, rng, fault, mesh_load, used)
+            elif fault["kind"] in ROUTE_RANGE_KINDS:
+                target = _route_spread_target(routes, rng, fault["kind"], rng_pct, used)
         if target is None:
             target = _resolve_target(raw_target, fault["kind"], pick, rng, routes,
                                      None if (raw_target or "").strip() else used)
@@ -800,12 +859,20 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
         return None
     if history is not None and group and auto and target.cell_keys:
         history.record(int(fault["fault_id"]), group, target_key(target.cell_keys))
+        if fault["kind"] in _AUTO_NODE:
+            history.record(int(fault["fault_id"]), f"kind:{fault['kind']}", target_key(target.cell_keys))
+    # 25번 — 실패를 셀 하나의 이웃 관계 1~2개로 좁힌다(`scenarios.son_focus`). **순환 기록 뒤다** —
+    # 순환은 고른 구간·띠 전체의 키로 비교하므로(`_route_target`) 좁힌 키를 적으면 같은 구간을 또 고른다
+    if int(spec.get("focus_pairs") or 0):
+        target = S.son_focus(target, int(spec["focus_pairs"]))
     if mode is not None:
         target.outage_mode = mode
     s = dict(spec)
     s["kind"] = fault["kind"]
     s["target"] = target
-    s["peak"] = float(fault["intensity"])
+    # 15번은 세기를 고정한다(2026-11-09 사용자 결정) — 강도는 범위로 바뀌었다. 옛 회차·API 가 다른 값을
+    # 적어도 세션별 세기(정체 0.9 · NR 레그 0.35)는 강도 1.0 값이다
+    s["peak"] = 1.0 if fault["kind"] in ROUTE_RANGE_KINDS else float(fault["intensity"])
     dur = int(fault["duration_min"])
     if fault["kind"] == "capacity_shift":
         # **길이는 시나리오가 정한다** — 상승·분산·분석 세 국면이 `SHIFT_TOTAL` 분이다.
@@ -889,6 +956,22 @@ def _disaster_mode(raw: str | None) -> tuple[str, str | None]:
     if head.upper() in ("LOCAL", "WIDE"):
         return head.lower(), (rest.strip() or None) if sep else None
     return "local", (text or None)
+
+
+#: 15번 범위 앞머리 — `ROUTE%:50`. 장애 테이블에 인자 칸이 없어 DDL 없이 대상 문자열로 받는다
+#: (`LOCAL:`·`WIDE:` 와 같은 길 · 2026-11-09)
+ROUTE_RANGE_HEAD = "ROUTE%"
+
+
+def route_range_of(raw: str | None) -> tuple[int | None, str | None]:
+    """`ROUTE%:50` → (50, None) · `ROUTE%:50:ENB:1234` 처럼 뒤에 대상이 있으면 그 대상도. 앞머리가 없으면
+    (None, 원문). 값은 `scenarios.route_range` 로 하한·상한을 맞춘다."""
+    text = (raw or "").strip()
+    head, sep, rest = text.partition(":")
+    if sep and head.upper() == ROUTE_RANGE_HEAD:
+        val, _, tail = rest.partition(":")
+        return S.route_range(val.strip()), (tail.strip() or None)
+    return None, (text or None)
 
 
 def resolve_active(cells: list[Cell], anchor: datetime, seed: int,

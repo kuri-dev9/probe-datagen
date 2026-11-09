@@ -2320,6 +2320,36 @@ def _fault_start(fault: str | None) -> str | None:
     return row[0].isoformat(timespec="seconds") if row and row[0] else None
 
 
+def cmd_l3(args) -> int:
+    """L3 문답 검사 기록 — `add <json>` 은 이어 붙이고 7일 지난 파일을 지운다. `prune` 은 지우기만."""
+    import json as _json
+    from . import l3log
+
+    if args.op == "prune":
+        gone = l3log.prune()
+        print(f"지움 {len(gone)}개: {', '.join(gone) or '없음'}")
+        return 0
+    if not args.file:
+        print("기록 파일을 준다 — python -m datagen l3 add <json 파일>")
+        return 2
+    try:
+        data = _json.loads(Path(args.file).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        print(f"기록 파일을 못 읽었다 — {args.file}: {e}")
+        return 1
+    recs = data if isinstance(data, list) else [data]
+    for rec in recs:
+        try:
+            got = l3log.add(rec)
+        except ValueError as e:
+            print(f"거부 — {e}")
+            return 1
+        print(f"{rec['no']}번 {rec['fault']} {rec['status']} → {got['file']}"
+              + (" · latest.l3 갱신" if got["latest_updated"] else " · 최신 회차가 아니라 latest.l3 는 그대로")
+              + (f" · 지움 {', '.join(got['pruned'])}" if got["pruned"] else ""))
+    return 0
+
+
 def cmd_measure(args) -> int:
     """권장 지속시간 실측 한 건을 넣는다. 재지 못한 값은 빼면 `null` 로 남는다(불변규칙 17)."""
     from . import measured
@@ -2495,6 +2525,11 @@ def main(argv=None) -> int:
     ms.add_argument("--l2", type=float, help="T0 → L2 사건의 정답(분). L2 가 안 섰으면 빼면 된다")
     ms.add_argument("--start", help="주입 시작 시각 ISO (기본: `F-n` 이면 장애 표에서 읽는다)")
     ms.set_defaults(fn=cmd_measure)
+
+    l3 = sub.add_parser("l3", help="L3 문답 검사 기록 — data/l3/날짜.jsonl, 7일 보관")
+    l3.add_argument("op", choices=("add", "prune"))
+    l3.add_argument("file", nargs="?", help="add: 기록 JSON 파일 (객체 하나 또는 목록)")
+    l3.set_defaults(fn=cmd_l3)
 
     # 마스터 토폴로지 — **1회성이다.** `pemfill`·`run` 은 상주하며 마스터를
     # 읽기만 하고, 쓰기를 그쪽에 넣으면 gen 이 둘 떴을 때 마스터가 흔들린다.
