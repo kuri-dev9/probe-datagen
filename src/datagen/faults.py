@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -129,6 +130,35 @@ _WAREHOUSE_GROUP = {"natural_disaster": "disaster", "ran_congestion": "mesh", "s
 def target_key(keys) -> str:
     """대상 셀 집합의 짧은 지문 — 순환 기록의 키다."""
     return hashlib.sha1(",".join(sorted(keys)).encode()).hexdigest()[:12]
+
+
+#: 장애 메모의 시나리오 번호 — 화면 `faultScn`(ui.py)과 같은 세 모양: `#19 …` · `… 시나리오 19` · `no19-…`
+_NOTE_NO = re.compile(r"^#(\d+)\b|시나리오 (\d+)|^no(\d+)-")
+
+
+def scenario_no(fault: dict) -> int | None:
+    """그 장애가 어느 시나리오 번호로 주입됐나 — 순환 기록을 시나리오마다 나누는 키다(2026-11-10).
+
+    장애 행에 번호 칸이 없다(DDL 없이 간다) — 주입 경로가 메모 앞에 `#<번호>` 를 붙이므로 메모에서
+    읽는다. 메모에 번호가 없으면(외부 API·옛 주입) kind 로 잇는다 — 그 kind 를 쓰는 번호가 하나면 그
+    번호, 여럿이면 **원본 번호**(`same_as` 없는 쪽 · 19 → 10)다. 화면이 이름을 붙이는 규칙과 같다
+    """
+    m = _NOTE_NO.search(str(fault.get("note") or ""))
+    if m:
+        return int(next(g for g in m.groups() if g))
+    from .control import SCENARIOS
+
+    rows = [r for r in SCENARIOS if r[2] == fault.get("kind")]
+    org = [r for r in rows if r[3] is None]
+    if len(rows) == 1:
+        return rows[0][0]
+    return org[0][0] if len(org) == 1 else None
+
+
+def _own_group(fault: dict) -> str:
+    """시나리오 몫 순환 기록의 묶음 이름 — 번호를 알면 `scn:<번호>`, 모르면 옛 `kind:<kind>`."""
+    no = scenario_no(fault)
+    return f"scn:{no}" if no is not None else f"kind:{fault['kind']}"
 
 
 class TargetHistory:
@@ -805,8 +835,12 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
         # **이 시나리오가 앞서 쓴 노드는 가장 최근에 쓴 것으로 친다**(2026-11-09 · 20번 F-209·F-226 이 둘 다
         # SGW-6). 순환 기록은 같은 종류 노드를 쓰는 시나리오끼리 나눠 써서, 후보가 적은 전국형(SGW 5대 ·
         # `auto_wide_min_share`)은 다른 시나리오가 나머지를 최근에 쓰면 "가장 오래전에 쓴" 자기 노드로
-        # 돌아왔다. 시나리오 몫 기록(`kind:<kind>`)의 노드를 맨 뒤로 민다 — 후보가 하나면 그대로 고른다
-        own = history.used(f"kind:{fault['kind']}", int(fault["fault_id"]))
+        # 돌아왔다. 시나리오 몫 기록의 노드를 맨 뒤로 민다 — 후보가 하나면 그대로 고른다
+        # **몫은 kind 가 아니라 시나리오 번호다**(2026-11-10 · 19번 F-243 이 직전 F-216 과 같은 MME-3). 10·19번은
+        # 둘 다 `mme_overload` 라 `kind:` 몫을 나눠 써서, 10번이 다른 MME 를 최근에 쓰면 19번 자기 직전 노드가
+        # "가장 오래전" 이 되어 다시 골랐다. 번호 몫 기록이 아직 없으면(전환 직후) 옛 `kind:` 몫을 본다
+        fid = int(fault["fault_id"])
+        own = history.used(_own_group(fault), fid) or history.used(f"kind:{fault['kind']}", fid)
         used = {**used, **{k: OWN_ROTATE_OFFSET + f for k, f in own.items()}}
     if fault["kind"] == "capacity_shift":
         target = _shift_target(fault.get("target"), fault["start_ts"], cells)
@@ -860,7 +894,7 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
     if history is not None and group and auto and target.cell_keys:
         history.record(int(fault["fault_id"]), group, target_key(target.cell_keys))
         if fault["kind"] in _AUTO_NODE:
-            history.record(int(fault["fault_id"]), f"kind:{fault['kind']}", target_key(target.cell_keys))
+            history.record(int(fault["fault_id"]), _own_group(fault), target_key(target.cell_keys))
     # 25번 — 실패를 셀 하나의 이웃 관계 1~2개로 좁힌다(`scenarios.son_focus`). **순환 기록 뒤다** —
     # 순환은 고른 구간·띠 전체의 키로 비교하므로(`_route_target`) 좁힌 키를 적으면 같은 구간을 또 고른다
     if int(spec.get("focus_pairs") or 0):

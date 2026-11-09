@@ -183,7 +183,7 @@ def test_node_kinds_record_a_kind_slot_next_to_the_group_slot(tmp_path):
     h = faults.TargetHistory(tmp_path / "t.json")
     _node_run("gw_resource", 4, _sgw_cells(), h)
     keys = set(__import__("json").loads((tmp_path / "t.json").read_text()))
-    assert {"4:node:sgw_id", "4:kind:gw_resource"} <= keys
+    assert {"4:node:sgw_id", "4:scn:1"} <= keys                    # 몫 키는 kind 가 아니라 시나리오 번호(11-10)
 
 
 def test_non_node_kinds_record_no_kind_slot(tmp_path):
