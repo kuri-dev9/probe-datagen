@@ -231,10 +231,11 @@ def test_a_graphio_that_cannot_be_reached_is_told_apart_from_no_history(api, exc
 
 def test_the_history_is_read_from_the_map_list_with_a_timeout(api):
     ui.api_fault_incidents(168)
-    assert api["urls"] == [("http://g:8008/api/incidents?scope=1&limit=200", 10)]
+    # 최근 200건이 아니라 `recent=1`(최근 `console.incident_list_days` 일) — 며칠 지난 회차(F-121)도 찾는다(2026-11-09)
+    assert api["urls"] == [("http://g:8008/api/incidents?scope=1&recent=1", 10)]
     api["base"] = "http://g:8008/"
     ui.api_fault_incidents(168)
-    assert api["urls"][1][0] == "http://g:8008/api/incidents?scope=1&limit=200", "끝 슬래시는 떼고 붙인다"
+    assert api["urls"][1][0] == "http://g:8008/api/incidents?scope=1&recent=1", "끝 슬래시는 떼고 붙인다"
 
 
 def test_the_fault_is_read_by_id(api):

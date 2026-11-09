@@ -932,8 +932,10 @@ def _match_score(i: dict, spec: dict, truth: dict, target: str) -> int:
 def api_fault_incidents(fault_id: int):
     """그 장애로 탐지된 이력 — 주입 시간(+ 확정 대기)과 겹치는 것을 맞는 순으로.
 
-    지도가 고를 수 있는 이력(최근 200건)만 본다. graphio 에 못 닿은 것과 이력이 없는 것은 다른
-    사실이라 `error` 로 가른다.
+    지도가 고를 수 있는 이력만 본다 — 장애에서 넘어간 지도는 graphio `recent=1`(최근
+    `console.incident_list_days` 일, 기본 7일)을 받으므로 여기도 같은 범위다(2026-11-09). 전에는 최근
+    200건이라 이틀만 지나도(F-121 · 11-05) 이력이 있는데 "없음"이 됐다. graphio 에 못 닿은 것과
+    이력이 없는 것은 다른 사실이라 `error` 로 가른다.
     """
     import urllib.error
     import urllib.request
@@ -954,7 +956,7 @@ def api_fault_incidents(fault_id: int):
     if not base:
         return {"error": "`pemdb1.graphio_api` 가 비어 있다", "incidents": []}
     try:
-        with urllib.request.urlopen(f"{base}/api/incidents?scope=1&limit=200", timeout=10) as r:
+        with urllib.request.urlopen(f"{base}/api/incidents?scope=1&recent=1", timeout=10) as r:
             doc = json.loads(r.read())
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         return {"error": f"graphio API 에 닿지 않는다: {e}", "incidents": []}
@@ -2382,7 +2384,7 @@ async function openFault(id) {
   $("fm").hidden = false;
   const [how, inc] = await Promise.all([
     s ? howOf(s.no).catch(() => null) : null,
-    getJson(`/api/faults/${id}/incidents`).catch(e => ({error: String(e), incidents: []}))]);
+    faultIncidents(id)]);
   if (FM_NOW !== id) return;             // 그새 닫았거나 다른 장애를 눌렀다
   $("fm-b").innerHTML = howHtml(how);
   const got = inc.incidents || [];
@@ -2391,8 +2393,7 @@ async function openFault(id) {
   if (!got.length) { msg.textContent = T("탐지 이력 없음"); return; }
   msg.textContent = T("탐지 이력 {n}건", {n: got.length});
   go.disabled = false;
-  go.onclick = () => { location.href = "/map?" + new URLSearchParams({
-    fault: id, inc: got[0].incident_id, ids: got.map(x => x.incident_id).join(",")}); };
+  go.onclick = () => { location.href = faultMapUrl(id, got); };
 }
 
 // 툴팁 — 잘린 칸이나 화면과 내용이 다른 칸(시작의 연도·메모)에만 뜬다
@@ -4290,7 +4291,7 @@ _SEV_RANK = {"INFO": 1, "WARN": 2, "WARNING": 2, "MINOR": 2,
 
 
 @app.get("/api/map/faults")
-def api_map_faults(minutes: int = 15):
+def api_map_faults(minutes: int = 15, recent: bool = False):
     """지도에 뿌릴 **장애 현황** — graphio 에서 HTTP 로 받는다.
 
     ## 왜 DB 를 직접 읽지 않나
@@ -4322,7 +4323,10 @@ def api_map_faults(minutes: int = 15):
     import urllib.error
     import urllib.request
 
-    url = f"{base}/api/incidents?scope=1&limit=200"
+    # `recent=1` — 장애·시나리오 화면에서 회차를 눌러 넘어온 지도만 쓴다. 최근 200건으로는 며칠 지난
+    # 회차가 목록에 없어 지도가 그 이력을 고르지 못한다(2026-11-09). 평소 지도는 그대로 200건이다
+    url = (f"{base}/api/incidents?scope=1&recent=1" if recent
+           else f"{base}/api/incidents?scope=1&limit=200")
     try:
         with urllib.request.urlopen(url, timeout=3) as r:
             doc = json.loads(r.read())
@@ -5366,9 +5370,9 @@ _HTML_MAP = """<!doctype html>
   <svg id=geofx></svg>
   <div id=fx><div id=fxin><div id=fxh></div><div id=fxb></div></div><div id=fxe><svg></svg><svg></svg><svg></svg></div></div>
   <div id=glob></div>
-  <div id=hq title="NTT docomo 本社 (千代田区永田町2-11-1)&#10;PGW 16대를 한 점으로 — 실제 PGW 위치가 아니다&#10;누르면 SGW 에서 모이는 선이 나온다">
+  <div id=hq title="NTT docomo 본사 (千代田区永田町2-11-1)&#10;PGW 16대를 한 점으로 — 실제 PGW 위치가 아니다&#10;누르면 SGW 에서 모이는 선이 나온다">
     <div class=rg></div><div class=bd><span class=pg></span></div>
-    <div class=cap><b>NTT docomo</b><br>本社</div><div class=msg></div></div>
+    <div class=cap><b>NTT docomo</b><br>본사</div><div class=msg></div></div>
   <div id=boxsel></div>
   <div id=fbar></div>
   <div id=sel></div>
@@ -5630,7 +5634,8 @@ async function pollStandby(){
 async function pollFaults(){
   let doc;
   // 한 번 못 받아도 조용히 넘긴다 — 10초 뒤에 다시 묻는다
-  try{ doc=await (await fetch('/api/map/faults?minutes='+LIVE_WINDOW_MIN)).json(); }catch(e){ return; }
+  // 장애에서 넘어왔으면 며칠 지난 회차도 목록에 있어야 고를 수 있다(`/api/faults/{id}/incidents` 와 같은 범위)
+  try{ doc=await (await fetch('/api/map/faults?minutes='+LIVE_WINDOW_MIN+(LINK?'&recent=1':''))).json(); }catch(e){ return; }
   const note=document.getElementById('note');
   if(doc.error){ if(note) note.textContent=doc.error; return; }
   if(note && /graphio/.test(note.textContent)) note.textContent='';
@@ -5708,7 +5713,7 @@ const coreOf=h=>(h.nodes||[]).filter(k=>!k.startsWith('pgw:'));
 // 그래서 칸은 **"그 칸을 덮는 셀들의 체감이 나빴다"**이지 "단말이 그 칸에
 // 있었다"가 아니다. 선택 바에 그렇게 적는다.
 const GEO_NAME={MESH1K:T('1km 메시'), MESH500:T('500m 메시'), MESH250:T('250m 메시'),
-                ADM1:T('광역'), ADM2:T('구·시'), ADM3:'丁目', GLOBAL:T('전국')};
+                ADM1:T('광역'), ADM2:T('구·시'), ADM3:T('정목'), GLOBAL:T('전국')};
 //: 위치 없는 축 — 무슨 축인지는 적는다. "범위 없음"만 적으면 "위치를
 //: 모른다"로 읽히는데, 이것들은 **애초에 지역이 아닌** 장애다
 const AXIS_NAME={UE:T('단말 기종'), APN:'APN', DOMAIN:T('서비스 도메인')};
@@ -6001,7 +6006,7 @@ function renderList(){
     const geo = h.axis==='GLOBAL' ? T('전국')
       : h.axis ? T('{geo} {n}곳',{geo:GEO_NAME[h.axis]||h.axis, n:h.geo_ids.length+(h.geo_ids.length>=GEO_CAP?'+':'')})
       : h.bias ? T('{ax} · 편향 {node}',{ax:AXIS_NAME[h.axis_raw]||h.axis_raw, node:h.bias.node.replace(':',' ').toUpperCase()})
-      : h.egress && !pg.length ? (h.axis_raw==='APN' ? T('APN · docomo 本社') : T('외부(APP·PAY) · docomo 本社'))
+      : h.egress && !pg.length ? (h.axis_raw==='APN' ? T('APN · docomo 본사') : T('외부(APP·PAY) · docomo 본사'))
       : AXIS_NAME[h.axis_raw] ? `<span class=na>${T('{ax} 축 — 지역과 무관',{ax:AXIS_NAME[h.axis_raw]})}</span>` : '';
     const where = ne||core.length||pg.length||geo
       ? [pieces(h), ne&&!pieces(h)?`eNB ${ne}`:'', core.length?T('코어 {c}',{c:esc(core.join(' ').toUpperCase())}):'',
@@ -6260,7 +6265,7 @@ function drawFocus(){
       : !h.axis&&AXIS_NAME[h.axis_raw]&&!h.egress?`<span class=dimtag>${T('{ax} 축 — 지역과 무관',{ax:esc(AXIS_NAME[h.axis_raw])})}`
         + (h.axis_raw==='DOMAIN'?'':T(' · 특정 장비로 쏠리지 않았다'))+`</span>`:'')
     + (!evOn&&h.axis&&h.axis.startsWith('MESH')?`<span class=dimtag>${T('칸 = 그 칸을 덮는 셀들의 체감 — 단말 실제 위치가 아니다')}</span>`:'')
-    + (!evOn&&h.axis==='ADM3'?`<span class=dimtag>${T('丁目 경계 없음 — 중심점 근사')}</span>`:'')
+    + (!evOn&&h.axis==='ADM3'?`<span class=dimtag>${T('정목 경계 없음 — 중심점 근사')}</span>`:'')
     + (!evOn&&h.axis&&h.axis!=='GLOBAL'&&h.geo_ids.length>=GEO_CAP?`<span class=warn>${T('graphio 가 {n}곳까지만 넘긴다 — 더 있을 수 있다',{n:GEO_CAP})}</span>`:'')
     + (!evOn&&h.axis&&h.axis!=='GLOBAL'&&geoShapes(h).length===0?`<span class=warn>${T('구역 좌표를 찾지 못했다')}</span>`:'')
     + (!pts.length&&!h.axis&&!AXIS_NAME[h.axis_raw]?`<span class=warn>${T('지도에 그릴 범위가 없다')}</span>`
@@ -6982,7 +6987,7 @@ function drawPick(){
       hotN.has(sh.dataset.kind+':'+sh.dataset.id) ? 1 : .18);
   }
   const lbl={cell:'eNB', enb:'eNB', sgw:'SGW', mme:'MME', pgw:'PGW'}[PICK.kind];
-  const head = PICK.kind==='pgw' ? T('NTT docomo 本社 · PGW (대표)') : PICK.kind==='box' ? T('드래그 범위 · eNB {n}국',{n:PICK.enb.length})
+  const head = PICK.kind==='pgw' ? T('NTT docomo 본사 · PGW (대표)') : PICK.kind==='box' ? T('드래그 범위 · eNB {n}국',{n:PICK.enb.length})
     : (PICK.kind==='cell'||PICK.kind==='enb') ? enbName(PICK.enb[0]) : `${lbl} ${PICK.id}`;
   bar.style.display='flex';   // CSS 기본이 none 이라 '' 로는 안 열린다
   bar.innerHTML=`<b>${head}</b>`
@@ -7457,10 +7462,11 @@ _JA_MAP = {
     "새로고침 — 장비·장애를 지금 다시 받는다": "再読み込み — 装置・障害を今すぐ取得し直す",
     "새로고침": "再読み込み",
     "셀": "セル", "TA목록": "TAリスト", "장애": "障害",
-    "NTT docomo 本社 (千代田区永田町2-11-1)\nPGW 16대를 한 점으로 — 실제 PGW 위치가 아니다\n누르면 SGW 에서 모이는 선이 나온다":
+    "NTT docomo 본사 (千代田区永田町2-11-1)\nPGW 16대를 한 점으로 — 실제 PGW 위치가 아니다\n누르면 SGW 에서 모이는 선이 나온다":
         "NTT docomo 本社 (千代田区永田町2-11-1)\nPGW 16台を1点に集約 — 実際のPGW位置ではない\nクリックするとSGWから集まる線が出る",
     "조각 {n}건": "断片 {n}件", "일반": "一般", "이 탭에 장애가 없다": "このタブに障害はない", "선 = 사건 전체 범위": "線 = 事象全体の範囲", "칸 = 조각이 판정한 메시·구역 {n}곳": "マス = 断片が判定したメッシュ・区域 {n}か所", "graphio 가 조각마다 {n}곳까지만 넘긴다 — 더 있을 수 있다": "graphioは断片ごとに{n}か所までしか渡さない — さらにある可能性がある", "사건 범위 eNB {e} · 셀 {c}": "事象範囲 eNB {e} · セル {c}",
-    "외부(APP·PAY) · docomo 本社": "外部(APP·PAY) · docomo 本社", "APN · docomo 本社": "APN · docomo 本社",
+    "외부(APP·PAY) · docomo 본사": "外部(APP·PAY) · docomo 本社", "APN · docomo 본사": "APN · docomo 本社",
+    "본사": "本社",
     "외부(APP·PAY) · {d}": "外部(APP·PAY) · {d}", "외부(APP·PAY) · DNS": "外部(APP·PAY) · DNS",
     "도코모 본사 PGW 에 붙였다 — graphio 가 PGW 를 지목한 것은 아니다": "ドコモ本社PGWに表示 — graphioがPGWを指定したわけではない",
     "장애 이력": "障害履歴", "펼치기": "展開", "접기": "折りたたむ",
@@ -7476,7 +7482,7 @@ _JA_MAP = {
     "장애 이력을 마지막으로 받아 반영한 시각 (10초마다)": "障害履歴を最後に取得して反映した時刻(10秒ごと)",
     "\ngraphio 마지막 이상 관측 {t}": "\ngraphio 最終異常観測 {t}",
     "1km 메시": "1kmメッシュ", "500m 메시": "500mメッシュ", "250m 메시": "250mメッシュ",
-    "광역": "都道府県", "구·시": "区・市", "전국": "全国",
+    "광역": "都道府県", "구·시": "区・市", "정목": "丁目", "전국": "全国",
     "단말 기종": "端末機種", "서비스 도메인": "サービスドメイン",
     "{nm} {id}\n그 칸을 덮는 셀들의 체감이 나빴다 — 단말 실제 위치가 아니다":
         "{nm} {id}\nこのメッシュを覆うセルの体感が悪化 — 端末の実位置ではない",
@@ -7487,7 +7493,7 @@ _JA_MAP = {
     "graphio 가 연 장애가 없다": "graphioが開いた障害はない",
     "{geo} {n}곳": "{geo} {n}か所",
     "{ax} · 편향 {node}": "{ax} · 偏り {node}",
-    "망 밖 · docomo 本社": "網外 · docomo 本社",
+    "망 밖 · docomo 본사": "網外 · docomo 本社",
     "{ax} 축 — 지역과 무관": "{ax}軸 — 地域とは無関係",
     "코어 {c}": "コア {c}",
     "중심 좌표만": "中心座標のみ", "지도에 범위 없음": "地図上の範囲なし",
@@ -7507,7 +7513,7 @@ _JA_MAP = {
     " · 특정 장비로 쏠리지 않았다": " · 特定装置への集中なし",
     "칸 = 그 칸을 덮는 셀들의 체감 — 단말 실제 위치가 아니다":
         "メッシュ = そのメッシュを覆うセルの体感 — 端末の実位置ではない",
-    "丁目 경계 없음 — 중심점 근사": "丁目境界なし — 中心点で近似",
+    "정목 경계 없음 — 중심점 근사": "丁目境界なし — 中心点で近似",
     "graphio 가 {n}곳까지만 넘긴다 — 더 있을 수 있다": "graphioは{n}か所までしか渡さない — さらにある可能性がある",
     "구역 좌표를 찾지 못했다": "区域の座標が見つからない",
     "지도에 그릴 범위가 없다": "地図に描く範囲がない",
@@ -7525,7 +7531,7 @@ _JA_MAP = {
     "{e} eNB / {c}셀": "{e} eNB / {c}セル",
     "화면 밖 {n}셀 — 동떨어져 있어 범위에서 뺐다": "画面外 {n}セル — 離れているため範囲から除外した",
     # 선택 바·주입
-    "NTT docomo 本社 · PGW (대표)": "NTT docomo 本社 · PGW (代表)",
+    "NTT docomo 본사 · PGW (대표)": "NTT docomo 本社 · PGW (代表)",
     "드래그 범위 · eNB {n}국": "ドラッグ範囲 · eNB {n}局",
     "셀 {n}": "セル {n}", "TA목록 {t}": "TAリスト {t}",
     "PGW 16대를 한 점으로 — 실제 PGW 위치가 아니다. 선은 SGW → PGW":
@@ -7570,6 +7576,7 @@ _JA_COMMON = {
     "시나리오 설명": "シナリオ説明", "만드는 순서": "作成手順", "데이터에 남는 흔적": "データに残る痕跡",
     "건드리지 않는 것": "変更しないもの", "실제와 다른 점": "実際との違い",
     "이 장애의 시나리오 설명이 없다": "この障害のシナリオ説明はありません",
+    "이 회차를 지도에서 보기": "この実行を地図で見る",
     "탐지 이력을 찾는 중": "検知履歴を検索中", "탐지 이력 없음": "検知履歴なし", "탐지 이력 {n}건": "検知履歴 {n}件",
     "장애 {n} 의 탐지 이력이 지금 목록에 없다": "障害 {n} の検知履歴は現在の一覧にありません",
     "시작": "開始", "지속": "継続", "대상": "対象", "불러오는 중…": "読み込み中…", "닫기": "閉じる",
@@ -7989,10 +7996,22 @@ def _page(html: str, page: str, ja: dict) -> str:
     html = html.replace("<body>", "<body>\n" + _shell_html(page), 1)
     html = _with_i18n(html, {**_JA_COMMON, **ja, **_JA_SHELL})
     # 껍데기 동작은 번역 함수 바로 뒤 — 페이지 스크립트보다 먼저 선다
-    return html.replace("function langSelect(", _SHELL_JS_HOOK + "function langSelect(", 1)
+    return html.replace("function langSelect(", _SHELL_JS_HOOK + _FAULT_MAP_JS + "function langSelect(", 1)
 
 
 _SHELL_JS_HOOK = "window.addEventListener('DOMContentLoaded',()=>{" + _SHELL_JS + "});\n"
+
+#: 장애 → 지도(2026-11-09). 주입 화면의 장애 창(`fm-go`)과 시나리오 화면의 회차 표가 함께 쓴다 —
+#: 화면마다 따로 두면 "탐지 이력 없음"을 가르는 기준이 두 벌이 된다. 모든 페이지에 실린다(`_page`)
+_FAULT_MAP_JS = r"""
+async function faultIncidents(id){
+  try{ return await (await fetch('/api/faults/'+encodeURIComponent(id)+'/incidents')).json(); }
+  catch(e){ return {error:String(e), incidents:[]}; }
+}
+function faultMapUrl(id, got){
+  return '/map?'+new URLSearchParams({fault:id, inc:got[0].incident_id, ids:got.map(x=>x.incident_id).join(',')});
+}
+"""
 
 # ── 시나리오 현황 화면 (`/scenarios`) ───────────────────────────────────────
 #
@@ -8012,6 +8031,9 @@ _HTML_SCEN = r"""<!doctype html>
   :root { --bg:#d6dae0; --panel:#e6e9ed; --line:#c3c9d1; --fg:#262c35;
           --dim:#505a67; --accent:#2f5c8f; --red:#94403a; --yellow:#6f561c;
           --green:#37664c; --hover:#dde1e6; --on:#d0dbe8; }
+  /* 회차의 장애 ID — 지도로 가는 링크(손 모양·밑줄) */
+  a.fmap { color:var(--accent); text-decoration:underline; cursor:pointer; }
+  .fmsg { color:var(--dim); font-size:.9em; }
   * { box-sizing:border-box; }
   /* 위 44px 상단 바 · 왼쪽 60px 레일(`_SHELL_CSS`) 자리를 비운다 */
   body { margin:0; padding:64px 20px 20px 80px; background:var(--bg); color:var(--fg);
@@ -8210,6 +8232,9 @@ function howBlock(no, h){
   return parts.length ? fold(no+':how',T('만드는 순서와 데이터 흔적 보기'),`<div class=how>${parts.join('')}</div>`) : '';
 }
 const minutes=v=>v==null||v==='' ? unk() : esc(T('{n}분',{n:v}));
+//: 장애 ID — 누르면 그 회차의 탐지 이력을 지도로 연다(2026-11-09). `F-121` 꼴이 아니면 글자로 둔다
+const fmap=v=>{ const m=/^F-?(\d+)$/.exec(v==null?'':String(v).trim());
+  return m ? `<a class=fmap href="#" data-fault="${m[1]}" title="${esc(T('이 회차를 지도에서 보기'))}">${esc(v)}</a><span class=fmsg></span>` : val(v); };
 // 목록 줄의 네 칸
 const sgCells=s=>'<span class=sgs>'+STAGES.map(([k,name])=>{ const [st,lb,mark,c]=sgInfo(sgState(s,k));
   return `<span class="sg g-${c}" title="${esc(T(name))}: ${esc(T(lb))}">${esc(k)} ${mark}</span>`; }).join('')+'</span>';
@@ -8259,7 +8284,7 @@ function detail(s){
           ['KPI',coded(e.kpi),'field:kpi'],['지리 모양',coded(e.geo),'field:geo']]))
     +timing(s)
     +sec(esc(T('최신 결과')),
-      dl([['장애 ID',val(l.fault),'field:fault'],['실행',val(l.run),'field:run'],['시각',val(l.at)],
+      dl([['장애 ID',fmap(l.fault),'field:fault'],['실행',val(l.run),'field:run'],['시각',val(l.at)],
           ['탐지까지',minutes(l.detect_min)+hint('field:detect_min')],
           ['판정 원인',coded(l.cause),'field:latest_cause'],
           ['신뢰도',val(l.confidence)+hint('field:confidence')],['요약',val(l.summary)]]))
@@ -8267,7 +8292,7 @@ function detail(s){
       `<h3>${esc(T('남은 문제'))}</h3>${list(l.issues)}`
       +`<div class=sub><h3>${esc(T('다음 할 일'))}</h3>${val(s.next)}</div>`)
     +(Array.isArray(s.history)&&s.history.length ? sec(esc(T('이전 회차 {n}건',{n:s.history.length})),
-      table(s.history,['장애 ID','시각','상태','요약'],x=>[val(x.fault),val(x.at),
+      table(s.history,['장애 ID','시각','상태','요약'],x=>[fmap(x.fault),val(x.at),
         x.status==null?unk():`<span class="${stCls(x.status)}">${esc(stName(x.status))}</span>`,val(x.summary)])) : '')
     +`</div>`;
 }
@@ -8347,6 +8372,20 @@ function goHash(){
   if(c) window.scrollBy(0, c.getBoundingClientRect().top-52);   // 머리글에 가리지 않게 — 아래 `toggle` 과 같은 자리
 }
 addEventListener('hashchange',goHash);        // 이미 이 화면에 있을 때
+// 회차의 장애 ID — 이력이 있으면 지도로 가고, 없으면 가지 않고 그 자리에 말한다(그냥 보내면 "거기 있다"로 읽힌다)
+document.getElementById('doc').addEventListener('click',async e=>{
+  const a=e.target.closest('a.fmap'); if(!a) return;
+  e.preventDefault();
+  if(a.dataset.busy) return;
+  const id=a.dataset.fault, msg=a.nextElementSibling;
+  a.dataset.busy='1'; msg.textContent=' '+T('탐지 이력을 찾는 중');
+  const inc=await faultIncidents(id), got=inc.incidents||[];
+  delete a.dataset.busy;
+  if(inc.error){ msg.textContent=' '+inc.error; return; }
+  if(!got.length){ msg.textContent=' '+T('탐지 이력 없음'); return; }
+  msg.textContent=' '+T('탐지 이력 {n}건',{n:got.length});
+  location.href=faultMapUrl(id, got);
+});
 document.getElementById('filters').addEventListener('click',e=>{
   const b=e.target.closest('button'); if(!b||!DOC) return;
   // 거르면 보던 카드는 닫는다. 참고 사항 칸은 카드가 아니라 둔다

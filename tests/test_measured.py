@@ -249,16 +249,18 @@ def test_other_kinds_are_not_touched_by_a_new_record(tmp_path_measured):
 
 # ---------------------------------------------------------------- 옮겨 온 22번 기록
 
-def test_the_real_file_holds_only_the_migrated_pay_dns_delay_record_and_keeps_11_minutes():
-    """실제 파일을 읽기만 한다 — 22번 1회 기록(정답까지 3분)은 줄이는 근거가 못 되어 권장 11 이 그대로다."""
+def test_the_real_file_keeps_the_migrated_pay_dns_delay_record_first_and_keeps_11_minutes():
+    """실제 파일을 읽기만 한다 — 옮겨 온 22번 기록(정답까지 3분)이 맨 앞이고, 그 뒤에 실측이 늘어도(11-08 F-198)
+    기록이 한두 건이면 줄이는 근거가 못 되어 권장 11 이 그대로다."""
     data = json.loads(REAL.read_text(encoding="utf-8"))
     runs = data["pay_dns_delay"]
-    assert len(runs) == 1 and runs[0]["result"] == "correct" and runs[0]["to_correct_min"] == 3
+    assert runs and runs[0]["fault"] == "RF87B" and runs[0]["result"] == "correct" and runs[0]["to_correct_min"] == 3
+    assert all(r["result"] == "correct" for r in runs)
     measured.PATH = REAL                                     # (fixture 가 되돌린다)
     measured._cache.update(mtime=None, data={})
     d = S.recommended_duration("pay_dns_delay")
-    # pay_dns_delay 는 L2 kind 다 — L2 까지 재지 않은 이 기록은 근거가 못 되어 끝→판정 값도 기본값(SETTLE_MIN)이다
-    assert (d["recommended"], d["basis"], d["settle"]) == (11, "shape", S.SETTLE_MIN)
+    # L2 까지 잰 기록이 1회뿐이면 줄이지 않는다("2회부터 반영") — 권장은 시나리오 모양 값 11 이다
+    assert (d["recommended"], d["basis"]) == (11, "shape") and d["settle"] >= S.SETTLE_MIN
 
 
 # ---------------------------------------------------------------- CLI
