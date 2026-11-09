@@ -207,6 +207,32 @@
       "to_first_event_min": 2.0,
       "to_incident_min": 2.0,
       "to_l2_min": null
+    },
+    {
+      "duration_min": 10.0,
+      "end_to_final_min": 1.0,
+      "fault": "F-214",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-09T12:02:07",
+      "result": "wrong",
+      "start_at": "2026-11-09T11:46:22",
+      "to_correct_min": null,
+      "to_first_event_min": 1.0,
+      "to_incident_min": 1.0,
+      "to_l2_min": null
+    },
+    {
+      "duration_min": 10.0,
+      "end_to_final_min": 3.0,
+      "fault": "F-219",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-09T14:29:55",
+      "result": "wrong",
+      "start_at": "2026-11-09T14:15:22",
+      "to_correct_min": null,
+      "to_first_event_min": 1.0,
+      "to_incident_min": 1.0,
+      "to_l2_min": null
     }
   ],
   "dns_degradation": [
@@ -419,6 +445,32 @@
       "to_first_event_min": 0.0,
       "to_incident_min": 0.0,
       "to_l2_min": 0.0
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": 2.0,
+      "fault": "F-217",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-09T13:35:04",
+      "result": "correct",
+      "start_at": "2026-11-09T13:19:22",
+      "to_correct_min": 1.0,
+      "to_first_event_min": 1.0,
+      "to_incident_min": 1.0,
+      "to_l2_min": 1.0
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": 1.0,
+      "fault": "F-218",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-09T14:04:20",
+      "result": "correct",
+      "start_at": "2026-11-09T13:47:22",
+      "to_correct_min": 1.0,
+      "to_first_event_min": 1.0,
+      "to_incident_min": 1.0,
+      "to_l2_min": 1.0
     }
   ],
   "ho_interruption": [
@@ -615,6 +667,32 @@
       "to_first_event_min": 0.0,
       "to_incident_min": 0.0,
       "to_l2_min": 0.0
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": 1.0,
+      "fault": "F-215",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-09T12:38:51",
+      "result": "correct",
+      "start_at": "2026-11-09T12:23:22",
+      "to_correct_min": 1.0,
+      "to_first_event_min": 1.0,
+      "to_incident_min": 1.0,
+      "to_l2_min": 1.0
+    },
+    {
+      "duration_min": 11.0,
+      "end_to_final_min": 2.0,
+      "fault": "F-216",
+      "intensity": 1.0,
+      "recorded_at": "2026-11-09T13:06:45",
+      "result": "correct",
+      "start_at": "2026-11-09T12:51:22",
+      "to_correct_min": 3.0,
+      "to_first_event_min": 2.0,
+      "to_incident_min": 2.0,
+      "to_l2_min": 3.0
     }
   ],
   "mobility": [
