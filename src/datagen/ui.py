@@ -991,10 +991,13 @@ def api_evt_lookup(ids: str = ""):
 
 
 def _fault_at(opened: str | None) -> int | None:
-    """사건이 열린 시각에 걸쳐 있던 장애(시작 ≤ 열림 ≤ 끝 + 확정 대기) — 지도 링크의 `fault` 인자. 없으면 None."""
+    """사건이 열린 시각에 걸쳐 있던 장애(시작 ≤ 열림 ≤ 끝 + 확정 대기) — 지도 링크의 `fault` 인자. 없으면 None.
+
+    **분 단위로 비교한다.** 사건 열림은 1분 집계 시각(초 0)이고 장애 시작은 초까지 있다 — 02:36:22 에
+    넣은 장애의 첫 사건은 02:36:00 에 열린다(3번 F-235). 시작·끝을 분으로 내려 같은 분이면 걸친 것으로 본다."""
     from .scenarios import SETTLE_MIN
     try:
-        at = datetime.fromisoformat(str(opened or "")[:19])
+        at = datetime.fromisoformat(str(opened or "")[:19]).replace(second=0, microsecond=0)
     except ValueError:
         return None
     try:
@@ -1003,8 +1006,9 @@ def _fault_at(opened: str | None) -> int | None:
         return None
     try:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT FAULT_ID FROM {T_FAULT} WHERE START_TIME <= %s AND "
-                        f"DATE_ADD(START_TIME, INTERVAL DURATION_MIN + %s MINUTE) >= %s "
+            st = "CAST(DATE_FORMAT(START_TIME, '%%Y-%%m-%%d %%H:%%i:00') AS DATETIME)"
+            cur.execute(f"SELECT FAULT_ID FROM {T_FAULT} WHERE {st} <= %s AND "
+                        f"DATE_ADD({st}, INTERVAL DURATION_MIN + %s MINUTE) >= %s "
                         "ORDER BY START_TIME DESC LIMIT 1", [at, SETTLE_MIN, at])
             row = cur.fetchone()
     except Exception:  # noqa: BLE001
@@ -2307,8 +2311,8 @@ function renderRush(h) {
   const el = $("dur-rush");
   if (!el) return;
   const clock = (h && h.clock) || [];
-  el.hidden = !clock.length;
-  if (!clock.length) { el.innerHTML = ""; return; }
+  if (!clock.length) { renderWindow(h); return; }
+  el.hidden = false;
   const on = $("diurnal").checked, vh = vNow().getHours();
   const inside = (h.rush || []).some(([a, b]) => a <= b ? (a <= vh && vh < b) : (vh >= a || vh < b));
   const now = String(vh).padStart(2, "0") + ":" + String(vNow().getMinutes()).padStart(2, "0");
@@ -2320,6 +2324,29 @@ function renderRush(h) {
     + " " + state;
 }
 async function rushClock(v) { PV = null; await postClock(v); renderDurHint(); }
+// 출퇴근이 아닌 시나리오의 시작 시간대(`recommended_hours` 의 실측 `from`·`to`) — 지금 가상 시각이 그 밖이면
+// 경고한다(2026-11-10 사용자 승인). **경고만 하고 주입은 막지 않는다.** 시간대를 정의에서 읽지 못하면
+// (실측 없음·제약 없음) 아무것도 말하지 않는다 — 지어내지 않는다. 곡선이 꺼져 있으면 모든 시각이 피크
+// 수준이라 시간대가 상관없다. 가상 시각을 옮긴 상태는 따로 적는다 — 11-10 에 +312분을 되돌리지 않은
+// 채 반나절 주입했다
+function renderWindow(h) {
+  const el = $("dur-rush"), on = $("diurnal").checked, parts = [];
+  if (on && $("kind").value && h && h.n && !h.all && h.from != null && h.to != null) {
+    const vh = vNow().getHours(), a = h.from, b = h.to;
+    const inside = a <= b ? (a <= vh && vh < b) : (vh >= a || vh < b);
+    if (!inside) {
+      const now = String(vh).padStart(2, "0") + ":" + String(vNow().getMinutes()).padStart(2, "0");
+      parts.push(`<span style="color:var(--yellow)">${esc(T("지금 가상 시각 {t} — 시작 시간대({h}) 밖이라 탐지되지 않을 수 있다 · 주입은 된다",
+        {t: now, h: LANG === "ja" && h.text_ja || h.text || ""}))}</span>`);
+    }
+  }
+  const m = Math.round(VO / 60);
+  if (on && $("kind").value && m)
+    parts.push(`<span style="color:var(--yellow)">${esc(T("가상 시각 {n}분 적용 중 — 끝나면 「지금으로」로 되돌린다",
+      {n: (m > 0 ? "+" : "") + m}))}</span>`);
+  el.hidden = !parts.length;
+  el.innerHTML = parts.join("<br>");
+}
 
 function renderTargets() {
   if (!TGT) return;
@@ -8096,6 +8123,8 @@ _JA_MAIN = {
     "지금 가상 시각 {t} — 출퇴근 시간대 안": "現在の仮想時刻 {t} — 通勤時間帯内",
     "지금 가상 시각 {t} — 출퇴근 시간대 밖이라 탐지되지 않을 수 있다": "現在の仮想時刻 {t} — 通勤時間帯外のため検知されない場合がある",
     "곡선이 꺼져 있다 — 시간대를 안 보므로 출퇴근 모양이 서지 않는다": "曲線がオフ — 時間帯を見ないため通勤時の形が立たない",
+    "지금 가상 시각 {t} — 시작 시간대({h}) 밖이라 탐지되지 않을 수 있다 · 주입은 된다": "現在の仮想時刻 {t} — 開始時間帯({h})外のため検知されない場合がある・注入は可能",
+    "가상 시각 {n}분 적용 중 — 끝나면 「지금으로」로 되돌린다": "仮想時刻 {n}分を適用中 — 終わったら「現在に戻す」で戻す",
     "곡선·지하철·이동 비율만 그 시각 기준이다 — 레코드 시각은 실제 시각 그대로": "曲線・地下鉄・移動比率のみその時刻基準 — レコード時刻は実時刻のまま",
     "데이터 보존": "データ保持", "— 지난 파티션을 떨어뜨린다": "— 古いパーティションを削除する",
     "보존 정리 on/off": "保持整理 on/off", "보존": "保持", "시간": "時間", "설정 저장": "設定を保存",
