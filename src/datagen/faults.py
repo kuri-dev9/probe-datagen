@@ -927,6 +927,13 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
     # 보인다. 노드 다운은 이 시각 전의 호·세션을 건드리지 않는다(`scenarios.node_down_set`
     # 의 `AT` · 2026-11-04 F-110). epoch 는 레코드 시각(`slot_start = ts.timestamp()`)과 같은 기준이다
     sc.start_ts = fault["start_ts"].timestamp()
+    # 정답지 `expect_geo` — 고른 대상 셀의 실제 모양(`scenarios.geo_shape` = graphio `geo_pattern` 과 같은 식 ·
+    # 사용자 결정 B 2026-11-11). 셀이 없는 축 kind(APN·외부 경로)와 좌표가 없는 대상은 재지 않고 고정값을 둔다
+    by_key_geo = {c.cell_key: c for c in cells}
+    mine = [by_key_geo[k] for k in target.cell_keys if k in by_key_geo]
+    shape = S.geo_shape(mine) if mine else "UNKNOWN"
+    if shape != "UNKNOWN":
+        sc._geo_shape = shape
     if fault["kind"] in ("natural_disaster", "earthquake"):
         # 정지 순위(`_disaster_rank` local)가 좌표를 본다 — 대상 셀을 실어 둔다
         by_key = {c.cell_key: c for c in cells}

@@ -599,7 +599,11 @@ class Scenario:
             "truth_category": self.truth_category,
             "expect_rules": list(self.expect_rules),
             "expect_alternatives": dict(self.expect_alternatives),
-            "expect_geo": self.expect_geo,
+            # **고른 셀로 잰 모양**(2026-11-11 사용자 결정 B) — 고정값은 kind 의 대표 모양이라 실제 대상과 어긋났다
+            # (도쿄 셀은 반경 7~8km 라 WIDE(60km 초과)가 나올 수 없다 · 5·11·21·22번). `faults.build` 가 대상
+            # 셀로 `geo_shape` 를 재 `_geo_shape` 에 둔다. 셀이 없거나 좌표가 없으면(APN·외부 경로) 고정값이다
+            "expect_geo": self.__dict__.get("_geo_shape") or self.expect_geo,
+            "expect_geo_static": self.expect_geo,
             "start_minute": self.start_minute,
             "duration": self.duration,
             "shape": self.shape,

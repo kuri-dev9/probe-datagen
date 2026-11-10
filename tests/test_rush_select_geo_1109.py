@@ -106,7 +106,9 @@ def test_truth_expect_geo(make, kind, want):
     g = make()
     scs, bad = g.set_fault_rows([_row(kind=kind, dur=15)])
     assert scs and not bad
-    assert scs[0].as_truth()["expect_geo"] == want
+    truth = scs[0].as_truth()
+    assert truth["expect_geo_static"] == want                    # 고정값은 그대로 남는다(2026-11-11 사용자 결정 B)
+    assert truth["expect_geo"] == (scs[0].__dict__.get("_geo_shape") or want)       # 고른 셀로 잰 모양이 있으면 그것
 
 
 # ── 5. UI ────────────────────────────────────────────────────────────────────

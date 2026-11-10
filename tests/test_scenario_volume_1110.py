@@ -34,22 +34,28 @@ def test_no_volume_is_the_same_as_15_and_is_the_base_file():
     assert len(a["report"]["scenarios"]) == 27
 
 
-def test_50_has_27_scenarios_and_only_no11_is_judged():
+def test_50_has_27_scenarios_and_judged_ones_carry_50_runs():
     d = ui.api_scenario_report(50)
     assert d["ok"] and d["report"] == load("scenario_report_v50.json")
     sc = d["report"]["scenarios"]
     assert len(sc) == 27 and sorted(s["no"] for s in sc) == list(range(1, 28))
-    judged = [s["no"] for s in sc if s.get("latest") or s.get("history")]
-    assert judged == [11]
-    st = {s["no"]: s.get("status") for s in sc}
-    assert st[11] != "pass" and all(v != "pass" for v in st.values())
+    judged = [s for s in sc if s.get("latest") or s.get("history")]
+    assert judged, "50% 재주행 결과가 하나도 없다"
+    # 50% 회차는 `noN-vX` 이름이고 통과 기준(네 단계 모두 정상)은 15% 탭과 같다 — 통과가 있어도 되고 단계 상태가 뒷받침해야 한다
+    for s in judged:
+        assert str(s["latest"]["run"]).startswith(f"no{s['no']}-v"), s["no"]
+        if s.get("status") == "pass":
+            assert all(v["state"] in ("ok", "na") for v in s["stages"].values()), s["no"]
+    assert all(s.get("status") == "not_run" for s in sc if s not in judged)
 
 
 def test_50_does_not_leak_15_judgements_and_15_does_not_get_50():
     p15 = {s["no"]: s for s in ui.api_scenario_report(15)["report"]["scenarios"]}
     p50 = {s["no"]: s for s in ui.api_scenario_report(50)["report"]["scenarios"]}
     assert sum(1 for s in p15.values() if s.get("status") == "pass") > 0
-    assert not any(s.get("status") == "pass" for s in p50.values())
+    runs15 = {s["latest"]["run"] for s in p15.values() if s.get("latest")}
+    runs50 = {s["latest"]["run"] for s in p50.values() if s.get("latest")}
+    assert runs50 and not (runs15 & runs50), "15% 회차와 50% 회차가 섞였다"
     for no in (1, 2, 5):
         for k in ("name", "kind", "what", "setup", "expect"):
             assert p15[no][k] == p50[no][k], "설정·기준은 15% 와 같다"
