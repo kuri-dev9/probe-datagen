@@ -245,7 +245,7 @@ CREATE TABLE IF NOT EXISTS `{T_SCENARIO}` (
 CREATE TABLE IF NOT EXISTS `{T_APP}` (
   `APP_IDX`         varchar(20)  NOT NULL             COMMENT '앱 코드 → XDR App_ID',
   `ENDPOINT_SEQ`    int          NOT NULL DEFAULT 1   COMMENT '앱 안의 엔드포인트 번호 — 앱 하나에 IP·포트가 여럿일 수 있다',
-  `APP_NAME`        varchar(100) NOT NULL,
+  `APP_NAME`        varchar(100) NOT NULL             COMMENT '앱 이름 — 화면·답에 쓰는 이름. 한 앱(APP_IDX)에 엔드포인트(ENDPOINT_SEQ)가 여러 행이라 앱 단위로는 APP_IDX 로 묶는다',
   `GROUP_CODE`      varchar(50)  NOT NULL             COMMENT '앱 그룹 → XDR App_Group_Code (STREAMING·PAY·SNS…)',
   `APP_TYPE`        varchar(20)      DEFAULT NULL     COMMENT '엔드포인트 성격 (API·CDN·WEB…)',
   `PROTOCOL`        int              DEFAULT NULL     COMMENT 'IP 프로토콜 번호 (6 TCP · 17 UDP)',
