@@ -292,20 +292,20 @@
     "ja": "11分、終了後に判定が確定するまで約7分"
    },
    "latest.summary": {
-    "h": "744051b814",
-    "ja": "セルC-02の原始影響加入者経路を確認する再確認回次。対象はセル326(セル範囲)で、直近の2番回次(F-187 セル1,045・F-118 セル796)と重なるセルが0。豊島区のC-02ピースが注入の初回分(13:15)に立ちRAN_RADIO_QUALITY 0.808で正解し、L1束EVT-663536dc78が6ピース・58セルを束ねて0.84で正解した。地理はCLUSTER 2.67kmで正解のCLUSTERと同じ。L2は該当なし。セルピースの影響加入者は原始のC-02ユニーク失敗人数と完全に一致する。L3は結論・根拠を証拠どおりに答え、破棄された文はない。"
+    "h": "487f408292",
+    "ja": "終了したイベントの値で判定した。対象はセル215個(前回F-213と重なり0)・11分回次。08:20(注入約2分後)に最初のイベントが立ち、L1バンドルEVT-7a7576ba0d(ピース2)がRAN_RADIO_QUALITY 0.84と08:20に判定、08:30に終了・解消した。イベントの地理は正解と同じCLUSTER 半径2.73km。確定セル19個は全て正解(精度100%)、ピースの影響セルを足すと59個中55個が正解(精度93%、正解215個に対する再現率25.6%)。影響加入者62人。注入直前のcorr遅延は約2分半だったが、検知が遅れた・欠けた形跡はない。L3は原因・R-06系の根拠(First Error S1MME 100%・原因121)・19セル・62人・開始08:20・終了08:30を証拠どおりに答え、範囲外の質問を断った。データ質問(08:22~08:27の全体試行)は16,748で生データと一致。"
    },
    "latest.issues.0": {
-    "h": "5e3cfab8cc",
-    "ja": "事象の影響加入者312人(下限)は失敗人数ではなく体感断片の値で、セル断片の値(121人)と定義が異なる。"
+    "h": "55856f1763",
+    "ja": "イベントが8個に分かれた — 主バンドルのほかに、軸の広いUNDETERMINEDピース6個とCHANGE_SUSPECTED 0.602のピース(セル2・加入者10人)が別に立った(L2イベントにまとまらない)。"
    },
    "latest.issues.1": {
-    "h": "cee705b561",
-    "ja": "事象ヘッダの rules が空で、R-06・R-22 が根拠として立ったかを事象単位で確認できない。"
+    "h": "dca1522aff",
+    "ja": "L3データ質問の「失敗数」を切断数(TOTAL_DROPS 92)で答えた — 接続失敗数は生データで63である(列名は表示した)。"
    },
    "latest.issues.2": {
-    "h": "25ea795509",
-    "ja": "aggregate 段階が約30分ごとに28秒に跳ねる(原因未確認)。"
+    "h": "a8ea7fa009",
+    "ja": "セル再現率が正解215個の25.6%である。"
    },
    "next": {
     "h": "b498d1ee34",
@@ -328,34 +328,86 @@
     "ja": "L1束に質問して答えた。無線品質劣化と答え、S1MME最初のエラー100%・Cause 121(Radio Connection With UE Lost)・無線起因切断98.876%(175件98%)・CLUSTER 2.67kmセル58を証拠どおりに引用した。破棄された文は0件。"
    },
    "history.0.summary": {
+    "h": "744051b814",
+    "ja": "セルC-02の原始影響加入者経路を確認する再確認回次。対象はセル326(セル範囲)で、直近の2番回次(F-187 セル1,045・F-118 セル796)と重なるセルが0。豊島区のC-02ピースが注入の初回分(13:15)に立ちRAN_RADIO_QUALITY 0.808で正解し、L1束EVT-663536dc78が6ピース・58セルを束ねて0.84で正解した。地理はCLUSTER 2.67kmで正解のCLUSTERと同じ。L2は該当なし。セルピースの影響加入者は原始のC-02ユニーク失敗人数と完全に一致する。L3は結論・根拠を証拠どおりに答え、破棄された文はない。"
+   },
+   "history.0.issues.0": {
+    "h": "5e3cfab8cc",
+    "ja": "事象の影響加入者312人(下限)は失敗人数ではなく体感断片の値で、セル断片の値(121人)と定義が異なる。"
+   },
+   "history.0.issues.1": {
+    "h": "cee705b561",
+    "ja": "事象ヘッダの rules が空で、R-06・R-22 が根拠として立ったかを事象単位で確認できない。"
+   },
+   "history.0.issues.2": {
+    "h": "25ea795509",
+    "ja": "aggregate 段階が約30分ごとに28秒に跳ねる(原因未確認)。"
+   },
+   "history.1.summary": {
     "h": "de357be8bc",
     "ja": "11分の回で、B案の対象は市区町村 `11110` ひとつのセル全部(1,045個 · 半径 2.73km CLUSTER)である。L1 まとめ `EVT-660b83c5fa` が RAN_RADIO_QUALITY 0.808 で正解し、地域断片の地理が CLUSTER 半径 2.81km で正解と同じである。L2 は該当なし、L3 も正常である。"
    },
-   "history.0.issues.0": {
+   "latest.l3.turns.0.note": {
+    "h": "b768cca300",
+    "ja": "原因・根拠・19セル・62人・開始08:20・終了08:30がイベント値と同じ。dropped 0件。"
+   },
+   "latest.l3.turns.1.note": {
+    "h": "1c41dc4463",
+    "ja": "試行16,748は生データと一致。「失敗数」を切断数(DROP 92)で答えた — 接続失敗数は生データで63(列名TOTAL_DROPSは明示)。最初のqueryでpartition_scope.columnが自動補完され、エラーなく成功。"
+   },
+   "latest.l3.turns.2.note": {
+    "h": "0dcec96727",
+    "ja": "範囲外の質問を断った。"
+   },
+   "history.0.l3.turns.0.note": {
+    "h": "82b1a68816",
+    "ja": "原因・根拠・範囲・開始・終了がイベント値と同じ。dropped 0件。"
+   },
+   "history.0.l3.turns.1.note": {
+    "h": "734f91d7ad",
+    "ja": "画面の値と同じ。"
+   },
+   "history.0.l3.turns.2.note": {
+    "h": "0dcec96727",
+    "ja": "範囲外の質問を断った。"
+   },
+   "history.0.l3.turns.3.q": {
+    "h": "07e6690d2d",
+    "ja": "全体の呼の試行数を実データで照会して教えてください(生データ削除区間)。"
+   },
+   "history.0.l3.turns.3.a_head": {
+    "h": "753195a359",
+    "ja": "DataLens 応答失敗 (HTTP 503): {'request_id': 'dlr_V0wB44SN572cJ3msnnq79i90', 'status': 'failed', 'error"
+   },
+   "history.0.l3.turns.3.note": {
+    "h": "bc06cc2f5c",
+    "ja": "未確認(DataLens MCPの読み取りtimeout 5秒の欠陥 — QueryForgeは正常終了)。生データが削除された日付のため照合不可。画面にHTTP 503のエラー文言がそのまま見えた。偽の値はない。"
+   },
+   "history.1.issues.0": {
     "h": "466cf9ee4b",
     "ja": "B案の効果が確認された。前回 F-118 は市区町村のセル796個を形を見ずに選び、事象の地理が SCATTER だったが、今回は市区町村全体の形が CLUSTER である所(`_sgg_of_shape`)を選び、地域断片 IX26110721425677 が CLUSTER 半径 2.81km・セル394個で正解の CLUSTER と同じである。セル1,045個は日本の市区町村のセル数が大きいためで正常な範囲である(マックス確認)。9番 F-186 の対象とは重ならなかった。"
    },
-   "history.0.issues.1": {
+   "history.1.issues.1": {
     "h": "8be641a875",
     "ja": "D は正常である。注入の最初の分(21:42)に地域断片(千代田区 · C-02・C-04・F-03・N-02・Q-02)と体感 Q-02 メッシュ・町丁・市区町村断片が立った。21:44 に Core ノード軸 C-02 断片(WIDE · UNDETERMINED)が出た。誤検知はない。"
    },
-   "history.0.issues.2": {
+   "history.1.issues.2": {
     "h": "10d0c7ae1d",
     "ja": "L1 は正常である。まとめ EVT-660b83c5fa(構成2 · セル394個 · 影響666人)が RAN_RADIO_QUALITY 0.808 である。代替は構成・設定変化の疑い 0.562 の1つである。ルール行はまとめ単位では空である。"
    },
-   "history.0.issues.3": {
+   "history.1.issues.3": {
     "h": "94acba4d9c",
     "ja": "L2 は該当なし(na)とする。正解が CLUSTER の局所障害のため広域形状がない(7番と同じ基準)。ただし体感 Q-02 断片5件と Core ノード C-02 断片(UNDETERMINED)が本まとめと別に残った。いずれも判定なしで、誤った結論はない。"
    },
-   "history.0.issues.4": {
+   "history.1.issues.4": {
     "h": "1cbe37a71c",
     "ja": "L3 は DataLens で L1 まとめの代表 ID に尋ねた。無線品質劣化と答え、最初のエラー S1MME_S1AP 100%・原因121 Radio Connection With UE Lost 295件・無線起因 98.662%・千代田区 CLUSTER 2.81km セル394個・影響666人・疎通率 11.25% 低下を引用した。代替(構成・設定変化の疑い)も述べた。除外された文は0件、切り詰めなしである。根拠表示は EV-00・EV-01・EV-04c・EV-11・EV-09・EV-06・EV-17 と実際の番号が付いた。"
    },
-   "history.0.issues.5": {
+   "history.1.issues.5": {
     "h": "4c009d88eb",
     "ja": "判定は注入終了(21:52:22)の約3分後で、解消後のクローズは見ていない。"
    },
-   "history.1.summary": {
+   "history.2.summary": {
     "h": "ca515362c9",
     "ja": "radio-v1(F-118、セル796個)。地理が SCATTER で正解の CLUSTER と分かれ、断片が別々に残った。"
    }
@@ -560,16 +612,16 @@
     "ja": "8分、終了後に判定確定まで約7分"
    },
    "latest.summary": {
-    "h": "fa289d795f",
-    "ja": "ノード巡回の再確認回次。対象はMME-5(セル1,335・全国範囲)。`target_history` は00:04再起動以降の分しかなく、再起動前の回次F-178(同じMME-5・同じセル)と重なった。巡回の不具合ではなく記録外の回次との重なりで、記録内の直近回次F-205(MME-2)・F-207(MME-6)とは異なる。L2イベントEVT-9bd8f38fe2がCORE形状で6ピース・90セルを束ね、AUTH_FAILURE 0.84(R-01)と判定した。地理はSCATTER 7.3km(マップ90セル)で正解と同じ。L3は結論・根拠を証拠どおりに答え、破棄された文はない。"
+    "h": "bec45e332d",
+    "ja": "終了したイベントの値で判定した。対象はMME-2・セル1484個(前回F-208のMME-5と重なり0)・11分回次。08:45の最初のイベントとともにL2イベントEVT-34e421b134(ピース6)がAUTH_FAILURE 0.793で立ち、0.808で08:55に終了、09:01に解消した。根拠はR-01(認証成功率92.7%・First Error S6a 100%・5003 DIAMETER_AUTHORIZATION_REJECTED)。地理は正解と同じSCATTER 6.5km、履歴に不審なNEW・PIECE行はない。セル88個は全て正解(精度100%、再現率5.9%)。影響加入者166人。L3の最初の質問は原因・根拠・166人・開始08:45・終了08:55を正確に答え、範囲外の質問は断った。**しかしデータ質問(08:46~08:51のMME-2経由の試行・失敗)が誤っていた** — 生データは3,144/91なのに51,309/273と答えた。空出力(eval 162)の後に新たに入れた形式固定の再照会(structured_retry)がMMEの絞り込みなしでPM_COR_EPC_1Mの全体合計を照会したためである。"
    },
    "latest.issues.0": {
-    "h": "9b366d1a36",
-    "ja": "L2 事象が注入5分後にようやく立った(最初の分ではない)。"
+    "h": "c64aabcbc7",
+    "ja": "L3データ質問が誤った値を出した: MME-2経由の試行・失敗(生データ3,144/91)を全体合計51,309/273と答えた — 形式固定の再照会(structured_retry、空出力eval 162)がfilters(MME_ID)を落とし、別の表(PM_COR_EPC_1M)へ行った。偽の値である。"
    },
    "latest.issues.1": {
-    "h": "c7a0f0d88a",
-    "ja": "事象のセル90個は対象1,335個の約7%で、事象軸に MME-5 がない。"
+    "h": "d901a07dfa",
+    "ja": "イベント履歴は正常だが、別に立ったUNDETERMINEDピース1個(EVT-2c1c4ed109)が残る。"
    },
    "next": {
     "h": "d58fa73adc",
@@ -592,38 +644,94 @@
     "ja": "L2イベントに質問して答えた。結論(認証失敗)と根拠(認証成功率93.7% -6.3%p・S6a First Error 100%・15001が41件/153件・MME-5失敗比率96.2%・セル90 SCATTER 7.3km)が証拠と同じで、破棄された文は0件。"
    },
    "history.0.summary": {
+    "h": "fa289d795f",
+    "ja": "ノード巡回の再確認回次。対象はMME-5(セル1,335・全国範囲)。`target_history` は00:04再起動以降の分しかなく、再起動前の回次F-178(同じMME-5・同じセル)と重なった。巡回の不具合ではなく記録外の回次との重なりで、記録内の直近回次F-205(MME-2)・F-207(MME-6)とは異なる。L2イベントEVT-9bd8f38fe2がCORE形状で6ピース・90セルを束ね、AUTH_FAILURE 0.84(R-01)と判定した。地理はSCATTER 7.3km(マップ90セル)で正解と同じ。L3は結論・根拠を証拠どおりに答え、破棄された文はない。"
+   },
+   "history.1.summary": {
     "h": "2614bf5be6",
     "ja": "11分の回で、対象は MME-2(セル1,484個 · 全国範囲)である。17:23 の全国核の修正(`core_globals`)の後で初めて、L2 事象 `EVT-1d7282a521` が CORE 形状で6断片・セル22個をまとめ、AUTH_FAILURE 0.808 と判定した(ルール R-01)。L3 も正常である。"
    },
-   "history.1.summary": {
+   "history.0.issues.0": {
+    "h": "9b366d1a36",
+    "ja": "L2 事象が注入5分後にようやく立った(最初の分ではない)。"
+   },
+   "history.0.issues.1": {
+    "h": "c7a0f0d88a",
+    "ja": "事象のセル90個は対象1,335個の約7%で、事象軸に MME-5 がない。"
+   },
+   "history.2.summary": {
     "h": "746fae408b",
     "ja": "auth-v2。L1 まとめは AUTH_FAILURE 0.84 で正解だったが、MME ノード断片がなく L2_EVENT は立たなかった。"
    },
-   "history.0.issues.0": {
+   "latest.l3.turns.0.note": {
+    "h": "a572e0bfe6",
+    "ja": "原因・R-01根拠・166人・開始08:45・終了08:55が正確。dropped 0件。"
+   },
+   "latest.l3.turns.1.note": {
+    "h": "bdc76927bc",
+    "ja": "生データのMME-2 3,144/91と異なる。空出力(eval 162)の後にstructured_retryがPM_COR_EPC_1Mをfiltersなしで照会し、全体合計をMME-2の値のように答えた。偽の値。"
+   },
+   "latest.l3.turns.2.note": {
+    "h": "734f91d7ad",
+    "ja": "画面の値と同じ。"
+   },
+   "latest.l3.turns.3.note": {
+    "h": "6b374fe84d",
+    "ja": "断りはしたが、答えが「…短く答え、その作業はしないでください」と指示文をそのまま繰り返した — 文言が不自然である。"
+   },
+   "latest.issues.2": {
+    "h": "152fa624cb",
+    "ja": "セル再現率が正解1484個の5.9%である(生成量の限界)。"
+   },
+   "history.0.l3.turns.0.note": {
+    "h": "82b1a68816",
+    "ja": "原因・根拠・範囲・開始・終了がイベント値と同じ。dropped 0件。"
+   },
+   "history.0.l3.turns.1.note": {
+    "h": "734f91d7ad",
+    "ja": "画面の値と同じ。"
+   },
+   "history.0.l3.turns.2.note": {
+    "h": "0dcec96727",
+    "ja": "範囲外の質問を断った。"
+   },
+   "history.0.l3.turns.3.q": {
+    "h": "07e6690d2d",
+    "ja": "全体の呼の試行数を実データで照会して教えてください(生データ削除区間)。"
+   },
+   "history.0.l3.turns.3.a_head": {
+    "h": "af07d92ed5",
+    "ja": "DataLens 応答失敗 (HTTP 503): {'request_id': 'dlr_kmfqpTcxMOYedjIOWEu-4Ytf', 'status': 'failed', 'error"
+   },
+   "history.0.l3.turns.3.note": {
+    "h": "bc06cc2f5c",
+    "ja": "未確認(DataLens MCPの読み取りtimeout 5秒の欠陥 — QueryForgeは正常終了)。生データが削除された日付のため照合不可。画面にHTTP 503のエラー文言がそのまま見えた。偽の値はない。"
+   },
+   "history.1.issues.0": {
     "h": "6b6984e7de",
     "ja": "L2 事象が立った。`AI_RCA_EVENT` の `L2_EVENT` EVT-1d7282a521 は形状 CORE、構成6断片、セル22個、影響加入者96人である。17:35 の注入の最初の分に開き、17:45 まで続いた。構成は全国 P-01 断片(核)・都道府県断片(セル22個 SCATTER)・市区町村1セル断片・体感 Q-02 メッシュ・町丁断片3件である。体感断片が1つの事象に付いた。17:23 の `corr` 再起動の `core_globals`(全国断片を呼失敗の集中で核に立てる)がノード断片なしで MME Core 事象を立てた。v2 で0件だった L2 が立ったことになる。"
    },
-   "history.0.issues.1": {
+   "history.1.issues.1": {
     "h": "a96d32b84c",
     "ja": "結論は正解である。事象 AUTH_FAILURE 0.808 で、ルール R-01(認証成功率 92.9% 正常比 -6.8%p + First Error S6a 100% · 15001 ERROR_USER_UNKNOWN)が立った。前回見られなかった事象ルール R-01 が立ち、マックスの懸念は解消した。代替はない。R-24・R-28・R-35 も出たが UNDETERMINED の補助ルールである。"
    },
-   "history.0.issues.2": {
+   "history.1.issues.2": {
     "h": "b2cb693364",
     "ja": "D は正常である。期待指標 P-01 イベントが全国(17:35)・都道府県(17:43 セル22個)に立った。市区町村1セルイベント(C-01・P-01)が 17:35 と 17:42 に出て、体感 Q-02 イベントが 17:42 に出た。誤検知はない。"
    },
-   "history.0.issues.3": {
+   "history.1.issues.3": {
     "h": "87ae077a02",
     "ja": "L3 は DataLens で L2 事象の代表 ID に `unit` なしで尋ねた。認証失敗と答え、認証成功率 92.9%(-6.8%p)・S6a First Error 100%・15001 ERROR_USER_UNKNOWN 49件(29.34%)・セル22個 SCATTER 5.88km・MME-2 100% を引用した。HSS/DRA の対処もある。除外された文は0件、切り詰めなしである。根拠表示は EV-00・EV-01・EV-04b・EV-11・EV-12・EV-KB と実際の番号が付いた。"
    },
-   "history.0.issues.4": {
+   "history.1.issues.4": {
     "h": "6b7c425509",
     "ja": "事象の地理 SCATTER 5.88km は正解の SCATTER と同じである。都道府県断片1つが地域を代表し、対象セル1,484個全体ではない(事象セル22個)。影響加入者96人は対象規模に比べて小さい。"
    },
-   "history.0.issues.5": {
+   "history.1.issues.5": {
     "h": "6f04a88fe3",
     "ja": "判定は注入終了(17:46:22)の約3分後で、解消後のクローズは見ていない。"
    },
-   "history.2.summary": {
+   "history.3.summary": {
     "h": "bdbe65140e",
     "ja": "auth-v1。L1 は AUTH_FAILURE で正解だったが、全国・都道府県断片が別に残り L2 事象は立たなかった。"
    }
@@ -846,6 +954,30 @@
    "next": {
     "h": "d58fa73adc",
     "ja": "なし"
+   },
+   "latest.l3.turns.0.note": {
+    "h": "82b1a68816",
+    "ja": "原因・根拠・範囲・開始・終了がイベント値と同じ。dropped 0件。"
+   },
+   "latest.l3.turns.1.note": {
+    "h": "734f91d7ad",
+    "ja": "画面の値と同じ。"
+   },
+   "latest.l3.turns.2.note": {
+    "h": "0dcec96727",
+    "ja": "範囲外の質問を断った。"
+   },
+   "latest.l3.turns.3.q": {
+    "h": "07e6690d2d",
+    "ja": "全体の呼の試行数を実データで照会して教えてください(生データ削除区間)。"
+   },
+   "latest.l3.turns.3.a_head": {
+    "h": "86213589e2",
+    "ja": "DataLens 応答失敗 (HTTP 503): {'request_id': 'dlr_sfsW9L37GxFnz1tTiwxmfeYY', 'status': 'failed', 'error"
+   },
+   "latest.l3.turns.3.note": {
+    "h": "bc06cc2f5c",
+    "ja": "未確認(DataLens MCPの読み取りtimeout 5秒の欠陥 — QueryForgeは正常終了)。生データが削除された日付のため照合不可。画面にHTTP 503のエラー文言がそのまま見えた。偽の値はない。"
    }
   },
   "7": {
@@ -936,6 +1068,30 @@
    "history.0.summary": {
     "h": "e51e8546ea",
     "ja": "transport-v1(F-121)。原因は正解だったが、地理が正解の CLUSTER と分かれた(市区町村のセル全部が SCATTER)。"
+   },
+   "latest.l3.turns.0.note": {
+    "h": "82b1a68816",
+    "ja": "原因・根拠・範囲・開始・終了がイベント値と同じ。dropped 0件。"
+   },
+   "latest.l3.turns.1.note": {
+    "h": "734f91d7ad",
+    "ja": "画面の値と同じ。"
+   },
+   "latest.l3.turns.2.note": {
+    "h": "0dcec96727",
+    "ja": "範囲外の質問を断った。"
+   },
+   "latest.l3.turns.3.q": {
+    "h": "07e6690d2d",
+    "ja": "全体の呼の試行数を実データで照会して教えてください(生データ削除区間)。"
+   },
+   "latest.l3.turns.3.a_head": {
+    "h": "b1915dd5cf",
+    "ja": "DataLens 応答失敗 (HTTP 503): {'request_id': 'dlr_mXvES_fTvsnpiVOpiiOnNs66', 'status': 'failed', 'error"
+   },
+   "latest.l3.turns.3.note": {
+    "h": "bc06cc2f5c",
+    "ja": "未確認(DataLens MCPの読み取りtimeout 5秒の欠陥 — QueryForgeは正常終了)。生データが削除された日付のため照合不可。画面にHTTP 503のエラー文言がそのまま見えた。偽の値はない。"
    }
   },
   "8": {
@@ -1026,6 +1182,30 @@
    "history.0.summary": {
     "h": "941ca6eedb",
     "ja": "uemodel-v1(F-122)。UE_MODEL_ISSUE で正解した。5G 比率・K6 変更前の判定。"
+   },
+   "latest.l3.turns.0.note": {
+    "h": "82b1a68816",
+    "ja": "原因・根拠・範囲・開始・終了がイベント値と同じ。dropped 0件。"
+   },
+   "latest.l3.turns.1.note": {
+    "h": "734f91d7ad",
+    "ja": "画面の値と同じ。"
+   },
+   "latest.l3.turns.2.note": {
+    "h": "0dcec96727",
+    "ja": "範囲外の質問を断った。"
+   },
+   "latest.l3.turns.3.q": {
+    "h": "07e6690d2d",
+    "ja": "全体の呼の試行数を実データで照会して教えてください(生データ削除区間)。"
+   },
+   "latest.l3.turns.3.a_head": {
+    "h": "56ba1fd07c",
+    "ja": "DataLens 応答失敗 (HTTP 503): {'request_id': 'dlr_lG3PVDa7hRL3sIdW1gjtb5LW', 'status': 'failed', 'error"
+   },
+   "latest.l3.turns.3.note": {
+    "h": "bc06cc2f5c",
+    "ja": "未確認(DataLens MCPの読み取りtimeout 5秒の欠陥 — QueryForgeは正常終了)。生データが削除された日付のため照合不可。画面にHTTP 503のエラー文言がそのまま見えた。偽の値はない。"
    }
   },
   "9": {
@@ -1136,6 +1316,30 @@
    "history.3.summary": {
     "h": "637a6508e0",
     "ja": "PSF なしで C-04 により検知し、原因 RAN_MOBILITY_ISSUE 0.653 を的中させた。地理は CLUSTER で、正解 CORRIDOR と異なった。PSF の分母が変わる前の結果である。"
+   },
+   "latest.l3.turns.0.note": {
+    "h": "82b1a68816",
+    "ja": "原因・根拠・範囲・開始・終了がイベント値と同じ。dropped 0件。"
+   },
+   "latest.l3.turns.1.note": {
+    "h": "734f91d7ad",
+    "ja": "画面の値と同じ。"
+   },
+   "latest.l3.turns.2.note": {
+    "h": "0dcec96727",
+    "ja": "範囲外の質問を断った。"
+   },
+   "latest.l3.turns.3.q": {
+    "h": "07e6690d2d",
+    "ja": "全体の呼の試行数を実データで照会して教えてください(生データ削除区間)。"
+   },
+   "latest.l3.turns.3.a_head": {
+    "h": "b5858b6f0e",
+    "ja": "DataLens 応答失敗 (HTTP 503): {'request_id': 'dlr_zPO0o6_KoWk_ctBM9zSfWngK', 'status': 'failed', 'error"
+   },
+   "latest.l3.turns.3.note": {
+    "h": "bc06cc2f5c",
+    "ja": "未確認(DataLens MCPの読み取りtimeout 5秒の欠陥 — QueryForgeは正常終了)。生データが削除された日付のため照合不可。画面にHTTP 503のエラー文言がそのまま見えた。偽の値はない。"
    }
   },
   "10": {
@@ -1618,6 +1822,26 @@
    "history.1.summary": {
     "h": "2849bca966",
     "ja": "ims-v1。D は立ったが、L1 の信頼度が基準 0.5 未満だった。"
+   },
+   "latest.l3.turns.0.note": {
+    "h": "82b1a68816",
+    "ja": "原因・根拠・範囲・開始・終了がイベント値と同じ。dropped 0件。"
+   },
+   "latest.l3.turns.1.note": {
+    "h": "734f91d7ad",
+    "ja": "画面の値と同じ。"
+   },
+   "latest.l3.turns.2.note": {
+    "h": "0dcec96727",
+    "ja": "範囲外の質問を断った。"
+   },
+   "latest.l3.turns.3.q": {
+    "h": "07e6690d2d",
+    "ja": "全体の呼の試行数を実データで照会して教えてください(生データ削除区間)。"
+   },
+   "latest.l3.turns.3.note": {
+    "h": "fc454439ba",
+    "ja": "PM_EPC_KPI_1M_ORGで「確認できない」と答えた。偽の値なし。生データ照合不可。"
    }
   },
   "13": {
@@ -1736,6 +1960,30 @@
    "history.2.summary": {
     "h": "0d77800330",
     "ja": "原因 NSA_NR_LEG_FAILURE 0.564 と R-33 が合っていた。平常時の NR 比率95% の時代の生成器と絶対閾値基準による古い結果のため、最新としては使わない。"
+   },
+   "latest.l3.turns.0.note": {
+    "h": "82b1a68816",
+    "ja": "原因・根拠・範囲・開始・終了がイベント値と同じ。dropped 0件。"
+   },
+   "latest.l3.turns.1.note": {
+    "h": "734f91d7ad",
+    "ja": "画面の値と同じ。"
+   },
+   "latest.l3.turns.2.note": {
+    "h": "0dcec96727",
+    "ja": "範囲外の質問を断った。"
+   },
+   "latest.l3.turns.3.q": {
+    "h": "07e6690d2d",
+    "ja": "全体の呼の試行数を実データで照会して教えてください(生データ削除区間)。"
+   },
+   "latest.l3.turns.3.a_head": {
+    "h": "a6e3bf2b59",
+    "ja": "DataLens 応答失敗 (HTTP 503): {'request_id': 'dlr_WQMoEdOfOi0uSRXK7MU6w73G', 'status': 'failed', 'error"
+   },
+   "latest.l3.turns.3.note": {
+    "h": "bc06cc2f5c",
+    "ja": "未確認(DataLens MCPの読み取りtimeout 5秒の欠陥 — QueryForgeは正常終了)。生データが削除された日付のため照合不可。画面にHTTP 503のエラー文言がそのまま見えた。偽の値はない。"
    }
   },
   "14": {
@@ -2720,6 +2968,30 @@
    "history.4.summary": {
     "h": "7f11391f27",
     "ja": "検知 0件。当時は対象セルを呼で埋めたため信号が埋もれた。その後、呼の補充を外したため、現在のコードの結果ではない。"
+   },
+   "latest.l3.turns.0.note": {
+    "h": "82b1a68816",
+    "ja": "原因・根拠・範囲・開始・終了がイベント値と同じ。dropped 0件。"
+   },
+   "latest.l3.turns.1.note": {
+    "h": "734f91d7ad",
+    "ja": "画面の値と同じ。"
+   },
+   "latest.l3.turns.2.note": {
+    "h": "0dcec96727",
+    "ja": "範囲外の質問を断った。"
+   },
+   "latest.l3.turns.3.q": {
+    "h": "07e6690d2d",
+    "ja": "全体の呼の試行数を実データで照会して教えてください(生データ削除区間)。"
+   },
+   "latest.l3.turns.3.a_head": {
+    "h": "81f2d6c11a",
+    "ja": "DataLens 応答失敗 (HTTP 503): {'request_id': 'dlr_uOv-izYJQDSI1zcS73memggN', 'status': 'failed', 'error"
+   },
+   "latest.l3.turns.3.note": {
+    "h": "bc06cc2f5c",
+    "ja": "未確認(DataLens MCPの読み取りtimeout 5秒の欠陥 — QueryForgeは正常終了)。生データが削除された日付のため照合不可。画面にHTTP 503のエラー文言がそのまま見えた。偽の値はない。"
    }
   },
   "18": {
@@ -3606,6 +3878,26 @@
    "next": {
     "h": "d58fa73adc",
     "ja": "なし"
+   },
+   "latest.l3.turns.0.note": {
+    "h": "82b1a68816",
+    "ja": "原因・根拠・範囲・開始・終了がイベント値と同じ。dropped 0件。"
+   },
+   "latest.l3.turns.1.note": {
+    "h": "734f91d7ad",
+    "ja": "画面の値と同じ。"
+   },
+   "latest.l3.turns.2.note": {
+    "h": "0dcec96727",
+    "ja": "範囲外の質問を断った。"
+   },
+   "latest.l3.turns.3.q": {
+    "h": "07e6690d2d",
+    "ja": "全体の呼の試行数を実データで照会して教えてください(生データ削除区間)。"
+   },
+   "latest.l3.turns.3.note": {
+    "h": "1b39bbfbc7",
+    "ja": "保有区間(11-09 10:39~11-10 08:41)を基準に照会したと明示してSGW-11の合計207,173を答えた — 文言は付いたが、値はこのイベントの値ではない。生データ照合不可。"
    }
   },
   "23": {
@@ -3812,6 +4104,30 @@
    "history.3.summary": {
     "h": "9e2ebb780f",
     "ja": "120分の注入。Q-09 と事象がともに 0件。"
+   },
+   "latest.l3.turns.0.note": {
+    "h": "82b1a68816",
+    "ja": "原因・根拠・範囲・開始・終了がイベント値と同じ。dropped 0件。"
+   },
+   "latest.l3.turns.1.note": {
+    "h": "734f91d7ad",
+    "ja": "画面の値と同じ。"
+   },
+   "latest.l3.turns.2.note": {
+    "h": "0dcec96727",
+    "ja": "範囲外の質問を断った。"
+   },
+   "latest.l3.turns.3.q": {
+    "h": "07e6690d2d",
+    "ja": "全体の呼の試行数を実データで照会して教えてください(生データ削除区間)。"
+   },
+   "latest.l3.turns.3.a_head": {
+    "h": "c7158ed646",
+    "ja": "DataLens 応答失敗 (HTTP 503): {'request_id': 'dlr_eUKBN35XTKPrvH55Sdg3H4_w', 'status': 'failed', 'error"
+   },
+   "latest.l3.turns.3.note": {
+    "h": "bc06cc2f5c",
+    "ja": "未確認(DataLens MCPの読み取りtimeout 5秒の欠陥 — QueryForgeは正常終了)。生データが削除された日付のため照合不可。画面にHTTP 503のエラー文言がそのまま見えた。偽の値はない。"
    }
   },
   "24": {
@@ -3986,6 +4302,30 @@
    "history.6.summary": {
     "h": "76fe042a64",
     "ja": "結果の記録がない。"
+   },
+   "latest.l3.turns.0.note": {
+    "h": "82b1a68816",
+    "ja": "原因・根拠・範囲・開始・終了がイベント値と同じ。dropped 0件。"
+   },
+   "latest.l3.turns.1.note": {
+    "h": "734f91d7ad",
+    "ja": "画面の値と同じ。"
+   },
+   "latest.l3.turns.2.note": {
+    "h": "0dcec96727",
+    "ja": "範囲外の質問を断った。"
+   },
+   "latest.l3.turns.3.q": {
+    "h": "07e6690d2d",
+    "ja": "全体の呼の試行数を実データで照会して教えてください(生データ削除区間)。"
+   },
+   "latest.l3.turns.3.a_head": {
+    "h": "939a67654f",
+    "ja": "DataLens 応答失敗 (HTTP 503): {'request_id': 'dlr_BXf3qHX_FX59eCBF1r8NbBkS', 'status': 'failed', 'error"
+   },
+   "latest.l3.turns.3.note": {
+    "h": "bc06cc2f5c",
+    "ja": "未確認(DataLens MCPの読み取りtimeout 5秒の欠陥 — QueryForgeは正常終了)。生データが削除された日付のため照合不可。画面にHTTP 503のエラー文言がそのまま見えた。偽の値はない。"
    }
   },
   "25": {
@@ -4214,6 +4554,30 @@
    "history.0.issues.0": {
     "h": "f2a72cc8d3",
     "ja": "同じ窓に単一セル RAN_RADIO_QUALITY の誤検知が1件ある。"
+   },
+   "latest.l3.turns.0.note": {
+    "h": "82b1a68816",
+    "ja": "原因・根拠・範囲・開始・終了がイベント値と同じ。dropped 0件。"
+   },
+   "latest.l3.turns.1.note": {
+    "h": "734f91d7ad",
+    "ja": "画面の値と同じ。"
+   },
+   "latest.l3.turns.2.note": {
+    "h": "0dcec96727",
+    "ja": "範囲外の質問を断った。"
+   },
+   "latest.l3.turns.3.q": {
+    "h": "07e6690d2d",
+    "ja": "全体の呼の試行数を実データで照会して教えてください(生データ削除区間)。"
+   },
+   "latest.l3.turns.3.a_head": {
+    "h": "5cda10f644",
+    "ja": "DataLens 応答失敗 (HTTP 503): {'request_id': 'dlr_WHzj79U0_v9QrvPXLJH1p6uB', 'status': 'failed', 'error"
+   },
+   "latest.l3.turns.3.note": {
+    "h": "bc06cc2f5c",
+    "ja": "未確認(DataLens MCPの読み取りtimeout 5秒の欠陥 — QueryForgeは正常終了)。生データが削除された日付のため照合不可。画面にHTTP 503のエラー文言がそのまま見えた。偽の値はない。"
    }
   },
   "27": {
