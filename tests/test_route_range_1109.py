@@ -22,7 +22,17 @@ from datagen import faults  # noqa: E402
 from datagen import handover as HO  # noqa: E402
 from datagen import scenarios as S  # noqa: E402
 
-UI = Path(__file__).resolve().parent.parent / "src" / "datagen" / "ui.py"
+from ui_src import ui_source  # noqa: E402
+
+
+class _UI:
+    """`ui.py` 가 패키지로 나뉘어 — 소스는 이어 붙여 읽는다."""
+    @staticmethod
+    def read_text():
+        return ui_source()
+
+
+UI = _UI()
 
 
 def _ring(n=90, stations=30, rid="YMT"):

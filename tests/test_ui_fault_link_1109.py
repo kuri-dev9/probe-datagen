@@ -76,7 +76,7 @@ def test_the_recent_flag_is_a_query_parameter_of_the_route():
     sig = ui.api_map_faults.__annotations__
     # 모듈이 `from __future__ import annotations` 라 주석은 문자열이다
     assert sig.get("recent") in (bool, "bool") and sig.get("minutes") in (int, "int")
-    assert any(getattr(r, "path", "") == "/api/map/faults" for r in ui.app.routes)
+    assert "/api/map/faults" in ui.app.openapi()["paths"]  # 라우터가 나뉘어 app.routes 에는 경로가 바로 없다
 
 
 @pytest.mark.parametrize("recent", [False, True])

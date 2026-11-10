@@ -1,0 +1,43 @@
+
+ .gp-rail{position:fixed;left:0;top:0;bottom:0;width:60px;z-index:60;box-sizing:border-box;
+   background:#161b22;border-right:1px solid #2a313a;display:flex;flex-direction:column;
+   align-items:center;gap:4px;padding:10px 0}
+ .gp-logo{width:34px;height:34px;border-radius:8px;background:#4e9af1;color:#0c1017;
+   display:grid;place-items:center;font:700 12px/1 sans-serif;margin-bottom:10px;letter-spacing:-.02em}
+ .gp-rbtn{width:48px;height:52px;border-radius:8px;color:#8a94a3;display:flex;flex-direction:column;
+   align-items:center;justify-content:center;gap:4px;font:10px/1.15 -apple-system,BlinkMacSystemFont,
+   "Hiragino Sans","Apple SD Gothic Neo","Noto Sans JP",sans-serif;text-decoration:none;text-align:center}
+ .gp-rbtn:hover{background:#1d242e;color:#c6cedb}
+ .gp-rbtn.on{background:rgba(78,154,241,.15);color:#4e9af1;font-weight:600}
+ .gp-rbtn svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;
+   stroke-linecap:round;stroke-linejoin:round}
+ .gp-top{position:fixed;left:60px;right:0;top:0;height:44px;z-index:59;box-sizing:border-box;
+   background:#161b22;border-bottom:1px solid #2a313a;display:flex;align-items:center;gap:14px;
+   padding:0 14px;color:#d8dee9;font:12px/1.4 -apple-system,BlinkMacSystemFont,
+   "Hiragino Sans","Apple SD Gothic Neo","Noto Sans JP",sans-serif;white-space:nowrap}
+ .gp-brand{font-size:13.5px;font-weight:600}
+ .gp-brand em{font-style:normal;color:#8a94a3;font-weight:400;font-size:11px;margin-left:6px}
+ .gp-sums{display:flex;border:1px solid #2a313a;border-radius:7px;overflow:hidden}
+ .gp-sum{padding:2px 11px;border-right:1px solid #2a313a;display:flex;flex-direction:column}
+ .gp-sum:last-child{border-right:0}
+ .gp-sum i{font-style:normal;font-size:9.5px;color:#8a94a3;letter-spacing:.03em}
+ .gp-sum b{font-size:12.5px;font-weight:600;font-variant-numeric:tabular-nums;
+   display:flex;align-items:center;gap:5px}
+ .gp-today{position:relative;cursor:default}
+ .gp-today:hover,.gp-today:focus{background:#1d232c;outline:0}
+ .gp-pop{display:none;position:absolute;top:100%;left:0;margin-top:6px;z-index:70;min-width:300px;
+   background:#161b22;border:1px solid #2a313a;border-radius:7px;padding:10px 12px;
+   box-shadow:0 6px 18px rgba(0,0,0,.45);white-space:nowrap;font-size:12px;color:#c6cedb}
+ .gp-today:hover .gp-pop,.gp-today:focus .gp-pop,.gp-today:focus-within .gp-pop{display:block}
+ .gp-pop h4{margin:0 0 6px;font-size:11px;color:#8a94a3;font-weight:500}
+ .gp-pop .r{display:flex;justify-content:space-between;gap:18px;padding:2px 0;
+   font-variant-numeric:tabular-nums}
+ .gp-pop .r.t{border-top:1px solid #2a313a;margin-top:4px;padding-top:5px;font-weight:600}
+ .gp-pop .r span:last-child{color:#d8dee9}
+ .gp-pop small{color:#8a94a3}
+ .gp-dot{width:7px;height:7px;border-radius:50%;background:#6b7684;display:inline-block}
+ .gp-top-r{margin-left:auto;display:flex;align-items:center;gap:10px}
+ .gp-badge{padding:1px 8px;border-radius:999px;border:1px solid #2a313a;font-size:11px;color:#c6cedb}
+ .gp-clock{color:#98a1ae;font-variant-numeric:tabular-nums}
+ .gp-top select{width:auto!important;margin:0!important;background:#222933;color:#d8dee9;
+   border:1px solid #39414c;border-radius:5px;padding:2px 6px;font:inherit;font-size:12px}

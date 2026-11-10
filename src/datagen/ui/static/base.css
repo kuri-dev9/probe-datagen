@@ -1,0 +1,10 @@
+  :root { --bg:#14181f; --panel:#1d242e; --line:#2c3542; --fg:#d7dde6;
+          --dim:#8a94a3; --accent:#4e9af1; --red:#e5534b; --yellow:#d8a22a;
+          --green:#4caf7d; }
+  * { box-sizing:border-box; }
+  /* 위 44px 상단 바 · 왼쪽 60px 레일(`_SHELL_CSS`) 자리를 비운다 */
+  body { margin:0; padding:64px 20px 20px 80px; background:var(--bg); color:var(--fg);
+         font:14px/1.5 "Pretendard","Apple SD Gothic Neo","Malgun Gothic",sans-serif; }
+  h1 { font-size:17px; margin:0 0 14px; }
+  h1 small { color:var(--dim); font-weight:normal; margin-left:8px; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }

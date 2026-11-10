@@ -14,7 +14,9 @@ import pytest
 
 from datagen import ui
 
-SRC = Path(ui.__file__).read_text(encoding="utf-8")
+from ui_src import ui_source  # noqa: E402
+
+SRC = ui_source()
 PAGES = {"main": "_HTML", "map": "_HTML_MAP", "scen": "_HTML_SCEN", "topo": "_HTML_TOPO"}
 NODE = shutil.which("node")
 

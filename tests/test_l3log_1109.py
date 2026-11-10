@@ -294,12 +294,9 @@ def api(monkeypatch, tmp_path):
     return ui
 
 
-def test_api_l3_shape_and_filter(api):
-    d = api.api_l3()
-    assert set(d) == {"ok", "keep_days", "records", "broken"} and d["keep_days"] == 7 and d["ok"] is True
-    assert [r["no"] for r in d["records"]] == [10, 3] and d["broken"] == 1
-    assert "answer" in d["records"][0]["turns"][0]                       # 답 원문 전체를 내린다
-    assert [r["no"] for r in api.api_l3(3)["records"]] == [3]
+def test_api_l3_route_is_gone(api):
+    # 부르는 곳이 없어 지웠다(2026-11-10) — 회차 기록은 `/api/scenario-report` 의 `l3` 로만 나간다
+    assert "/api/l3" not in api.app.openapi()["paths"] and not hasattr(api, "api_l3")
 
 
 def test_scenario_report_carries_l3_and_broken(api):

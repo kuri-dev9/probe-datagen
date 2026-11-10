@@ -296,7 +296,8 @@ def test_control_comment_records_the_nationwide_change():
 
 
 def test_gen_ui_labels_auto_as_nationwide_only_for_external_server():
-    ui = (ROOT / "src" / "datagen" / "ui.py").read_text()
+    from ui_src import ui_source
+    ui = ui_source()
     m = re.search(r'const AUTO_NATIONWIDE = new Set\(\[(.*?)\]\)', ui)
     assert m, "AUTO_NATIONWIDE 가 없다"
     kinds = set(re.findall(r'"([a-z_0-9]+)"', m.group(1)))

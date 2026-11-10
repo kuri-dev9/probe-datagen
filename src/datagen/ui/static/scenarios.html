@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>probe-datagen 시나리오 현황</title>
+<style>
+  /* **읽는 화면이라 본문은 밝다**(사용자 11-06). 단 순백은 어두운 틀(레일·상단 바)과 대비가 너무
+     세서 옅은 회색으로 낮췄다. 틀은 자기 색을 직접 들고 있어 이 값을 받지 않는다.
+     색·글자 크기·폭은 초기값이고, 글자는 카드 바탕 대비 4.5:1 이상이다 */
+  :root { --bg:#d6dae0; --panel:#e6e9ed; --line:#c3c9d1; --fg:#262c35;
+          --dim:#505a67; --accent:#2f5c8f; --red:#94403a; --yellow:#6f561c;
+          --green:#37664c; --hover:#dde1e6; --on:#d0dbe8; }
+  /* 회차의 장애 ID — 지도로 가는 링크(손 모양·밑줄) */
+  a.fmap { color:var(--accent); text-decoration:underline; cursor:pointer; }
+  /* 문장 속 사건 — `EVT-…` 를 단위 이름(L1 장애 등) 링크로 바꾼다(`upgradeEvt`) */
+  a.evtl { color:var(--accent); text-decoration:underline; }
+  .fmsg { color:var(--dim); font-size:.9em; }
+  * { box-sizing:border-box; }
+  /* 위 44px 상단 바 · 왼쪽 60px 레일(`_SHELL_CSS`) 자리를 비운다 */
+  body { margin:0; padding:64px 20px 20px 80px; background:var(--bg); color:var(--fg);
+         font:13px/1.55 "Pretendard","Apple SD Gothic Neo","Malgun Gothic",sans-serif; }
+  #doc { max-width:960px; margin:0 auto; }
+  h1 { font-size:16px; margin:2px 0 12px; }
+  h1 small { color:var(--dim); font-weight:normal; margin-left:8px; font-size:11.5px; }
+  h3 { margin:0 0 5px; font-size:11.5px; font-weight:600; color:var(--dim); }
+  button { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:6px;
+           padding:3px 9px; font:inherit; font-size:12px; cursor:pointer; }
+  button:hover { border-color:var(--dim); }
+  button.on { border-color:var(--accent); background:var(--on); }
+  button b { margin-left:5px; font-variant-numeric:tabular-nums; }
+  .chips { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin-bottom:8px; }
+  .chips .lb { color:var(--dim); font-size:11.5px; margin-right:2px; }
+  /* 맨 위 요약 — 문장, 판정·도달 아이콘 칩, 단계별 표(사용자 11-06). 누르면 그것만 거른다 */
+  #sum { margin:0 0 8px; font-size:13px; }
+  #msg { display:none; border:1px solid var(--yellow); border-radius:8px; padding:10px 14px;
+         margin-bottom:12px; background:#e6dfc9; }
+  #notes { margin-top:18px; }
+  #notes ol { margin:8px 0 0; padding-left:20px; font-size:12.5px; }
+  .s-ok { color:var(--green); } .s-warn { color:var(--yellow); } .s-bad { color:var(--red); }
+  .s-acc { color:var(--accent); } .s-dim { color:var(--dim); }
+  .unk { color:var(--yellow); }
+  .dim { color:var(--dim); }
+  details.sc { background:var(--panel); border:1px solid var(--line); border-radius:8px; margin-bottom:6px; }
+  details.sc>summary { display:grid; grid-template-columns:24px minmax(130px,1fr) 58px 168px minmax(0,2.4fr); gap:10px;
+            align-items:baseline; padding:6px 12px; cursor:pointer; list-style:none; }
+  summary::-webkit-details-marker { display:none; }
+  details.sc>summary:hover { background:var(--hover); border-radius:8px; }
+  summary .no { color:var(--dim); font-variant-numeric:tabular-nums; }
+  summary .nm { font-weight:600; }
+  summary .st { font-size:12px; font-weight:600; }
+  /* 단계 네 칸 — 색만으로 말하지 않게 기호를 함께 둔다 */
+  .sgs { display:flex; gap:3px; }
+  .sg { display:inline-block; min-width:31px; padding:0 3px; border-radius:4px; font-size:10.5px; line-height:16px;
+        text-align:center; white-space:nowrap; border:1px solid transparent; }
+  .g-ok { background:#c9dacf; color:#234a35; } .g-warn { background:#e0d6b8; color:#54410f; }
+  .g-bad { background:#e3c9c6; color:#6f2b26; } .g-dim { border-color:var(--line); color:var(--dim); }
+  /* 한 줄로 자른다 — 전체는 마우스를 올리면 나온다(`#tip`) */
+  summary .ln { font-size:12px; color:#3b434f; line-height:1.45; min-width:0;
+                white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  /* 접는 칸 — 처음에는 접혀 있다 */
+  details.fold { margin-top:12px; }
+  details.fold>summary { cursor:pointer; list-style:none; font-size:12.5px; font-weight:600; color:var(--accent); }
+  details.fold>summary::before { content:'▸'; display:inline-block; width:16px; }
+  details.fold[open]>summary::before { content:'▾'; }
+  details.box { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 12px; }
+  .how { margin-top:8px; padding-left:16px; border-left:2px solid var(--line); }
+  .how ol { margin:0; padding-left:20px; }
+  .body { border-top:1px solid var(--line); padding:12px 14px 14px; }
+  /* 펼친 카드는 **한 단**이다(사용자 11-06 — 두 단은 어느 칸에 무엇이 있는지 찾기 어려웠다).
+     구역마다 제목 막대로 나눈다 */
+  .sec { margin-top:18px; } .sec:first-child { margin-top:0; }
+  .sec>h2 { margin:0 0 8px; padding:3px 0 3px 9px; font-size:13px; font-weight:700; color:var(--fg);
+            border-left:3px solid var(--accent); background:var(--hover); }
+  .desc p { margin:0 0 3px; }
+  .stg td:first-child { white-space:nowrap; } .stg td:nth-child(2) { white-space:nowrap; }
+  @media (max-width:980px) {
+    details.sc>summary { grid-template-columns:24px minmax(0,1fr) 58px; }
+    summary .sgs, summary .ln { grid-column:1/-1; } }
+  .l3t td:nth-child(1), .l3t td:nth-child(2), .l3t td:nth-child(5) { white-space:nowrap; }
+  /* 답 원문 — 줄바꿈을 살리고 너무 길면 칸 안에서 스크롤한다 */
+  .ans { white-space:pre-wrap; max-height:260px; overflow:auto; font-size:12px; }
+  ul { margin:0; padding-left:18px; }
+  /* 표는 테두리·머리글 바탕·칸 구분을 모두 둔다 — 밝은 바탕에서 선만으로는 묻혔다. 색은 초기값 */
+  table { width:100%; border-collapse:collapse; font-size:12.5px; margin-top:4px; background:#f1f3f5;
+          border:1px solid #8f99a6; }
+  th, td { text-align:left; padding:4px 9px; border:1px solid #a4adb9; vertical-align:top; overflow-wrap:anywhere; }
+  th { background:#c6ced8; color:#1f252d; font-weight:700; }
+  table.kv th { width:112px; white-space:nowrap; }
+  .how td:first-child { white-space:nowrap; }
+  #mx { table-layout:fixed; margin:0 0 12px; }
+  #mx th, #mx td { padding:0; }
+  #mx th { padding:3px 9px; font-size:12px; }
+  #mx th.rw { width:118px; white-space:nowrap; }
+  #mx td.no { background:none; }
+  #mx button { display:flex; justify-content:space-between; gap:6px; width:100%; height:100%; padding:3px 9px;
+               border:0; border-radius:0; background:none; text-align:left; white-space:nowrap; }
+  #mx button:hover { background:var(--hover); }
+  #mx button.on { background:var(--on); box-shadow:inset 0 0 0 2px var(--accent); }
+  #mx button b { margin:0; }
+  #mx th:not(.rw) { text-align:center; }
+  #mx button { justify-content:center; background:none; }
+  /* 건수가 있는 칸만 색을 칠한다 — 어디가 잘되고 잘못됐는지 색으로 먼저 읽히게(사용자 11-06) */
+  #mx td.m-ok { background:#cfe6d6; } #mx td.m-warn { background:#f2e3b6; } #mx td.m-bad { background:#f4c6bf; }
+  #mx td.m-dim { background:#e3e6ea; } #mx td.m-z button b { color:var(--dim); font-weight:400; }
+  .chips button i { font-style:normal; font-weight:700; margin-right:4px; }
+  .chips button b.z { color:var(--dim); font-weight:400; }
+  .stg tr:has(.g-ok)>td { background:#e6f2ea; } .stg tr:has(.g-warn)>td { background:#f9f0d6; }
+  .stg tr:has(.g-bad)>td { background:#f9dfdb; }
+  .stg tr:has(.g-ok)>td:first-child { box-shadow:inset 4px 0 0 var(--green); }
+  .stg tr:has(.g-warn)>td:first-child { box-shadow:inset 4px 0 0 var(--yellow); }
+  .stg tr:has(.g-bad)>td:first-child { box-shadow:inset 4px 0 0 var(--red); }
+  /* 용어 — 값 옆의 짧은 뜻은 그대로 보이고, 문장 안의 코드는 점선이라 올리면 뜻이 나온다 */
+  .gl { border-bottom:1px dotted var(--dim); cursor:help; }
+  .mean { margin-left:7px; color:var(--dim); font-size:12px; }
+  #tip { display:none; position:fixed; z-index:60; max-width:440px; padding:6px 9px; border-radius:6px;
+         background:#262c35; color:#f1f3f5; font-size:12px; line-height:1.5; pointer-events:none; white-space:pre-line; }
+  .tag { display:inline-block; margin-left:6px; padding:0 6px; border:1px solid var(--yellow);
+         border-radius:999px; font-size:10.5px; color:var(--yellow); white-space:nowrap; }
+  .sub { margin-top:12px; }
+</style>
+</head>
+<body>
+<main id=doc>
+<h1>시나리오 현황 <small id=stamp></small></h1>
+<div id=vol class=chips></div>
+<p id=volnote class=dim></p>
+<div id=msg></div>
+<div id=filters></div>
+<div id=list></div>
+<div id=notes></div>
+</main>
+<div id=tip></div>
+<script>
+/*__I18N__*/
+//: 상태 — 자료의 `status` 값, 이름, 색. 표에 없는 값은 "상태 미확인"으로 따로 센다
+const STATUS=[['pass','통과','ok'],['partial','일부 통과','warn'],['missed','못 잡음','bad'],
+              ['pending','판정 대기','acc'],['not_run','미실행','dim'],['excluded','제외','dim']];
+const NO_STATUS='?';
+const stOf=s=>STATUS.some(x=>x[0]===s.status) ? s.status : NO_STATUS;
+const stName=k=>{ const x=STATUS.find(y=>y[0]===k); return T(x?x[1]:'상태 미확인'); };
+const ST_ICON={pass:'✓',partial:'△',missed:'✕',pending:'◷',not_run:'○',excluded:'–'};
+const stCls=k=>{ const x=STATUS.find(y=>y[0]===k); return 's-'+(x?x[2]:'warn'); };
+//: 단계 — D 탐지 → L1 판정 → L2 묶음 → L3 결과. 값이 없으면 "미평가"다. 평가 전을 실패로 읽으면 안 된다
+const STAGES=[['D','D 장애 검출'],['L1','L1 판정'],['L2','L2 묶음'],['L3','L3 문답 검사']];
+const SG_STATE=[['ok','정상','✓','ok'],['partial','일부','△','warn'],['fail','실패','✕','bad'],
+                ['na','해당 없음','–','dim'],['unknown','미평가','?','dim']];
+const REACHED=[['none','도달 없음'],['D','D'],['L1','L1'],['L2','L2'],['L3','L3']];
+//: L3 단계는 **문답 검사(`latest.l3`)로만** 채운다(사용자 11-09) — 옛 `stages.L3`(도달·한 줄 소감)는 쓰지 않는다.
+//: 검사가 없으면 미평가다. 칸 뒤 괄호는 통과한 질의 회차 수다
+const L3_STAGE={pass:'ok',partial:'partial',fail:'fail'};
+const l3Turns=x=>Array.isArray(x&&x.turns) ? x.turns : [];
+const l3Count=x=>{ const t=l3Turns(x); return t.length ? `${t.filter(y=>y&&y.verdict==='ok').length}/${t.length}` : ''; };
+const sgOf=(s,k)=>{
+  if(k==='L3'){ const x=s.latest&&s.latest.l3;
+    if(!x||typeof x!=='object'||!L3_STAGE[x.status]) return null;
+    const c=l3Count(x);
+    return {state:L3_STAGE[x.status], detail:(c?T('질의 {n}회 중 통과 {k}회',{n:l3Turns(x).length,k:c.split('/')[0]})+' · ':'')+(x.at||'')}; }
+  return (s.stages&&typeof s.stages==='object'&&s.stages[k])||null; };
+const sgState=(s,k)=>{ const x=sgOf(s,k); return x&&SG_STATE.some(y=>y[0]===x.state) ? x.state : 'unknown'; };
+const sgInfo=st=>SG_STATE.find(y=>y[0]===st);
+const reachedOf=s=>REACHED.some(y=>y[0]===s.reached) ? s.reached : '?';
+const reachedName=k=>{ const x=REACHED.find(y=>y[0]===k); return T(x?x[1]:'미평가'); };
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const unk=()=>`<span class=unk>${esc(T('미확인'))}</span>`;
+//: 용어집(`scenario_glossary.json`). `Cause 73`·`S11 Cause 73`·`ESM 26` 은 번호 하나로 찾는다
+let GL={}, GL_RE=null;
+function setGloss(g){
+  GL=g||{};
+  const keys=Object.keys(GL).filter(k=>GL[k].kind!=='field'&&GL[k].kind!=='cause_no')
+    .sort((a,b)=>b.length-a.length).map(k=>k.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'));
+  GL_RE=new RegExp('(?<![A-Za-z0-9_-])(?:(?:S11|S1AP|ESM|EMM)(?: Cause)? \\d+|Cause \\d+'
+    +keys.map(k=>'|'+k).join('')+')(?![A-Za-z0-9_-])','g');
+}
+const glOf=m=>{ const n=/^(?:S11|S1AP|ESM|EMM|Cause)\b.*?(\d+)$/.exec(m), t=GL[n?'Cause '+n[1]:m];
+  return t ? (t[LANG]||t.ko) : null; };
+const glTip=(m,t)=>t.l ? `${m} — ${t.s}\n${t.l}` : `${m} — ${t.s}`;
+//: 이미 이스케이프한 글에 쓴다. 코드는 그대로 두고 뜻만 얹는다
+const gl=h=>GL_RE ? h.replace(GL_RE,m=>{ const t=glOf(m);
+  return t ? `<span class=gl data-tip="${esc(glTip(m,t))}">${m}</span>` : m; }) : h;
+//: 문장 속 사건 ID(`EVT-…`) 자리표 — 그리고 나서 `upgradeEvt` 가 단위 이름 링크로 바꾼다(2026-11-10 사용자)
+const EVT_RE=/EVT-[0-9a-f]{10}/g;
+const evtMark=h=>h.replace(EVT_RE,id=>`<span class=evt data-evt="${id}">${id}</span>`);
+const val=v=>v==null||v==='' ? unk() : evtMark(gl(esc(typeof v==='object' ? JSON.stringify(v) : v)));
+//: `EVT-…` → 「L1 장애」「L2 장애」「조각」 링크(gen-ui 지도에서 그 사건 범위가 열린다). 단위는 graphio 사건 표에서
+//: 받는다(`/api/evt-lookup`) — 받지 못하면 ID 를 그대로 둔다(지어내지 않는다 · graphio 불변규칙 18). 원래 ID 는 툴팁
+const EVT_INFO={};
+const EVT_UNIT={L1_BUNDLE:'L1 장애',L2_EVENT:'L2 장애',PIECE:'조각'};
+let EVT_BUSY=false;
+async function upgradeEvt(){
+  if(EVT_BUSY) return;
+  const els=[...document.querySelectorAll('span.evt:not([data-done])')];
+  if(!els.length) return;
+  EVT_BUSY=true;
+  try{
+    const need=[...new Set(els.map(e=>e.dataset.evt))].filter(id=>!(id in EVT_INFO));
+    if(need.length){
+      let got={};
+      try{ got=(await (await fetch('/api/evt-lookup?ids='+encodeURIComponent(need.join(',')))).json()).events||{}; }catch(e){}
+      for(const id of need) EVT_INFO[id]=got[id]||null;
+    }
+    for(const el of els){
+      el.dataset.done='1';
+      const i=EVT_INFO[el.dataset.evt], name=i&&EVT_UNIT[i.unit];
+      if(!name) continue;
+      const q=new URLSearchParams({...(i.fault!=null?{fault:'F-'+i.fault}:{}), inc:i.rep, ids:i.rep});
+      const tip=el.dataset.evt+(i.merged_into?' → '+i.merged_into:'')+' · '+T('지도에서 이 사건 범위 보기');
+      el.innerHTML=`<a class=evtl href="/map?${q}" title="${esc(tip)}">${esc(T(name))}</a>`;
+    }
+  }finally{ EVT_BUSY=false; }
+  if(document.querySelector('span.evt:not([data-done])')) upgradeEvt();
+}
+new MutationObserver(()=>upgradeEvt()).observe(document.body,{childList:true,subtree:true});
+//: 값 옆에 짧은 뜻을 붙인다 — 판정 기준·최신 결과처럼 코드만 덩그러니 있는 칸에 쓴다
+const mean=v=>{ if(v==null||!GL_RE) return ''; const got=[];
+  String(v).replace(GL_RE,m=>{ const t=glOf(m); if(t&&!got.includes(t.s)) got.push(t.s); return m; });
+  return got.length ? `<span class=mean>${esc(got.join(' · '))}</span>` : ''; };
+const coded=v=>val(v)+mean(v);
+//: 칸의 뜻 — 값 자체는 코드가 아니고 값을 읽는 기준이 필요할 때(신뢰도·탐지까지)
+const hint=k=>{ const t=GL[k]&&(GL[k][LANG]||GL[k].ko); if(!t) return '';
+  return `<span class="mean${t.l?' gl':''}"${t.l?` data-tip="${esc(t.l)}"`:''}>${esc(t.s)}</span>`; };
+// 목록 — `null` 은 모르는 것이고 `[]` 는 없다고 적은 것이다
+const list=v=>{
+  if(v==null) return unk();
+  if(!Array.isArray(v)) return val(v);
+  if(!v.length) return `<span class=dim>${esc(T('없음'))}</span>`;
+  return '<ul>'+v.map(x=>`<li>${val(x)}</li>`).join('')+'</ul>';
+};
+//: 셋째 값은 그 칸의 뜻이다 — 칸 이름에 마우스를 올리면 나온다
+const dl=rows=>'<table class=kv>'+rows.map(([k,v,f])=>{ const t=f&&GL[f]&&(GL[f][LANG]||GL[f].ko);
+  return `<tr><th${t?` class=gl data-tip="${esc(t.l?t.s+'\n'+t.l:t.s)}"`:''}>${esc(T(k))}</th><td>${v}</td></tr>`; }).join('')+'</table>';
+//: 구역 — 제목 막대로 나눈다
+const sec=(title,body)=>`<section class=sec><h2>${title}</h2>${body}</section>`;
+//: 설명 자료의 언어 — 일본어 칸이 없으면 한국어로 둔다
+const tr=(h,k)=>LANG==='ja'&&h&&h.ja&&h.ja[k]!=null ? h.ja[k] : (h||{})[k];
+//: 코드 목록 — `list` 에 뜻을 붙인 것
+const codedList=v=>Array.isArray(v)&&v.length ? '<ul>'+v.map(x=>`<li>${coded(x)}</li>`).join('')+'</ul>' : list(v);
+const table=(v,cols,row)=>{
+  if(!Array.isArray(v)) return `<div>${list(v)}</div>`;
+  if(!v.length) return `<div>${list(v)}</div>`;
+  return '<table><tr>'+cols.map(c=>`<th>${esc(T(c))}</th>`).join('')+'</tr>'
+    +v.map(x=>'<tr>'+row(x||{}).map(c=>`<td>${c}</td>`).join('')+'</tr>').join('')+'</table>';
+};
+// `2026-11-06T11:31:05` → `11-06 11:31`. 그 모양이 아니면 적힌 대로 둔다
+const stamp=v=>{ const m=/^\d{4}-(\d\d)-(\d\d)[T ](\d\d):(\d\d)/.exec(v==null?'':v);
+  return m ? esc(`${m[1]}-${m[2]} ${m[3]}:${m[4]}`) : val(v); };
+//: 접는 칸. 다시 그려도 펼친 칸은 그대로다(`OPEN`)
+const fold=(k,title,body,cls='')=>`<details class="fold ${cls}" data-k="${esc(k)}"${OPEN.has(k)?' open':''}>`
+  +`<summary>${esc(title)}</summary>${body}</details>`;
+//: 만드는 방법 — `scenario_how.json`. 없는 항목은 뺀다(결과가 아니라 설명이라 "미확인"을 적지 않는다)
+function howBlock(no, h){
+  if(!h||typeof h!=='object') return '';
+  const part=(t,b)=>`<div class=sub><h3>${esc(T(t))}</h3>${b}</div>`;
+  const parts=[], steps=tr(h,'steps'), traces=tr(h,'traces'), same=tr(h,'unchanged'), lim=tr(h,'limits');
+  if(Array.isArray(steps)&&steps.length)
+    parts.push(part('만드는 순서','<ol>'+steps.map(x=>`<li>${val(x)}</li>`).join('')+'</ol>'));
+  if(Array.isArray(traces)&&traces.length)
+    parts.push(part('데이터에 남는 흔적',table(traces,['위치','내용'],x=>[val(x.where),val(x.what)])));
+  if(same!=null&&same!=='') parts.push(part('건드리지 않는 것',val(same)));
+  if(lim!=null&&lim!=='') parts.push(part('실제와 다른 점',val(lim)));
+  return parts.length ? fold(no+':how',T('만드는 순서와 데이터 흔적 보기'),`<div class=how>${parts.join('')}</div>`) : '';
+}
+const minutes=v=>v==null||v==='' ? unk() : esc(T('{n}분',{n:v}));
+//: 장애 ID — 누르면 그 회차의 탐지 이력을 지도로 연다(2026-11-09). `F-121` 꼴이 아니면 글자로 둔다
+const fmap=v=>{ const m=/^F-?(\d+)$/.exec(v==null?'':String(v).trim());
+  return m ? `<a class=fmap href="#" data-fault="${m[1]}" title="${esc(T('이 회차를 지도에서 보기'))}">${esc(v)}</a><span class=fmsg></span>` : val(v); };
+// 목록 줄의 네 칸
+const sgCells=s=>'<span class=sgs>'+STAGES.map(([k,name])=>{ const [st,lb,mark,c]=sgInfo(sgState(s,k));
+  const n=k==='L3' ? l3Count(s.latest&&s.latest.l3) : '';
+  return `<span class="sg g-${c}" title="${esc(T(name))}: ${esc(T(lb))}">${esc(k)} ${mark}${n?` (${n})`:''}</span>`; }).join('')+'</span>';
+// 펼친 카드 맨 위의 단계 표
+const sgTable=s=>`<div class=stg>`
+  +table(STAGES,['단계','상태','내용'],([k,name])=>{
+    const x=sgOf(s,k), [st,lb,mark,c]=sgInfo(sgState(s,k));
+    const det=x&&Array.isArray(x.detectors)&&x.detectors.length ? esc(x.detectors.join(', '))+' · ' : '';
+    return [esc(T(name)), `<span class="sg g-${c}">${mark}</span> <b class=s-${c}>${esc(T(lb))}</b>`,
+            x ? det+val(x.detail) : `<span class=dim>${esc(T('평가 전'))}</span>`];
+  })+'</div>';
+//: L3 상세 — `latest.l3`(에스터 문답 검사, 사용자 11-09). 없으면 "미검사"다. 단계 표의 L3(도달 여부)와 별개다
+const L3_ST={pass:['통과','ok','✓'],partial:['일부','warn','△'],fail:['실패','bad','✕']};
+const L3_CHECKS=[['numbers','수치'],['cause','원인'],['refs','근거'],['guide','가이드'],['ja','일본어']];
+const L3_KIND={first:'최초',context:'상황',data:'데이터',offtopic:'범위 밖'};
+const l3Of=s=>{ const x=s.latest&&s.latest.l3; return x&&typeof x==='object' ? x : null; };
+const okIssue=v=>v==='ok' ? `<span class="sg g-ok">✓</span>` : v==='issue' ? `<span class="sg g-warn">△</span>` : unk();
+function l3Sec(s){
+  const x=l3Of(s);
+  if(!x) return sec(esc(T('L3 상세')),`<span class=dim>${esc(T('미검사'))}</span>`);
+  const t=L3_ST[x.status], c=x.checks||{};
+  const head=t ? `<span class="sg g-${t[1]}">${t[2]}</span> <b class=s-${t[1]}>${esc(T(t[0]))}</b>` : unk();
+  return sec(`${esc(T('L3 상세'))} · ${head}`,
+    dl([['검사 시각',val(x.at)],
+        ...L3_CHECKS.map(([k,n])=>[n,okIssue(c[k])]),
+        ['걸러짐',c.filtered==null?unk():esc(T('{n}문장',{n:c.filtered}))]])
+    +`<div class="sub l3t"><h3>${esc(T('질의 회차'))}</h3>`
+    +table(x.turns,['번호','종류','질문','답 앞부분','판정','메모'],y=>[val(y.n),
+        esc(T(L3_KIND[y.kind]||y.kind||'?')),val(y.q),val(y.a_head),okIssue(y.verdict),val(y.note)])+`</div>`
+    +l3Log(s));
+}
+//: L3 기록(`data/l3/*.jsonl` · 최근 7일, 사용자 11-09). 같은 시나리오의 검사를 최신순으로 — 맨 위가 `latest.l3`
+//: 와 같은 검사면 "답 원문"으로, 나머지는 "이전 검사"로 접어 둔다. 기록이 없으면 칸을 그리지 않는다
+const l3Rec=s=>L3LOG.filter(r=>r&&r.no===s.no);
+const l3Badge=r=>{ const t=L3_ST[r&&r.status]; if(!t) return '–';
+  return `<span class="sg g-${t[1]}">${t[2]} ${esc(l3Count(r))}</span>`; };
+const l3Raw=r=>table(r.turns,['번호','종류','경로','질문','답 원문','판정','메모'],y=>[val(y.n),
+  esc(T(L3_KIND[y.kind]||y.kind||'?')),esc(y.route==='general'?T('일반 질의'):'RCA'),val(y.q),
+  `<div class=ans>${esc(y.answer||'')}</div>`,okIssue(y.verdict),val(y.note)]);
+function l3Log(s){
+  const rs=l3Rec(s), x=l3Of(s), lat=s.latest||{};
+  const same=r=>x&&r.fault===lat.fault&&String(r.at).slice(0,16).replace('T',' ')===String(x.at||'');
+  const top=rs.length&&same(rs[0]) ? rs[0] : null, older=rs.filter(r=>r!==top);
+  const warn=L3BROKEN ? `<p class=unk>${esc(T('읽지 못한 기록 {n}줄',{n:L3BROKEN}))}</p>` : '';
+  return warn+(top ? fold(s.no+':l3raw',T('답 원문 보기'),`<div class=sub>${l3Raw(top)}</div>`) : '')
+    +(older.length ? `<div class=sub><h3>${esc(T('이전 검사 {n}건 (최근 7일)',{n:older.length}))}</h3>`
+      +older.map((r,i)=>fold(`${s.no}:l3o:${i}`,
+        `${String(r.at).slice(5,16).replace('T',' ')} · ${r.fault} · ${T((L3_ST[r.status]||['?'])[0])} · ${T('통과')} ${l3Count(r)}`,
+        `<div class=sub>${l3Raw(r)}</div>`)).join('')+`</div>` : '');
+}
+//: 이전 회차 표의 L3 칸 — 그 장애 ID 의 가장 최근 검사(최근 7일). 없으면 "–"
+const l3OfFault=(s,f)=>l3Rec(s).find(r=>r.fault===f)||null;
+// 주입 길이·시작 시간대의 근거 — 시나리오 번호가 아니라 kind 로 쌓인 실측이다
+const RESULT={correct:'정답',wrong:'오답',missed:'미탐'};
+function timing(s){
+  const t=TIMING[s.kind]; if(!t) return '';
+  const h=t.hours||{}, at=v=>v?esc(String(v).slice(5,16).replace('T',' ')):unk();
+  return sec(esc(T('권장 주입')),
+    dl([['길이',t.recommended==null?unk():minutes(t.recommended)],
+        ['시작 시간대',esc(LANG==='ja'&&h.text_ja||h.text||'')]])
+    +(t.runs.length?`<div class=sub><h3>${esc(T('시간대별 실측'))}</h3>`
+      +table(t.runs,['장애 ID','시작','결과','첫 이벤트','정답까지',...(t.l2?['L2까지']:[]),'길이'],x=>[val(x.fault),at(x.start_at),
+        esc(T(RESULT[x.result]||x.result||'')),minutes(x.to_first_event_min),minutes(x.to_correct_min),
+        ...(t.l2?[x.to_l2_min==null?esc(T('안 섬')):minutes(x.to_l2_min)]:[]),
+        minutes(x.duration_min)])+`</div>`:''));
+}
+function detail(s){
+  const u=s.setup||{}, e=s.expect||{}, l=s.latest||{}, h=HOW[String(s.no)]||{};
+  const lines=tr(h,'detail');
+  const desc=Array.isArray(lines)&&lines.length
+    ? '<div class=desc>'+lines.map(x=>`<p>${val(x)}</p>`).join('')+'</div>' : `<p>${val(s.what)}</p>`;
+  const same=h.same_as!=null ? `<span class=tag>${esc(T('{n}번과 같은 데이터',{n:h.same_as}))}</span>` : '';
+  return `<div class=body>`
+    +sec(esc(T('시나리오 설명')),desc)
+    +sec(`${esc(T('단계별 상태'))} · ${esc(T('도달 단계'))} ${esc(reachedName(reachedOf(s)))}`+hint('field:reached'),sgTable(s))
+    +sec(esc(T('만드는 법'))+same,
+      dl([['종류',val(s.kind)],['출처',val(s.source)],['대상',val(u.target)],
+          ['길이',minutes(u.duration_min)],
+          // 범위로 거는 시나리오(15번)는 강도 대신 범위(%) — 강도는 쓰지 않는다(2026-11-09)
+          u.range_pct!=null ? ['범위',esc(u.range_pct+'%')] : ['강도',val(u.intensity)]])
+      +`<div class=sub><h3>${esc(T('진행'))}</h3>`
+      +table(u.phases,['시점','일어나는 일'],x=>[val(x.at),val(x.what)])+`</div>`
+      +`<div class=sub><h3>${esc(T('설정값'))}</h3>`
+      +table(u.params,['이름','값'],x=>[val(x.name),
+          val(x.value)+(x.initial===true?`<span class=tag>${esc(T('초기값'))}</span>`:'')])+`</div>`
+      +howBlock(s.no,h))
+    +sec(esc(T('판정 기준')),
+      dl([['원인',coded(e.cause),'field:cause'],['룰',codedList(e.rules),'field:rules'],
+          ['허용 대안',codedList(e.alternatives),'field:alternatives'],
+          ['KPI',coded(e.kpi),'field:kpi'],['지리 모양',coded(e.geo),'field:geo']]))
+    +timing(s)
+    +sec(esc(T('최신 결과')),
+      dl([['장애 ID',fmap(l.fault),'field:fault'],['실행',val(l.run),'field:run'],['시각',val(l.at)],
+          ['탐지까지',minutes(l.detect_min)+hint('field:detect_min')],
+          ['판정 원인',coded(l.cause),'field:latest_cause'],
+          ['신뢰도',val(l.confidence)+hint('field:confidence')],['요약',val(l.summary)]]))
+    +l3Sec(s)
+    +sec(esc(T('남은 문제와 다음 할 일')),
+      `<h3>${esc(T('남은 문제'))}</h3>${list(l.issues)}`
+      +`<div class=sub><h3>${esc(T('다음 할 일'))}</h3>${val(s.next)}</div>`)
+    +(Array.isArray(s.history)&&s.history.length ? sec(esc(T('이전 회차 {n}건',{n:s.history.length})),
+      table(s.history,['장애 ID','시각','상태','L3','요약'],x=>[fmap(x.fault),val(x.at),
+        x.status==null?unk():`<span class="${stCls(x.status)}">${esc(stName(x.status))}</span>`,
+        l3Badge(l3OfFault(s,x.fault)),val(x.summary)])) : '')
+    +`</div>`;
+}
+let DOC=null, HOW={}, TIMING={}, RAW=null, PICK='all', JA_LEFT=0, HASH_DONE=false, L3LOG=[], L3BROKEN=0;
+const OPEN=new Set();
+//: 생성량 탭(사용자 11-10) — 15% 가 시나리오 검증 기준이고 50% 결과는 따로 쌓는다. 주소의 `?vol=50` 으로
+//: 남겨 새로고침·링크에서도 같은 탭이 열린다. `#no=23` 은 해시라 함께 쓴다
+const VOLS=[['15','생성량 15%','분당 XDR 약 3천 건 · 시나리오 검증 기준 생성량'],
+            ['50','생성량 50%','분당 XDR 약 1만 건 · 15%의 약 3.3배']];
+let VOL=new URLSearchParams(location.search).get('vol');
+if(!VOLS.some(x=>x[0]===VOL)) VOL='15';
+function renderVol(){
+  document.getElementById('vol').innerHTML=`<span class=lb>${esc(T('생성량'))}</span>`
+    +VOLS.map(([k,name])=>`<button data-vol="${k}" class="${VOL===k?'on':''}">${esc(T(name))}</button>`).join('');
+  const v=VOLS.find(x=>x[0]===VOL);
+  document.getElementById('volnote').textContent=T('생성량은 생성기 기준(100%) 대비 비율입니다.')+' '+T(v[1])+': '+T(v[2]);
+}
+document.getElementById('vol').addEventListener('click',e=>{
+  const b=e.target.closest('button[data-vol]'); if(!b||b.dataset.vol===VOL) return;
+  VOL=b.dataset.vol;
+  const q=new URLSearchParams(location.search); if(VOL==='15') q.delete('vol'); else q.set('vol',VOL);
+  history.replaceState(null,'',location.pathname+(q.toString()?'?'+q:'')+location.hash);
+  // 다른 탭의 판정이 남아 보이면 이 탭의 것으로 읽힌다 — 비우고 새로 받는다
+  DOC=null; RAW=null; PICK='all'; for(const k of [...OPEN]) if(k!=='notes') OPEN.delete(k);
+  for(const id of ['filters','list','notes']) document.getElementById(id).innerHTML='';
+  document.getElementById('stamp').textContent='';
+  renderVol(); load();
+});
+function render(){
+  const all=(DOC.scenarios||[]).filter(s=>s&&typeof s==='object').slice()
+    .sort((a,b)=>(Number(a.no)||1e9)-(Number(b.no)||1e9));
+  document.getElementById('stamp').innerHTML=esc(T('갱신'))+' '+stamp(DOC.updated_at);
+  const n={}; for(const s of all) n[stOf(s)]=(n[stOf(s)]||0)+1;
+  const keys=[...STATUS.map(x=>x[0]), ...(n[NO_STATUS]?[NO_STATUS]:[])];
+  if(PICK===NO_STATUS&&!n[NO_STATUS]) PICK='all';
+  const cnt=f=>all.filter(f).length;
+  const rk=[...REACHED.map(x=>x[0]),'?'];
+  const chip=(k,icon,name,c,cls)=>`<button data-k="${esc(k)}" class="${PICK===k?'on':''}">`
+    +`<i class="${c?cls:'s-dim'}">${icon}</i>${esc(name)}<b class="${c?cls:'z'}">${c}</b></button>`;
+  const other=all.length-(n.pass||0)-(n.partial||0)-(n.missed||0);
+  document.getElementById('filters').innerHTML=
+    `<p id=sum>${esc(T('{a}건 중 통과 {p}건, 일부 통과 {q}건, 못 잡음 {m}건입니다.',{a:all.length,p:n.pass||0,q:n.partial||0,m:n.missed||0}))}`
+    +(other>0?' '+esc(T('그 밖에 {n}건은 판정 전이거나 제외했습니다.',{n:other})):'')
+    +' '+esc(T('L3까지 모두 정상인 것은 {a}건이고, {b}건은 D 단계부터 막혔습니다.',{a:cnt(s=>reachedOf(s)==='L3'),b:cnt(s=>reachedOf(s)==='none')}))+`</p>`
+    +(LANG==='ja'&&JA_LEFT ? `<p id=sum class=unk>${esc(T('번역이 없거나 낡은 칸 {n}건은 한국어로 보입니다',{n:JA_LEFT}))}</p>` : '')
+    +`<div class=chips><span class=lb>${esc(T('판정'))}</span>`+chip('all','≡',T('전체'),all.length,'')
+    +keys.map(k=>chip(k,ST_ICON[k]||'?',stName(k),n[k]||0,stCls(k))).join('')+`</div>`
+    +`<div class=chips><span class="lb gl" data-tip="${esc((GL['field:reached']?.[LANG]||GL['field:reached']?.ko||{}).l||'')}">${esc(T('도달 단계'))}</span>`
+    +rk.map(k=>chip('r:'+k,'▸',reachedName(k),cnt(s=>reachedOf(s)===k),'')).join('')+`</div>`
+    +`<table id=mx><tr><th class=rw>${esc(T('단계별'))}</th>${SG_STATE.map(x=>`<th class="s-${x[3]}">${x[2]} ${esc(T(x[1]))}</th>`).join('')}</tr>`
+    +STAGES.map(([k,name])=>`<tr><th class=rw>${esc(T(name))}</th>`+SG_STATE.map(([st,,,c])=>{ const key=`s:${k}:${st}`, v=cnt(s=>sgState(s,k)===st);
+      return `<td class=m-${v?c:'z'}><button data-k="${key}" class="${PICK===key?'on':''}"><b>${v}</b></button></td>`;
+    }).join('')+`</tr>`).join('')+`</table>`;
+  const notes=Array.isArray(DOC.notes)?DOC.notes:[];
+  document.getElementById('notes').innerHTML=notes.length
+    ? fold('notes',T('판정 기준과 참고 사항'),'<ol>'+notes.map(x=>`<li>${val(x)}</li>`).join('')+'</ol>','box') : '';
+  const hit=s=>{
+    if(PICK==='all') return true;
+    if(PICK.startsWith('r:')) return reachedOf(s)===PICK.slice(2);
+    if(PICK.startsWith('s:')){ const [,k,st]=PICK.split(':'); return sgState(s,k)===st; }
+    return stOf(s)===PICK;
+  };
+  const rows=all.filter(hit);
+  document.getElementById('list').innerHTML=rows.length ? rows.map(s=>{ const k=stOf(s);
+    const ln=tr(HOW[String(s.no)],'brief')??s.what;
+    return `<details class=sc data-k="${esc(s.no)}"${OPEN.has(String(s.no))?' open':''}><summary>`
+      +`<span class=no>${esc(s.no)}</span><span class=nm>${s.name==null?unk():esc(s.name)}</span>`
+      +`<span class="st ${stCls(k)}">${esc(stName(k))}</span>`+sgCells(s)
+      +`<span class=ln data-tip="${esc(ln??'')}">${ln==null?unk():esc(ln)}</span></summary>${detail(s)}</details>`;
+  }).join('') : `<p class=dim>${esc(T('해당하는 시나리오가 없습니다'))}</p>`;
+}
+function warn(text, stale){
+  const m=document.getElementById('msg');
+  m.style.display=text?'block':'none';
+  m.textContent=!text ? '' : text+(stale&&DOC?' · '+T('아래는 마지막으로 읽은 내용입니다'):'');
+}
+async function load(){
+  let d; const vol=VOL;
+  try{ d=await (await fetch('/api/scenario-report'+(vol==='15'?'':'?volume='+vol),{cache:'no-store'})).json(); }
+  catch(e){ if(vol===VOL) warn(T('서버 응답 없음'),true); return; }
+  if(vol!==VOL) return;          // 받는 사이 탭이 바뀌었다 — 옛 탭의 판정을 그리지 않는다
+  if(!d.ok){ warn(d.reason==='missing' ? T('자료 파일이 없습니다 — {p}',{p:d.path})
+                : d.reason==='volume' ? T('서버가 모르는 생성량입니다 — {v}%',{v:d.volume})
+                                       : T('자료 파일이 깨졌습니다 — {p} · {e}',{p:d.path,e:d.detail}), true); return; }
+  // 만드는 방법은 없으면 칸만 숨긴다. 깨진 것은 말한다 — 조용히 숨기면 없는 것으로 읽힌다
+  warn(d.how_error ? T('자료 파일이 깨졌습니다 — {p} · {e}',{p:d.how_error.path,e:d.how_error.detail}) : '');
+  // 내용이 그대로면 다시 그리지 않는다 — 읽던 자리와 스크롤을 건드리지 않게
+  const raw=JSON.stringify([d.report,d.how,d.report_ja,d.glossary,d.timing,d.l3,d.l3_broken]); if(raw===RAW) return;
+  RAW=raw; DOC=LANG==='ja'&&d.report_ja||d.report; HOW=d.how||{}; TIMING=d.timing||{}; JA_LEFT=d.ja_left||0;
+  L3LOG=Array.isArray(d.l3)?d.l3:[]; L3BROKEN=d.l3_broken||0;
+  setGloss(d.glossary);
+  render();
+  if(!HASH_DONE){ HASH_DONE=true; goHash(); }   // 다시 받을 때는 읽던 자리를 건드리지 않는다
+}
+// 주입 칸·장애 창에서 넘어온 것 — `#no=23` 의 카드를 펼쳐 그 자리로 간다. 목록을 받은 뒤에만 된다.
+// 이 페이지는 raw 문자열이다 — 정규식의 역슬래시를 두 번 쓰면 `#no=23` 이 맞지 않는다(2026-11-07)
+function goHash(){
+  const no=/^#no=(\d+)$/.exec(location.hash); if(!no||!DOC) return;
+  PICK='all';
+  for(const k of [...OPEN]) if(k!=='notes') OPEN.delete(k);
+  OPEN.add(no[1]); render();
+  const c=document.querySelector(`details.sc[data-k="${no[1]}"]`);
+  if(c) window.scrollBy(0, c.getBoundingClientRect().top-52);   // 머리글에 가리지 않게 — 아래 `toggle` 과 같은 자리
+}
+addEventListener('hashchange',goHash);        // 이미 이 화면에 있을 때
+// 회차의 장애 ID — 이력이 있으면 지도로 가고, 없으면 가지 않고 그 자리에 말한다(그냥 보내면 "거기 있다"로 읽힌다)
+document.getElementById('doc').addEventListener('click',async e=>{
+  const a=e.target.closest('a.fmap'); if(!a) return;
+  e.preventDefault();
+  if(a.dataset.busy) return;
+  const id=a.dataset.fault, msg=a.nextElementSibling;
+  a.dataset.busy='1'; msg.textContent=' '+T('탐지 이력을 찾는 중');
+  const inc=await faultIncidents(id), got=inc.incidents||[];
+  delete a.dataset.busy;
+  if(inc.error){ msg.textContent=' '+inc.error; return; }
+  if(!got.length){ msg.textContent=' '+T('탐지 이력 없음'); return; }
+  msg.textContent=' '+T('탐지 이력 {n}건',{n:got.length});
+  location.href=faultMapUrl(id, got);
+});
+document.getElementById('filters').addEventListener('click',e=>{
+  const b=e.target.closest('button'); if(!b||!DOC) return;
+  // 거르면 보던 카드는 닫는다. 참고 사항 칸은 카드가 아니라 둔다
+  PICK=b.dataset.k;
+  for(const k of [...OPEN]) if(k!=='notes') OPEN.delete(k);
+  render();
+});
+// `toggle` 은 거슬러 오르지 않는다 — 잡는 단계에서 받는다
+document.getElementById('doc').addEventListener('toggle',e=>{
+  const q=e.target; if(q.tagName!=='DETAILS') return;
+  const card=q.classList.contains('sc');
+  if(!q.open){
+    OPEN.delete(q.dataset.k);
+    if(card) for(const f of q.querySelectorAll('details.fold[open]')) f.open=false;
+    return;
+  }
+  if(OPEN.has(q.dataset.k)) return;      // 다시 그리면서 열린 것이다
+  OPEN.add(q.dataset.k);
+  if(!card) return;
+  // 카드는 하나만 연다. 위의 카드가 닫히면 누른 줄이 화면 밖으로 밀리니 제자리로 데려온다
+  for(const o of document.querySelectorAll('details.sc[open]')) if(o!==q) o.open=false;
+  const top=q.getBoundingClientRect().top;
+  if(top<52) window.scrollBy(0, top-52);
+},true);
+//: 마우스를 올린 칸의 전체 글 — 브라우저 `title` 은 1초쯤 늦게 뜨고 줄바꿈을 못 믿는다
+const TIP=document.getElementById('tip');
+document.getElementById('doc').addEventListener('mouseover',e=>{
+  const q=e.target.closest('[data-tip]');
+  if(!q||!q.dataset.tip){ TIP.style.display='none'; return; }
+  TIP.textContent=q.dataset.tip; TIP.style.display='block';
+  const r=q.getBoundingClientRect(), w=TIP.offsetWidth, h=TIP.offsetHeight;
+  TIP.style.left=Math.max(8,Math.min(e.clientX-12,innerWidth-w-8))+'px';
+  TIP.style.top=(r.bottom+6+h>innerHeight ? r.top-h-6 : r.bottom+6)+'px';
+});
+document.getElementById('doc').addEventListener('mouseleave',()=>{ TIP.style.display='none'; });
+applyLang();
+renderVol(); load(); setInterval(load, 60000);
+</script>
+</body>
+</html>

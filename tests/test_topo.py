@@ -1042,6 +1042,10 @@ def test_every_topo_call_resolves_to_a_definition():
     import re
 
     for mod in ("cli", "ui", "pemdb1"):
-        src = (HERE / "src" / "datagen" / f"{mod}.py").read_text(encoding="utf-8")
+        if mod == "ui":      # ui.py 는 패키지로 나뉘었다
+            from ui_src import ui_source
+            src = ui_source()
+        else:
+            src = (HERE / "src" / "datagen" / f"{mod}.py").read_text(encoding="utf-8")
         for name in sorted(set(re.findall(r"\btopo\.(\w+)\s*\(", src))):
             assert hasattr(topo, name), f"{mod}.py → topo.{name}() 가 없다"

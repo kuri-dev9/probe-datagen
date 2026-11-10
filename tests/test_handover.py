@@ -796,8 +796,8 @@ def test_map_ui_has_no_external_dependency():
     """
     from pathlib import Path
 
-    src = (Path(__file__).resolve().parents[1]
-           / "src" / "datagen" / "ui.py").read_text(encoding="utf-8")
+    from ui_src import ui_source
+    src = ui_source()
     bad = [ln.strip() for ln in src.splitlines()
            if "https://" in ln or "http://" in ln]
     # 주석 안의 설명은 허용한다 — 코드가 부르는 자리만 막는다

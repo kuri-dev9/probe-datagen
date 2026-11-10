@@ -161,7 +161,8 @@ def test_ui_list_comes_from_the_registry():
     처리). 그래서 `ui.py` 에 지역 이름이 박혀 있지 않은 것을 함께 센다.
     """
     assert [n["value"] for n in region.names()] == list(region.LOCALES)
-    src = (HERE / "src" / "datagen" / "ui.py").read_text(encoding="utf-8")
+    from ui_src import ui_source
+    src = ui_source()
     for lit in ('"44010"', '"45005"', "'44010'", "'45005'"):
         assert lit not in src, f"UI 에 PLMN 이 박혀 있다: {lit}"
 
