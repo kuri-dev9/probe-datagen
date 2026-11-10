@@ -322,6 +322,7 @@ const _el=new Proxy(function(){},{get:(t,k)=>k==='style'||k==='classList'||k==='
 globalThis.document=new Proxy({},{get:()=>_el});globalThis.window=globalThis;
 globalThis.localStorage={getItem:()=>null,setItem(){}};globalThis.location={search:'',hash:'',pathname:'/scenarios'};
 globalThis.fetch=()=>new Promise(()=>{});globalThis.setInterval=()=>0;globalThis.addEventListener=()=>{};
+globalThis.MutationObserver=class{observe(){}};
 """
 
 

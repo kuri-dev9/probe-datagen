@@ -942,6 +942,78 @@ def _match_score(i: dict, spec: dict, truth: dict, target: str) -> int:
     return n + {"L2_EVENT": 2, "L1_BUNDLE": 1}.get(i.get("event_unit"), 0)
 
 
+#: `EVT-…` 조회 결과 재사용(초) — 끝난 사건의 단위·대표 조각은 바뀌지 않는다. 열린 사건도 몇 분 늦는 것은 괜찮다. **초기값이다**
+EVT_LOOKUP_TTL_SEC = 300
+_EVT_RE = re.compile(r"^EVT-[0-9a-f]{10}$")
+_EVT_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+@app.get("/api/evt-lookup")
+def api_evt_lookup(ids: str = ""):
+    """시나리오 화면의 `EVT-…` → 단위·대표 조각·겹친 장애(2026-11-10 사용자 — "EVT 를 직접 쓰지 말고 L1 장애 같은
+    이름에 지도 링크를"). 사건 표는 graphio 것이라 `/api/events/{id}` 로 받는다(직접 읽지 않는다). 합쳐진 사건
+    (`MERGED`)은 `merged_into` 를 따라간다(최대 3번). 받지 못한 ID 는 응답에 없다 — 화면은 ID 를 그대로 둔다
+    """
+    import time as _time
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    want = [x for x in dict.fromkeys(i.strip() for i in ids.split(",")) if _EVT_RE.match(x)][:40]
+    base = str(_pem_cfg().get("graphio_api") or "").rstrip("/")
+    if not want or not base:
+        return {"events": {}, **({} if base else {"error": "`pemdb1.graphio_api` 가 비어 있다"})}
+
+    def one(eid: str) -> dict | None:
+        try:
+            with urllib.request.urlopen(f"{base}/api/events/{urllib.parse.quote(eid)}", timeout=5) as r:
+                return json.loads(r.read())
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+            return None
+
+    now, out = _time.time(), {}
+    for eid in want:
+        hit = _EVT_CACHE.get(eid)
+        if hit and now - hit[0] < EVT_LOOKUP_TTL_SEC:
+            out[eid] = hit[1]
+            continue
+        cur, path = one(eid), [eid]
+        while cur and cur.get("status") == "MERGED" and cur.get("merged_into") and len(path) < 4:
+            path.append(str(cur["merged_into"]))
+            cur = one(path[-1])
+        if not cur or not cur.get("unit") or not cur.get("rep_incident_id"):
+            continue
+        out[eid] = {"unit": cur["unit"], "rep": cur["rep_incident_id"], "event_id": cur.get("event_id") or path[-1],
+                    "merged_into": path[-1] if len(path) > 1 else None, "opened": cur.get("opened_time"),
+                    "fault": _fault_at(cur.get("opened_time"))}
+        _EVT_CACHE[eid] = (now, out[eid])
+    return {"events": out}
+
+
+def _fault_at(opened: str | None) -> int | None:
+    """사건이 열린 시각에 걸쳐 있던 장애(시작 ≤ 열림 ≤ 끝 + 확정 대기) — 지도 링크의 `fault` 인자. 없으면 None."""
+    from .scenarios import SETTLE_MIN
+    try:
+        at = datetime.fromisoformat(str(opened or "")[:19])
+    except ValueError:
+        return None
+    try:
+        conn = _connect()
+    except Exception:  # noqa: BLE001 — 장애 번호만 모름
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT FAULT_ID FROM {T_FAULT} WHERE START_TIME <= %s AND "
+                        f"DATE_ADD(START_TIME, INTERVAL DURATION_MIN + %s MINUTE) >= %s "
+                        "ORDER BY START_TIME DESC LIMIT 1", [at, SETTLE_MIN, at])
+            row = cur.fetchone()
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        conn.close()
+    return int(row[0]) if row else None
+
+
 @app.get("/api/faults/{fault_id}/incidents")
 def api_fault_incidents(fault_id: int):
     """그 장애로 탐지된 이력 — 주입 시간(+ 확정 대기)과 겹치는 것을 맞는 순으로.
@@ -7911,6 +7983,7 @@ _JA_COMMON = {
     "건드리지 않는 것": "変更しないもの", "실제와 다른 점": "実際との違い",
     "이 장애의 시나리오 설명이 없다": "この障害のシナリオ説明はありません",
     "이 회차를 지도에서 보기": "この実行を地図で見る",
+    "L1 장애": "L1障害", "L2 장애": "L2障害", "조각": "断片", "지도에서 이 사건 범위 보기": "地図でこの事件の範囲を見る",
     "탐지 이력을 찾는 중": "検知履歴を検索中", "탐지 이력 없음": "検知履歴なし", "탐지 이력 {n}건": "検知履歴 {n}件",
     "장애 {n} 의 탐지 이력이 지금 목록에 없다": "障害 {n} の検知履歴は現在の一覧にありません",
     "시작": "開始", "지속": "継続", "대상": "対象", "불러오는 중…": "読み込み中…", "닫기": "閉じる",
@@ -8371,6 +8444,8 @@ _HTML_SCEN = r"""<!doctype html>
           --green:#37664c; --hover:#dde1e6; --on:#d0dbe8; }
   /* 회차의 장애 ID — 지도로 가는 링크(손 모양·밑줄) */
   a.fmap { color:var(--accent); text-decoration:underline; cursor:pointer; }
+  /* 문장 속 사건 — `EVT-…` 를 단위 이름(L1 장애 등) 링크로 바꾼다(`upgradeEvt`) */
+  a.evtl { color:var(--accent); text-decoration:underline; }
   .fmsg { color:var(--dim); font-size:.9em; }
   * { box-sizing:border-box; }
   /* 위 44px 상단 바 · 왼쪽 60px 레일(`_SHELL_CSS`) 자리를 비운다 */
@@ -8532,7 +8607,39 @@ const glTip=(m,t)=>t.l ? `${m} — ${t.s}\n${t.l}` : `${m} — ${t.s}`;
 //: 이미 이스케이프한 글에 쓴다. 코드는 그대로 두고 뜻만 얹는다
 const gl=h=>GL_RE ? h.replace(GL_RE,m=>{ const t=glOf(m);
   return t ? `<span class=gl data-tip="${esc(glTip(m,t))}">${m}</span>` : m; }) : h;
-const val=v=>v==null||v==='' ? unk() : gl(esc(typeof v==='object' ? JSON.stringify(v) : v));
+//: 문장 속 사건 ID(`EVT-…`) 자리표 — 그리고 나서 `upgradeEvt` 가 단위 이름 링크로 바꾼다(2026-11-10 사용자)
+const EVT_RE=/EVT-[0-9a-f]{10}/g;
+const evtMark=h=>h.replace(EVT_RE,id=>`<span class=evt data-evt="${id}">${id}</span>`);
+const val=v=>v==null||v==='' ? unk() : evtMark(gl(esc(typeof v==='object' ? JSON.stringify(v) : v)));
+//: `EVT-…` → 「L1 장애」「L2 장애」「조각」 링크(gen-ui 지도에서 그 사건 범위가 열린다). 단위는 graphio 사건 표에서
+//: 받는다(`/api/evt-lookup`) — 받지 못하면 ID 를 그대로 둔다(지어내지 않는다 · graphio 불변규칙 18). 원래 ID 는 툴팁
+const EVT_INFO={};
+const EVT_UNIT={L1_BUNDLE:'L1 장애',L2_EVENT:'L2 장애',PIECE:'조각'};
+let EVT_BUSY=false;
+async function upgradeEvt(){
+  if(EVT_BUSY) return;
+  const els=[...document.querySelectorAll('span.evt:not([data-done])')];
+  if(!els.length) return;
+  EVT_BUSY=true;
+  try{
+    const need=[...new Set(els.map(e=>e.dataset.evt))].filter(id=>!(id in EVT_INFO));
+    if(need.length){
+      let got={};
+      try{ got=(await (await fetch('/api/evt-lookup?ids='+encodeURIComponent(need.join(',')))).json()).events||{}; }catch(e){}
+      for(const id of need) EVT_INFO[id]=got[id]||null;
+    }
+    for(const el of els){
+      el.dataset.done='1';
+      const i=EVT_INFO[el.dataset.evt], name=i&&EVT_UNIT[i.unit];
+      if(!name) continue;
+      const q=new URLSearchParams({...(i.fault!=null?{fault:'F-'+i.fault}:{}), inc:i.rep, ids:i.rep});
+      const tip=el.dataset.evt+(i.merged_into?' → '+i.merged_into:'')+' · '+T('지도에서 이 사건 범위 보기');
+      el.innerHTML=`<a class=evtl href="/map?${q}" title="${esc(tip)}">${esc(T(name))}</a>`;
+    }
+  }finally{ EVT_BUSY=false; }
+  if(document.querySelector('span.evt:not([data-done])')) upgradeEvt();
+}
+new MutationObserver(()=>upgradeEvt()).observe(document.body,{childList:true,subtree:true});
 //: 값 옆에 짧은 뜻을 붙인다 — 판정 기준·최신 결과처럼 코드만 덩그러니 있는 칸에 쓴다
 const mean=v=>{ if(v==null||!GL_RE) return ''; const got=[];
   String(v).replace(GL_RE,m=>{ const t=glOf(m); if(t&&!got.includes(t.s)) got.push(t.s); return m; });
