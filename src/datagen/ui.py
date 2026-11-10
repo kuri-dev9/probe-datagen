@@ -6457,11 +6457,17 @@ function fitBox(pts){
 const FIT_MIN_M={area:1000, equip:500};
 //: 한 단계 내릴 때 내용 둘레에 남길 최소 여유(배). 초기값
 const FIT_TIGHT=1.02;
+//: **장애 맞추기는 단계에 맞추지 않는다**(사용자 11-10 F-254). 단계로 올림하면 내용이 다음 단계 문턱을
+//: 조금만 넘어도 2.5배 멀어진다. 맞춘 화면은 내용(여백 30% `fitBox`)에 꼭 맞는 연속 축척이고, 휠·버튼을
+//: 쓰면 가장 가까운 단계로 돌아간다(`nearestLevel`). 최소 축척(`FIT_MIN_M`)은 그대로 지킨다
+const FIT_FREE=true;
 function fitFor(h, pts){
   const v=fitBox(pts);
   const mpp=mppOf(v); if(!mpp) return v;
   const area = !!h.axis && (h.axis.startsWith('MESH') || h.axis.startsWith('ADM'));
   const floor=(area?FIT_MIN_M.area:FIT_MIN_M.equip)/SCALE_PX;
+  if(FIT_FREE){ const t=Math.min(Math.max(mpp, floor), MAX_MPP); if(Math.abs(t/mpp-1)<1e-9) return v;
+    return zoomAbout(v, t/mpp, v.x+v.w/2, v.y+v.h/2); }
   let t=snapUp(Math.max(mpp, floor));
   // **여백을 줄여 한 단계 아래에 들어가면 그 단계로**(사용자 11-09 "엄청 멀리로 줌 아웃 되네"). 단계가
   // 2km→5km 처럼 2.5배씩 뛰어, 여백 30%(`fitBox`)를 다 지키려다 조금만 넘쳐도 2.5배 멀어졌다
@@ -6505,15 +6511,15 @@ function focusFlyMs(a, v){
 }
 function flyFocus(v){
   if(!VB) return;
-  v=snapVB(v);
-  flyTo(v, focusFlyMs(VB, v), {settle:true});
+  if(!FIT_FREE) v=snapVB(v);
+  flyTo(v, focusFlyMs(VB, v), {settle:true, free:FIT_FREE});
 }
 function flyTo(v, ms=700, opt={}){
   if(!VB) return;
   const a={...VB};
   // 축척 단계는 도착점에서 `setVB` 가 지킨다 — 여기서 미리 맞춰
-  // 둬야 마지막 프레임에서 튀지 않는다
-  v=snapVB(v);
+  // 둬야 마지막 프레임에서 튀지 않는다. 장애 맞추기(`opt.free`)는 단계에 맞추지 않는다
+  if(!opt.free) v=snapVB(v);
   const id={}, moving=!!FLY && !opt.at;   // 휠은 자기 방식으로 이어 붙인다(`wheelStep`)
   // 끼어들 때는 한 프레임 앞에서 출발한다 — 첫 프레임이 제자리면 그만큼 멈춰 보인다
   //: 시간은 **프레임 간격을 더해** 잰다 — 한 간격은 `FLY_DT_MAX` 까지만 센다(사용자 11-09). 누른
@@ -6547,7 +6553,7 @@ function flyTo(v, ms=700, opt={}){
     document.getElementById('hq').classList.remove('fly');
     gestEnd();
     // 단계가 바뀌면 `setVB` 가 이미 그렸다 — 또 그리지 않는다
-    const lod=LOD; setVB(v); if(LOD===lod) draw();
+    const lod=LOD; setVB(v, {free:!!opt.free}); if(LOD===lod) draw();
   };
   requestAnimationFrame(step);
   return id;
@@ -6796,9 +6802,11 @@ let LOD=-1;
 //: **축척은 정해진 단계로만 움직인다**(사람 결정 2026-11-03). 연속 줌일 때는
 //: 같은 "200 m" 눈금 막대가 57~140px 로 늘었다 줄었다 해서, 두 화면의 200m 를
 //: 사람이 비교할 수 없었다. 단계마다 막대가 늘 `SCALE_PX` 로 같은 길이다.
-//: 1·2·5 계열이라 단계 사이 배율은 ×2 와 ×2.5 가 섞인다
 const SCALE_PX=100;
-const ZOOM_MPP=[50,100,200,500,1000,2000,5000,10000].map(m=>m/SCALE_PX);
+//: **단계 사이를 2배 이하로**(사용자 결정 11-10 · F-254 "엄청 멀리서 보인다"). 1·2·5 계열은 2→5km 가
+//: 2.5배라 남북 14km 사건이 2km 에 조금 못 들어가면 5km 로 올라가 화면의 40%만 썼다. 1 → 1.5 → 2.5 → 5 → 7
+//: 이 10배마다 되풀이되고(배율 1.4~2), 어떤 크기의 내용도 화면의 절반 이상을 쓴다
+const ZOOM_MPP=[50,100,150,250,500,700,1000,1500,2500,5000,7000,10000].map(m=>m/SCALE_PX);
 //: **확대 한계 — 눈금 50m**(사람 결정 2026-11-03).
 //: **축소 한계 — 눈금 10km**(사람 결정 2026-10-28). 이동은 막지 않는다
 const MAX_MPP=ZOOM_MPP[ZOOM_MPP.length-1];
@@ -6821,10 +6829,15 @@ function mppOf(v){
   if(!v||!r.width||!r.height) return 0;
   return Math.max(v.w/r.width, v.h/r.height)*90400;
 }
-function setVB(v){
+//: 지금 화면이 장애 맞추기의 연속 축척인가. 끌기·다시 그리기처럼 **축척이 그대로인** setVB 는 그 축척을
+//: 지키고, 축척이 바뀌는 것(휠·전체 보기·창 크기 변경)이 오면 단계로 돌아간다
+let VB_FREE=false;
+function setVB(v, opt={}){
   // **어디서 오든 단계에 맞춘다** — "전체 보기"·처음 화면·창 크기 변경이
   // 여기로 온다. 이미 맞춘 값(휠·장애 맞추기)은 그대로 지나간다
-  v=snapVB(v);
+  const keep = opt.free || (VB_FREE && VB && Math.abs(v.w/VB.w-1)<1e-6 && Math.abs(mppOf(v)/mppOf(VB)-1)<1e-6);
+  if(!keep) v=snapVB(v);
+  VB_FREE=!!keep;
   VB=v; VBC={...v}; svg.setAttribute('viewBox',`${v.x} ${v.y} ${v.w} ${v.h}`);
   geofx.setAttribute('viewBox',`${v.x} ${v.y} ${v.w} ${v.h}`);   // 구역 겉층도 같이
   svg.style.transform=''; geofx.style.transform='';
@@ -6927,9 +6940,9 @@ function drawScale(){
   const w=document.getElementById('wrap').getBoundingClientRect().width;
   if(!w) return;
   const mpp=mppOf(VB);
-  // 1·2·5 계열에서 **`SCALE_PX` 를 넘지 않는** 가장 큰 눈금 — 단계에 맞춰
-  // 서 있으면 막대가 늘 `SCALE_PX` 다. 길이가 달라지는 것은 날아가는 도중뿐이다
-  const nice=[10,20,50,100,200,500,1000,2000,5000,10000,20000,50000];
+  // 아래 목록에서 **`SCALE_PX` 를 넘지 않는** 가장 큰 눈금. 목록이 `ZOOM_MPP` 의 눈금을 모두 담아 단계에
+  // 서 있으면 막대가 늘 `SCALE_PX` 다. 길이가 달라지는 것은 날아가는 도중과 장애 맞추기(연속 축척)뿐이다
+  const nice=[10,20,50,100,150,250,500,700,1000,1500,2500,5000,7000,10000,20000,50000];
   let m=nice[0];
   for(const v of nice) if(v/mpp<=SCALE_PX*1.01) m=v;
   box.innerHTML=`<i style="width:${(m/mpp).toFixed(1)}px"></i>`
@@ -7711,7 +7724,7 @@ wrap.addEventListener('wheel',e=>{
   if(!WHEEL_RUN || WHEEL_RUN.near) wheelStep();
 },{passive:false});
 //: 창 크기가 바뀌면 같은 viewBox 라도 1px 의 거리가 달라진다 — 단계로 되돌린다
-window.addEventListener('resize',()=>{ if(VB) setVB(VB); });
+window.addEventListener('resize',()=>{ if(VB){ VB_FREE=false; setVB(VB); } });   // 연속 축척도 단계로 되돌린다
 
 wrap.addEventListener('click',e=>{
   if(moved>4) return;        // 끌고 놓은 것은 클릭이 아니다
