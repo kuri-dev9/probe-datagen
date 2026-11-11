@@ -65,6 +65,13 @@ RUN groupadd -r -g 1000 datagen \
  && chown -R datagen:datagen /app
 USER datagen
 
+# 생성기 코드 판(2026-11-11) — 장애 기록 `INJECT_CONTEXT.gen_rev` 에 남는다(`cli.gen_rev`). 컨테이너 안에는
+# git 이 없어 빌드할 때 넘겨 받는다(`--build-arg GEN_REV=$(git describe --always --dirty)`). 안 넘기면
+# unknown 이고 기록은 NULL 이다 — 모르는 판을 지어내지 않는다. **맨 끝에 둔다** — 판이 바뀔 때마다 앞 층
+# (의존성·소스 복사)의 캐시가 깨지지 않게
+ARG GEN_REV=unknown
+ENV GEN_REV=${GEN_REV}
+
 EXPOSE 8009
 
 ENTRYPOINT ["python", "-u", "-m", "datagen"]

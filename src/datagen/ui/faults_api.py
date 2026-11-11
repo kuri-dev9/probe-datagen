@@ -24,6 +24,7 @@ class FaultReq(BaseModel):
     intensity: float = 1.0
     start_ts: str | None = None  # ISO 문자열, 없으면 now
     note: str | None = None
+    scenario_no: int | None = None  # 없으면 메모 앞 `#n` (control.add_fault)
 
 
 
@@ -91,6 +92,12 @@ def api_faults(limit: int = 50, date: str | None = None):
             tail = {}
         for r in rows:
             r["tail_until"] = tail.get(str(r.get("fault_id")))
+            # json 칸은 드라이버가 글로 준다 — 화면이 객체로 읽게 푼다. 깨졌으면 글 그대로 둔다
+            if isinstance(r.get("inject_context"), str):
+                try:
+                    r["inject_context"] = json.loads(r["inject_context"])
+                except ValueError:
+                    pass
         return rows
     finally:
         conn.close()
@@ -276,7 +283,7 @@ def api_add_fault(req: FaultReq):
         try:
             fid = add_fault(conn, req.kind, target, start,
                             duration_min=req.duration_min, intensity=req.intensity,
-                            mode="manual", note=req.note)
+                            mode="manual", note=req.note, scenario_no=req.scenario_no)
         except ValueError as e:
             # `LIKE:` 원본 검사(`control._check_like`) — 500 이 아니라 사유를 돌려준다
             raise HTTPException(400, str(e))

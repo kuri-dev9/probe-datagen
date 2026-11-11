@@ -136,16 +136,24 @@ def target_key(keys) -> str:
 _NOTE_NO = re.compile(r"^#(\d+)\b|시나리오 (\d+)|^no(\d+)-")
 
 
+def note_scenario_no(note) -> int | None:
+    """메모 앞의 시나리오 번호(`#19 …` · `… 시나리오 19` · `no19-…`). 없으면 None — kind 로 잇지 않는다."""
+    m = _NOTE_NO.search(str(note or ""))
+    return int(next(g for g in m.groups() if g)) if m else None
+
+
 def scenario_no(fault: dict) -> int | None:
     """그 장애가 어느 시나리오 번호로 주입됐나 — 순환 기록을 시나리오마다 나누는 키다(2026-11-10).
 
-    장애 행에 번호 칸이 없다(DDL 없이 간다) — 주입 경로가 메모 앞에 `#<번호>` 를 붙이므로 메모에서
-    읽는다. 메모에 번호가 없으면(외부 API·옛 주입) kind 로 잇는다 — 그 kind 를 쓰는 번호가 하나면 그
-    번호, 여럿이면 **원본 번호**(`same_as` 없는 쪽 · 19 → 10)다. 화면이 이름을 붙이는 규칙과 같다
+    **장애 행의 `SCENARIO_NO` 칸이 먼저다**(2026-11-11 DDL). 칸이 비면(기록 전 장애) 메모 앞의
+    `#<번호>` 를 읽는다. 메모에도 없으면(외부 API·옛 주입) kind 로 잇는다 — 그 kind 를 쓰는 번호가
+    하나면 그 번호, 여럿이면 **원본 번호**(`same_as` 없는 쪽 · 19 → 10)다. 화면이 이름을 붙이는 규칙과 같다
     """
-    m = _NOTE_NO.search(str(fault.get("note") or ""))
-    if m:
-        return int(next(g for g in m.groups() if g))
+    if fault.get("scenario_no") is not None:
+        return int(fault["scenario_no"])
+    no = note_scenario_no(fault.get("note"))
+    if no is not None:
+        return no
     from .control import SCENARIOS
 
     rows = [r for r in SCENARIOS if r[2] == fault.get("kind")]

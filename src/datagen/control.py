@@ -166,6 +166,25 @@ NO_EVIDENCE = frozenset()
 SCENARIO_EQUIP = ("MME", "SGW", "PGW", "ENB")
 
 #: 상태 전이: pending → active → done. cancelled 는 pending/active 어디서든.
+#: 주입 당시 조건 칸(2026-11-11 사용자 승인 DDL) — 새 환경 `DDL` 과 기존 환경 `_ADDED_COLUMNS` 가 **이 한
+#: 벌**을 쓴다. 두 곳에 따로 적으면 한쪽만 고쳐져 새 환경과 기존 환경의 칸이 갈린다. 모두 NULL 허용이고
+#: **NULL 은 "기록 전 장애"**다 — 0 으로 채우면 생성량 0%·오프셋 0 이라는 없는 사실이 된다(graphio 불변규칙 17).
+#: 이전 행은 채우지 않는다. 주석에 `;` 를 쓰지 않는다(`ensure_tables` 가 DDL 을 `;` 로 자른다)
+FAULT_COND_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("SCENARIO_NO",
+     "int DEFAULT NULL COMMENT '시나리오 번호 (CM_ERROR_SCENARIO.SCENARIO_NO) — 생성 API 값, 없으면 메모 #n. NULL = 기록 전 장애'"),
+    ("VOLUME_PCT",
+     "tinyint unsigned DEFAULT NULL COMMENT '활성 전이 때의 생성량(%) — CM_DATAGEN_CONFIG.volume_pct. NULL = 기록 전 장애'"),
+    ("VIRTUAL_OFFSET_SEC",
+     "int DEFAULT NULL COMMENT '활성 전이 때의 가상 시각 오프셋(초) — 곡선·그룹 비율만 옮긴다. NULL = 기록 전 장애'"),
+    ("RESOLVED_TARGET",
+     "varchar(255) DEFAULT NULL COMMENT '생성기가 실제로 고른 대상 (정답지 scope 와 같은 글) — 예 SGW-9, MME-1 · APN · 셀 N개. NULL = 기록 전 장애'"),
+    ("INJECT_CONTEXT",
+     "json DEFAULT NULL COMMENT '활성 전이 때의 생성 조건 {diurnal, blocked, reassign, curve, gen_rev}. NULL = 기록 전 장애'"),
+)
+_FAULT_COND_DDL = "".join(f"  `{c}` {d},\n" for c, d in FAULT_COND_COLUMNS)
+
+
 DDL = f"""
 -- ── CM_DATAGEN_CONFIG ───────────────────────────────────────────────────────
 -- UI 가 바꾸는 생성 설정. 데몬이 틱마다 읽으므로 **다음 분부터 반영된다.**
@@ -200,7 +219,7 @@ CREATE TABLE IF NOT EXISTS `{T_FAULT}` (
   `INJECT_MODE`   varchar(8)   NOT NULL DEFAULT 'manual'  COMMENT 'manual | auto',
   `STATUS`        varchar(12)  NOT NULL DEFAULT 'pending' COMMENT 'pending → active → done · cancelled',
   `NOTE`          varchar(255)     DEFAULT NULL COMMENT '취소 사유 등 — UI 가 보여준다',
-  `CREATED_TIME`  datetime     NOT NULL,
+{_FAULT_COND_DDL}  `CREATED_TIME`  datetime     NOT NULL,
   `UPDATED_TIME`  datetime     NOT NULL,
   PRIMARY KEY (`FAULT_ID`),
   KEY `IX_CM_DATAGEN_FAULT_STATUS` (`STATUS`, `START_TIME`)
@@ -272,16 +291,19 @@ FAULT_SELECT = (
     "SELECT FAULT_ID AS fault_id, FAULT_KIND AS kind, TARGET AS target, "
     "START_TIME AS start_ts, DURATION_MIN AS duration_min, "
     "INTENSITY AS intensity, INJECT_MODE AS mode, STATUS AS status, "
-    "NOTE AS note, CREATED_TIME AS created_at, UPDATED_TIME AS updated_at"
+    "NOTE AS note, CREATED_TIME AS created_at, UPDATED_TIME AS updated_at, "
+    "SCENARIO_NO AS scenario_no, VOLUME_PCT AS volume_pct, "
+    "VIRTUAL_OFFSET_SEC AS virtual_offset_sec, RESOLVED_TARGET AS resolved_target, "
+    "INJECT_CONTEXT AS inject_context"
 )
 
-#: 틱 루프가 쓰는 짧은 형태 — 해석에 필요한 일곱 컬럼만.
+#: 틱 루프가 쓰는 짧은 형태 — 해석에 필요한 여덟 컬럼만. `scenario_no` 는 칸이 있으면 메모보다 먼저 읽힌다.
 #: `note` 는 순환 몫의 시나리오 번호다(`faults.scenario_no` 가 `#19` 를 읽는다). 빠지면 kind 를 나눠 쓰는
 #: 번호(18·19·20·26)가 원본 번호(1·10·12·8)로 읽혀 남의 사용 기록으로 대상을 고른다(2026-11-11 · 19번 MME-3 연속)
 FAULT_SELECT_ACTIVE = (
     "SELECT FAULT_ID AS fault_id, FAULT_KIND AS kind, TARGET AS target, "
     "START_TIME AS start_ts, DURATION_MIN AS duration_min, INTENSITY AS intensity, "
-    "NOTE AS note"
+    "NOTE AS note, SCENARIO_NO AS scenario_no"
 )
 
 
@@ -295,6 +317,7 @@ FAULT_SELECT_ACTIVE = (
 _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     (T_HISTORY, "SERIES_STAT",
      "json DEFAULT NULL COMMENT '계열별 {n, bytes} — 제어 화면 툴팁용'"),
+    *((T_FAULT, c, d) for c, d in FAULT_COND_COLUMNS),
 )
 
 
@@ -353,7 +376,8 @@ def list_scenarios(conn) -> list[dict]:
 
 def add_fault(conn, kind: str, target: str | None, start_ts: datetime,
               duration_min: int = 30, intensity: float = 1.0,
-              mode: str = "manual", note: str | None = None) -> int:
+              mode: str = "manual", note: str | None = None,
+              scenario_no: int | None = None) -> int:
     if kind not in KINDS:
         raise ValueError(f"알 수 없는 kind: {kind!r} — {', '.join(KINDS)}")
     if kind == "capacity_shift":
@@ -364,13 +388,17 @@ def add_fault(conn, kind: str, target: str | None, start_ts: datetime,
         from .scenarios import SHIFT_TOTAL
         duration_min = SHIFT_TOTAL
     target = _check_like(conn, kind, target)
+    if scenario_no is None:
+        # 받은 값이 없으면 메모 앞 `#n` — kind 로 짐작하지 않는다(같은 kind 를 여러 번호가 쓴다 · 19·10)
+        from .faults import note_scenario_no
+        scenario_no = note_scenario_no(note)
     now = datetime.now()
     with conn.cursor() as cur:
         cur.execute(
             f"INSERT INTO {T_FAULT} (FAULT_KIND,TARGET,START_TIME,DURATION_MIN,"
-            "INTENSITY,INJECT_MODE,STATUS,NOTE,CREATED_TIME,UPDATED_TIME) "
-            "VALUES (%s,%s,%s,%s,%s,%s,'pending',%s,%s,%s)",
-            [kind, target, start_ts, duration_min, intensity, mode, note, now, now],
+            "INTENSITY,INJECT_MODE,STATUS,NOTE,SCENARIO_NO,CREATED_TIME,UPDATED_TIME) "
+            "VALUES (%s,%s,%s,%s,%s,%s,'pending',%s,%s,%s,%s)",
+            [kind, target, start_ts, duration_min, intensity, mode, note, scenario_no, now, now],
         )
         fid = cur.lastrowid
     conn.commit()
@@ -457,27 +485,77 @@ def list_faults(conn, limit: int = 50) -> list[dict]:
         return [dict(zip(cols, r)) for r in cur.fetchall()]
 
 
-def poll_transitions(conn, now: datetime) -> list[dict]:
+def poll_transitions(conn, now: datetime, cond: dict | None = None,
+                     slot: datetime | None = None) -> list[dict]:
     """상태 전이를 수행하고 **현재 활성** fault 목록을 돌려준다.
 
     데몬이 틱마다 부른다. 전이는 DB 에서 일어나므로 데몬이 죽었다 떠도
     진행 중이던 장애가 그대로 이어진다.
+
+    ``cond`` 가 있으면 **pending → active 전이와 같은 UPDATE 로** 그 순간의 생성 조건을 적는다
+    (`volume_pct`·`virtual_offset_sec`·`context`). 따로 적으면 그 사이에 UI 가 값을 바꿔 전이 시점과
+    다른 값이 남을 수 있다. 한 번 활성이 된 행은 다시 이 UPDATE 에 걸리지 않으므로 덮어쓰지 않는다.
+    없으면(다른 경로) 칸을 건드리지 않는다 — NULL 은 "기록 전"이다.
+
+    ``slot`` 은 **지금 만드는 분**이다(2026-11-11 · 8번 F-264·F-284). 상태 전이는 벽시계(``now``)로 하되 돌려줄
+    활성 목록은 그 분이 장애 창 안인지로 고른다. 실시간 틱은 방금 닫힌 분을 그 분 + 3초에 만들므로, 벽시계로만
+    고르면 마지막 분을 만들 때 장애가 이미 `done` 이라 **모든 장애가 마지막 1분을 잃었다**(F-284 13:56 기종 실패
+    0건 · F-264 00:43 0건 — 정답지는 11분). 취소된 장애는 넣지 않는다 — 사람이 끊은 것이다.
     """
     with conn.cursor() as cur:
-        cur.execute(
-            f"UPDATE {T_FAULT} SET STATUS='active', UPDATED_TIME=%s "
-            "WHERE STATUS='pending' AND START_TIME <= %s", [now, now])
+        if cond is None:
+            cur.execute(
+                f"UPDATE {T_FAULT} SET STATUS='active', UPDATED_TIME=%s "
+                "WHERE STATUS='pending' AND START_TIME <= %s", [now, now])
+        else:
+            vol, vo = cond.get("volume_pct"), cond.get("virtual_offset_sec")
+            ctx = cond.get("context")
+            cur.execute(
+                f"UPDATE {T_FAULT} SET STATUS='active', UPDATED_TIME=%s, "
+                "VOLUME_PCT=%s, VIRTUAL_OFFSET_SEC=%s, INJECT_CONTEXT=%s "
+                "WHERE STATUS='pending' AND START_TIME <= %s",
+                [now,
+                 None if vol is None else max(0, min(255, int(round(float(vol))))),
+                 None if vo is None else int(round(float(vo))),
+                 None if ctx is None else json.dumps(ctx, ensure_ascii=False, separators=(",", ":")),
+                 now])
         cur.execute(
             f"UPDATE {T_FAULT} SET STATUS='done', UPDATED_TIME=%s "
             "WHERE STATUS='active' "
             "AND DATE_ADD(START_TIME, INTERVAL DURATION_MIN MINUTE) <= %s",
             [now, now])
-        cur.execute(FAULT_SELECT_ACTIVE + f" FROM {T_FAULT} "
-                    "WHERE STATUS='active' ORDER BY FAULT_ID")
+        if slot is None:
+            cur.execute(FAULT_SELECT_ACTIVE + f" FROM {T_FAULT} "
+                        "WHERE STATUS='active' ORDER BY FAULT_ID")
+        else:
+            cur.execute(FAULT_SELECT_ACTIVE + f" FROM {T_FAULT} "
+                        "WHERE (STATUS='active' OR (STATUS='done' "
+                        "AND DATE_ADD(START_TIME, INTERVAL DURATION_MIN MINUTE) > %s)) "
+                        "ORDER BY FAULT_ID", [slot])
         cols = [d[0] for d in cur.description]
         active = [dict(zip(cols, r)) for r in cur.fetchall()]
     conn.commit()
     return active
+
+
+def record_resolved(conn, targets: dict[int, str]) -> list[int]:
+    """생성기가 해석한 실제 대상을 `RESOLVED_TARGET` 에 적는다 — **비어 있는 행만**, 적은 fault_id 를 돌려준다.
+
+    값은 정답지 `scope`(`Target.label()`)와 같은 글이다 — 화면과 정답지가 같은 말을 해야 대조가 된다.
+    한 번 적으면 덮지 않는다(`IS NULL`). 해석은 fault_id 시드라 틱마다 같지만, gen 재빌드로 해석 코드가
+    바뀌면 다른 값이 나올 수 있다 — 그때도 **주입 당시** 값이 남아야 한다.
+    """
+    done = []
+    with conn.cursor() as cur:
+        for fid, label in targets.items():
+            if not label:
+                continue
+            cur.execute(
+                f"UPDATE {T_FAULT} SET RESOLVED_TARGET=%s "
+                "WHERE FAULT_ID=%s AND RESOLVED_TARGET IS NULL", [label[:255], fid])
+            done.append(fid)
+    conn.commit()
+    return done
 
 
 def record_tick(conn, slot_ts: datetime, records: int,

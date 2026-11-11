@@ -372,6 +372,35 @@ def _truth_path(pem: dict, data_dir: Path) -> Path:
 _ASIDE_FAILED: dict[str, str] = {}
 
 
+def gen_rev() -> str | None:
+    """생성기 코드 판 — 장애 기록(`INJECT_CONTEXT.gen_rev`)에 남겨 "어느 코드로 만든 데이터인가"를 잇는다.
+
+    **컨테이너 안에는 git 이 없다.** 이미지를 구울 때 build arg 로 받은 `GEN_REV` 환경변수가 정본이다
+    (`Dockerfile`). 호스트에서 돌면 저장소에서 `git describe --always --dirty` 로 읽는다 — 미커밋 코드로
+    돈 회차는 `-dirty` 가 붙어 커밋 판과 구분된다. 둘 다 없으면 None — 모르는 것을 지어내지 않는다.
+    """
+    rev = (os.environ.get("GEN_REV") or "").strip()
+    if rev and rev != "unknown":
+        return rev
+    import subprocess
+
+    try:
+        out = subprocess.run(["git", "describe", "--always", "--dirty"], cwd=Path(__file__).resolve().parent,
+                             capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() or None if out.returncode == 0 else None
+
+
+def _fault_cond(pct: float, vo: float, diurnal: bool, blocked, reassign: str, curve, rev: str | None) -> dict:
+    """장애가 활성이 되는 순간의 생성 조건 — `control.poll_transitions(cond=)` 가 그 행에 적는다."""
+    return {"volume_pct": pct, "virtual_offset_sec": vo,
+            "context": {"diurnal": bool(diurnal), "blocked": sorted(blocked or ()),
+                        "reassign": json.loads(reassign) if (reassign or "").strip() else None,
+                        # 곡선은 설정 값 그대로(24칸) — 없으면 기본 곡선이다
+                        "curve": list(curve) if curve else None, "gen_rev": rev}}
+
+
 def _aside(label: str, fn, *args, **kw):
     """**주 경로를 멈추지 않는 부수 작업.**
 
@@ -781,6 +810,8 @@ def cmd_run(args) -> int:
                   + ("  ※ lte_call 차단은 U-Plane 까지 멈춘다"
                      if "lte_call" in blocked else ""), flush=True)
         tail_last: str | None = None   # 하한 꼬리 — 첫 틱에 반드시 쓴다
+        rev = gen_rev()                # 장애 기록의 생성기 판 — 기동 때 한 번
+        resolved_done: set[int] = set()  # RESOLVED_TARGET 을 이미 적은 fault
         # 기본값은 설정(`pemdb1.clock`), UI 저장값(DB)이 이긴다 — `volume_pct` 와 같다
         clk = pem.get("clock") or {}
         from .generator import set_curve
@@ -954,7 +985,10 @@ def cmd_run(args) -> int:
                     break
                 continue
 
-            active = control.poll_transitions(conn, datetime.now())
+            # 활성 전이 때 그 순간의 조건을 같은 UPDATE 로 적는다(2026-11-11 · `CM_DATAGEN_FAULT` 조건 칸)
+            # 활성 목록은 **만드는 분(ts)** 기준 — 벽시계로 고르면 마지막 분을 만들 때 장애가 이미 done 이다
+            active = control.poll_transitions(conn, datetime.now(), cond=_fault_cond(
+                pct_now, vo_now, di_now, blocked, ra_now, clk.get("curve"), rev), slot=ts)
             # 자연재해 자동 대상이 창고의 eNB 호율을 본다(`pemdb1.enb_call_rate` · 한 fault 에 한 번)
             # 16번 자동 대상은 메시의 평소 인원을 본다(`pemdb1.mesh_people`)
             scs, bad = gen.set_fault_rows(
@@ -962,6 +996,11 @@ def cmd_run(args) -> int:
                 mesh_load=lambda t: P.mesh_people(conn, t))
             if bad:
                 _cancel_faults(conn, bad, _CANCEL_NOTE)
+            # 실제 대상 — 해석·기종/APN 바인딩(`set_faults`) 뒤라 정답지 `scope` 와 같은 글이다. 적은 것은 다시 묻지 않는다
+            todo = {int(sc.id[2:]): sc.target.label() for sc in scs
+                    if sc.id.startswith("F-") and sc.id[2:].isdigit() and int(sc.id[2:]) not in resolved_done}
+            if todo:
+                resolved_done.update(_aside("실제 대상 기록", control.record_resolved, conn, todo) or ())
             _aside("정답 기록", _live_truth, P, gen, scs)
 
             t0 = time.time()

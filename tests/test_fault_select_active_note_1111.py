@@ -66,10 +66,13 @@ def test_active_query_selects_note():
     assert "NOTE AS note" in control.FAULT_SELECT_ACTIVE
 
 
-def test_active_query_columns_are_the_seven_the_tick_reads():
+def test_active_query_columns_are_the_eight_the_tick_reads():
+    """일곱에서 여덟이 됐다 — `scenario_no` 가 더해졌다(2026-11-11 `CM_DATAGEN_FAULT` 조건 칸).
+    칸이 비면(기록 전 장애) `faults.scenario_no` 가 메모 `note` 를 읽으므로 `note` 는 그대로 있어야 한다."""
     head = control.FAULT_SELECT_ACTIVE[len("SELECT "):]
     cols = [p.split(" AS ")[-1].strip() for p in head.split(", ")]
-    assert cols == ["fault_id", "kind", "target", "start_ts", "duration_min", "intensity", "note"]
+    assert cols == ["fault_id", "kind", "target", "start_ts", "duration_min", "intensity", "note",
+                    "scenario_no"]
 
 
 def test_poll_transitions_returns_note_in_each_active_row():

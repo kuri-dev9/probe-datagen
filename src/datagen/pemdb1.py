@@ -2494,15 +2494,29 @@ class PemdbGen:
 
         꼬리는 이 프로세스의 메모리 상태라 UI 가 직접 볼 수 없다. 데몬이 틱마다
         이것을 `CM_DATAGEN_CONFIG.floor_tail` 에 쓰고 `/api/faults` 가 읽는다
-        (2026-11-02 · 카드 15). 진행 중인 장애는 "지금 끝나면"의 시각이다.
-        재시작하면 비어 있다 — 그것이 사실이다(꼬리가 사라졌다).
+        (2026-11-02 · 카드 15). 재시작하면 비어 있다 — 그것이 사실이다(꼬리가 사라졌다).
+
+        **진행 중인 장애는 계획된 끝 분까지 간다고 보고 센다**(2026-11-11). 전에는 "지금 끝나면"의
+        시각이라 주입 직후에 찍힌 값이 주입 끝보다 앞섰다(F-286 · 75분 주입에 `tail_until` 16:13, 끝 16:29).
+        화면은 이 값을 "같은 셀을 다시 노려도 되는 시각"으로 쓰므로 끝 전 시각은 틀린 안내다. 끝 분의 하한은
+        그 분의 `visible_level` 로 다시 잰다(끝 3분 램프다운 kind 는 끝 분 하한이 작아 꼬리가 짧다). 중간에
+        취소되면 활성 목록에서 빠져 실제 마지막 분 기준으로 돌아간다. 24번은 넣지 않는다 — `visible_level`
+        이 그 시나리오의 국면 상태(`_minute`)를 바꾸고, B 가 켜지면 꼬리를 남기지 않는다
         """
         if self.anchor is None:
             return {}
+        cfg = self.fault
+        running = {_fault_no(sc.id): sc for sc in (getattr(self.gen, "scenarios", None) or ())
+                   if _fault_no(sc.id) is not None and sc.kind != "capacity_shift"}
         last_by: dict[int, int] = {}
         for last, peak, fid in self._floor_last.values():
             if fid is not None:
                 end = last + self._tail_len(peak)
+                sc = running.get(fid)
+                fin = sc.start_minute + sc.duration - 1 if sc is not None else last
+                if fin > last:
+                    w = cfg.floor_by_kind.get(sc.kind, cfg.floor_per_cell) * visible_level(sc, fin)
+                    end = max(end, fin + self._tail_len(w))
                 last_by[fid] = max(end, last_by.get(fid, end))
         # 끝 분 + 1 이 "다시 같은 셀을 노려도 되는" 시각이다
         return {str(fid): (self.anchor + timedelta(minutes=last + 1))
