@@ -309,6 +309,14 @@ class Groups:
                         break
         if not self.subway_running(ts):
             sw = 0.0
+        elif self.blend_h > 0 and self.sub_h[1] - self.sub_h[0] < 24:
+            # **운행 시작·끝도 `blend_min` 에 걸쳐 선형으로** (2026-11-12 · graphio 27번 F-303). 정시에 0 → 10% 로
+            # 켜자 06:00~06:02 노선(야마노테선) eNB 13곳의 분당 호가 1분 만에 5~24배가 되어 D5 호 폭주(C-24)가
+            # 매일 같은 시각에 섰고(11-11·11-12), 27번 재해 사건에 섞였다. 시간대 경계와 같은 이유다(머리말).
+            # 시작부터 `blend_min` 동안 0 → 1, 끝 `blend_min` 전부터 1 → 0. 빠진 몫은 그냥 이동이 가져간다
+            h = self._hour(ts)
+            a, b = self.sub_h
+            sw *= max(0.0, min(1.0, (h - a) / self.blend_h, (b - h) / self.blend_h))
         return sw, mv - sw
 
 #: 거주지 격자 한 칸(도). 0.05도 ≈ 5.5km — `home_radius_m`(10km)보다 작아야
