@@ -2330,7 +2330,7 @@ def cmd_l3(args) -> int:
         print(f"지움 {len(gone)}개: {', '.join(gone) or '없음'}")
         return 0
     if not args.file:
-        print("기록 파일을 준다 — python -m datagen l3 add <json 파일>")
+        print(f"기록 파일을 준다 — python -m datagen l3 {args.op} <json 파일>")
         return 2
     try:
         data = _json.loads(Path(args.file).read_text(encoding="utf-8"))
@@ -2338,6 +2338,26 @@ def cmd_l3(args) -> int:
         print(f"기록 파일을 못 읽었다 — {args.file}: {e}")
         return 1
     recs = data if isinstance(data, list) else [data]
+    if args.volume is not None:
+        # `--volume` 은 기록에 칸이 없을 때 채운다 — 기록이 다른 값을 말하면 어느 쪽이 맞는지 모르니 멈춘다
+        for rec in recs:
+            if isinstance(rec, dict):
+                if rec.get("volume") not in (None, args.volume):
+                    print(f"거부 — 기록은 volume {rec['volume']} 인데 --volume {args.volume} 이다")
+                    return 1
+                rec["volume"] = args.volume
+    if args.op == "annotate":
+        # 한국어 해석 보충 — 원문 줄은 그대로 두고 해석 줄을 이어 붙인다(`l3log.annotate`)
+        for note in recs:
+            try:
+                got = l3log.annotate(note)
+            except ValueError as e:
+                print(f"거부 — {e}")
+                return 1
+            a = note.get("annotate") or {}
+            print(f"{a.get('fault')} 해석 {len(note.get('turns') or ())}턴 → {got['file']}"
+                  + (f" · latest.l3 갱신({Path(got['report']).name})" if got["latest_updated"] else ""))
+        return 0
     for rec in recs:
         try:
             got = l3log.add(rec)
@@ -2345,7 +2365,8 @@ def cmd_l3(args) -> int:
             print(f"거부 — {e}")
             return 1
         print(f"{rec['no']}번 {rec['fault']} {rec['status']} → {got['file']}"
-              + (" · latest.l3 갱신" if got["latest_updated"] else " · 최신 회차가 아니라 latest.l3 는 그대로")
+              + (f" · latest.l3 갱신({Path(got['report']).name})" if got["latest_updated"]
+                 else f" · 최신 회차가 아니라 latest.l3 는 그대로({Path(got['report']).name})")
               + (f" · 지움 {', '.join(got['pruned'])}" if got["pruned"] else ""))
     return 0
 
@@ -2527,8 +2548,11 @@ def main(argv=None) -> int:
     ms.set_defaults(fn=cmd_measure)
 
     l3 = sub.add_parser("l3", help="L3 문답 검사 기록 — data/l3/날짜.jsonl, 7일 보관")
-    l3.add_argument("op", choices=("add", "prune"))
-    l3.add_argument("file", nargs="?", help="add: 기록 JSON 파일 (객체 하나 또는 목록)")
+    l3.add_argument("op", choices=("add", "annotate", "prune"))
+    l3.add_argument("file", nargs="?", help="add: 기록 JSON 파일 (객체 하나 또는 목록) · "
+                    "annotate: 해석 JSON {annotate:{fault, at?}, turns:[{n, q_ko, answer_ko}]}")
+    l3.add_argument("--volume", type=int, choices=(15, 50), default=None,
+                    help="생성량(%%) — 기록에 volume 칸이 없을 때 채운다. 50 은 scenario_report_v50.json 을 갱신한다")
     l3.set_defaults(fn=cmd_l3)
 
     # 마스터 토폴로지 — **1회성이다.** `pemfill`·`run` 은 상주하며 마스터를

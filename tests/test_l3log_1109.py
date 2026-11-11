@@ -235,8 +235,8 @@ def sandbox(monkeypatch, tmp_path):
 
 
 class _A:
-    def __init__(self, op, file=None):
-        self.op, self.file = op, file
+    def __init__(self, op, file=None, volume=None):          # 실제 파서는 `--volume` 이 없어도 None 을 넣는다
+        self.op, self.file, self.volume = op, file, volume
 
 
 def test_cli_add_accepts_an_object_and_a_list(sandbox, tmp_path, capsys):

@@ -27,8 +27,10 @@ HOW = HERE / "config" / "scenario_how.json"
 GLOSSARY = HERE / "config" / "scenario_glossary.json"
 
 HANGUL = re.compile("[가-힣]")
-#: 화면에 내리지 않는 칸 — 근거 파일 이름이라 번역할 뜻이 없다
-SKIP_KEYS = frozenset({"evidence"})
+#: 번역하지 않는 칸 — `evidence` 는 근거 파일 이름이라 번역할 뜻이 없다. `q_ko`·`a_head_ko` 는 일본어 L3
+#: 문답의 **한국어 해석**이다(`l3log` · 2026-11-11) — 원문이 일본어라 일본어 화면은 원문을 보면 된다.
+#: 빼지 않으면 해석 칸마다 "번역 없음"으로 세어 `ja_left` 가 0 이 되지 않는다
+SKIP_KEYS = frozenset({"evidence", "q_ko", "a_head_ko"})
 
 
 def src_hash(text: str) -> str:

@@ -79,6 +79,8 @@
   .l3t td:nth-child(1), .l3t td:nth-child(2), .l3t td:nth-child(5) { white-space:nowrap; }
   /* 답 원문 — 줄바꿈을 살리고 너무 길면 칸 안에서 스크롤한다 */
   .ans { white-space:pre-wrap; max-height:260px; overflow:auto; font-size:12px; }
+  /* 한국어 해석 — 일본어 원문 아래 작은 글씨(l3log `q_ko`·`answer_ko`). 없으면 그리지 않는다 */
+  .ko { display:block; margin-top:3px; font-size:11px; color:var(--dim); white-space:pre-wrap; }
   ul { margin:0; padding-left:18px; }
   /* 표는 테두리·머리글 바탕·칸 구분을 모두 둔다 — 밝은 바탕에서 선만으로는 묻혔다. 색은 초기값 */
   table { width:100%; border-collapse:collapse; font-size:12.5px; margin-top:4px; background:#f1f3f5;
@@ -149,6 +151,8 @@ const REACHED=[['none','도달 없음'],['D','D'],['L1','L1'],['L2','L2'],['L3',
 //: 검사가 없으면 미평가다. 칸 뒤 괄호는 통과한 질의 회차 수다
 const L3_STAGE={pass:'ok',partial:'partial',fail:'fail'};
 const l3Turns=x=>Array.isArray(x&&x.turns) ? x.turns : [];
+// 한국어 해석 한 줄 — 있을 때만(원문 아래 작은 글씨)
+const ko=v=>v ? `<span class=ko>${esc(v)}</span>` : '';
 const l3Count=x=>{ const t=l3Turns(x); return t.length ? `${t.filter(y=>y&&y.verdict==='ok').length}/${t.length}` : ''; };
 const sgOf=(s,k)=>{
   if(k==='L3'){ const x=s.latest&&s.latest.l3;
@@ -292,7 +296,7 @@ function l3Sec(s){
         ['걸러짐',c.filtered==null?unk():esc(T('{n}문장',{n:c.filtered}))]])
     +`<div class="sub l3t"><h3>${esc(T('질의 회차'))}</h3>`
     +table(x.turns,['번호','종류','질문','답 앞부분','판정','메모'],y=>[val(y.n),
-        esc(T(L3_KIND[y.kind]||y.kind||'?')),val(y.q),val(y.a_head),okIssue(y.verdict),val(y.note)])+`</div>`
+        esc(T(L3_KIND[y.kind]||y.kind||'?')),val(y.q)+ko(y.q_ko),val(y.a_head)+ko(y.a_head_ko),okIssue(y.verdict),val(y.note)])+`</div>`
     +l3Log(s));
 }
 //: L3 기록(`data/l3/*.jsonl` · 최근 7일, 사용자 11-09). 같은 시나리오의 검사를 최신순으로 — 맨 위가 `latest.l3`
@@ -301,8 +305,8 @@ const l3Rec=s=>L3LOG.filter(r=>r&&r.no===s.no);
 const l3Badge=r=>{ const t=L3_ST[r&&r.status]; if(!t) return '–';
   return `<span class="sg g-${t[1]}">${t[2]} ${esc(l3Count(r))}</span>`; };
 const l3Raw=r=>table(r.turns,['번호','종류','경로','질문','답 원문','판정','메모'],y=>[val(y.n),
-  esc(T(L3_KIND[y.kind]||y.kind||'?')),esc(y.route==='general'?T('일반 질의'):'RCA'),val(y.q),
-  `<div class=ans>${esc(y.answer||'')}</div>`,okIssue(y.verdict),val(y.note)]);
+  esc(T(L3_KIND[y.kind]||y.kind||'?')),esc(y.route==='general'?T('일반 질의'):'RCA'),val(y.q)+ko(y.q_ko),
+  `<div class=ans>${esc(y.answer||'')}${ko(y.answer_ko)}</div>`,okIssue(y.verdict),val(y.note)]);
 function l3Log(s){
   const rs=l3Rec(s), x=l3Of(s), lat=s.latest||{};
   const same=r=>x&&r.fault===lat.fault&&String(r.at).slice(0,16).replace('T',' ')===String(x.at||'');
