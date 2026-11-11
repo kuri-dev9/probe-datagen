@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-11-12 05:50",
+  "updated_at": "2026-11-12 06:00",
   "volume_pct": 50,
   "notes": [
     "생성량 50% 는 분당 XDR 약 1만 건이다. 시나리오 검증 기준인 15%(약 3천 건)의 약 3.3배다.",
@@ -4145,23 +4145,45 @@
         "kpi": "Q-11",
         "geo": "POINT"
       },
-      "status": "not_run",
-      "latest": null,
+      "status": "fail",
+      "latest": {
+        "fault": "F-302",
+        "run": "no24-v50n",
+        "at": "2026-11-12 06:00",
+        "detect_min": null,
+        "cause": "TRANSPORT_LOSS",
+        "confidence": 0.696,
+        "summary": "생성량 50% 24번 재주행 회차다(40분, 05:08:03~05:48, `capacity_shift` · A eNB-190885 혼잡 → B eNB-798120 개통 · 채점 제외(`scored=False`, 정답지 없음), 기대 지표 Q-11·지리 POINT, `tail_until` 05:49). 새 칸 5개(24·50·0·'eNB-190885 → eNB-798120 · 셀 6개'·INJECT_CONTEXT, `gen_rev` eea27b0)가 기록됐다. **데이터 모양은 설계대로다** — A 분당 호가 05:08 9 → 05:27 45~48(20분 혼잡) → B 개통 05:28 첫 호(29/분)·A 15~20/분으로 감소(B 몫 약 60%) → B 마지막 호 05:47 → A 05:48 2(뒤 평시). **시스템이 본 것: 정답 신호 없음** — 기대 지표 **Q-11 이벤트 0건**, L1 묶음 **RAN_CAPACITY_CONGESTION 없음**(지난 24번 capacity-v8 은 20:35 Q-11·EVT 묶음 0.55·20:38 닫힘). 있던 것은 05:22~05:23 U-12 down 재전송 이벤트 3건(셀 196534-5 2건·셀 190885-2(A 셀) 1건)과 이를 묶은 조각 EVT-ffebcdfa6c(TRANSPORT_LOSS 0.696, 셀 2·POINT, 05:24 닫힘) 하나뿐이다 — A 혼잡 정점(분당 호 47)에 A 셀이 섞여 섰으나 혼잡 원인으로 읽지 못했다. B 소등(05:48) 뒤 C-01·RAN_NODE_DOWN 이벤트는 0건(24r1 의 C-01 132건과 달리 D4 기준선 수정 뒤 정상). 가입자 체감: A 판정 가입자 15~26(05:10~05:12). Q-11 이 서지 않은 원인은 확인하지 못했다(새벽 05시대 호량·판정 가입자 수 때문일 수 있다 — 23번과 같은 새벽 회차, 추정). L3 는 묻지 않았다(정답 사건이 없고 27번 주입 직전). 그래서 회차 판정은 **미통과(D·L1 기대 신호 없음)**다.",
+        "issues": [
+          "**기대 지표 Q-11 0건 · RAN_CAPACITY_CONGESTION 미판정** — A 20분 혼잡·B 이동 데이터는 설계대로 들어갔는데(A 호 9→47/분, B 29/분) Q-11 이벤트와 L1 묶음이 없다. 지난 24번(capacity-v8, 20:16 저녁)은 Q-11 20:35·묶음 0.55 로 맞았다. 새벽 05시대(호량·판정 가입자 수 적음)라 Q-11 조건을 못 넘었을 가능성 — 확인하지 못함. 23번 F-301 도 같은 새벽 회차에서 신호가 서지 않았다. 판정 규칙·임계를 건드리는 일이라 기록만(아침 결정 목록: 새벽 시간대 회차 허용 여부).",
+          "**정답 밖 단독 조각** — 05:22~05:24 셀 196534-5(무관 eNB)와 A 셀 190885-2 의 U-12 down 재전송 3건이 TRANSPORT_LOSS 0.696 조각(IX2611120522c911·EVT-ffebcdfa6c)이 됐다. A 혼잡 정점과 겹치지만 혼잡 원인이 아니라 전송 손실로 읽었다.",
+          "**L3 미실시** — 정답 사건이 없고 27번 주입 직전이라 묻지 않았다. 필요하면 조각 EVT-ffebcdfa6c 로 한 세션 가능."
+        ]
+      },
       "history": [],
-      "next": null,
-      "evidence": [],
+      "next": "50% 재주행 24번 미통과(Q-11·RAN_CAPACITY_CONGESTION 없음, 새벽 05시대·채점 제외 시나리오). 27번(06:03)·15번(07:00) 뒤 아침 결정 목록에 새벽 시간대 허용 여부.",
+      "evidence": [
+        "runs.md no24-v50n",
+        "DB AI_ANOMALY_EVENT·AI_RCA_EVENT·AI_INCIDENT 05:00~05:58 조회",
+        "PM_COR_LTE_CALL_1M eNB 190885·798120 분당 호 05:04~05:55",
+        "docs/jp/scenario-cards/24-capacity_shift.md 결과 정의"
+      ],
       "stages": {
         "D": {
-          "state": "unknown"
+          "state": "fail",
+          "detail": "기대 Q-11 0건. U-12 down 재전송 3건(05:22~05:23, 셀 196534-5·190885-2)만 섰다."
         },
         "L1": {
-          "state": "unknown"
+          "state": "fail",
+          "detail": "RAN_CAPACITY_CONGESTION 묶음 없음. 조각 EVT-ffebcdfa6c TRANSPORT_LOSS 0.696(셀 2) 하나."
         },
         "L2": {
-          "state": "unknown"
+          "state": "na",
+          "detail": "시나리오 결과 정의가 D1·L1 까지이다."
         },
         "L3": {
-          "state": "unknown"
+          "state": "unknown",
+          "detail": "묻지 않음(정답 사건 없음)."
         }
       },
       "reached": null
