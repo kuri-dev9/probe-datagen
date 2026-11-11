@@ -275,10 +275,13 @@ FAULT_SELECT = (
     "NOTE AS note, CREATED_TIME AS created_at, UPDATED_TIME AS updated_at"
 )
 
-#: 틱 루프가 쓰는 짧은 형태 — 해석에 필요한 여섯 컬럼만.
+#: 틱 루프가 쓰는 짧은 형태 — 해석에 필요한 일곱 컬럼만.
+#: `note` 는 순환 몫의 시나리오 번호다(`faults.scenario_no` 가 `#19` 를 읽는다). 빠지면 kind 를 나눠 쓰는
+#: 번호(18·19·20·26)가 원본 번호(1·10·12·8)로 읽혀 남의 사용 기록으로 대상을 고른다(2026-11-11 · 19번 MME-3 연속)
 FAULT_SELECT_ACTIVE = (
     "SELECT FAULT_ID AS fault_id, FAULT_KIND AS kind, TARGET AS target, "
-    "START_TIME AS start_ts, DURATION_MIN AS duration_min, INTENSITY AS intensity"
+    "START_TIME AS start_ts, DURATION_MIN AS duration_min, INTENSITY AS intensity, "
+    "NOTE AS note"
 )
 
 
