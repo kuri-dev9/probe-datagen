@@ -12,8 +12,8 @@
           --green:#37664c; --hover:#dde1e6; --on:#d0dbe8; }
   /* 회차의 장애 ID — 지도로 가는 링크(손 모양·밑줄) */
   a.fmap { color:var(--accent); text-decoration:underline; cursor:pointer; }
-  /* 문장 속 사건 — `EVT-…` 를 단위 이름(L1 장애 등) 링크로 바꾼다(`upgradeEvt`) */
-  a.evtl { color:var(--accent); text-decoration:underline; }
+  /* 문장 속 사건 — `EVT-…` 를 단위 이름(L1 장애 등)으로 바꾼다(`upgradeEvt`) */
+  .evtn { border-bottom:1px dotted currentColor; cursor:help; }
   .fmsg { color:var(--dim); font-size:.9em; }
   * { box-sizing:border-box; }
   /* 위 44px 상단 바 · 왼쪽 60px 레일(`_SHELL_CSS`) 자리를 비운다 */
@@ -185,7 +185,7 @@ const gl=h=>GL_RE ? h.replace(GL_RE,m=>{ const t=glOf(m);
 const EVT_RE=/EVT-[0-9a-f]{10}/g;
 const evtMark=h=>h.replace(EVT_RE,id=>`<span class=evt data-evt="${id}">${id}</span>`);
 const val=v=>v==null||v==='' ? unk() : evtMark(gl(esc(typeof v==='object' ? JSON.stringify(v) : v)));
-//: `EVT-…` → 「L1 장애」「L2 장애」「조각」 링크(gen-ui 지도에서 그 사건 범위가 열린다). 단위는 graphio 사건 표에서
+//: `EVT-…` → 「L1 장애」「L2 장애」「조각」 이름(지도 링크는 11-11 에 걷었다 — 장애 ID 가 같은 곳으로 간다). 단위는 graphio 사건 표에서
 //: 받는다(`/api/evt-lookup`) — 받지 못하면 ID 를 그대로 둔다(지어내지 않는다 · graphio 불변규칙 18). 원래 ID 는 툴팁
 const EVT_INFO={};
 const EVT_UNIT={L1_BUNDLE:'L1 장애',L2_EVENT:'L2 장애',PIECE:'조각'};
@@ -206,9 +206,10 @@ async function upgradeEvt(){
       el.dataset.done='1';
       const i=EVT_INFO[el.dataset.evt], name=i&&EVT_UNIT[i.unit];
       if(!name) continue;
-      const q=new URLSearchParams({...(i.fault!=null?{fault:'F-'+i.fault}:{}), inc:i.rep, ids:i.rep});
-      const tip=el.dataset.evt+(i.merged_into?' → '+i.merged_into:'')+' · '+T('지도에서 이 사건 범위 보기');
-      el.innerHTML=`<a class=evtl href="/map?${q}" title="${esc(tip)}">${esc(T(name))}</a>`;
+      // 링크는 걷었다(2026-11-11 사용자) — 같은 칸 위의 장애 ID(F-…)가 같은 회차의 지도로 이미 간다.
+      // 단위 이름만 남기고 원래 ID 는 툴팁으로 둔다
+      const tip=el.dataset.evt+(i.merged_into?' → '+i.merged_into:'');
+      el.innerHTML=`<span class=evtn title="${esc(tip)}">${esc(T(name))}</span>`;
     }
   }finally{ EVT_BUSY=false; }
   if(document.querySelector('span.evt:not([data-done])')) upgradeEvt();
@@ -439,8 +440,17 @@ function render(){
     return `<details class=sc data-k="${esc(s.no)}"${OPEN.has(String(s.no))?' open':''}><summary>`
       +`<span class=no>${esc(s.no)}</span><span class=nm>${s.name==null?unk():esc(s.name)}</span>`
       +`<span class="st ${stCls(k)}">${esc(stName(k))}</span>`+sgCells(s)
-      +`<span class=ln data-tip="${esc(ln??'')}">${ln==null?unk():esc(ln)}</span></summary>${detail(s)}</details>`;
+      +`<span class=ln data-tip="${esc(ln??'')}">${ln==null?unk():esc(ln)}</span></summary>${fromFault(s)}${detail(s)}</details>`;
   }).join('') : `<p class=dim>${esc(T('해당하는 시나리오가 없습니다'))}</p>`;
+}
+//: 장애 창에서 넘어온 장애가 이 카드의 어느 회차에도 없으면 — 판정 전이다. 아래 "최신 결과"가 그 장애인 줄
+//: 알고 읽지 않게 먼저 말한다(2026-11-11 사용자 지적 · F-285 → 카드는 F-265)
+let FROM_FAULT=null;
+function fromFault(s){
+  const h=FROM_FAULT; if(!h||String(s.no)!==h.no) return '';
+  if((JSON.stringify(s).match(/F-\d+/g)||[]).includes(h.f)) return '';
+  const lat=(s.latest||{}).fault;
+  return `<p class=unk>${esc(T('{f} 는 아직 판정 기록이 없다(판정 전) — 아래 최신 결과는 {g} 이다',{f:h.f,g:lat||T('미확인')}))}</p>`;
 }
 function warn(text, stale){
   const m=document.getElementById('msg');
@@ -468,7 +478,8 @@ async function load(){
 // 주입 칸·장애 창에서 넘어온 것 — `#no=23` 의 카드를 펼쳐 그 자리로 간다. 목록을 받은 뒤에만 된다.
 // 이 페이지는 raw 문자열이다 — 정규식의 역슬래시를 두 번 쓰면 `#no=23` 이 맞지 않는다(2026-11-07)
 function goHash(){
-  const no=/^#no=(\d+)$/.exec(location.hash); if(!no||!DOC) return;
+  const no=/^#no=(\d+)(?:&f=(F-\d+))?$/.exec(location.hash); if(!no||!DOC) return;
+  FROM_FAULT=no[2]?{no:no[1],f:no[2]}:null;
   PICK='all';
   for(const k of [...OPEN]) if(k!=='notes') OPEN.delete(k);
   OPEN.add(no[1]); render();

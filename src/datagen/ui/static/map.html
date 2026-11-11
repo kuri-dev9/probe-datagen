@@ -1026,13 +1026,33 @@ function geoPoints(h){
 // eNB 를 격자에 뿌려 밀도를 만들고 등고선 한 겹을 딴다(마칭 스퀘어). 사건당 한 번만
 // 계산한다. 빛은 **선 바깥으로만** 낸다 — 번짐 필터 대신 굵기가 다른 옅은 선을 겹치고,
 // 안쪽 절반은 윤곽 안을 칠한 마스크로 지운다. 필터는 프레임마다 다시 계산돼 느렸다
-const EVT_R=.006, EVT_G=.0018, EVT_LV=.35;
+// **격자 닫기**(2026-11-11 사용자 지적 · 동구 A안) — eNB 원(반경 ≈ 440m)을 겹친 등고선을 그대로 따면 점이
+// 띄엄띄엄한 곳이 잘록한 목·안쪽 뾰족점이 되고, 두 혹이 한 칸에서 맞닿아 X 자로 엇갈려 보였다. 이진 격자를
+// `EVT_CLOSE` 칸 넓혔다 좁혀(닫기) 틈을 메우고 3×3 평균으로 한 번 흐려 0.5 등고선을 딴다. F-279 기지국 조각
+// 107점에서 덩어리 2→1 · 안장 1→0 · 면적 +9%. 반경을 키우면(+46%) 범위가 부풀고 볼록 외곽선은 노선 고리
+// 안쪽까지 메운다. **화면 표시 상수이고 탐지·판정 문턱이 아니다.** graphio `IncidentMap.outlineD` 와 같다
+const EVT_R=.006, EVT_G=.0018, EVT_LV=.35, EVT_CLOSE=2;   // EVT_CLOSE(칸) 는 초기값
+//: 밀도 → 닫은 뒤 흐린 격자(0~1). 바깥 칸은 0 으로 본다 — 여백(`pad`)이 닫기 반경보다 넓다
+function evtClose(f,W,H){
+  const r=EVT_CLOSE, D=[];
+  for(let dj=-r;dj<=r;dj++) for(let di=-r;di<=r;di++) if(di*di+dj*dj<=r*r) D.push([di,dj]);
+  const m=new Uint8Array(W*H); for(let q=0;q<W*H;q++) m[q]=f[q]>EVT_LV?1:0;
+  const get=(g,i,j)=>i<0||j<0||i>=W||j>=H?0:g[j*W+i];
+  const dil=new Uint8Array(W*H), ero=new Uint8Array(W*H), out=new Float32Array(W*H);
+  for(let j=0;j<H;j++) for(let i=0;i<W;i++) dil[j*W+i]=D.some(([a,b])=>get(m,i+a,j+b))?1:0;
+  for(let j=0;j<H;j++) for(let i=0;i<W;i++) ero[j*W+i]=D.every(([a,b])=>get(dil,i+a,j+b))?1:0;
+  for(let j=0;j<H;j++) for(let i=0;i<W;i++){
+    let t=0; for(let b=-1;b<=1;b++) for(let a=-1;a<=1;a++) t+=get(ero,i+a,j+b);
+    out[j*W+i]=t/9;
+  }
+  return out;
+}
 function evtPath(ev){
   if(ev.d!=null) return ev.d;
   ev.fill='';
   const P=ev.pts.filter(p=>p[0]!=null&&p[1]!=null).map(p=>[mx(p[0]), -my(p[1])]);
   if(!P.length) return ev.d='';
-  const xs=P.map(p=>p[0]), ys=P.map(p=>p[1]), pad=EVT_R*2;
+  const xs=P.map(p=>p[0]), ys=P.map(p=>p[1]), pad=EVT_R*2+EVT_CLOSE*EVT_G;
   const x0=Math.min(...xs)-pad, y0=Math.min(...ys)-pad;
   const W=Math.ceil((Math.max(...xs)+pad-x0)/EVT_G)+1, Hh=Math.ceil((Math.max(...ys)+pad-y0)/EVT_G)+1;
   const f=new Float32Array(W*Hh), k=Math.ceil(EVT_R/EVT_G);
@@ -1043,16 +1063,17 @@ function evtPath(ev){
       if(w>0) f[j*W+i]+=w;
     }
   }
-  const at=(i,j)=>f[j*W+i], out=[], fill=[];
-  const cut=(a,b)=>(EVT_LV-a)/(b-a);
+  const g=evtClose(f,W,Hh), LV=.5;
+  const at=(i,j)=>g[j*W+i], out=[], fill=[];
+  const cut=(a,b)=>(LV-a)/(b-a);
   const pt=(x,y)=>`${(x0+x*EVT_G).toFixed(5)} ${(y0+y*EVT_G).toFixed(5)}`;
   for(let j=0;j<Hh-1;j++) for(let i=0;i<W-1;i++){
     const a=at(i,j), b=at(i+1,j), c=at(i+1,j+1), d=at(i,j+1);
-    const n=(a>EVT_LV?8:0)|(b>EVT_LV?4:0)|(c>EVT_LV?2:0)|(d>EVT_LV?1:0);
+    const n=(a>LV?8:0)|(b>LV?4:0)|(c>LV?2:0)|(d>LV?1:0);
     if(n===0) continue;
     if(n===15){                          // 다 안쪽 — 가로로 이어 한 사각형으로
       let e=i+1;
-      while(e<W-1&&at(e+1,j)>EVT_LV&&at(e+1,j+1)>EVT_LV) e++;
+      while(e<W-1&&at(e+1,j)>LV&&at(e+1,j+1)>LV) e++;
       fill.push(`M${pt(i,j)}L${pt(e,j)}L${pt(e,j+1)}L${pt(i,j+1)}Z`);
       i=e-1; continue;
     }
@@ -1074,8 +1095,10 @@ function evtPath(ev){
       case 1: case 14: seg(L_,B_); break;   case 2: case 13: seg(B_,R_); break;
       case 3: case 12: seg(L_,R_); break;   case 4: case 11: seg(T_,R_); break;
       case 6: case 9:  seg(T_,B_); break;   case 7: case 8:  seg(L_,T_); break;
-      case 5: seg(L_,T_); seg(B_,R_); break;
-      case 10: seg(T_,R_); seg(L_,B_); break;
+      // 안장 칸 — 네 모서리 평균이 안쪽이면 대각의 안쪽 두 모서리를 잇고, 아니면 끊는다(정해 두지 않으면
+      // 이웃 칸과 엇갈려 X 자가 선다)
+      case 5:  if((a+b+c+d)/4>LV){ seg(L_,T_); seg(B_,R_); } else { seg(T_,R_); seg(L_,B_); } break;
+      case 10: if((a+b+c+d)/4>LV){ seg(T_,R_); seg(L_,B_); } else { seg(L_,T_); seg(B_,R_); } break;
     }
   }
   ev.fill=fill.join('');

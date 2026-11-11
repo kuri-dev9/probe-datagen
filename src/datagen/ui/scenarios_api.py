@@ -59,6 +59,34 @@ def _timing(doc: dict) -> dict:
     return out
 
 
+@router.get("/api/scenario-fault-volume")
+def api_scenario_fault_volume(fault: str):
+    """그 장애가 **어느 생성량 탭에 판정 기록으로 있나** — 주입 화면의 "시나리오 화면에서 보기"가 그 탭으로 간다.
+
+    2026-11-11 사용자 지적 — 50% 회차 F-278 을 열어 링크를 누르면 15% 탭이 열려 옛 회차(F-245)가 최신으로 보였다.
+    장애 행·틱 이력에는 주입 당시 생성량이 남지 않는다(DDL 없이 간다). 그래서 **판정 기록(`latest`·`history`
+    의 `fault`)에서 찾는다** — 추정이 아니라 기록이다. 없으면(아직 판정 전) ``volume`` 이 None 이고 화면이 지금
+    생성량으로 고르며 그 사실을 링크 설명에 적는다. 여러 탭에 있으면 모두 돌려주고 첫 탭을 쓴다
+    """
+    fid = str(fault).strip().upper()
+    if not fid.startswith("F-"):
+        fid = f"F-{fid}"
+    found: list[int] = []
+    for vol in sorted(SCENARIO_VOLUMES):
+        file = (SCENARIO_VOLUMES[vol] or (SCENARIO_REPORT, None))[0]
+        rep = _read_report(file, "scenarios", list)
+        if not rep["ok"]:
+            continue
+        for sc in rep["doc"]["scenarios"]:
+            if not isinstance(sc, dict):
+                continue
+            runs = [sc.get("latest")] + list(sc.get("history") or ())
+            if any(isinstance(r, dict) and str(r.get("fault") or "").upper() == fid for r in runs):
+                found.append(vol)
+                break
+    return {"fault": fid, "volume": found[0] if found else None, "volumes": found}
+
+
 @router.get("/api/scenario-report")
 def api_scenario_report(volume: int = 15):
     """요청마다 파일을 읽는다 — 캐시하면 재시작 전까지 옛 판정이 보인다.

@@ -39,10 +39,27 @@
   /* 두 줄 — 위: 종류(넓게)·대상·지속·강도, 아래: 메모(길게). 주입 버튼은
      오른쪽 칸에 한 줄 높이로 세로 가운데(2026-11-03 사람 지시) */
   #f { grid-template-columns:minmax(0,2.4fr) minmax(0,1.6fr) minmax(0,.8fr) minmax(0,1fr) 92px;
-       grid-template-areas:"kind tgt dur int go" "memo memo memo memo go" "hint hint hint hint hint"; }
+       grid-template-areas:"when when when when when" "kind tgt dur int go" "memo memo memo memo memo" "hint hint hint hint hint";
+       row-gap:8px; }
+  /* 주입 버튼은 입력 줄(종류·대상·지속·강도)에만 — 입력칸 바닥에 맞춰 그 줄의 세로 가운데에 선다(2026-11-11 사용자 요청) */
+  #inj { padding:12px 16px 10px; } #inj h2 { margin-bottom:8px; }
+  #inj #msg { margin-top:4px; } #inj #msg:empty { margin-top:0; min-height:0; }
+  /* "강도 1.0" 을 한 줄로 — label 이 세로 flex 라 글자와 값이 두 줄로 갈렸다 */
+  #f .f-int .lbl { white-space:nowrap; }
+  /* 시작 시각 — 현재시간이면 지금처럼, 지정시간이면 그 시각에 시작(2026-11-11 사용자 요청) */
+  #f .f-when { grid-area:when; display:flex; gap:14px; align-items:center; flex-wrap:wrap; font-size:13px; }
+  #f .f-when label { display:flex; flex-direction:row; gap:5px; font-size:13px; align-items:center; cursor:pointer; }
+  #f .f-when input[type=radio] { width:auto; accent-color:var(--accent); }
+  /* 날짜·시각을 칸으로 나눈다 — `datetime-local` 은 브라우저 언어에 따라 "오전 11:37"(12시간제)로 보였다(2026-11-11 사용자 요청) */
+  /* 현재시간이면 **자리는 두고 숨긴다**(visibility) — 칸이 빠지면 줄 높이가 바뀌어 아래 칸들이 움직였다 */
+  #f .f-when #at { display:flex; gap:4px; align-items:center; }
+  #f .f-when #at input { width:auto; padding:5px 6px; }
+  #f .f-when #at #at-y { width:72px; }
+  #f .f-when #at #at-mo, #f .f-when #at #at-d, #f .f-when #at #at-h, #f .f-when #at #at-mi { width:52px; }
+  #f .f-when #at .u { color:var(--dim); margin-right:6px; }
   #f .f-kind { grid-area:kind; } #f .f-tgt { grid-area:tgt; } #f .f-dur { grid-area:dur; }
   #f .f-int { grid-area:int; } #f .f-memo { grid-area:memo; }
-  #f button[type=submit] { grid-area:go; align-self:center; }
+  #f button[type=submit] { grid-area:go; align-self:end; }
   /* 권장 지속시간 힌트 — 폼 전체 폭 한 줄(빈 칸에 끼면 3줄로 접혔다) */
   #f #dur-hint { grid-area:hint; color:var(--dim); line-height:1.5; }
   #dur-more { margin-left:8px; color:var(--acc,#4e9af1); }
@@ -62,7 +79,7 @@
   #fm .bd table { width:100%; border-collapse:collapse; } #fm .bd td { padding:3px 8px 3px 0; vertical-align:top;
              border-bottom:1px solid var(--line); white-space:normal; }
   #fm .ft { display:flex; gap:12px; align-items:center; padding:12px 18px; border-top:1px solid var(--line); }
-  #fm .ft .msg { color:var(--dim); font-size:12px; } #fm .ft a { margin-left:auto; color:var(--acc,#4e9af1); font-size:12px; }
+  #fm .ft .msg { color:var(--dim); font-size:12px; } #fm .ft button.cancel { padding:7px 12px; } #fm .ft a { margin-left:auto; color:var(--acc,#4e9af1); font-size:12px; }
   /* 지역 — 콤보와 저장을 한 줄로. 전역 select{width:100%} 가 줄을 넘겼다 */
   #region-sel { width:auto; flex:1; min-width:0; }
   #region-row { flex-wrap:nowrap; }
@@ -124,6 +141,13 @@
   .tg input:checked + i::after { transform:translateX(22px);
                                  background:var(--accent); }
   .tg input:disabled + i { opacity:.45; }
+  /* 가상 시각 스핀 상자 · 쓸 일이 없을 때 회색인 적용/지금으로(2026-11-11 사용자 요청) */
+  .vspin { display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:6px;
+           background:#111620; overflow:hidden; }
+  .vspin button { padding:4px 8px; font-size:11px; border-radius:0; background:transparent; color:var(--accent); }
+  .vspin button:hover { background:#ffffff12; }
+  .vspin b { min-width:48px; text-align:center; font-size:15px; padding:0 4px; }
+  #vclock-row button:disabled { background:#2c3542; color:var(--dim); cursor:default; filter:none; }
   /* ── 상태등 ──────────────────────────────────────────────────────────
      회색=정지 · 파랑=생성 중 · 빨강=생성 중인데 장애가 주입돼 있다.
      **색만으로 말하지 않는다** — 바로 옆에 글자를 함께 둔다. 색각 이상이면
@@ -276,7 +300,9 @@
     </div>
     <!-- 스위치는 **누르는 순간 반영된다.** 저장 버튼에 묶여 있으면 끄려다가
          조절 중인 생성량까지 함께 적용된다. -->
-    <div class="row">
+    <!-- 지역 설명과 붙어 있어 지역 설정처럼 읽혔다 — 띄우고 이름을 단다(2026-11-11 사용자 요청) -->
+    <div class="row" style="margin-top:16px">
+      <b style="font-size:13px">데이터 생성</b>
       <label class="tg" title="생성 가동/정지 — 즉시 반영">
         <input type="checkbox" id="gen-on" onchange="toggleGen(this)"><i></i>
       </label>
@@ -284,7 +310,8 @@
       <span class="dim" style="font-size:12px">끄면 그 분은 비어 있다 — 0 으로 채우지 않는다</span>
     </div>
     <div style="margin-top:14px">
-      <label class="dim" style="font-size:12px">생성량
+      <!-- "생성량 50 %" 한 줄 — label 기본이 세로 flex 라 세 줄로 갈렸다 -->
+      <label class="dim" style="font-size:12px; flex-direction:row; align-items:baseline; gap:4px; flex-wrap:wrap">생성량
         <b id="pct-label" style="color:var(--fg)">—</b> %
         <span id="pct-msg" class="dim" style="margin-left:8px"></span>
       </label>
@@ -318,11 +345,14 @@
            **미리보기**(곡선 점·특징 문장만 바뀐다)이고 생성기에는 `적용` 을 눌러야 간다 -->
       <div class="row" id="vclock-row" style="margin-top:8px; align-items:center">
         <span class="dim" style="font-size:12px">가상 시각</span>
-        <button type="button" class="ghost" onclick="spinHour(-1)" title="1시간 앞으로">◀</button>
-        <b id="vclock-spin" style="min-width:48px; text-align:center; font-size:15px">--:--</b>
-        <button type="button" class="ghost" onclick="spinHour(1)" title="1시간 뒤로">▶</button>
-        <button type="button" onclick="setVClock()">적용</button>
-        <button type="button" class="ghost" onclick="resetVClock()">지금으로</button>
+        <!-- ◀ 시각 ▶ 을 한 상자로 — 버튼이 따로 떠 있어 시각과 묶인 조작으로 안 보였다(2026-11-11 사용자 요청) -->
+        <span class="vspin">
+          <button type="button" class="ghost" onclick="spinHour(-1)" title="1시간 앞으로">◀</button>
+          <b id="vclock-spin">--:--</b>
+          <button type="button" class="ghost" onclick="spinHour(1)" title="1시간 뒤로">▶</button>
+        </span>
+        <button type="button" id="vclock-set" onclick="setVClock()">적용</button>
+        <button type="button" id="vclock-now" class="ghost" onclick="resetVClock()">지금으로</button>
         <b id="vclock-label" style="font-size:12px">—</b>
       </div>
       <div class="dim" style="margin-top:4px; font-size:11px">곡선·지하철·이동 비율만 그 시각 기준이다 — 레코드 시각은 실제 시각 그대로</div>
@@ -406,9 +436,20 @@
   </div>
  </div>
  <div class="col">
-  <div class="panel">
+  <div class="panel" id="inj">
     <h2>장애 주입</h2>
     <form id="f" onsubmit="return inject(event)">
+      <div class="f-when">
+        <label><input type="radio" name="when" value="now" checked onchange="applyWhen()"><span>현재시간</span></label>
+        <label><input type="radio" name="when" value="at" onchange="applyWhen()"><span>지정시간</span></label>
+        <span id="at" style="visibility:hidden">
+          <input id="at-y" type="number" min="2000" max="2099" title="연"><span class="u">연</span>
+          <input id="at-mo" type="number" min="1" max="12" title="월"><span class="u">월</span>
+          <input id="at-d" type="number" min="1" max="31" title="일"><span class="u">일</span>
+          <input id="at-h" type="number" min="0" max="23" title="시" onchange="pad2(this)"><span class="u">시</span>
+          <input id="at-mi" type="number" min="0" max="59" title="분" onchange="pad2(this)"><span class="u">분</span>
+        </span>
+      </div>
       <label class="f-kind">종류
         <select id="kind" onchange="renderTargets(); applyDur(); applyRange()"></select>
       </label>
@@ -418,12 +459,12 @@
       <label class="f-dur">지속시간(분)
         <input id="dur" type="number" min="1" value="10" oninput="renderDurHint()">
       </label>
-      <label class="f-int" id="f-int">강도 <span id="iv">1.0</span>
+      <label class="f-int" id="f-int"><span class="lbl">강도 <span id="iv">1.0</span></span>
         <input id="intensity" type="range" min="0.1" max="1.0" step="0.1" value="1.0"
                oninput="document.getElementById('iv').textContent=this.value">
       </label>
       <!-- 15번은 강도 대신 범위(%) — 노선 셀 중 몇 %에 넣나(2026-11-09 사용자 결정). 강도 자리를 쓴다 -->
-      <label class="f-int" id="f-rng" style="display:none">범위(%) <span id="rv">50</span>
+      <label class="f-int" id="f-rng" style="display:none"><span class="lbl">범위(%) <span id="rv">50</span></span>
         <input id="range" type="range" min="10" max="100" step="10" value="50"
                oninput="document.getElementById('rv').textContent=this.value">
       </label>
@@ -443,17 +484,17 @@
       <button class="x" type="button" onclick="closeFault()" aria-label="닫기">✕</button></div>
     <div class="bd" id="fm-b"></div>
     <div class="ft"><button id="fm-go" type="button" disabled>지도로 이동</button><span class="msg" id="fm-msg"></span>
+      <button id="fm-cancel" class="cancel" type="button" hidden>취소</button>
       <a id="fm-s" href="/scenarios">시나리오 화면에서 보기</a></div>
   </div></div>
   <div class="panel">
     <h2>장애 목록 <small class="dim" id="f-range"></small></h2>
     <table id="ftab">
       <colgroup><col style="width:46px"><col><col style="width:92px">
-        <col style="width:100px"><col style="width:52px"><col style="width:70px">
-        <col style="width:50px"></colgroup>
+        <col style="width:100px"><col style="width:52px"><col style="width:70px"></colgroup>
       <thead><tr id="fhead"><th>ID</th><th>종류</th><th>대상</th><th>시작</th>
-                 <th>지속</th><th>상태</th><th></th></tr></thead>
-      <tbody id="rows"><tr><td colspan="7" class="dim">불러오는 중…</td></tr></tbody>
+                 <th>지속</th><th>상태</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="6" class="dim">불러오는 중…</td></tr></tbody>
     </table>
     <div class="pager" id="pager"></div>
     <div id="ftip"></div>
@@ -548,7 +589,8 @@ function renderDurHint() {
   if (!el) return;
   // 고른 시나리오의 카드로 — 종류를 바꾸면 따라간다
   more.hidden = !$("kind").value;
-  more.href = "/scenarios#no=" + encodeURIComponent($("kind").value);
+  // 지금 생성량의 탭으로 — 이제 넣을 장애라 그 판정은 지금 생성량 탭에 쌓인다(`scnHref`)
+  more.href = scnHref($("kind").value, curVol());
   if (!d) { txt.textContent = el.title = ""; return; }
   // 권장은 탐지 최소 시간에 몇 분 더한 **안내**다 — 줄여도 늘려도 주입은 된다(2026-11-06 사용자
   // 정의). 산정 근거는 마우스를 올린 사람만 본다
@@ -688,6 +730,7 @@ function renderBar(st) {
     $("slot-age").style.color = age > 3 ? "var(--yellow)" : "";
   } else { $("slot-age").textContent = ""; }
   $("st-pct").textContent = `${(st.volume_pct ?? 100).toFixed(0)}%`;
+  VOL_NOW = st.volume_pct ?? null;
   const r = st.rates || {}, b = st.base_rates || {};
   RATES = r;
   if (BLOCKABLE.length) renderBlocked();
@@ -753,6 +796,14 @@ function goPage(i) { FPAGE = i; renderFaults(); }
 
 // ── 장애 상세 창 — 시나리오 설명·만드는 법과, 그 장애의 탐지 이력으로 가는 길 ──────────────
 let HOW = null, FM_NOW = 0;
+// 시나리오 화면 탭 — 50% 만 따로 있고 나머지는 15%(기본) 탭이다(`scenarios_api.SCENARIO_VOLUMES`)
+const SCN_VOLS = [15, 50];
+let VOL_NOW = null;                    // /api/status 의 volume_pct
+const curVol = () => VOL_NOW == null ? 15 : (SCN_VOLS.includes(Math.round(VOL_NOW)) ? Math.round(VOL_NOW) : 15);
+// 장애 창에서 가면 그 장애 ID 도 싣는다 — 판정 전이면 시나리오 화면이 "이 장애는 아직 기록 없음"을 먼저 말한다
+// (2026-11-11 사용자 지적: F-285 로 갔는데 카드가 직전 회차 F-265 만 보여 틀린 장애로 읽혔다)
+const scnHref = (no, vol, fault) => "/scenarios" + (Number(vol) === 50 ? "?vol=50" : "") + "#no=" + encodeURIComponent(no)
+  + (fault ? "&f=" + encodeURIComponent(fault) : "");
 async function howOf(no) {
   if (!HOW) HOW = (await getJson("/api/scenario-report")).how || {};
   return HOW[String(no)] || null;
@@ -771,6 +822,21 @@ function howHtml(h) {
     + (same ? sec("건드리지 않는 것", `<p>${esc(same)}</p>`) : "")
     + (lim ? sec("실제와 다른 점", `<p>${esc(lim)}</p>`) : "");
 }
+function fmHead(f) {
+  $("fm-m").textContent = [T("시작") + " " + ts(f.start_ts), T("지속") + " " + T("{n}분", {n: f.duration_min}),
+    T("대상") + " " + (f.target || T("자동")), f.status, memoOf(f)].filter(Boolean).join(" · ");
+  // **취소는 설명 화면에서만**(2026-11-11 사용자 요청 — 목록의 상태 옆 버튼은 지웠다). 진행 중·시작 전만
+  const b = $("fm-cancel");
+  b.hidden = !["pending", "active"].includes(f.status);
+  b.disabled = false;
+  b.onclick = async () => {
+    if (!confirm(T("F-{id} 장애를 취소할까요? 진행 중이면 다음 틱부터 멈춥니다", {id: f.fault_id}))) return;
+    b.disabled = true;
+    if (!await cancelFault(f.fault_id)) { b.disabled = false; return; }
+    const now = FAULTS.find(x => x.fault_id === f.fault_id);
+    if (FM_NOW === f.fault_id && now) fmHead(now);
+  };
+}
 function closeFault() { FM_NOW = 0; $("fm").hidden = true; }
 document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("fm").hidden) closeFault(); });
 async function openFault(id) {
@@ -778,11 +844,25 @@ async function openFault(id) {
   const s = faultScn(f), memo = memoOf(f);
   FM_NOW = id;
   $("fm-t").textContent = `F-${f.fault_id} · ${faultName(f)}`;
-  $("fm-m").textContent = [T("시작") + " " + ts(f.start_ts), T("지속") + " " + T("{n}분", {n: f.duration_min}),
-    T("대상") + " " + (f.target || T("자동")), f.status, memo].filter(Boolean).join(" · ");
+  fmHead(f);
   $("fm-b").innerHTML = `<p class="dim">${esc(T("불러오는 중…"))}</p>`;
   $("fm-s").hidden = !s;
-  if (s) $("fm-s").href = "/scenarios#no=" + s.no;
+  if (s) {
+    // **판정 기록이 있는 생성량 탭으로**(2026-11-11 사용자 지적 — 50% 회차가 15% 탭으로 열려 옛 회차가 보였다).
+    // 장애 행에는 생성량이 없어 판정 기록에서 찾는다. 판정 전이면 지금 생성량이고 그 사실을 설명에 적는다
+    const link = $("fm-s");
+    link.href = scnHref(s.no, curVol(), "F-" + id);
+    link.title = T("판정 기록을 찾는 중 — 지금 생성량 탭으로 연다");
+    fetch("/api/scenario-fault-volume?fault=F-" + id, {cache: "no-store"}).then(r => r.json()).then(v => {
+      if (FM_NOW !== id) return;
+      if (v && v.volume != null) {
+        link.href = scnHref(s.no, v.volume, "F-" + id);
+        link.title = T("판정 기록이 {v}% 탭에 있다", {v: v.volume});
+      } else {
+        link.title = T("아직 판정 기록이 없어 지금 생성량({v}%) 탭으로 연다 — 주입 때 생성량과 다를 수 있다", {v: curVol()});
+      }
+    }).catch(() => {});
+  }
   const go = $("fm-go"), msg = $("fm-msg");
   go.disabled = true; go.onclick = null; msg.textContent = T("탐지 이력을 찾는 중");
   $("fm").hidden = false;
@@ -833,7 +913,7 @@ function sortBy(k) {
 function renderHead() {
   $("fhead").innerHTML = FCOLS.map(c =>
     `<th class="sort${FSORT.k === c.k ? " on" : ""}" onclick="sortBy('${c.k}')">${T(c.h)}`
-    + `<i>${FSORT.k === c.k ? (FSORT.dir < 0 ? "▼" : "▲") : ""}</i></th>`).join("") + "<th></th>";
+    + `<i>${FSORT.k === c.k ? (FSORT.dir < 0 ? "▼" : "▲") : ""}</i></th>`).join("");
 }
 
 // 날짜를 시각과 함께 적는다 — 정렬을 바꾸면 날짜 구분 행이 뜻을 잃으므로
@@ -874,13 +954,11 @@ function renderFaults() {
         ${td(mdhm(f.start_ts), ts(f.start_ts))}
         ${td(T("{n}분", {n: f.duration_min}))}
         <td><span class="st st-${f.status}">${f.status}</span></td>
-        <td>${["pending","active"].includes(f.status)
-              ? `<button class="cancel" onclick="event.stopPropagation();cancelFault(${f.fault_id})">${T("취소")}</button>` : ""}</td>
       </tr>`).join("");
-  if (!html) html = `<tr><td colspan="7" class="dim">${T("장애 이력이 없다")}</td></tr>`;
+  if (!html) html = `<tr><td colspan="6" class="dim">${T("장애 이력이 없다")}</td></tr>`;
   // **마지막 쪽도 20줄 높이** — 빈 줄로 채워 카드 높이가 쪽마다 같다
   const fill = FAULT_PAGE - Math.max(view.length, 1);
-  html += `<tr class="pad"><td colspan="7">&nbsp;</td></tr>`.repeat(Math.max(0, fill));
+  html += `<tr class="pad"><td colspan="6">&nbsp;</td></tr>`.repeat(Math.max(0, fill));
   $("rows").innerHTML = html;
   $("rows").onclick = e => { const r = e.target.closest("tr[data-fid]");
     if (r) openFault(+r.dataset.fid); };
@@ -910,6 +988,10 @@ async function inject(ev) {
     note: `#${$("kind").value} ` + ($("note").value || ""),
   };
   const m = $("msg");
+  // 지정시간 — 작업은 지금 등록하고 장애는 그 시각에 시작한다. 서버는 이미 `start_ts` 를 받는다(리오 주입 경로)
+  const at = whenAt();
+  if (at === false) return false;
+  if (at) body.start_ts = at;
   try {
     const r = await fetch("/api/faults", {
       method: "POST", headers: {"content-type": "application/json"},
@@ -917,7 +999,9 @@ async function inject(ev) {
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.detail || r.status);
-    m.className = ""; m.textContent = T("주입됨 — fault #{id} (다음 틱부터 반영)", {id: j.fault_id});
+    m.className = ""; m.textContent = at
+      ? T("예약됨 — fault #{id} ({t}에 시작)", {id: j.fault_id, t: at.replace("T", " ").slice(0, 16)})
+      : T("주입됨 — fault #{id} (다음 틱부터 반영)", {id: j.fault_id});
     $("note").value = "";
     poll();
   } catch (e) {
@@ -932,7 +1016,46 @@ async function cancelFault(id) {
     const j = await r.json().catch(() => ({}));
     alert(T("취소 실패: ") + (j.detail || r.status));
   }
-  poll();
+  await poll();
+  return r.ok;
+}
+
+// ── 시작 시각 — 현재시간 / 지정시간 ─────────────────────────────────────
+//: 지정시간을 고를 때 처음 채우는 값 — 지금부터 몇 분 뒤(초기값)
+const AT_LEAD_MIN = 10;
+const p2 = n => String(n).padStart(2, "0");
+// 시·분도 날짜처럼 숫자 스핀 — 24시간제 00~23 · 00~59, 두 자리로 보인다(2026-11-11 사용자 요청 · 콤보였다).
+// 고칠 때마다(`change` — 스핀·칸 벗어남) 다시 두 자리로 쓴다. 치는 도중(`input`)에 쓰면 "1" 이 "01" 이 되어 둘째 자리를 못 친다
+function pad2(el) { if (el.value !== "" && Number.isInteger(Number(el.value))) el.value = p2(Number(el.value)); }
+function applyWhen() {
+  const on = document.querySelector('input[name=when]:checked').value === "at";
+  $("at").style.visibility = on ? "visible" : "hidden";
+  if (on && !$("at-y").value) {
+    const d = new Date(Date.now() + AT_LEAD_MIN * 60000);
+    $("at-y").value = d.getFullYear(); $("at-mo").value = d.getMonth() + 1; $("at-d").value = d.getDate();
+    $("at-h").value = p2(d.getHours()); $("at-mi").value = p2(d.getMinutes());
+  }
+}
+// 현재시간이면 null, 지정시간이면 서버에 보낼 `YYYY-MM-DDTHH:MM:00`, 쓸 수 없으면 false — 이유는 메시지 칸에
+function whenAt() {
+  if (document.querySelector('input[name=when]:checked').value !== "at") return null;
+  const m = $("msg");
+  const bad = t => { m.className = "err"; m.textContent = T("주입 실패: ") + t; return false; };
+  const [y, mo, d, h, mi] = ["at-y", "at-mo", "at-d", "at-h", "at-mi"].map(k => Number($(k).value));
+  if (![y, mo, d, h, mi].every(Number.isInteger)
+      || ["at-y", "at-mo", "at-d", "at-h", "at-mi"].some(k => $(k).value === ""))
+    return bad(T("지정 시각을 고르세요"));
+  if (h < 0 || h > 23 || mi < 0 || mi > 59)
+    return bad(T("시는 00~23, 분은 00~59 로 넣으세요"));
+  const txt = `${y}-${p2(mo)}-${p2(d)} ${p2(h)}:${p2(mi)}`;
+  // 없는 날짜(2월 30일 등)는 `Date` 가 다음 달로 넘긴다 — 넘어갔으면 없는 날짜다
+  const at = new Date(y, mo - 1, d, h, mi);
+  if (mo < 1 || mo > 12 || at.getFullYear() !== y || at.getMonth() !== mo - 1 || at.getDate() !== d)
+    return bad(T("{t} 은 없는 날짜입니다", {t: `${y}-${p2(mo)}-${p2(d)}`}));
+  // 브라우저 시계로 거른다 — 서버(생성기)와 같은 기계의 시각이다. 분 단위라 지금 이 분도 지난 것으로 본다
+  if (at.getTime() <= Date.now())
+    return bad(T("지정 시각 {t} 이 이미 지났습니다 — 지금 이후 시각을 고르거나 현재시간으로 주입하세요", {t: txt}));
+  return txt.replace(" ", "T") + ":00";
 }
 
 loadKinds(); loadTargets(); poll();
@@ -1510,6 +1633,10 @@ function renderDiurnal() {
   $("vclock-row").style.opacity = on ? "1" : ".45";
   renderRush((curDur() || {}).hours);   // 가상 시각·곡선이 바뀌면 출퇴근 안내도 따라간다
   $("vclock-spin").textContent = String(h).padStart(2, "0") + ":" + String(m).padStart(2, "0");
+  // 적용은 미리보기 시가 적용된 시와 다를 때만, 지금으로는 가상 시각이 걸려 있거나 미리보기 중일 때만 — 둘 다
+  // 지금 그대로면 회색이다. 곡선을 꺼도 가상 시각은 남으므로 같은 규칙이다
+  $("vclock-set").disabled = !(PV != null && PV !== vn.getHours());
+  $("vclock-now").disabled = !(VO || PV != null);
   $("vclock-label").textContent = !on ? T("곡선 꺼짐 — 시간대 안 봄")
     : PV != null ? T("미리보기 — 적용 전")
     : VO ? T("가상 {t} (실제 대비 {m}분)", {t: vn.toTimeString().slice(0, 5), m: (VO >= 0 ? "+" : "") + Math.round(VO / 60)})

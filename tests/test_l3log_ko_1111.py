@@ -251,7 +251,8 @@ def test_annotate_with_an_explicit_at_targets_that_record_even_if_older(box):
 def test_a_later_note_wins_over_an_earlier_one(box):
     root, _ = box
     l3log.add(_rec(volume=50), root, today=TODAY)
-    l3log.annotate(_note(turns=[{"n": 1, "q_ko": "처음"}], at=AT, ), root)
+    # 보충 줄의 시각은 지금 시계다 — 시계에 기대면 시험을 도는 시각에 따라 뒤집힌다(11-11 13:28 에 깨졌다). 둘 다 못 박는다
+    l3log.annotate({**_note(turns=[{"n": 1, "q_ko": "처음"}], at=AT), "at": "2026-11-11T11:00:00"}, root)
     l3log.annotate({**_note(turns=[{"n": 1, "q_ko": "고침"}], at=AT), "at": "2026-11-11T12:00:00"}, root)
     (rec,), _ = l3log.load(root=root, today=TODAY)
     assert rec["turns"][0]["q_ko"] == "고침"
