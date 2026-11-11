@@ -823,8 +823,8 @@ function howHtml(h) {
     + (lim ? sec("실제와 다른 점", `<p>${esc(lim)}</p>`) : "");
 }
 function fmHead(f) {
-  $("fm-m").textContent = [T("시작") + " " + ts(f.start_ts), T("지속") + " " + T("{n}분", {n: f.duration_min}),
-    T("대상") + " " + (f.target || T("자동")), f.status, memoOf(f)].filter(Boolean).join(" · ");
+  $("fm-m").textContent = [T("시작") + " " + ts(f.start_ts), T("지속") + " " + durText(f),
+    T("대상") + " " + (f.target || T("자동")), shownStatus(f), memoOf(f)].filter(Boolean).join(" · ");
   // **취소는 설명 화면에서만**(2026-11-11 사용자 요청 — 목록의 상태 옆 버튼은 지웠다). 진행 중·시작 전만
   const b = $("fm-cancel");
   b.hidden = !["pending", "active"].includes(f.status);
@@ -897,6 +897,15 @@ async function openFault(id) {
 
 // ── 정렬 — 머리글을 누르면 그 열로, 다시 누르면 반대로 ─────────────────
 // 기본은 ID 내림차순(최근 것이 위). 정렬을 바꾸면 1쪽으로 간다
+// **시작한 뒤 끊은 장애는 done 이다**(2026-11-11 사용자) — 취소선은 "지워졌다"로 읽혔다. DB 상태는 그대로
+// cancelled 이고, 시작 전(pending)에 취소했을 때만 취소선이다. 끊은 시각은 취소 때 찍히는 updated_at 이다
+const stoppedMin = f => {
+  if (f.status !== "cancelled" || !f.start_ts || !f.updated_at || f.updated_at <= f.start_ts) return null;
+  return Math.max(0, Math.round((Date.parse(f.updated_at) - Date.parse(f.start_ts)) / 60000));
+};
+const shownStatus = f => stoppedMin(f) == null ? f.status : "done";
+const durText = f => { const m = stoppedMin(f);
+  return m == null ? T("{n}분", {n: f.duration_min}) : T("{n}분 → {m}분에 중간 종료", {n: f.duration_min, m}); };
 let FSORT = {k: "id", dir: -1};
 const FCOLS = [
   {k: "id",     h: "ID",   v: f => f.fault_id},
@@ -904,7 +913,7 @@ const FCOLS = [
   {k: "target", h: "대상", v: f => f.target || ""},
   {k: "start",  h: "시작", v: f => String(f.start_ts || "")},
   {k: "dur",    h: "지속", v: f => f.duration_min},
-  {k: "status", h: "상태", v: f => f.status},
+  {k: "status", h: "상태", v: f => shownStatus(f)},
 ];
 function sortBy(k) {
   FSORT = FSORT.k === k ? {k, dir: -FSORT.dir} : {k, dir: k === "id" || k === "start" ? -1 : 1};
@@ -947,13 +956,13 @@ function renderFaults() {
          + (mm ? `<div class="memo">${esc(mm)}</div>` : "") + "</td>";
   };
   let html = view.map(f => `
-      <tr class="${f.status}" data-fid="${f.fault_id}">
+      <tr class="${shownStatus(f)}" data-fid="${f.fault_id}">
         ${td(f.fault_id)}
         ${nameTd(f)}
         ${td(f.target || T("자동"))}
         ${td(mdhm(f.start_ts), ts(f.start_ts))}
-        ${td(T("{n}분", {n: f.duration_min}))}
-        <td><span class="st st-${f.status}">${f.status}</span></td>
+        ${td(stoppedMin(f) == null ? T("{n}분", {n: f.duration_min}) : T("{m}/{n}분", {n: f.duration_min, m: stoppedMin(f)}), durText(f))}
+        <td><span class="st st-${shownStatus(f)}"${stoppedMin(f) == null ? "" : ` title="${esc(durText(f))}"`}>${shownStatus(f)}</span></td>
       </tr>`).join("");
   if (!html) html = `<tr><td colspan="6" class="dim">${T("장애 이력이 없다")}</td></tr>`;
   // **마지막 쪽도 20줄 높이** — 빈 줄로 채워 카드 높이가 쪽마다 같다
