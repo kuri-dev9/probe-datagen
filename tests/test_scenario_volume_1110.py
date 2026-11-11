@@ -41,9 +41,9 @@ def test_50_has_27_scenarios_and_judged_ones_carry_50_runs():
     assert len(sc) == 27 and sorted(s["no"] for s in sc) == list(range(1, 28))
     judged = [s for s in sc if s.get("latest") or s.get("history")]
     assert judged, "50% 재주행 결과가 하나도 없다"
-    # 50% 회차는 `noN-vX` 이름이고 통과 기준(네 단계 모두 정상)은 15% 탭과 같다 — 통과가 있어도 되고 단계 상태가 뒷받침해야 한다
+    # 50% 회차는 `noN-` 으로 시작하는 이름이고(15번 러시 재주행은 `no15-r50-rush2` — runs.md 행 이름과 같다) 통과 기준(네 단계 모두 정상)은 15% 탭과 같다 — 통과가 있어도 되고 단계 상태가 뒷받침해야 한다
     for s in judged:
-        assert str(s["latest"]["run"]).startswith(f"no{s['no']}-v"), s["no"]
+        assert str(s["latest"]["run"]).startswith(f"no{s['no']}-"), s["no"]
         if s.get("status") == "pass":
             assert all(v["state"] in ("ok", "na") for v in s["stages"].values()), s["no"]
     assert all(s.get("status") == "not_run" for s in sc if s not in judged)
