@@ -378,12 +378,12 @@
   "R-16": {
    "kind": "rule",
    "ko": {
-    "s": "지역 뭉침·전송 손실",
-    "l": "지리 뭉침 + 다수 Core 노드 분산 + U-Plane 손실 동반 → TRANSPORT_LOSS"
+    "s": "Core 분산·전송 손실",
+    "l": "Core 노드 분산 + down 손실 동반(RAN·전송 기인) → TRANSPORT_LOSS"
    },
    "ja": {
-    "s": "地域の固まり・伝送損失",
-    "l": "地理的な固まり + 複数 Core ノードに分散 + U-Plane 損失を伴う → TRANSPORT_LOSS"
+    "s": "Core分散・伝送損失",
+    "l": "Core ノードに分散 + down 損失を伴う(RAN・伝送起因) → TRANSPORT_LOSS"
    }
   },
   "R-15": {
