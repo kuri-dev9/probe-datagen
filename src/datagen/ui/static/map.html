@@ -894,7 +894,7 @@ function mergeParts(list){
     detached_reason:(list.find(m=>m.detached_reason)||{}).detached_reason||null,
     cells:list.reduce((a,m)=>a+(m.cells||0),0), areas:list.flatMap(m=>m.areas||[]),
     nodes:uniq(list.flatMap(m=>m.nodes||[])), axis_vals:uniq(list.flatMap(m=>m.axis_vals||[])),
-    severity:top.severity, title:T('조각 {n}건 묶음',{n:list.length}),
+    severity:top.severity, title:T('이상징후 {n}건 묶음',{n:list.length}),
     opened_ts:list.map(m=>m.opened_ts).sort()[0], updated_ts:list.map(m=>m.updated_ts).sort().slice(-1)[0],
     // 결론이 모두 같을 때만 그 결론을 쓴다 — 다르면 칩 묶음이 결론을 지어내지 않는다
     root_code:codes.length===1?list[0].root_code:null, root_label:codes.length===1?list[0].root_label:null,
@@ -1244,15 +1244,15 @@ function drawGeoOf(h, col, box, only){
 }
 // 판정 단위 표시와 제목 — 사건이면 **사건 결론**을, 아니면 탐지 제목을 쓴다
 function unitTag(h){
-  if(h.event_unit==='L2_EVENT') return `<span class="ub l2">L2${h.event_shape?' '+esc(h.event_shape):''}</span>`;
-  if(h.event_unit==='L1_BUNDLE') return `<span class="ub l1">L1</span>`;
+  if(h.event_unit==='L2_EVENT') return `<span class="ub l2">${T('통합 장애')}${h.event_shape?' '+esc(h.event_shape):''}</span>`;
+  if(h.event_unit==='L1_BUNDLE') return `<span class="ub l1">${T('장애')}</span>`;
   return '';
 }
 const headOf=h=>isEvent(h)&&h.root_label&&h.root_code!=='UNDETERMINED' ? h.root_label : h.title;
-const pieces=h=>(h.event_members_cnt||1)>1 ? T('조각 {n}건',{n:h.event_members_cnt}) : '';
+const pieces=h=>(h.event_members_cnt||1)>1 ? T('이상징후 {n}건',{n:h.event_members_cnt}) : '';
 const confOf=h=>isEvent(h)&&h.confidence!=null&&h.root_code&&h.root_code!=='UNDETERMINED' ? ` · ${Math.round(h.confidence*100)}%` : '';
 // 판정 단위별 탭 — L2 사건 · L1 묶음 · 일반(조각·판정 단위 없음). 고른 탭은 브라우저에 남긴다
-const FTABS=[['L2','L2'],['L1','L1'],['ETC','일반']];
+const FTABS=[['L2','통합 장애'],['L1','장애'],['ETC','일반']];
 const tabOf=h=>h.event_unit==='L2_EVENT' ? 'L2' : h.event_unit==='L1_BUNDLE' ? 'L1' : 'ETC';
 let FTAB=localStorage.getItem('gp-map-ftab')||'L2';
 function renderTabs(H){
@@ -1556,25 +1556,25 @@ function drawFocus(){
   bar.innerHTML=`<b>${unitTag(base)}${esc(base.severity)} · ${esc(headOf(base))}${confOf(base)}</b>`
     + `<button id=unfocus>${T('해제')}</button><i></i>`
     + chips
-    + (h.part?`<span class=warn>${T('조각 {k}/{n}',{k:PART+1,n:gs.length})} · ${esc(h.severity)} · ${esc(h.title||'')}`
+    + (h.part?`<span class=warn>${T('이상징후 {k}/{n}',{k:PART+1,n:gs.length})} · ${esc(h.severity)} · ${esc(h.title||'')}`
         + (h.confidence!=null&&h.root_code&&h.root_code!=='UNDETERMINED'?` · ${Math.round(h.confidence*100)}%`:'')+`</span>`:'')
     // 묶음이면 조각마다 무엇(축 값)·결론을 한 줄씩 — 결론이 달라도 숨기지 않는다
     + (h.part&&h.part.group?h.part.group.map(m=>`<span>${MESH_AXES.has(m.axis)?esc(GEO_NAME[m.axis])+' ':''}${esc((m.axis_vals||[]).slice(0,3).join(', ')||m.incident_id)}`
         + ` — ${esc(m.root_code||'?')}${m.root_code&&m.root_code!=='UNDETERMINED'&&m.confidence!=null?` ${Math.round(m.confidence*100)}%`:''}</span>`).join(''):'')
     // 뗀 셀 — 사건 범위가 아니라는 것과 graphio 가 적은 이유를 그대로(불변규칙 18)
-    + (h.part&&h.part.detached?`<span class=warn>${T('이 조각의 셀 {n}개는 사건에서 뗐다',{n:h.part.detached})}`
+    + (h.part&&h.part.detached?`<span class=warn>${T('이 이상징후의 셀 {n}개는 장애에서 뗐다',{n:h.part.detached})}`
         + (h.part.detached_kpis.length?` (${esc(h.part.detached_kpis.join(', '))})`:'')
         + (h.part.detached_reason?` — ${esc(h.part.detached_reason)}`:'')+`</span>`:'')
     + `<span>${esc(md(h.opened_ts))} ${esc(hm(h.opened_ts))}`
     + (hm(h.updated_ts)&&hm(h.updated_ts)!==hm(h.opened_ts)?`~${esc(hm(h.updated_ts))}`:'')
     + (h.live?T(' · 지금 진행'):T(' · 지난 장애'))+`</span>`
     + `<span>${esc(h.trigger_kpi)}</span>`
-    + (ev?`<span>${T(h.part?'조각 범위 eNB {e} · 셀 {c}':'사건 범위 eNB {e} · 셀 {c}',{e:ev.enbs.length.toLocaleString(), c:ev.cells.toLocaleString()})}</span>`
+    + (ev?`<span>${T(h.part?'이상징후 범위 eNB {e} · 셀 {c}':'장애 범위 eNB {e} · 셀 {c}',{e:ev.enbs.length.toLocaleString(), c:ev.cells.toLocaleString()})}</span>`
          :h.part&&(h.axis||!(h.enbs||[]).length)?'':`<span>eNB ${(h.enbs||[]).length}</span>`)
     + (!h.part&&pieces(h)?`<span>${pieces(h)}</span>`:'')
-    + (evOn?`<span class=dimtag>${T(h.part?'선 = 이 조각의 범위':'선 = 사건 전체 범위')}</span>`:'')
-    + (nArea?`<span class=dimtag>${T('칸 = 조각이 판정한 메시·구역 {n}곳',{n:nArea.toLocaleString()})}</span>`:'')
-    + (nArea&&evtOf(h).areas_capped?`<span class=warn>${T('graphio 가 조각마다 {n}곳까지만 넘긴다 — 더 있을 수 있다',{n:GEO_CAP})}</span>`:'')
+    + (evOn?`<span class=dimtag>${T(h.part?'선 = 이 이상징후의 범위':'선 = 장애 전체 범위')}</span>`:'')
+    + (nArea?`<span class=dimtag>${T('칸 = 이상징후가 판정한 메시·구역 {n}곳',{n:nArea.toLocaleString()})}</span>`:'')
+    + (nArea&&evtOf(h).areas_capped?`<span class=warn>${T('graphio 가 이상징후마다 {n}곳까지만 넘긴다 — 더 있을 수 있다',{n:GEO_CAP})}</span>`:'')
     + (core.length?`<span>${T('코어 {c}',{c:esc(core.join(', '))})}</span>`:'')
     + (h.root_code?`<span>${T('원인 {c}',{c:esc(h.root_code)})}${h.root_label?' — '+esc(h.root_label):''}</span>`:'')
     + (h.axis==='GLOBAL'?`<span class=warn>${T('전국 장애 — 특정 지역이 아니다')}</span>`
@@ -1602,7 +1602,7 @@ function drawFocus(){
     + (!evOn&&h.axis&&h.axis!=='GLOBAL'&&geoShapes(h).length===0?`<span class=warn>${T('구역 좌표를 찾지 못했다')}</span>`:'')
     + (!pts.length&&!h.axis&&!AXIS_NAME[h.axis_raw]?`<span class=warn>${T('지도에 그릴 범위가 없다')}</span>`
        : pts.length&&!(h.enbs||[]).length&&!core.length&&!h.axis&&!h.bias&&!h.egress&&!ev&&!(h.part&&AXIS_NAME[h.axis_raw])?`<span class=warn>${T('장비 범위가 없어 graphio 중심 좌표로 옮겼다')}</span>`:'')
-    + (h.part&&!h.axis&&AXIS_NAME[h.axis_raw]&&!h.egress&&!(h.enbs||[]).length&&!core.length?`<span class=dimtag>${T('지도에 그릴 위치가 없는 조각이라 화면을 옮기지 않았다')}</span>`:'')
+    + (h.part&&!h.axis&&AXIS_NAME[h.axis_raw]&&!h.egress&&!(h.enbs||[]).length&&!core.length?`<span class=dimtag>${T('지도에 그릴 위치가 없는 이상징후라 화면을 옮기지 않았다')}</span>`:'')
     // `#sel button` 규칙(해제 단추 자리 — 오른쪽 위)을 받지 않고 맨 끝에 선다
     ;
   document.getElementById('unfocus').onclick=()=>focusInc(FOCUS);

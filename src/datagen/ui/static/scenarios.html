@@ -143,10 +143,12 @@ const stName=k=>{ const x=STATUS.find(y=>y[0]===k); return T(x?x[1]:'상태 미�
 const ST_ICON={pass:'✓',partial:'△',missed:'✕',pending:'◷',not_run:'○',excluded:'–'};
 const stCls=k=>{ const x=STATUS.find(y=>y[0]===k); return 's-'+(x?x[2]:'warn'); };
 //: 단계 — D 탐지 → L1 판정 → L2 묶음 → L3 결과. 값이 없으면 "미평가"다. 평가 전을 실패로 읽으면 안 된다
-const STAGES=[['D','D 장애 검출'],['L1','L1 판정'],['L2','L2 묶음'],['L3','L3 문답 검사']];
+const STAGES=[['D','D 이상징후 검출'],['L1','장애 판정'],['L2','통합 장애 판정'],['L3','AI 문답 검사']];
 const SG_STATE=[['ok','정상','✓','ok'],['partial','일부','△','warn'],['fail','실패','✕','bad'],
                 ['na','해당 없음','–','dim'],['unknown','미평가','?','dim']];
-const REACHED=[['none','도달 없음'],['D','D'],['L1','L1'],['L2','L2'],['L3','L3']];
+//: 단계 칩의 짧은 이름 — 키(`D`·`L1`…)는 자료 값이라 그대로 두고 보이는 글자만 graphio 이름으로(2026-11-12)
+const SG_SHORT={D:'D',L1:'장애',L2:'통합',L3:'AI'};
+const REACHED=[['none','도달 없음'],['D','D'],['L1','장애'],['L2','통합 장애'],['L3','AI']];
 //: L3 단계는 **문답 검사(`latest.l3`)로만** 채운다(사용자 11-09) — 옛 `stages.L3`(도달·한 줄 소감)는 쓰지 않는다.
 //: 검사가 없으면 미평가다. 칸 뒤 괄호는 통과한 질의 회차 수다
 const L3_STAGE={pass:'ok',partial:'partial',fail:'fail'};
@@ -188,7 +190,7 @@ const val=v=>v==null||v==='' ? unk() : evtMark(gl(esc(typeof v==='object' ? JSON
 //: `EVT-…` → 「L1 장애」「L2 장애」「조각」 이름(지도 링크는 11-11 에 걷었다 — 장애 ID 가 같은 곳으로 간다). 단위는 graphio 사건 표에서
 //: 받는다(`/api/evt-lookup`) — 받지 못하면 ID 를 그대로 둔다(지어내지 않는다 · graphio 불변규칙 18). 원래 ID 는 툴팁
 const EVT_INFO={};
-const EVT_UNIT={L1_BUNDLE:'L1 장애',L2_EVENT:'L2 장애',PIECE:'조각'};
+const EVT_UNIT={L1_BUNDLE:'장애',L2_EVENT:'통합 장애',PIECE:'이상징후'};
 let EVT_BUSY=false;
 async function upgradeEvt(){
   if(EVT_BUSY) return;
@@ -271,7 +273,7 @@ const fmap=v=>{ const m=/^F-?(\d+)$/.exec(v==null?'':String(v).trim());
 // 목록 줄의 네 칸
 const sgCells=s=>'<span class=sgs>'+STAGES.map(([k,name])=>{ const [st,lb,mark,c]=sgInfo(sgState(s,k));
   const n=k==='L3' ? l3Count(s.latest&&s.latest.l3) : '';
-  return `<span class="sg g-${c}" title="${esc(T(name))}: ${esc(T(lb))}">${esc(k)} ${mark}${n?` (${n})`:''}</span>`; }).join('')+'</span>';
+  return `<span class="sg g-${c}" title="${esc(T(name))}: ${esc(T(lb))}">${esc(T(SG_SHORT[k]||k))} ${mark}${n?` (${n})`:''}</span>`; }).join('')+'</span>';
 // 펼친 카드 맨 위의 단계 표
 const sgTable=s=>`<div class=stg>`
   +table(STAGES,['단계','상태','내용'],([k,name])=>{
@@ -288,10 +290,10 @@ const l3Of=s=>{ const x=s.latest&&s.latest.l3; return x&&typeof x==='object' ? x
 const okIssue=v=>v==='ok' ? `<span class="sg g-ok">✓</span>` : v==='issue' ? `<span class="sg g-warn">△</span>` : unk();
 function l3Sec(s){
   const x=l3Of(s);
-  if(!x) return sec(esc(T('L3 상세')),`<span class=dim>${esc(T('미검사'))}</span>`);
+  if(!x) return sec(esc(T('AI 상세')),`<span class=dim>${esc(T('미검사'))}</span>`);
   const t=L3_ST[x.status], c=x.checks||{};
   const head=t ? `<span class="sg g-${t[1]}">${t[2]}</span> <b class=s-${t[1]}>${esc(T(t[0]))}</b>` : unk();
-  return sec(`${esc(T('L3 상세'))} · ${head}`,
+  return sec(`${esc(T('AI 상세'))} · ${head}`,
     dl([['검사 시각',val(x.at)],
         ...L3_CHECKS.map(([k,n])=>[n,okIssue(c[k])]),
         ['걸러짐',c.filtered==null?unk():esc(T('{n}문장',{n:c.filtered}))]])
@@ -415,7 +417,7 @@ function render(){
   document.getElementById('filters').innerHTML=
     `<p id=sum>${esc(T('{a}건 중 통과 {p}건, 일부 통과 {q}건, 못 잡음 {m}건입니다.',{a:all.length,p:n.pass||0,q:n.partial||0,m:n.missed||0}))}`
     +(other>0?' '+esc(T('그 밖에 {n}건은 판정 전이거나 제외했습니다.',{n:other})):'')
-    +' '+esc(T('L3까지 모두 정상인 것은 {a}건이고, {b}건은 D 단계부터 막혔습니다.',{a:cnt(s=>reachedOf(s)==='L3'),b:cnt(s=>reachedOf(s)==='none')}))+`</p>`
+    +' '+esc(T('AI까지 모두 정상인 것은 {a}건이고, {b}건은 D 단계부터 막혔습니다.',{a:cnt(s=>reachedOf(s)==='L3'),b:cnt(s=>reachedOf(s)==='none')}))+`</p>`
     +(LANG==='ja'&&JA_LEFT ? `<p id=sum class=unk>${esc(T('번역이 없거나 낡은 칸 {n}건은 한국어로 보입니다',{n:JA_LEFT}))}</p>` : '')
     +`<div class=chips><span class=lb>${esc(T('판정'))}</span>`+chip('all','≡',T('전체'),all.length,'')
     +keys.map(k=>chip(k,ST_ICON[k]||'?',stName(k),n[k]||0,stCls(k))).join('')+`</div>`
