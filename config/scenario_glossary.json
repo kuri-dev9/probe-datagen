@@ -346,22 +346,22 @@
    "kind": "rule",
    "ko": {
     "s": "무선 오류 몰림",
-    "l": "s1ap_error_Cause 1xx 대역 편중 + First Error S1AP + 지리 뭉침 → RAN_RADIO_QUALITY"
+    "l": "s1ap_error_Cause 1xx 대역 편중 + First Error S1AP + 국지 분포(한 지역 안) → RAN_RADIO_QUALITY"
    },
    "ja": {
     "s": "無線エラーの集中",
-    "l": "s1ap_error_Cause 1xx 帯への偏り + First Error S1AP + 地理的な固まり → RAN_RADIO_QUALITY"
+    "l": "s1ap_error_Cause 1xx 帯への偏り + First Error S1AP + 局地的な分布(一地域内) → RAN_RADIO_QUALITY"
    }
   },
   "R-22": {
    "kind": "rule",
    "ko": {
     "s": "무선 연결 유실 몰림",
-    "l": "UEContextRelease_Cause=121(Radio Connection With UE Lost) 편중 + 지리 뭉침 → RAN_RADIO_QUALITY"
+    "l": "UEContextRelease_Cause=121(Radio Connection With UE Lost) 편중 + 국지 분포(한 지역 안) → RAN_RADIO_QUALITY"
    },
    "ja": {
     "s": "無線接続喪失の集中",
-    "l": "UEContextRelease_Cause=121(Radio Connection With UE Lost)への偏り + 地理的な固まり → RAN_RADIO_QUALITY"
+    "l": "UEContextRelease_Cause=121(Radio Connection With UE Lost)への偏り + 局地的な分布(一地域内) → RAN_RADIO_QUALITY"
    }
   },
   "R-17": {
