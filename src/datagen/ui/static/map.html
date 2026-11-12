@@ -1252,7 +1252,7 @@ const headOf=h=>isEvent(h)&&h.root_label&&h.root_code!=='UNDETERMINED' ? h.root_
 const pieces=h=>(h.event_members_cnt||1)>1 ? T('이상징후 {n}건',{n:h.event_members_cnt}) : '';
 const confOf=h=>isEvent(h)&&h.confidence!=null&&h.root_code&&h.root_code!=='UNDETERMINED' ? ` · ${Math.round(h.confidence*100)}%` : '';
 // 판정 단위별 탭 — L2 사건 · L1 묶음 · 일반(조각·판정 단위 없음). 고른 탭은 브라우저에 남긴다
-const FTABS=[['L2','통합 장애'],['L1','장애'],['ETC','일반']];
+const FTABS=[['L2','통합 장애'],['L1','장애'],['ETC','이상징후']];
 const tabOf=h=>h.event_unit==='L2_EVENT' ? 'L2' : h.event_unit==='L1_BUNDLE' ? 'L1' : 'ETC';
 let FTAB=localStorage.getItem('gp-map-ftab')||'L2';
 function renderTabs(H){

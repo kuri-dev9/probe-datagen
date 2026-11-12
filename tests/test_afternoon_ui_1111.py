@@ -382,12 +382,12 @@ upgradeEvt().then(()=>console.log(JSON.stringify(els.map(e=>e.innerHTML))));""")
 @needs_node
 def test_evt_id_becomes_a_unit_name_without_a_link():
     (out,) = _upgrade(["EVT-aaaaaaaaaa"], {"EVT-aaaaaaaaaa": {"unit": "L1_BUNDLE"}})
-    assert out == '<span class=evtn title="EVT-aaaaaaaaaa">L1 장애</span>'
+    assert out == '<span class=evtn title="EVT-aaaaaaaaaa">장애</span>'
     assert "<a" not in out and "href" not in out
 
 
 @needs_node
-@pytest.mark.parametrize("unit,name", [("L1_BUNDLE", "L1 장애"), ("L2_EVENT", "L2 장애"), ("PIECE", "조각")])
+@pytest.mark.parametrize("unit,name", [("L1_BUNDLE", "장애"), ("L2_EVENT", "통합 장애"), ("PIECE", "이상징후")])
 def test_each_unit_has_its_name(unit, name):
     (out,) = _upgrade(["EVT-bbbbbbbbbb"], {"EVT-bbbbbbbbbb": {"unit": unit}})
     assert f">{name}</span>" in out
@@ -408,7 +408,7 @@ def test_unknown_event_or_unit_keeps_the_raw_id():
 @needs_node
 def test_same_id_appearing_twice_is_looked_up_once_and_both_become_names():
     out = _upgrade(["EVT-1111111111", "EVT-1111111111"], {"EVT-1111111111": {"unit": "PIECE"}})
-    assert out == ['<span class=evtn title="EVT-1111111111">조각</span>'] * 2
+    assert out == ['<span class=evtn title="EVT-1111111111">이상징후</span>'] * 2
 
 
 def test_event_names_have_a_dotted_underline_and_help_cursor_and_ja_text_for_the_notice():
