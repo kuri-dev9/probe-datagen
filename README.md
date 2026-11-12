@@ -136,6 +136,17 @@ IMEI  = TAC 8자리 + SNR 6자리 + Luhn 체크디지트 = 15자리   TAC 는 Ve
 varchar(16) 이라 상용은 이름(`TAU`·`PAGING`)을 담을 수도 있는데, 실측 데이터를
 못 봐서 **조인이 성립하는 쪽**을 골랐다.
 
+## 장애 주입 스크립트 — `tools/inject.py`
+
+바로·예약·랜덤 N개 순차 예약. gen-ui(`:8009`) API 를 부르고 예약은 gen 이 처리한다. 장애는 겹치지 않게 줄을 선다.
+
+```bash
+python3 tools/inject.py list | queue | now 14 | at 14 18:30 | random 5 [--start 19:00 --only 1-16]
+python3 tools/inject.py --dry-run random 5      # 계획만
+```
+
+사용법 전체와 Claude 로 자동 주입하는 법은 graphio-probe-rca `docs/HANDOVER-UI-2026-11-12.md` §7.
+
 ## 다음 단계
 
 - 2단계: 실시간 틱 루프 + 장애 주입(datagen_fault 테이블) + 제어 UI
