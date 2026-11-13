@@ -3031,9 +3031,24 @@ class PemdbGen:
         # 그대로라, TAU 만 100% 로 나와 낮에 전체 레코드의 20%(분당 ~700건)
         # 가 됐다. 이동·TA 판정은 건드리지 않고 **기록만** 같은 비율로 뽑는다
         keep = min(1.0, max(0.0, self._volume_pct / 100.0))
+
+        def dead(c) -> bool:
+            # **꺼진 셀에서는 TAU 도 없다**(2026-11-14 · 27번 F-328). 이 루프는 위 호 루프의 억제·재배치·
+            # 다운 거름을 하나도 지나지 않아, 정지 eNB 두 곳에 TAU(5)가 20분간 18건 남았다 — D4 무호
+            # run 이 분마다 끊겨 확정되지 않았다. 셋은 위 호 루프가 쓰는 같은 판정이다: 다운 eNB
+            # (`node_down_set` · 27번·SC-17), 억제(SC-17), 재배치 대상(지진·27번·24번 소등 B).
+            # 옮기지 않고 버린다 — TAU 는 TA 경계를 넘은 결과라 이웃 셀로 옮기면 TAC 가 어긋난다
+            if any_down and str(c.enb_id) in down["ENB"]:
+                return True
+            if suppress is not None and suppress(c):
+                return True
+            return relocate is not None and relocate(c) is not None
+
         if tau and "lte_call" not in self._blocked:
             for sub_i, src, dst in tau:
                 if keep < 1.0 and gen.rng.random() >= keep:
+                    continue
+                if dead(dst):
                     continue
                 rec, cell = gen.tau_rec(ts, slot_start, gen.subs[sub_i],
                                         src, dst)

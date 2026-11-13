@@ -104,6 +104,7 @@ def test_plain_sentences_for_25_and_27_exist_only_in_the_50_percent_report_with_
     p25 = (sc["25"].get("latest") or {}).get("plain")
     p27 = (sc["27"].get("latest") or {}).get("plain")
     assert p25 and p27
-    assert "(지진 구현 이전 회차)" in p27 and "지진 구현 이전" not in p25
+    # 11-14 04:05~05:08 새 회차(F-327·F-328)로 갱신 — 27번도 지진 구현 이후 회차라 "이전 회차" 표시가 없어졌다
+    assert "지진 구현 이전" not in p25 and "지진 구현 이전" not in p27
     others = [n for n, s in sc.items() if n not in ("25", "27") and (s.get("latest") or {}).get("plain")]
     assert others == [], "나머지 번호는 비워 둔다(자동 문장)"
