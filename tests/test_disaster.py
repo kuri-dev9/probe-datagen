@@ -187,8 +187,9 @@ def _build(target, dur=25):
 def test_empty_target_is_a_local_area_of_about_twenty_five_cells():
     sc = _build(None)
     assert sc is not None and (sc.target.outage_mode or "local") == "local"
-    assert 25 <= len(sc.target.cell_keys) <= 25 + 3 * 3, len(sc.target.cell_keys)   # eNB 단위로 넓힌다(셀 3개씩)
-    assert len({k.rsplit("-", 1)[0] for k in sc.target.cell_keys}) * 3 == len(sc.target.cell_keys)
+    dead = set(sc.as_truth()["down_cells"])
+    assert 25 <= len(sc.target.cell_keys) <= 25 + len(dead), len(sc.target.cell_keys)   # 진앙 가까운 25셀 + 꺼진 eNB 의 셀(11-14 · 폭주는 진앙 둘레)
+    assert dead <= sc.target.cell_keys and len(sc.target.cell_keys - dead) <= 25       # 꺼진 eNB 는 통째로 들어간다(eNB 단위는 정지 몫)
 
 
 def test_local_and_wide_words_pick_the_mode_and_the_area_size():
@@ -237,17 +238,25 @@ def _baseline_area_mean(g, runs, sc, lo=0, hi=START):
 
 def test_dense_harness_surge_is_big_and_the_national_cap_holds(make):
     """셀당 평소 호가 하한보다 많은 **조밀한** 하니스 — 정점 40배는 전국 상한(더하는 호 ≤ 전국 평소의 2배)에
-    먼저 걸린다. 그래서 여기서는 크기의 하한과 상한(전국 3배)만 본다. 40배 자체는 아래 희소 하니스가 본다."""
+    먼저 걸린다. 그래서 여기서는 **상한이 걸리고 지켜지는지**와 **추가 호가 지역에만 가는지**를 잰다.
+    지역 배율("10배")은 지역 크기(분모)에 따라 바뀌는 값이라 이 하니스에서는 재지 않는다 — 11-14 폭주 지역이
+    진앙 25셀 + 꺼진 셀(44셀)이 되자 추가 호는 상한으로 고정인데 분모만 커져 12배 → 8.9배가 됐다(제품 결함 아님 ·
+    꺼질 셀도 +1·+2분엔 호를 정상으로 내고, 꺼진 뒤 호는 `relocate` 가 옮긴다). 40배 자체는 아래 희소 하니스가 본다."""
     g = make()
     runs, sc = _disaster_run(g)
     base = _baseline_area_mean(g, runs, sc)
     assert base > 30, "지역 평소 호가 너무 적어 배율을 못 잰다"
-    for m in (START + 1, START + 2):                       # 정점이지만 다운 전(0~3분)
-        ratio = len(_area_calls(g, runs[m][0], sc)) / base
-        assert ratio >= 10, f"{m}분: 지역 호가 평소의 {ratio:.1f}배 — 폭주가 작다"
     total_base = sum(len(runs[m][0]) for m in range(START)) / START
     for m in range(START, START + 13):
         assert len(runs[m][0]) <= 3.0 * total_base * 1.1, f"{m}분: 전국 호가 평소의 3배를 넘었다"
+    # 아래 0.9 · 0.95 는 기준값이 아니라 **시험 쪽 여유**다 — 분당 호 수가 포아송으로 흔들리는 폭을 받아 준다
+    from datagen import pemdb1
+    for m in (START + 1, START + 2):                       # 정점이지만 다운 전(0~3분)
+        extra_nat = len(runs[m][0]) - total_base
+        extra_area = len(_area_calls(g, runs[m][0], sc)) - base
+        assert extra_nat >= 0.9 * pemdb1.PemdbGen.SURGE_CAP * total_base, \
+            f"{m}분: 전국 추가 호 {extra_nat:.0f} — 상한({pemdb1.PemdbGen.SURGE_CAP}배)을 다 쓰지 못했다(폭주가 작다)"
+        assert extra_area >= 0.95 * extra_nat, f"{m}분: 추가 호 {extra_nat:.0f} 중 지역에는 {extra_area:.0f}만 갔다"
     assert len(runs[START + 14][0]) < 1.5 * total_base, "13분 뒤에는 폭주가 가라앉아야 한다"
 
 

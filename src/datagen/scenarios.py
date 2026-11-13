@@ -2813,8 +2813,10 @@ def quake_plan(cells: list[Cell], q: dict, rng: random.Random,
     뽑히면 **그 eNB 의 셀을 함께** 끈다(실제 정전·전송 단절은 eNB 째 꺼진다 · 케이 제안). 함께 끄면 최대
     셀 수를 넘는 eNB 는 건너뛰고, 최대에 닿으면 멈춘다. 좌표 없는 셀은 거리를 모르므로 넣지 않는다.
 
-    **폭주 지역은 기존 크기다**(``want`` = `DISASTER_AREA_CELLS` 국소 25 · 넓은 80 · 2026-11-13 정정). 진앙
-    (LINEAR 면 선분)에서 가까운 셀부터 ``want`` 개에 꺼진 eNB 의 셀을 더한다 — 그래서 조금 넘을 수 있다.
+    **폭주 지역은 기존 크기다**(``want`` = `DISASTER_AREA_CELLS` 국소 25 · 넓은 80 · 2026-11-13 정정). **진앙**
+    에서 가까운 셀부터 ``want`` 개에 꺼진 eNB 의 셀을 더한다 — 그래서 조금 넘을 수 있다. LINEAR 여도 폭주는
+    진앙 둘레다(2026-11-14 · 11-13 결정 "진앙 중심 25/80셀"). 선분 거리로 고르면 선분 위 셀이 모두 거리 0 으로
+    같아져 25셀이 선분 끝에 몰렸다(F-329 · 진앙에서 5~7.6km). 선분 거리는 정지 eNB 를 고를 때만 쓴다.
     처음에는 반경 안 셀 전부였는데, 진도 4(10km)면 수백~수천 셀이 되어 전국 상한(`pemdb1.SURGE_CAP`)에
     눌려 "지역만 40배 폭주"가 희석됐다. 사용자 결정은 "호 폭주는 기존과 동일"이다
     """
@@ -2840,7 +2842,11 @@ def quake_plan(cells: list[Cell], q: dict, rng: random.Random,
         dead.append(e)
         n += len(per[e])
     dead_cells = sorted(k for e in dead for k in per[e])
-    area = {k for _d, k, _c in ranked[:max(0, int(want))]} | set(dead_cells)
+    from .geo_lite import haversine_km
+
+    by_epi = sorted((haversine_km(q["lat"], q["lon"], c.latitude, c.longitude), c.cell_key) for c in cells
+                    if c.geo_status == "MAPPED")
+    area = {k for _d, k in by_epi[:max(0, int(want))]} | set(dead_cells)
     return area, sorted(dead), dead_cells
 
 
