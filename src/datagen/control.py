@@ -36,6 +36,8 @@ T_HISTORY = "CM_DATAGEN_HISTORY"
 #: `CM_DATAGEN_*` 가 아닌 이유: 생성기 제어가 아니라 **장애 카탈로그**라
 #: graphio 지도·다른 화면도 같은 표를 본다(사용자 지정 이름).
 T_SCENARIO = "CM_ERROR_SCENARIO"
+#: 지진 정보 — 27번 시나리오가 시작될 때 생성기가 한 행을 쓴다(2026-11-13 사용자 승인 DDL)
+T_QUAKE = "CM_QUAKE_EVENT"
 #: 앱 사전 — 정의와 적재는 `apps` 가 갖고 DDL 만 여기 모은다
 from .apps import T_APP  # noqa: E402
 
@@ -261,6 +263,35 @@ CREATE TABLE IF NOT EXISTS `{T_SCENARIO}` (
   PRIMARY KEY (`SCENARIO_NO`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_general_ci
   COMMENT='장애 시나리오 고정 목록 · 발생 장비 마스크 — 정본 control.SCENARIOS';
+
+-- ── CM_QUAKE_EVENT ──────────────────────────────────────────────────────────
+-- 지진 정보 (2026-11-13 사용자 승인). 27번 장애가 시작될 때 생성기가 장애 ID 시드로 정한 지진 한 건을
+-- 쓴다(`cli` → `record_quakes`). 실제 지진(P2P·기상청)도 같은 모양으로 받는다 — 지진 1건 + 진앙 하나.
+-- 음영 셀 목록은 두지 않는다 — 정답지(down_enbs)에 있고 이 행과 시드로 다시 셀 수 있다. graphio 가
+-- 읽어도 되는 것은 운영에서도 받을 수 있는 이 지진 정보까지다(꺼진 셀은 D4 가 스스로 찾는다).
+-- 반경·확률·최대 셀은 시나리오의 **초기값**이다(`scenarios.QUAKE_TABLE`)
+CREATE TABLE IF NOT EXISTS `{T_QUAKE}` (
+  `QUAKE_ID`      varchar(32)  NOT NULL                COMMENT '지진 키 — 시나리오는 Q-F<FAULT_ID>',
+  `FAULT_ID`      int              DEFAULT NULL        COMMENT '시나리오 장애 CM_DATAGEN_FAULT.FAULT_ID — 실제 지진이면 NULL',
+  `SOURCE`        varchar(16)  NOT NULL                COMMENT 'SCENARIO | P2P | JMA',
+  `ORIGIN_TIME`   datetime     NOT NULL                COMMENT '발생 시각',
+  `HYPO_NAME`     varchar(64)      DEFAULT NULL        COMMENT '진원 지명 — 시나리오는 진앙에 가장 가까운 셀의 시도·시군구',
+  `LAT`           decimal(9,6) NOT NULL                COMMENT '진앙 위도',
+  `LON`           decimal(9,6) NOT NULL                COMMENT '진앙 경도',
+  `DEPTH_KM`      decimal(5,1)     DEFAULT NULL        COMMENT '깊이 — 시나리오는 NULL',
+  `MAGNITUDE`     decimal(3,1)     DEFAULT NULL        COMMENT '규모 — 시나리오는 NULL',
+  `INTENSITY`     decimal(2,1) NOT NULL                COMMENT '진도 — 시나리오는 2.0~4.0 무작위(소수 한 자리)',
+  `SHAPE`         varchar(8)   NOT NULL                COMMENT '음영 모양 ROUND(원형) | LINEAR(선형)',
+  `AZIMUTH_DEG`   smallint         DEFAULT NULL        COMMENT 'LINEAR 선의 방향(0~359 · 0 = 북) — ROUND 는 NULL',
+  `LENGTH_KM`     decimal(5,1)     DEFAULT NULL        COMMENT 'LINEAR 선의 길이(진앙이 가운데) — ROUND 는 NULL',
+  `RADIUS_KM`     decimal(5,1) NOT NULL                COMMENT '음영 반경(선형이면 선에서의 거리) — 진도로 정한다',
+  `BASE_PCT`      decimal(4,1) NOT NULL                COMMENT '진앙 0km 에서의 정지 확률(%) — 거리에 비례해 줄어든다',
+  `MAX_CELLS`     int          NOT NULL                COMMENT '정지 셀 최대 개수',
+  `UPDATED_TIME`  datetime     NOT NULL,
+  PRIMARY KEY (`QUAKE_ID`),
+  KEY `IX_CM_QUAKE_EVENT_FAULT` (`FAULT_ID`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_general_ci
+  COMMENT='지진 정보 — 시나리오 시작 시 생성기가 입력, 실제 지진도 같은 모양으로 받는다';
 CREATE TABLE IF NOT EXISTS `{T_APP}` (
   `APP_IDX`         varchar(20)  NOT NULL             COMMENT '앱 코드 → XDR App_ID',
   `ENDPOINT_SEQ`    int          NOT NULL DEFAULT 1   COMMENT '앱 안의 엔드포인트 번호 — 앱 하나에 IP·포트가 여럿일 수 있다',
@@ -554,6 +585,28 @@ def record_resolved(conn, targets: dict[int, str]) -> list[int]:
                 f"UPDATE {T_FAULT} SET RESOLVED_TARGET=%s "
                 "WHERE FAULT_ID=%s AND RESOLVED_TARGET IS NULL", [label[:255], fid])
             done.append(fid)
+    conn.commit()
+    return done
+
+
+def record_quakes(conn, rows: list[dict]) -> list[int]:
+    """27번 지진 정보를 `CM_QUAKE_EVENT` 에 적는다 — **이미 있는 지진은 덮지 않는다**(`INSERT IGNORE`).
+
+    지진은 장애 ID 시드로 정해져 틱마다 같은 값이지만, gen 재빌드로 계산이 바뀌어도 **주입 당시** 값이
+    남아야 한다(`record_resolved` 와 같은 이유). 적은 fault_id 를 돌려준다
+    """
+    done = []
+    now = datetime.now()
+    with conn.cursor() as cur:
+        for r in rows:
+            cur.execute(
+                f"INSERT IGNORE INTO {T_QUAKE} (QUAKE_ID, FAULT_ID, SOURCE, ORIGIN_TIME, HYPO_NAME, LAT, LON, "
+                "DEPTH_KM, MAGNITUDE, INTENSITY, SHAPE, AZIMUTH_DEG, LENGTH_KM, RADIUS_KM, BASE_PCT, MAX_CELLS, "
+                "UPDATED_TIME) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                [r["quake_id"], r["fault_id"], r["source"], r["origin_time"], (r.get("hypo_name") or "")[:64] or None,
+                 r["lat"], r["lon"], r.get("depth_km"), r.get("magnitude"), r["intensity"], r["shape"],
+                 r.get("azimuth_deg"), r.get("length_km"), r["radius_km"], r["base_pct"], r["max_cells"], now])
+            done.append(int(r["fault_id"]))
     conn.commit()
     return done
 

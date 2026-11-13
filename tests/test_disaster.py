@@ -203,9 +203,11 @@ def test_wide_with_a_box_keeps_the_mode_and_uses_the_box():
     sc = _build(box)
     assert sc is not None and sc.target.outage_mode == "wide"
     assert sc.target.cell_keys
-    cells = {c.cell_key: c for c in _master()}
-    assert all(35.60 - 0.02 <= cells[k].latitude <= 35.66 + 0.02 and 139.60 - 0.02 <= cells[k].longitude <= 139.66 + 0.02
-               for k in sc.target.cell_keys)
+    # 2026-11-13 — 상자는 진앙(상자 안 셀의 중심)을 정한다. 폭주 지역은 진앙에서 가까운 25셀 + 꺼진 eNB 의 셀이다
+    q = sc.as_truth()["quake"]
+    assert 35.60 <= q["lat"] <= 35.66 and 139.60 <= q["lon"] <= 139.66
+    dead = set(sc.as_truth()["down_cells"])
+    assert len(sc.target.cell_keys - dead) <= S.DISASTER_AREA_CELLS["wide"]
 
 
 @pytest.mark.parametrize("dur", [10, 1, 23])

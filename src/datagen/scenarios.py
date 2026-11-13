@@ -2709,7 +2709,7 @@ def _quake_ring(plan, sc, intensity, rng, cell) -> bool:
 # 국면(장애 시작 분 기준 · **초기값**) —
 #
 #   0 ~ 3분    호 폭주만 — 경보를 본 사람들이 안부 통화·문자·뉴스. 2분에 걸쳐 차오른다
-#   3분        기지국 다운(지역 eNB 의 `DISASTER_DOWN_RATIO`)
+#   3분        기지국 다운(지진 정보로 고른 음영 eNB · `quake_plan` · 2026-11-13. 전에는 지역 eNB 의 40%)
 #   3 ~ 13분   폭주 + 다운
 #   13 ~ 23분  다운만 — 폭주가 가라앉아도 무호가 남아야 장비 장애라는 근거가 선다
 #   23분       정상화
@@ -2736,13 +2736,139 @@ DISASTER_SURGE_MIX = (("7", 0.6 * 5 / 7), ("8", 0.6 * 2 / 7),
                       ("3", 0.4 * 5 / 7), ("4", 0.4 * 2 / 7))
 #: Emergency 접속을 찍는 절차 — 단말이 거는 발신뿐이다. 착신(4·8)의 접속 사유는 MT_ACCESS 다
 DISASTER_EMERGENCY_CALL_TYPES = frozenset(("3", "7"))
-#: 지역 셀 중 정지하는 eNB 비율 — 지진의 `QUAKE_DOWN` 그대로(확정대장 §11.3)
+#: 지역 셀 중 정지하는 eNB 비율 — 지진의 `QUAKE_DOWN` 그대로(확정대장 §11.3). 2026-11-13 부터는 지진 정보
+#: (`quake_plan`)가 없을 때만 쓴다 — 지난 기록 재생과 자동 지역 고르기(`faults._busy_disaster_area`)의 미리 셈
 DISASTER_DOWN_RATIO = QUAKE_DOWN
 #: 자동 선택 지역 크기(셀 수) — 국소 / 넓은 지역. 초기값
 DISASTER_AREA_CELLS = {"local": 25, "wide": 80}
 #: 다운 뒤 이웃 셀에서 다시 붙기까지(초) — 무선 연결 유실 감지 + 셀 재선택 + Service Request.
 #: 초기값(현업 확인 전)
 DISASTER_RECONNECT_S = (5.0, 30.0)
+
+
+# ── 지진 정보로 음영 eNB 를 고른다 (2026-11-13 사용자 결정 · 27번) ──────────────────────────
+#
+# 27번이 시작될 때 지진 한 건(진앙·진도·모양)을 정하고 `CM_QUAKE_EVENT` 에 적는다(`cli` · `control`).
+# 음영(정지) eNB 는 그 지진에서 고른다 — 전에는 지역 eNB 의 40%(`DISASTER_DOWN_RATIO`)였다. 호 폭주·
+# 국면(3분 정지 · 23분 정상화)은 그대로다. **아래 값은 모두 결과를 보고 조정할 초기값이다.**
+
+#: 시나리오 진도 범위 — 무작위 · 소수 한 자리(사용자 결정 2.0~4.0)
+QUAKE_INTENSITY_RANGE = (2.0, 4.0)
+#: 진도 → (음영 반경 km, 진앙 0km 정지 확률 %, 정지 셀 최대 수). 사이는 직선으로 잇는다. 확률·최대 셀은
+#: 사용자 값(2 → 10%·10셀, 3 → 30%·25셀, 4 → 50%·40셀), 반경은 케이 제안(3·6·10km)이다. 실측 근거는 없다
+QUAKE_TABLE = ((2.0, 3.0, 10.0, 10), (3.0, 6.0, 30.0, 25), (4.0, 10.0, 50.0, 40))
+#: 음영 모양 — ROUND(진앙에서의 거리) · LINEAR(진앙을 지나는 선분에서의 거리 · 단층을 따라 꺼지는 모양)
+QUAKE_SHAPES = ("ROUND", "LINEAR")
+#: LINEAR 선분 길이 = 반경 × 이 값(진앙이 선분 가운데). 초기값
+QUAKE_LINEAR_LEN_X = 2.0
+
+
+def quake_params(intensity: float) -> tuple[float, float, int]:
+    """진도 → (반경 km, 진앙 정지 확률 %, 최대 셀) — `QUAKE_TABLE` 사이를 직선으로 잇는다. 범위 밖은 끝값."""
+    t = QUAKE_TABLE
+    x = min(max(float(intensity), t[0][0]), t[-1][0])
+    for (x0, r0, p0, m0), (x1, r1, p1, m1) in zip(t, t[1:]):
+        if x <= x1:
+            f = (x - x0) / (x1 - x0) if x1 > x0 else 0.0
+            return (round(r0 + (r1 - r0) * f, 1), round(p0 + (p1 - p0) * f, 1),
+                    int(round(m0 + (m1 - m0) * f)))
+    return t[-1][1], t[-1][2], t[-1][3]
+
+
+def quake_new(lat: float, lon: float, rng: random.Random, intensity: float | None = None,
+              shape: str | None = None) -> dict:
+    """지진 한 건 — 정하지 않은 값은 ``rng``(장애 ID 시드)로 뽑는다. 키는 `CM_QUAKE_EVENT` 컬럼과 같은 뜻이다."""
+    lo, hi = QUAKE_INTENSITY_RANGE
+    inten = round(rng.uniform(lo, hi), 1) if intensity is None else round(float(intensity), 1)
+    shape = shape if shape in QUAKE_SHAPES else QUAKE_SHAPES[rng.randrange(len(QUAKE_SHAPES))]
+    radius, base, most = quake_params(inten)
+    q = {"lat": round(float(lat), 6), "lon": round(float(lon), 6), "intensity": inten, "shape": shape,
+         "azimuth_deg": None, "length_km": None, "radius_km": radius, "base_pct": base, "max_cells": most}
+    if shape == "LINEAR":
+        q["azimuth_deg"] = rng.randrange(360)
+        q["length_km"] = round(radius * QUAKE_LINEAR_LEN_X, 1)
+    return q
+
+
+def quake_dist_km(q: dict, lat: float, lon: float) -> float:
+    """셀까지 거리 — ROUND 는 진앙, LINEAR 는 진앙을 가운데 둔 선분(방위 0 = 북 · 시계 방향)."""
+    from .geo_lite import haversine_km
+
+    if q["shape"] != "LINEAR":
+        return haversine_km(q["lat"], q["lon"], lat, lon)
+    kx = 111.32 * math.cos(math.radians(q["lat"]))
+    x, y = (lon - q["lon"]) * kx, (lat - q["lat"]) * 111.0
+    a = math.radians(q["azimuth_deg"] or 0)
+    dx, dy = math.sin(a), math.cos(a)
+    half = (q["length_km"] or 0.0) / 2.0
+    t = max(-half, min(half, x * dx + y * dy))
+    return math.hypot(x - t * dx, y - t * dy)
+
+
+def quake_plan(cells: list[Cell], q: dict, rng: random.Random,
+               want: int = 25) -> tuple[set[str], list[str], list[str]]:
+    """지진 → (폭주 지역 셀, 음영 eNB, 음영 셀).
+
+    반경 안 셀마다 정지 확률 `base × (1 − 거리/반경)` 을 두고 **가까운 셀부터** ``rng`` 로 뽑는다. 한 셀이
+    뽑히면 **그 eNB 의 셀을 함께** 끈다(실제 정전·전송 단절은 eNB 째 꺼진다 · 케이 제안). 함께 끄면 최대
+    셀 수를 넘는 eNB 는 건너뛰고, 최대에 닿으면 멈춘다. 좌표 없는 셀은 거리를 모르므로 넣지 않는다.
+
+    **폭주 지역은 기존 크기다**(``want`` = `DISASTER_AREA_CELLS` 국소 25 · 넓은 80 · 2026-11-13 정정). 진앙
+    (LINEAR 면 선분)에서 가까운 셀부터 ``want`` 개에 꺼진 eNB 의 셀을 더한다 — 그래서 조금 넘을 수 있다.
+    처음에는 반경 안 셀 전부였는데, 진도 4(10km)면 수백~수천 셀이 되어 전국 상한(`pemdb1.SURGE_CAP`)에
+    눌려 "지역만 40배 폭주"가 희석됐다. 사용자 결정은 "호 폭주는 기존과 동일"이다
+    """
+    r = float(q["radius_km"])
+    ranked = sorted(((quake_dist_km(q, c.latitude, c.longitude), c.cell_key, c) for c in cells
+                     if c.geo_status == "MAPPED"), key=lambda x: (x[0], x[1]))
+    near = [(d, c) for d, _k, c in ranked if d <= r]
+    per: dict[str, list[str]] = {}
+    for c in cells:
+        per.setdefault(str(c.enb_id), []).append(c.cell_key)
+    dead: list[str] = []
+    n = 0
+    for d, c in near:
+        if n >= q["max_cells"]:
+            break
+        e = str(c.enb_id)
+        if e in dead:
+            continue
+        if rng.random() >= q["base_pct"] / 100.0 * (1.0 - d / r if r > 0 else 0.0):
+            continue
+        if n + len(per[e]) > q["max_cells"]:
+            continue
+        dead.append(e)
+        n += len(per[e])
+    dead_cells = sorted(k for e in dead for k in per[e])
+    area = {k for _d, k, _c in ranked[:max(0, int(want))]} | set(dead_cells)
+    return area, sorted(dead), dead_cells
+
+
+#: 27번 폭주 호에 얹는 SMS 에러(2026-11-13 사용자 결정) — 비율은 레코드 몫이고 **초기값**이다(현장 실측 없음).
+#: SMS 필드는 LTE 호 기록 안의 "마지막 SMS 에러 원인"이다 — 시도 여부 칸이 없어 성공률은 셀 수 없다
+DISASTER_SMS_SHARE = {"surge": 0.08, "down": 0.15}
+#: 발신(MO) — (필드, 원인) · 규격 `XDR_Cause_v0.5` SM_RP 42 Congestion · SM_CP 22 Congestion · SM_TP 192 SC busy
+DISASTER_SMS_MO = (("sms_mo_rp_error_cause", "42"), ("sms_mo_cp_error_cause", "22"),
+                   ("sms_mo_tp_error_cause", "192"))
+#: 착신(MT) — 음영 국면의 수신 도달 불가 · SM_RP 27 Destination out of order · 28 Unidentified subscriber
+DISASTER_SMS_MT = (("sms_mt_rp_error_cause", "27"), ("sms_mt_rp_error_cause", "28"))
+#: 착신 절차 — 4(데이터 착신) · 8(음성 착신). 나머지 폭주 절차(3·7)는 발신이다
+DISASTER_MT_CALL_TYPES = frozenset(("4", "8"))
+
+
+def disaster_sms_error(sc, minute: int, ct: str, rng: random.Random) -> tuple[str, str] | None:
+    """폭주 호 하나에 얹을 SMS 에러 `(필드, 원인)` — 없으면 None.
+
+    폭주만 있는 국면은 `DISASTER_SMS_SHARE["surge"]`, 음영이 생긴 뒤는 `"down"` 이다. 발신은 혼잡 원인
+    셋 중 하나, 착신은 음영이 있을 때만 도달 불가(27·28)다 — 음영 전에는 받을 사람이 다 살아 있다
+    """
+    dead = disaster_dead_enbs(sc, minute)
+    share = DISASTER_SMS_SHARE["down" if dead else "surge"]
+    if rng.random() >= share:
+        return None
+    if ct in DISASTER_MT_CALL_TYPES:
+        return DISASTER_SMS_MT[rng.randrange(len(DISASTER_SMS_MT))] if dead else None
+    return DISASTER_SMS_MO[rng.randrange(len(DISASTER_SMS_MO))]
 
 
 def disaster_elapsed(sc, minute: int) -> int:
@@ -2806,6 +2932,10 @@ def disaster_dead_enbs(sc, minute: int) -> set[str]:
     e = disaster_elapsed(sc, minute)
     if not (DISASTER_DOWN_AT <= e < DISASTER_DOWN_END):
         return set()
+    q = sc.__dict__.get("_quake_dead")
+    if q is not None:
+        # 지진 정보로 고른 음영 eNB(2026-11-13) — 없을 때만 옛 비율 규칙이다(지난 기록 재생)
+        return set(q)
     rank = _disaster_rank(sc)
     n = disaster_dead_n(len(rank))
     return {k for k, r in rank.items() if r < n}
@@ -2819,12 +2949,19 @@ def _disaster_truth(sc) -> dict:
     """
     if sc.kind != "natural_disaster":
         return {}
-    rank = _disaster_rank(sc)
-    n = disaster_dead_n(len(rank))
-    dead = sorted(k for k, r in rank.items() if r < n)
+    quake = sc.__dict__.get("_quake")
+    if sc.__dict__.get("_quake_dead") is not None:
+        dead = sorted(sc._quake_dead)
+    else:
+        rank = _disaster_rank(sc)
+        n = disaster_dead_n(len(rank))
+        dead = sorted(k for k, r in rank.items() if r < n)
     at = disaster_down_at(sc)
     rate = sc.__dict__.get("_enb_rate")
     return {
+        # 지진 한 건(`CM_QUAKE_EVENT` 와 같은 값 · 2026-11-13) — 옛 비율 규칙이면 None
+        "quake": quake,
+        "down_cells": sc.__dict__.get("_quake_dead_cells"),
         # 정지 eNB 의 평소 호율(분당 시도 · 장애 시작 전 60분 · `pemdb1.enb_call_rate`). D4 확정에
         # 걸리는 분(N*)을 미리 셈하라고 싣는다. 창고를 못 읽었으면 None 이다(불변규칙 17)
         "down_enbs_rate": ({e: round(rate.get(e, 0.0), 3) for e in dead}

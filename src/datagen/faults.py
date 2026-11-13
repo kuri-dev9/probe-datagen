@@ -866,6 +866,65 @@ def _venue_target(cells: list[Cell], rng: random.Random, fault: dict, load,
     return Target(cell_keys={c.cell_key for c in per[enb]}, enb_id=enb)
 
 
+def _quake_arg(text: str) -> dict | None:
+    """`QUAKE:<위도>,<경도>[,<진도>][,ROUND|LINEAR]` → `{"lat","lon","intensity","shape"}`. 꼴이 틀리면 None."""
+    parts = [p.strip() for p in text.split(":", 1)[1].split(",") if p.strip()]
+    try:
+        lat, lon = float(parts[0]), float(parts[1])
+    except (IndexError, ValueError):
+        return None
+    out = {"lat": lat, "lon": lon, "intensity": None, "shape": None}
+    for p in parts[2:]:
+        if p.upper() in S.QUAKE_SHAPES:
+            out["shape"] = p.upper()
+            continue
+        try:
+            out["intensity"] = float(p)
+        except ValueError:
+            return None
+    return out
+
+
+def _quake_step(fault: dict, cells: list[Cell], target: Target, given: dict | None,
+                mode: str | None = None) -> dict | None:
+    """27번 지진 한 건과 음영 eNB(2026-11-13 사용자 결정).
+
+    진앙은 지정값(`QUAKE:`)이거나, 고른 지역(자동이면 `_busy_disaster_area` — 호가 많은 곳이라 D4 가
+    확정되기 쉽다)의 셀 중심이다. 진도·모양·방위는 **장애 ID 시드**로 뽑는다 — 틱마다·gen 재시작마다 같은
+    지진이다. 값은 `S.quake_new`·`S.quake_plan`(모두 초기값). 반경 안에 좌표 있는 셀이 없으면 None(취소)
+    """
+    fid = int(fault["fault_id"])
+    qrng = random.Random(f"quake:{fid}")
+    if given is not None:
+        lat, lon = given["lat"], given["lon"]
+    else:
+        by_key = {c.cell_key: c for c in cells}
+        pts = [by_key[k] for k in target.cell_keys if k in by_key and by_key[k].geo_status == "MAPPED"]
+        if not pts:
+            print(f"  ! F-{fid} 27번 — 지역에 좌표 있는 셀이 없어 진앙을 못 정한다", flush=True)
+            return None
+        lat = sum(c.latitude for c in pts) / len(pts)
+        lon = sum(c.longitude for c in pts) / len(pts)
+    q = S.quake_new(lat, lon, qrng, (given or {}).get("intensity"), (given or {}).get("shape"))
+    # 폭주 지역은 기존 크기(국소 25 · 넓은 80)를 진앙 둘레에서 잡는다(`S.quake_plan` 머리말 · 2026-11-13 정정)
+    want = S.DISASTER_AREA_CELLS.get(mode or "local", S.DISASTER_AREA_CELLS["local"])
+    area, dead, dead_cells = S.quake_plan(cells, q, qrng, want)
+    if not area:
+        print(f"  ! F-{fid} 27번 — 좌표 있는 셀이 없어 폭주 지역을 못 잡는다", flush=True)
+        return None
+    from .geo_lite import haversine_km
+    mapped = [c for c in cells if c.geo_status == "MAPPED"]
+    hypo = min(mapped, key=lambda c: haversine_km(lat, lon, c.latitude, c.longitude)) if mapped else None
+    row = {"quake_id": f"Q-F{fid}", "fault_id": fid, "source": "SCENARIO",
+           # 문자열로 둔다 — 정답지(JSON)에 그대로 실리고 MySQL datetime 도 이 꼴을 받는다
+           "origin_time": fault["start_ts"].strftime("%Y-%m-%d %H:%M:%S"),
+           "hypo_name": (f"{hypo.adm_sido_nm} {hypo.adm_sgg_nm}".strip() if hypo else None) or None,
+           **q, "down_enb_cnt": len(dead), "down_cell_cnt": len(dead_cells)}
+    print(f"  · F-{fid} 27번 지진 진도 {q['intensity']} {q['shape']} 반경 {q['radius_km']}km — "
+          f"음영 eNB {len(dead)} · 셀 {len(dead_cells)} / 폭주 지역 셀 {len(area)}", flush=True)
+    return {"row": row, "area": area, "dead": dead, "dead_cells": dead_cells}
+
+
 def build(fault: dict, cells: list[Cell], anchor: datetime,
           rng: random.Random, seed: int | None = None,
           enb_rate=None, routes=None, nr_on=None, mesh_load=None,
@@ -891,6 +950,14 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
         pick = [c for c in cells if nr_on(str(c.enb_id))]
     mode = None
     raw_target = fault.get("target")
+    quake_in = None
+    if fault["kind"] == "natural_disaster" and (raw_target or "").strip().upper().startswith("QUAKE:"):
+        # 진앙 지정(2026-11-13) — `QUAKE:<위도>,<경도>[,<진도>][,ROUND|LINEAR]`. 지역은 진앙으로 정한다
+        quake_in = _quake_arg(raw_target)
+        if quake_in is None:
+            print(f"  ! 27번 대상 {raw_target} — QUAKE:<위도>,<경도>[,<진도>][,ROUND|LINEAR] 꼴이 아니다", flush=True)
+            return None
+        raw_target = None
     if fault["kind"] == "natural_disaster":
         # 기지국 정지 배치 — 대상 앞머리 `LOCAL:`·`WIDE:`(또는 그 낱말만). 장애 테이블에 인자 칸이
         # 없어(DDL 없이) 대상 문자열로 받는다. 기본 ``local``
@@ -904,7 +971,7 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
     # 자동 대상 순환(`TargetHistory`) — 앞선 회차가 쓴 대상. 지정 대상·`LIKE:` 는 보지 않는다
     # (자연재해 `LOCAL:`·`WIDE:` 앞머리는 배치라 떼고 본다)
     group = _rotate_group(fault["kind"])
-    auto = not (raw_target or "").strip() and like is None
+    auto = not (raw_target or "").strip() and like is None and quake_in is None
     used = (history.used(group, int(fault["fault_id"])) if history is not None and group and auto
             else None)
     if used is not None and fault["kind"] in _AUTO_NODE:
@@ -920,6 +987,9 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
         used = {**used, **{k: OWN_ROTATE_OFFSET + f for k, f in own.items()}}
     if fault["kind"] == "capacity_shift":
         target = _shift_target(fault.get("target"), fault["start_ts"], cells)
+    elif quake_in is not None:
+        # 지역은 아래 지진 단계가 진앙으로 정한다 — 여기서는 비워 둔다
+        target = Target(cell_keys=set())
     elif fault["kind"] == "natural_disaster" and not (raw_target or "").strip() and like is None:
         # 자동 선택 — 지역 크기가 배치를 따른다(국소 25셀 · 넓은 80셀 · 초기값)
         # 창고의 eNB 호율이 있으면 **정지 eNB 호율이 가장 높은 지역**(`_busy_disaster_area`), 없으면
@@ -971,6 +1041,14 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
         history.record(int(fault["fault_id"]), group, target_key(target.cell_keys))
         if fault["kind"] in _AUTO_NODE:
             history.record(int(fault["fault_id"]), _own_group(fault), target_key(target.cell_keys))
+    quake = None
+    if fault["kind"] == "natural_disaster":
+        # **지진 한 건 → 음영 eNB**(2026-11-13 사용자 결정). 순환 기록 **뒤**다 — 순환은 고른 지역의 키로
+        # 비교하므로(`_busy_disaster_area`) 지진으로 바꾼 지역을 적으면 같은 지역을 또 고른다
+        quake = _quake_step(fault, cells, target, quake_in, mode)
+        if quake is None:
+            return None
+        target = Target(cell_keys=quake["area"])
     # 25번 좁히기(`son_focus`)는 대상을 만들 때 이미 했다(2026-11-13 · `_son_target`·`_son_enb_target`) — 전에는
     # 노선 구간을 고른 뒤 여기서 셀 하나로 좁혔다
     if mode is not None:
@@ -1012,6 +1090,15 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
         # 정지 순위(`_disaster_rank` local)가 좌표를 본다 — 대상 셀을 실어 둔다
         by_key = {c.cell_key: c for c in cells}
         sc._pool = [by_key[k] for k in sorted(target.cell_keys) if k in by_key]
+    if quake is not None:
+        sc._quake = quake["row"]
+        sc._quake_dead = quake["dead"]
+        sc._quake_dead_cells = quake["dead_cells"]
+        # 정답 모양은 **꺼진 셀**로 잰다(2026-11-13 · 케이 지시) — 폭주 지역은 반경 전체라 모양이 다르다
+        dead_cells = [by_key_geo[k] for k in quake["dead_cells"] if k in by_key_geo]
+        dshape = S.geo_shape(dead_cells) if dead_cells else "UNKNOWN"
+        if dshape != "UNKNOWN":
+            sc._geo_shape = dshape
     if fault["kind"] == "natural_disaster":
         # 정답지의 `down_enbs_rate` — 지정 대상(ENB:·BOX:)이어도 싣는다. 못 읽으면 None
         sc._enb_rate = _rate_at(enb_rate, fault)

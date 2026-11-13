@@ -135,6 +135,9 @@ def test_marked_surge_calls_survive_relocation_off_the_dead_enbs(g, monkeypatch)
     i = _col(g, "lte_call", "First_eNB_ID")
     assert marked and not [r for _m, _c, r in marked if r[i] in dead], "정지 eNB 에서 걸린 Emergency 호가 있다"
 
+    # 대조군 — 정지 eNB 없음. 2026-11-13 부터 정지 eNB 는 지진(`quake_plan`)이 정한다(옛 40% 규칙은 지난 기록용)
+    _plan = S.quake_plan
+    monkeypatch.setattr(S, "quake_plan", lambda *a, **k: (lambda ar, d, dc: (ar, [], []))(*_plan(*a, **k)))
     monkeypatch.setattr(S, "disaster_dead_n", lambda n: 0)
     ctl = PemdbGen(None, ROOT / "data", rates={"lte_call": 1500, "transport": 1500}, seed=11, subscriber_pool=2500)
     ctl.anchor = T0

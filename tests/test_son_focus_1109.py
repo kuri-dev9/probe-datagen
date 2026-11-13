@@ -413,7 +413,9 @@ def test_scenario_how_json_is_valid_and_ko_ja_counts_match_for_25():
         assert d[k] and ja[k]
     txt = json.dumps(d, ensure_ascii=False)
     assert "출발 셀을 확인하지 않아" not in txt and "셀 쌍 8개" not in txt
-    assert "쌍 2개" in d["steps"][2] and "모두 3셀" in d["steps"][2] and "셀 3개" in d["limits"]
+    # 2026-11-13 — eNB 전 셀이 출발 셀이다: 출발 셀마다 도착 셀 2곳 · 셀별 세기 배율 · 출발 셀은 증거에만 보인다
+    assert "출발 셀마다" in d["steps"][2] and "셀 2곳" in d["steps"][2] and "도착 셀" in d["steps"][2] and "배율" in d["steps"][2]
+    assert "EV-13b" in d["limits"] and "셀 3개" not in json.dumps(d, ensure_ascii=False)
     assert "出発セル" in json.dumps(ja, ensure_ascii=False)
 
 

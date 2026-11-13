@@ -222,7 +222,14 @@ def test_auto_target_with_rates_picks_the_busy_area(target):
     mode = "wide" if (target or "").upper() == "WIDE" else "local"
     want = S.DISASTER_AREA_CELLS[mode]
     expected = faults._busy_disaster_area(_master(), _rates(), want, mode, "F-27")
-    assert sc.target.cell_keys == expected
+    # 2026-11-13 — 고른 지역은 진앙(그 셀들의 중심)을 정한다. 폭주 지역은 진앙에서 가까운 `want`셀 + 꺼진 eNB 셀
+    by = {c.cell_key: c for c in _master()}
+    pts = [by[k] for k in expected]
+    t = sc.as_truth()
+    assert t["quake"]["lat"] == pytest.approx(sum(c.latitude for c in pts) / len(pts), abs=1e-5)
+    assert t["quake"]["lon"] == pytest.approx(sum(c.longitude for c in pts) / len(pts), abs=1e-5)
+    assert set(t["down_cells"]) <= sc.target.cell_keys
+    assert len(sc.target.cell_keys - set(t["down_cells"])) <= want
     assert sc.target.outage_mode == mode
 
 

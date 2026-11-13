@@ -812,6 +812,7 @@ def cmd_run(args) -> int:
         tail_last: str | None = None   # 하한 꼬리 — 첫 틱에 반드시 쓴다
         rev = gen_rev()                # 장애 기록의 생성기 판 — 기동 때 한 번
         resolved_done: set[int] = set()  # RESOLVED_TARGET 을 이미 적은 fault
+        quake_done: set[int] = set()     # CM_QUAKE_EVENT 를 이미 적은 fault(27번)
         # 기본값은 설정(`pemdb1.clock`), UI 저장값(DB)이 이긴다 — `volume_pct` 와 같다
         clk = pem.get("clock") or {}
         from .generator import set_curve
@@ -1001,6 +1002,11 @@ def cmd_run(args) -> int:
                     if sc.id.startswith("F-") and sc.id[2:].isdigit() and int(sc.id[2:]) not in resolved_done}
             if todo:
                 resolved_done.update(_aside("실제 대상 기록", control.record_resolved, conn, todo) or ())
+            # 27번 지진 정보(`CM_QUAKE_EVENT` · 2026-11-13) — 해석이 정한 지진 한 건. 적은 것은 다시 쓰지 않는다
+            quakes = [sc._quake for sc in scs if sc.__dict__.get("_quake")
+                      and int(sc._quake["fault_id"]) not in quake_done]
+            if quakes:
+                quake_done.update(_aside("지진 기록", control.record_quakes, conn, quakes) or ())
             _aside("정답 기록", _live_truth, P, gen, scs)
 
             t0 = time.time()
