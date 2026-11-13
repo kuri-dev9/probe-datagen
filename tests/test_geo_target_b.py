@@ -2,7 +2,7 @@
 
 * `scenarios.geo_shape` — graphio `detect/detector.geo_pattern` 과 같은 판정(문턱 0.9·2.5·3.2·3.0·60km)
 * `faults._sgg_of_shape` — 2·7번: 시군구 셀 전부의 모양이 `expect_geo` 인 시군구
-* `faults._auto_target` — 25번은 노선 구간, 없으면 `corridor_cells`, 2·7번은 시군구 셀 전부
+* `faults._auto_target` — 25번은 eNB 1개의 전 셀(11-13), 2·7번은 시군구 셀 전부
 * `faults._disaster_area` · `_busy_disaster_area` — 27번
 DB 없이 돈다 — 합성 셀. graphio 가 import 되는 환경에서는 `geo_pattern` 과 직접 대조한다.
 """
@@ -155,35 +155,31 @@ def _route_cells():
     return _line("r", 40, 14.0)
 
 
-def test_son_param_change_uses_a_route_segment_with_adjacent_pairs(monkeypatch):
-    cells = _route_cells()
-    calls = {}
+def _enb_cells():
+    """eNB 4개 · 각 3셀 — 호 가중이 다른 합성 셀."""
+    out = []
+    for e in range(4):
+        for n in range(3):
+            c = _cell(f"{500 + e}-{n}", LAT0 + e * 0.01 + n * 0.0005, LON0 + n * 0.0005)
+            out.append(c)
+    return out
 
-    def fake_segment(routes, rng, *a, **k):
-        calls["routes"] = routes
-        seg = cells[:15]
-        return seg, {"route": "L1", "cells": len(seg)}
 
-    monkeypatch.setattr(S, "route_segment", fake_segment)
+def test_son_param_change_picks_all_cells_of_one_enb_and_ignores_routes(monkeypatch):
+    """25번은 노선 구간을 고르지 않는다(11-13) — eNB 하나의 전 셀이 출발 셀이다."""
+    monkeypatch.setattr(S, "route_segment", lambda *a, **k: (_ for _ in ()).throw(AssertionError("노선 구간을 불렀다")))
+    cells = _enb_cells()
     t = faults._auto_target("son_param_change", cells, random.Random(0), routes=["L1"])
-    assert calls["routes"] == ["L1"]
-    assert t.cell_keys == {c.cell_key for c in cells[:15]}
-    assert t.cell_pairs == [(a.cell_key, b.cell_key) for a, b in zip(cells[:14], cells[1:15])]
-    assert t.route_seg == {"route": "L1", "cells": 15}
+    assert t is not None and len(t.son_enbs) == 1 and t.route_seg is None
+    enb = t.son_enbs[0]
+    mine = {c.cell_key for c in cells if c.enb_id == enb}
+    assert {a for a, _ in t.cell_pairs} == mine                                         # 출발 셀 = 그 eNB 의 전 셀
+    assert mine < t.cell_keys and set(t.son_gain) == mine
 
 
-def test_son_param_change_falls_back_to_corridor_cells_without_routes(capsys):
-    cells = _route_cells()
-    t = faults._auto_target("son_param_change", cells, random.Random(0), routes=None)
-    assert t is not None and t.cell_pairs, "방위각 띠 경로"
-    assert "노선 구간을 못 골랐다" in capsys.readouterr().out
-
-
-def test_son_param_change_falls_back_when_the_route_has_no_valid_segment(monkeypatch, capsys):
-    monkeypatch.setattr(S, "route_segment", lambda *a, **k: None)
-    t = faults._auto_target("son_param_change", _route_cells(), random.Random(0), routes=["L1"])
-    assert t is not None
-    assert "모양 미달" in capsys.readouterr().out
+def test_son_param_change_without_routes_works_the_same():
+    t = faults._auto_target("son_param_change", _enb_cells(), random.Random(0), routes=None)
+    assert t is not None and t.cell_pairs and t.son_enbs
 
 
 def test_route_target_none_when_no_routes(capsys):
@@ -261,13 +257,14 @@ def test_busy_disaster_area_is_deterministic_and_needs_rates():
 
 # ---------------------------------------------------------------- 9번 · _ROUTE_KINDS · _route_target 모양 검사
 
-def test_route_kinds_cover_the_three_corridor_scenarios():
-    assert set(faults._ROUTE_KINDS) == {"ho_interruption", "son_param_change", "mobility"}
+def test_route_kinds_cover_the_two_corridor_scenarios():
+    """25번은 11-13 에 뺐다(eNB 1~2개의 전 셀). 노선 구간을 고르는 kind 는 9·15번뿐이다."""
+    assert set(faults._ROUTE_KINDS) == {"ho_interruption", "mobility"}
     for k in faults._ROUTE_KINDS:
-        # 구간을 고르는 모양(`select_geo`)이 CORRIDOR 다. 25번은 정답 모양(`expect_geo`)이 POINT 로 갈렸다(2026-11-09)
         sp = faults.KIND_SPECS[k]
         assert (sp.get("select_geo") or sp["expect_geo"]) == "CORRIDOR", k
     assert faults.KIND_SPECS["son_param_change"]["expect_geo"] == "POINT"
+    assert not faults.KIND_SPECS["son_param_change"].get("select_geo")
 
 
 def test_mobility_auto_target_uses_the_route_segment(monkeypatch):

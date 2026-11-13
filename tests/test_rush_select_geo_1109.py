@@ -54,11 +54,12 @@ def test_scenario_has_rush_hours_and_select_geo_with_empty_defaults():
     assert f["rush_hours"].default == () and f["select_geo"].default is None
 
 
-def test_only_15_has_rush_hours_and_only_25_has_select_geo():
+def test_only_15_has_rush_hours_and_nobody_has_select_geo_any_more():
+    """25번의 `select_geo` 는 11-13 에 뺐다 — 대상이 노선 구간이 아니라 eNB 1~2개의 전 셀이다(`faults._son_target`)."""
     assert [k for k, v in S.KIND_SPECS.items() if v.get("rush_hours")] == ["ho_interruption"]
-    assert [k for k, v in S.KIND_SPECS.items() if v.get("select_geo")] == ["son_param_change"]
+    assert [k for k, v in S.KIND_SPECS.items() if v.get("select_geo")] == []
     sp = S.KIND_SPECS["son_param_change"]
-    assert sp["expect_geo"] == "POINT" and sp["select_geo"] == "CORRIDOR"
+    assert sp["expect_geo"] == "POINT" and "select_geo" not in sp
     assert S.KIND_SPECS["ho_interruption"]["expect_geo"] == "CORRIDOR"
 
 
@@ -80,16 +81,13 @@ def _patch(monkeypatch, shape):
     monkeypatch.setattr(S, "geo_shape", lambda seg: shape)
 
 
-def test_25_picks_a_route_segment_when_the_segment_is_a_corridor(monkeypatch):
-    _patch(monkeypatch, "CORRIDOR")
-    t = faults._route_target(["L1"], random.Random(0), "son_param_change")
-    assert t is not None and t.cell_keys == {"1-1", "2-1", "3-1"}
+def test_25_no_longer_picks_a_route_segment(monkeypatch):
+    """25번은 노선 구간을 고르지 않는다(11-13) — 구간 고르기를 부르면 깨지게 해 두고 자동 대상을 만든다."""
+    import test_son_focus_1109 as SF
 
-
-@pytest.mark.parametrize("shape", ["POINT", "CLUSTER"])
-def test_25_falls_back_when_the_segment_is_not_a_corridor(monkeypatch, shape):
-    _patch(monkeypatch, shape)
-    assert faults._route_target(["L1"], random.Random(0), "son_param_change") is None   # select_geo 가 CORRIDOR 를 요구
+    monkeypatch.setattr(S, "route_segment", lambda *a, **k: (_ for _ in ()).throw(AssertionError("노선 구간을 불렀다")))
+    t = faults._auto_target("son_param_change", SF.enb_cells(), random.Random(0), routes=["L1"])
+    assert t is not None and t.son_enbs and t.route_seg is None
 
 
 def test_a_kind_with_only_expect_geo_still_checks_expect_geo(monkeypatch):

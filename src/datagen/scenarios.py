@@ -388,6 +388,11 @@ class Target:
     #: 15번(`ho_interruption`)이 고른 **노선 구간** — `route_segment` 가 만든 사전(노선 id·역·SGW 가
     #: 바뀌는 칸 수·모양). 노선을 못 쓴 대상은 `None` 이다. 정답지에 그대로 실린다
     route_seg: dict | None = None
+    #: 25번(`son_param_change`)이 파라미터를 넣은 **eNB 1~2개**(2026-11-13 사용자 결정) — 그 eNB 의 전 셀이
+    #: 출발 셀이다. `enb_id` 를 쓰지 않는다 — 그 칸은 eNB 정지(17번)가 읽어 다른 뜻이 섞인다
+    son_enbs: tuple[str, ...] = ()
+    #: 25번 출발 셀별 세기 배율(`son_focus` · `SON_GAIN_RANGE` × 평소 호 비율). 없는 셀은 1.0 이다
+    son_gain: dict[str, float] = field(default_factory=dict)
 
     def label(self) -> str:
         bits = []
@@ -401,6 +406,8 @@ class Target:
             bits.append(f"MME {len(self.mme_group)}대")
         if self.enb_id:
             bits.append(f"eNB-{self.enb_id}")
+        if self.son_enbs:
+            bits.append("eNB-" + "·".join(self.son_enbs))
         if self.shift_to:
             bits.append(f"→ eNB-{self.shift_to}")
         if self.vendor_model:
@@ -486,8 +493,8 @@ class Scenario:
     flap_low: float = 0.0
     #: 계열별 시작 지연(분) — SC-21 의 "전송망 → 2분 뒤 DNS"
     series_offset: dict[str, int] = field(default_factory=dict)
-    #: 전환 실패를 몰아 넣을 셀 쌍 수 — 25번(`son_param_change`)만 쓴다(2026-11-09). 0 이면 쌍 목록 전부에
-    #: 흩는다(9·15번과 같은 옛 동작). 대상 좁히기는 `faults.son_focus`, 주입은 `_son_param_change`
+    #: **출발 셀 하나당 도착 셀 수** — 25번(`son_param_change`)만 쓴다(2026-11-13 뜻을 바꿨다 · 전에는 셀 하나의
+    #: 쌍 수였다). 0 이면 쌍 목록 전부에 흩는다(9·15번과 같은 옛 동작). 대상은 `son_focus`, 주입은 `_son_param_change`
     focus_pairs: int = 0
     #: **이 시간대에만 나오는 장애**의 시작 시간대 `((시작시, 끝시), ...)` — 끝시는 넣지 않는다(2026-11-09
     #: 사용자 결정). 15번(`ho_interruption`)은 전철 이동 세션이 몰리는 출퇴근에만 선다. 실측 시간대
@@ -625,7 +632,24 @@ class Scenario:
             **_disaster_truth(self),
             **_sa_fallback_truth(self),
             **_route_truth(self),
+            **_son_truth(self),
         }
+
+
+def _son_truth(sc) -> dict:
+    """25번 정답지 — 파라미터를 넣은 eNB 와 셀별 역할·배율(2026-11-13). 화면 셀별 표와 대조하려는 값이고 채점은
+    모르는 키를 무시한다. 출발 셀은 구조상 graphio 장애 셀이 아니다(절단은 도착 셀에 계상) — 그래서 따로 싣는다"""
+    t = sc.target
+    if sc.kind != "son_param_change" or not t.son_enbs:
+        return {}
+    src = sorted({a for a, _ in t.cell_pairs} | {k for k in t.son_gain})
+    dst = sorted({b for _, b in t.cell_pairs} - set(src))
+    return {
+        "son_enbs": list(t.son_enbs),
+        "son_cells": ([{"cell": k, "role": "src", "gain": t.son_gain.get(k)} for k in src]
+                      + [{"cell": k, "role": "dst", "gain": None} for k in dst]),
+        "son_pairs": [list(p) for p in t.cell_pairs],
+    }
 
 
 # Scenario는 분 슬롯마다 활성 셀 집합을 캐시해 두고 mutator가 그걸 본다.
@@ -844,17 +868,18 @@ KIND_SPECS: dict[str, dict] = {
         title="SON 파라미터 변경 후 계단형 저하 (H/O)",
         truth_code="CHANGE_SUSPECTED", truth_category="CHANGE",
         # R-17 은 셀 쌍 전환 실패로 서지만 RAN_MOBILITY_ISSUE 를 낸다(11-04 25r4 에서 1위였다)
-        # 정답 모양은 POINT 다(2026-11-09 사용자 결정) — 실패가 출발 셀 하나와 이웃 1~2곳에만 난다
-        # (`focus_pairs`). F-229 실측도 셀 1개 POINT 였다. 대상은 지금처럼 노선 구간에서 고른다(`select_geo`)
-        expect_rules=("R-11",), expect_geo="POINT", select_geo="CORRIDOR",
+        # **대상은 eNB 1~2개의 전 셀이다**(2026-11-13 사용자 결정 · 전에는 노선 구간의 셀 하나). 파라미터는 eNB 에
+        # 들어가는데 셀 하나만 영향받는 것은 실제 모양이 아니다. 정답 모양은 고른 셀로 잰다(`faults.build` 의
+        # `geo_shape` · 사용자 결정 B) — eNB 하나는 한 사이트라 대개 POINT, 둘이면 잰 값을 따른다. 여기 POINT 는
+        # 셀을 못 잴 때의 고정값이다. 노선 구간에서 고르지 않으므로 `select_geo` 를 두지 않는다
+        expect_rules=("R-11",), expect_geo="POINT",
         expect_alternatives={"R-17": "RAN_MOBILITY_ISSUE"},
         shape="STEP", ramp_in=1, scope_kind="CELL", expect_kpi="C-04",
         onset="instant", offset="instant",
         grade="TOP3",
-        # **실패를 셀 하나의 이웃 관계 1~2개에 몰아 넣는다**(2026-11-09). SON 은 셀 쌍마다(이웃 관계마다)
-        # 핸드오버 파라미터를 바꾼다 — 잘못 바꾸면 그 셀에서 그 이웃으로 가는 전환만 실패한다. 전에는
-        # 출발 셀을 버리고 도착 셀 8곳에 고르게 뽑아 실패가 최대 15×8 쌍으로 퍼졌고, "한 이웃 관계에
-        # 몰렸다"는 설정 변경의 지문이 데이터에 없었다(리오 확인 · `scenarios.py:2141`). **초기값이다**
+        # **출발 셀마다 도착 셀 1~2곳**(2026-11-13 · 거리순 · 이웃 관계 표가 없다). SON 은 이웃 관계마다
+        # 핸드오버 파라미터를 바꾼다 — 잘못 바꾸면 그 셀에서 그 이웃으로 가는 전환만 실패한다(11-09). 그
+        # 지문을 출발 셀마다 지킨다. 셀별 세기는 `SON_GAIN_RANGE`·`SON_LOAD_FLOOR`. **초기값이다**
         focus_pairs=2,
     ),
     # 일본 시연 `j-sc-14` — 도심 역 저녁 러시. **원인 코드와 룰은 graphio
@@ -2130,7 +2155,10 @@ def _son_param_change(rec, sc, intensity, rng, cell) -> bool:
         pairs = [p for p in sc.target.cell_pairs if p[0] == cell.cell_key]
         if not pairs:
             return False
-    if rng.random() >= intensity * 0.50:
+    # 셀별 세기(2026-11-13) — 출발 셀마다 배율이 다르다. **시작 분은 모든 셀이 같다** — 한 변경이 한 시점에
+    # 들어간다. 배율이 없는 셀(옛 대상)은 1.0 이다
+    gain = sc.target.son_gain.get(cell.cell_key, 1.0)
+    if rng.random() >= intensity * gain * 0.50:
         return False
     return _handover_failure(rec, sc, rng, pairs=pairs)
 
@@ -3941,34 +3969,91 @@ def _route_truth(sc) -> dict:
     return out
 
 
-def son_focus(target: Target, n: int) -> Target:
-    """25번 대상 좁히기 — **출발 셀 하나와 그 이웃 1~``n`` 곳**만 남긴다(2026-11-09).
+#: 25번 출발 셀 세기 배율 범위 — 셀마다 해시로 고정한다(2026-11-13 사용자 승인). **초기값이다** — 결과를 보고
+#: 바꾼다. 화면에서 "같은 시각, 같은 eNB, 셀마다 다른 정도"가 보이게 하려는 값이고 실측 근거는 없다
+SON_GAIN_RANGE = (0.5, 1.0)
+#: 25번 평소 호 비율(셀 `traffic_weight` ÷ 그 eNB 최대 셀)의 하한 — 배율에 곱한다. 하한이 없으면 한산한
+#: 셀이 0 에 가까워져 사실상 꺼진다(2026-11-13 케이 결정). **초기값이다**
+SON_LOAD_FLOOR = 0.5
+#: 25번 자동 대상 후보 — 셀 `traffic_weight` 합 상위 eNB 수. 그 안에서 회차마다 돌려 고른다. **초기값이다**
+SON_AUTO_TOP_ENBS = 20
 
-    SON 은 이웃 관계(셀 쌍)마다 핸드오버 파라미터를 바꾼다. 잘못 바꾸면 그 셀에서 그 이웃으로 가는
-    전환만 실패한다 — 실패가 셀 띠 전체로 퍼지지 않는다. 쌍 목록 모양은 둘이다.
 
-    * **노선 구간**(`_route_target`) — 이웃 칸이 줄지어 이어진 쌍(a→b, b→c …). 가운데 칸을 출발 셀로
-      두고 노선 앞뒤 칸을 도착 셀로 둔다 — 같은 출발 셀의 이웃 관계 둘이다.
-    * **기준 셀 → 띠**(`corridor_cells`) — 출발 셀이 이미 하나다. 가까운 순 앞 ``n`` 개.
+def son_gain(src: list[Cell]) -> dict[str, float]:
+    """25번 출발 셀별 세기 배율 — `SON_GAIN_RANGE` 해시 배율 × `SON_LOAD_FLOOR` 하한의 평소 호 비율.
 
-    대상 셀은 출발·도착 셀뿐이다 — 셀 채움·정답지 셀·활성 셀이 실패가 실제로 난 자리와 같아진다.
-    ``n`` 이 0 이거나 쌍이 없으면 그대로 돌려준다.
+    해시는 셀 키로만 정한다 — 같은 셀은 회차·틱·gen 재시작마다 같은 배율이다. 호 비율의 기준은 **그 eNB
+    안의 최대 셀**이다. 다른 eNB 와 비교하면 eNB 가 둘일 때 한쪽 전체가 약해진다
     """
-    import dataclasses
+    import hashlib
 
-    pairs = [tuple(p) for p in target.cell_pairs or ()]
-    if n <= 0 or not pairs:
-        return target
-    if len({a for a, _ in pairs}) > 1:
-        chain = [pairs[0][0]] + [b for _, b in pairs]
-        k = len(chain) // 2
-        src = chain[k]
-        nbrs = [chain[i] for i in (k + 1, k - 1) if 0 <= i < len(chain)]
-        picked = [(src, c) for c in nbrs][:n]
-    else:
-        picked = pairs[:n]
-    keys = {picked[0][0]} | {b for _, b in picked}
-    return dataclasses.replace(target, cell_keys=keys, cell_pairs=picked)
+    lo, hi = SON_GAIN_RANGE
+    top: dict[str, float] = {}
+    for c in src:
+        top[c.enb_id] = max(top.get(c.enb_id, 0.0), float(c.traffic_weight or 0.0))
+    out: dict[str, float] = {}
+    for c in src:
+        h = int(hashlib.sha1(f"son:{c.cell_key}".encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
+        t = top.get(c.enb_id) or 0.0
+        load = max(SON_LOAD_FLOOR, float(c.traffic_weight or 0.0) / t) if t > 0 else 1.0
+        out[c.cell_key] = round((lo + (hi - lo) * h) * load, 3)
+    return out
+
+
+def son_near_enb(cells: list[Cell], enb: str) -> str | None:
+    """``enb`` 와 사이트 중심이 가장 가까운 다른 eNB — 25번 "eNB 2개"의 둘째(2026-11-13). 좌표가 없으면 None."""
+    from .geo_lite import haversine_km
+
+    pos: dict[str, list[Cell]] = {}
+    for c in cells:
+        if c.geo_status == "MAPPED":
+            pos.setdefault(c.enb_id, []).append(c)
+    if enb not in pos:
+        return None
+
+    def mid(e: str) -> tuple[float, float]:
+        m = pos[e]
+        return sum(c.latitude for c in m) / len(m), sum(c.longitude for c in m) / len(m)
+
+    la, lo = mid(enb)
+    rest = [(haversine_km(la, lo, *mid(e)), e) for e in pos if e != enb]
+    return min(rest)[1] if rest else None
+
+
+def son_focus(cells: list[Cell], enbs: list[str], n: int) -> Target | None:
+    """25번 대상 — **eNB 1~2개의 전 셀을 출발 셀**로, 출발 셀마다 도착 셀 ``n`` 곳(2026-11-13 사용자 결정).
+
+    파라미터는 eNB 에 들어간다 — 그 eNB 의 셀이 함께 영향받는다. 전에는 노선 구간에서 **셀 하나**만 남겼다
+    (11-09). 이웃 관계(셀 쌍)마다 실패가 몰린다는 설정 변경의 지문은 출발 셀마다 지킨다 — 한 출발 셀의
+    실패는 그 셀의 도착 셀 1~``n`` 곳으로만 간다.
+
+    * 도착 셀은 **거리순**이다 — 셀 마스터에 이웃 관계 표가 없다(리오 확인 · 11-13). 고른 eNB 의 셀은
+      도착 셀에서 뺀다(같은 사이트 안 전환은 이 eNB 의 파라미터만으로 설명되지 않는다).
+    * 좌표 없는 출발 셀은 쌍을 만들지 못한다 — 대상 셀에는 남지만 실패가 나지 않는다(숨기지 않는다).
+    * 셀별 세기는 `son_gain`. **시작 분은 모든 셀이 같다.**
+
+    대상 셀은 출발·도착 셀이다 — 절단은 도착 셀(Last)에 계상되므로 둘 다 정답 셀이다(9번과 같은 이유).
+    UI 주입(`faults`)과 배치(`build_scenarios`)가 이 함수 하나를 쓴다. eNB 셀이 없으면 None.
+    """
+    import heapq
+
+    from .geo_lite import haversine_km
+
+    want = [str(e) for e in enbs if e]
+    mine = set(want)
+    src = sorted((c for c in cells if c.enb_id in mine), key=lambda c: c.cell_key)
+    if not src:
+        return None
+    other = [c for c in cells if c.geo_status == "MAPPED" and c.enb_id not in mine]
+    pairs: list[tuple[str, str]] = []
+    for a in src:
+        if a.geo_status != "MAPPED" or n <= 0:
+            continue
+        near = heapq.nsmallest(n, other, key=lambda c: (
+            haversine_km(a.latitude, a.longitude, c.latitude, c.longitude), c.cell_key))
+        pairs += [(a.cell_key, c.cell_key) for c in near]
+    keys = {c.cell_key for c in src} | {b for _, b in pairs}
+    return Target(cell_keys=keys, cell_pairs=pairs, son_enbs=tuple(want), son_gain=son_gain(src))
 
 
 def busy_cluster(cells: list[Cell], rng: random.Random, want: int = 8,
@@ -4158,14 +4243,14 @@ def build_scenarios(
     # 미등록으로 보고된다.
     anchor, corridor = corridor_cells(cells, rng, want=18)
     pairs = [(anchor.cell_key, c.cell_key) for c in corridor[:8]]
-    # J-SC-25 의 SON 대상 셀 쌍 — **`rng` 를 더 소비하지 않는다.** 소비하면
+    # J-SC-25 의 SON 앵커 — **`rng` 를 더 소비하지 않는다.** 소비하면
     # 뒤에 고르는 시나리오의 대상이 전부 바뀌어 기존 채점 기준선이 흔들린다.
-    # SC-09 셀은 뺀다 — 같은 셀에 둘이 걸리면 `R-17` 근거가 섞인다.
+    # SC-09 셀은 뺀다 — 같은 셀에 둘이 걸리면 `R-17` 근거가 섞인다. 대상은 앵커 셀의
+    # eNB 전 셀이다(2026-11-13 · `son_focus`). 띠(`son_band`)는 J-SC-15 를 비키는 데만 남는다
     sc09 = {anchor.cell_key} | {c.cell_key for c in corridor}
     son_anchor, son_band = corridor_cells(
         [c for c in cells if c.cell_key not in sc09],
         random.Random(f"son:{anchor.cell_key}"), want=18)
-    son_pairs = [(son_anchor.cell_key, c.cell_key) for c in son_band[:8]]
     # J-SC-14 의 혼잡 셀 8개 — 같은 이유로 `rng` 를 소비하지 않는다
     crowd = busy_cluster(cells, random.Random(f"crowd:{anchor.cell_key}"), want=8)
     # J-SC-15 의 코리도 — SC-09·J-SC-25 셀과 겹치지 않게 뺀다(같은 셀에 둘이
@@ -4228,11 +4313,9 @@ def build_scenarios(
         spec("J-SC-16", "anchor_saturation",
              target=Target(cell_keys={c.cell_key for c in anchor_cells},
                            sgg_codes={anchor_sgg})),
-        # 배치도 UI 주입과 같은 좁히기(`son_focus`) — 한쪽만 좁히면 같은 kind 의 정답 셀이 갈린다
+        # 배치도 UI 주입과 같은 대상(`son_focus` · 앵커 셀의 eNB 전 셀) — 한쪽만 바꾸면 같은 kind 의 정답 셀이 갈린다
         spec("J-SC-25", "son_param_change",
-             target=son_focus(Target(cell_keys={son_anchor.cell_key}
-                                     | {c.cell_key for c in son_band[:14]},
-                                     cell_pairs=son_pairs),
+             target=son_focus(cells, [son_anchor.enb_id],
                               int(KIND_SPECS["son_param_change"].get("focus_pairs") or 0))),
         spec("SC-13b", "nsa_policy_restrict",
              target=Target(cell_keys={c.cell_key for c in by_mme[other_mme]},

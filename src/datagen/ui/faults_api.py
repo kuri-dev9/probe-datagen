@@ -124,9 +124,11 @@ def _match_score(i: dict, spec: dict, truth: dict, target: str) -> int:
         n += 2
     cells = {str(sc.get("scope_id")) for sc in i.get("scopes") or [] if sc.get("scope_type") == "CELL"}
     axis = {str(x) for x in (i.get("detail") or {}).get("axis_ids") or []}
-    enb = target.split(":", 1)[1].strip() if target.upper().startswith("ENB:") else None
+    # `ENB:a,b`·`ENB:a,+` — 25번은 eNB 를 둘까지 받는다(2026-11-13). `+` 는 정답지 `son_enbs` 에 풀린 이름이 있다
+    enbs = ({e.strip() for e in target.split(":", 1)[1].split(",") if e.strip() and e.strip() != "+"}
+            | {str(e) for e in truth.get("son_enbs") or ()}) if target.upper().startswith("ENB:") else set()
     if (cells & set(truth.get("cells") or ()) or truth.get("expect_node") in axis or target in axis
-            or (enb and any(c.startswith(enb + "-") for c in cells))):
+            or any(c.startswith(e + "-") for e in enbs for c in cells)):
         n += 3
     return n + {"L2_EVENT": 2, "L1_BUNDLE": 1}.get(i.get("event_unit"), 0)
 

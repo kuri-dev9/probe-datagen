@@ -117,7 +117,7 @@ def test_rotating_empty_candidates_is_none():
 # ---------------------------------------------------------------- _rotate_group
 
 @pytest.mark.parametrize("kind,want", [("ran_radio", "sgg"), ("transport_loss", "sgg"), ("mobility", "route"),
-                                       ("ho_interruption", "route"), ("son_param_change", "route"),
+                                       ("ho_interruption", "route"), ("son_param_change", "son"),
                                        ("natural_disaster", "disaster"), ("gw_resource", "node:sgw_id"),
                                        ("auth_failure", "node:mme_id"), ("dns_flap", None),
                                        ("external_server", None)])

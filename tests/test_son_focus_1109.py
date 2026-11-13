@@ -1,9 +1,10 @@
-"""25번 `son_param_change` — 전환 실패를 셀 하나의 이웃 관계 1~2개에 몰아 넣는다 (2026-11-09 · 사용자 "특정 셀 쌍").
+"""25번 `son_param_change` — 파라미터를 넣은 **eNB 1~2개의 전 셀**이 출발 셀이다 (2026-11-13 사용자 결정 · 전에는 셀 하나의 이웃 관계 1~2개).
 
-* `scenarios.son_focus` — 대상을 출발 셀 하나와 도착 셀 1~n 곳으로 좁힌다(노선 사슬은 가운데 칸 = 출발).
-* `_son_param_change` — `focus_pairs` 가 있으면 그 쌍의 **출발 셀(호의 First)** 에서 시작한 호만 끊고, `_handover_failure(pairs=…)` 가 도착 셀을
-  Last 로 적는다. 강도 0.50·106 절단·PSF 50%·Last 80% 는 그대로.
-* `faults.build` — 순환 기록은 좁히기 **전** 키로, 25번만 좁힌다. 9·15번(`mobility`·`ho_interruption`)은 이 분기를 지나지 않는다.
+* `scenarios.son_focus(cells, enbs, n)` — eNB 의 전 셀 = 출발 셀, 출발 셀마다 도착 셀 ``n`` 곳(**거리순** · 이웃 관계 표가 없다). 고른 eNB 의 셀은
+  도착 셀에서 뺀다. 셀별 세기는 `son_gain`(0.5~1.0 해시 × 하한 0.5 의 평소 호 비율 · **초기값**), 계단 시작 분은 모든 셀이 같다.
+* `_son_param_change` — 쌍의 **출발 셀(호의 First)** 에서 시작한 호만 `intensity × 셀 배율 × 0.50` 으로 끊는다. 106 절단·PSF 50%·Last 80% 는 그대로.
+* `faults` — 자동은 `traffic_weight` 합 상위 eNB 에서 돌려 하나, `ENB:a` · `ENB:a,b` · `ENB:a,+`(가장 가까운 eNB). 순환 묶음은 `son`.
+  9·15번(`mobility`·`ho_interruption`)은 이 분기를 지나지 않는다.
 DB 없이.
 """
 from __future__ import annotations
@@ -32,70 +33,94 @@ def gen():
     return NF._gen(True)
 
 
-# ── son_focus ────────────────────────────────────────────────────────────────
+# ── son_focus · son_gain ──────────────────────────────────────────────────────
 
-def chain(*keys):
-    return [(a, b) for a, b in zip(keys, keys[1:])]
-
-
-def T(pairs, **kw):
-    cells = {k for p in pairs for k in p}
-    return Target(cell_keys=cells, cell_pairs=list(pairs), **kw)
-
-
-def test_a_route_chain_takes_the_middle_cell_as_the_source_and_its_two_neighbours_as_destinations():
-    t = S.son_focus(T(chain("a", "b", "c", "d", "e")), 2)
-    assert t.cell_pairs == [("c", "d"), ("c", "b")]
-    assert t.cell_keys == {"b", "c", "d"}
+def enb_cells(n_enb=6, per=3, weights=None):
+    """eNB 마다 셀 ``per`` 개 — eNB 는 0.01° 씩 북쪽으로, 셀은 0.0006° 씩 동쪽으로 떨어진다(`traffic_weight` 는 ``weights``)."""
+    out = []
+    for e in range(n_enb):
+        for n in range(per):
+            c = RS._cell(f"{600000 + e}-{n}", 35.60 + e * 0.01, 139.60 + n * 0.0006)
+            if weights:
+                c = dataclasses.replace(c, traffic_weight=weights[n % len(weights)])
+            out.append(c)
+    return out
 
 
-@pytest.mark.parametrize("keys,src,nbrs", [
-    (("a", "b", "c"), "b", ["c", "a"]),
-    (("a", "b", "c", "d"), "c", ["d", "b"]),
-    (("a", "b", "c", "d", "e", "f"), "d", ["e", "c"]),
-    (tuple("abcdefg"), "d", ["e", "c"]),
-])
-def test_chain_lengths_even_and_odd_stay_inside_the_chain(keys, src, nbrs):
-    t = S.son_focus(T(chain(*keys)), 2)
-    assert t.cell_pairs == [(src, n) for n in nbrs]
-    assert t.cell_keys == {src, *nbrs} and t.cell_keys <= set(keys)
+def test_one_enb_makes_every_cell_a_source_with_nearest_destinations():
+    cells = enb_cells()
+    t = S.son_focus(cells, ["600001"], 2)
+    src = {f"600001-{n}" for n in range(3)}
+    assert {a for a, _ in t.cell_pairs} == src and len(t.cell_pairs) == 3 * 2
+    assert t.son_enbs == ("600001",) and set(t.son_gain) == src
+    assert src < t.cell_keys and t.cell_keys == src | {b for _, b in t.cell_pairs}
 
 
-def test_a_single_pair_chain_stays_as_it_is():
-    t = S.son_focus(T([("a", "b")]), 2)
-    assert t.cell_pairs == [("a", "b")] and t.cell_keys == {"a", "b"}
+def test_destinations_exclude_the_chosen_enbs_own_cells_and_are_nearest_first():
+    cells = enb_cells()
+    t = S.son_focus(cells, ["600002"], 2)
+    for a, b in t.cell_pairs:
+        assert not b.startswith("600002-"), (a, b)
+    # 이웃 eNB(남 600001 · 북 600003) 셀이 도착 셀이다 — 가장 가까운 순
+    assert {b.split("-")[0] for _, b in t.cell_pairs} <= {"600001", "600003"}
+    first = [(a, b) for a, b in t.cell_pairs if a == "600002-0"]
+    assert len(first) == 2 and first[0][1] != first[1][1]
 
 
-def test_n_one_keeps_only_the_first_neighbour():
-    t = S.son_focus(T(chain("a", "b", "c", "d", "e")), 1)
-    assert t.cell_pairs == [("c", "d")] and t.cell_keys == {"c", "d"}
+def test_two_enbs_both_become_sources_and_neither_is_a_destination_of_the_other():
+    cells = enb_cells()
+    t = S.son_focus(cells, ["600001", "600002"], 1)
+    src = {a for a, _ in t.cell_pairs}
+    assert src == {f"6000{e:02d}-{n}" for e in (1, 2) for n in range(3)} and len(t.cell_pairs) == 6
+    assert t.son_enbs == ("600001", "600002")
+    assert all(b.split("-")[0] not in ("600001", "600002") for _, b in t.cell_pairs)
 
 
-def test_a_band_from_one_anchor_keeps_the_first_n_pairs():
-    band = [("x", "y"), ("x", "z"), ("x", "w")]
-    t = S.son_focus(T(band), 2)
-    assert t.cell_pairs == [("x", "y"), ("x", "z")] and t.cell_keys == {"x", "y", "z"}
-    assert S.son_focus(T(band), 1).cell_pairs == [("x", "y")]
-    assert S.son_focus(T(band), 9).cell_pairs == band                 # n 이 쌍 수보다 크면 전부
+def test_n_destinations_per_source_and_n_zero_makes_no_pairs():
+    cells = enb_cells()
+    assert len(S.son_focus(cells, ["600001"], 1).cell_pairs) == 3
+    assert len(S.son_focus(cells, ["600001"], 4).cell_pairs) == 12
+    t0 = S.son_focus(cells, ["600001"], 0)
+    assert t0.cell_pairs == [] and len(t0.cell_keys) == 3                                # 출발 셀은 대상에 남는다
 
 
-@pytest.mark.parametrize("n", [0, -1])
-def test_n_zero_or_negative_returns_the_original_object(n):
-    t = T(chain("a", "b", "c"))
-    assert S.son_focus(t, n) is t
+def test_unknown_enb_returns_none_and_unmapped_sources_stay_without_pairs():
+    cells = enb_cells()
+    assert S.son_focus(cells, ["999999"], 2) is None and S.son_focus(cells, [], 2) is None
+    cells = [dataclasses.replace(c, geo_status="UNMAPPED") if c.cell_key == "600001-1" else c for c in cells]
+    t = S.son_focus(cells, ["600001"], 2)
+    assert "600001-1" in t.cell_keys and "600001-1" not in {a for a, _ in t.cell_pairs}   # 숨기지 않는다
 
 
-def test_no_pairs_returns_the_original_object():
-    t = Target(cell_keys={"a", "b"})
-    assert S.son_focus(t, 2) is t
+def test_son_gain_is_in_range_fixed_per_cell_and_load_floored():
+    cells = enb_cells(weights=[1.0, 0.2, 0.05])
+    src = [c for c in cells if c.enb_id == "600001"]
+    g = S.son_gain(src)
+    lo, hi = S.SON_GAIN_RANGE
+    assert set(g) == {c.cell_key for c in src}
+    for k, v in g.items():
+        assert lo * S.SON_LOAD_FLOOR - 1e-9 <= v <= hi + 1e-9, (k, v)                      # 호 비율 하한 0.5 라 한산한 셀도 0 에 가깝지 않다
+    assert g == S.son_gain(list(reversed(src)))                                            # 순서·회차와 무관하게 같은 셀은 같은 배율
+    assert len(set(g.values())) > 1                                                        # 셀마다 다르다
 
 
-def test_cell_keys_are_only_the_source_and_destinations_and_other_fields_survive():
-    t = T(chain("a", "b", "c", "d", "e"), mme_id="0001", sgg_codes={"13104"}, route_seg={"route_id": "L1"})
-    f = S.son_focus(t, 2)
-    assert f.cell_keys == {"b", "c", "d"} and f.mme_id == "0001" and f.sgg_codes == {"13104"}
-    assert f.route_seg == {"route_id": "L1"}
-    assert t.cell_pairs == chain("a", "b", "c", "d", "e") and len(t.cell_keys) == 5     # 원본은 그대로
+def test_son_gain_load_ratio_is_per_enb_and_defaults_to_full_without_weight():
+    cells = [dataclasses.replace(c, traffic_weight=0.0) for c in enb_cells()]
+    g = S.son_gain([c for c in cells if c.enb_id == "600001"])
+    assert all(S.SON_GAIN_RANGE[0] <= v <= S.SON_GAIN_RANGE[1] for v in g.values())         # 가중이 없으면 호 비율 1.0
+
+
+def test_son_near_enb_is_the_closest_other_enb_by_site_centre():
+    cells = enb_cells()
+    assert S.son_near_enb(cells, "600000") == "600001"
+    assert S.son_near_enb(cells, "600005") == "600004"
+    assert S.son_near_enb(cells, "nope") is None
+    assert S.son_near_enb([c for c in cells if c.enb_id == "600000"], "600000") is None     # 다른 eNB 가 없다
+
+
+def test_the_target_label_names_both_enbs():
+    t = S.son_focus(enb_cells(), ["600001", "600002"], 1)
+    assert "eNB-600001·600002" in t.label()
 
 
 # ── 주입 ────────────────────────────────────────────────────────────────────
@@ -103,9 +128,9 @@ def test_cell_keys_are_only_the_source_and_destinations_and_other_fields_survive
 SRC, D1, D2, OTHER = "600001-0", "600002-0", "600003-0", "600009-0"
 
 
-def _sc(focus=2, pairs=None, active=None):
+def _sc(focus=2, pairs=None, active=None, gain=None):
     pairs = pairs if pairs is not None else [(SRC, D1), (SRC, D2)]
-    return SimpleNamespace(focus_pairs=focus, target=SimpleNamespace(cell_pairs=pairs, cell_keys={SRC, D1, D2}),
+    return SimpleNamespace(focus_pairs=focus, target=SimpleNamespace(cell_pairs=pairs, cell_keys={SRC, D1, D2}, son_gain=gain or {}),
                            active_cells_cache=set(active if active is not None else {SRC, D1, D2}))
 
 
@@ -240,72 +265,139 @@ def test_the_son_step_shape_and_failure_constants_are_unchanged():
     assert sp["scope_kind"] == "CELL" and sp["expect_kpi"] == "C-04" and sp["grade"] == "TOP3"
     import inspect
     src = inspect.getsource(S._son_param_change)
-    assert "intensity * 0.50" in src and "_handover_failure(rec, sc, rng, pairs=pairs)" in src
+    assert "intensity * gain * 0.50" in src and "_handover_failure(rec, sc, rng, pairs=pairs)" in src
     assert "callflow.drop(rec, 106, rng)" in inspect.getsource(S._handover_failure)
 
 
 # ── faults.build ────────────────────────────────────────────────────────────
 
-def test_the_son_target_is_focused_in_the_fault_build():
+def test_the_son_target_is_all_cells_of_one_enb_in_the_fault_build():
     sc = RS._build("son_param_change", routes=[RS._line_route()])
-    assert len(sc.target.cell_pairs) == 2 and len(sc.target.cell_keys) == 3
-    src = {a for a, _ in sc.target.cell_pairs}
-    assert len(src) == 1 and sc.target.cell_keys == src | {b for _, b in sc.target.cell_pairs}
-    assert sc.target.route_seg is not None                  # 노선 구간 정보는 정답지에 남는다
+    t = sc.target
+    assert len(t.son_enbs) == 1 and t.route_seg is None                 # 노선 구간이 아니다
+    src = {a for a, _ in t.cell_pairs}
+    assert src == {c.cell_key for c in RS._grid_cells() if c.enb_id == t.son_enbs[0]} and len(src) == 3
+    assert len(t.cell_pairs) == 3 * 2 and t.cell_keys == src | {b for _, b in t.cell_pairs}
+    assert set(t.son_gain) == src
 
 
-def test_son_band_target_without_routes_is_focused_too():
+def test_son_target_without_routes_is_the_same_kind_of_target():
     sc = RS._build("son_param_change", routes=None)
-    assert len(sc.target.cell_pairs) == 2 and len({a for a, _ in sc.target.cell_pairs}) == 1
-    assert len(sc.target.cell_keys) == 3
+    assert len(sc.target.son_enbs) == 1 and len({a for a, _ in sc.target.cell_pairs}) == 3
 
 
 @pytest.mark.parametrize("kind", ["mobility", "ho_interruption"])
-def test_mobility_and_ho_interruption_targets_are_not_focused(kind):
+def test_mobility_and_ho_interruption_targets_are_not_son_targets(kind):
     sc = RS._build(kind, routes=[RS._line_route()])
-    assert len(sc.target.cell_pairs) >= 4 and len(sc.target.cell_keys) > 3
+    assert len(sc.target.cell_pairs) >= 4 and len(sc.target.cell_keys) > 3 and not sc.target.son_enbs
 
 
 def test_other_kinds_are_not_touched():
     for kind in ("ran_radio", "transport_loss", "mme_overload"):
         sc = RS._build(kind)
-        assert sc is not None and sc.focus_pairs == 0 and not sc.target.cell_pairs
+        assert sc is not None and sc.focus_pairs == 0 and not sc.target.cell_pairs and not sc.target.son_enbs
 
 
-@pytest.mark.parametrize("target", ["ENB:600000", "LIKE:1"])
-def test_explicit_targets_are_focused_for_the_son_kind(target):
-    cells = RS._grid_cells()
-    if target.startswith("LIKE"):
-        orig = RS._build("son_param_change", routes=[RS._line_route()], fid=1)
-        row = {"fault_id": 30, "kind": "son_param_change", "target": "LIKE:1", "start_ts": RS.T0 + timedelta(minutes=2),
-               "duration_min": 30, "intensity": 1.0}
-        sc = faults.build(row, cells, RS.T0, faults.target_rng(7, 30), seed=7, routes=[RS._line_route()])
-        assert sc.target.cell_keys == orig.target.cell_keys
+def test_explicit_one_enb_target():
+    sc = RS._build("son_param_change", target="ENB:600000")
+    assert sc.target.son_enbs == ("600000",) and len({a for a, _ in sc.target.cell_pairs}) == 3
+
+
+@pytest.mark.parametrize("target,enbs", [("ENB:600000,600001", ("600000", "600001")), ("ENB:600000,+", None)])
+def test_explicit_two_enb_targets(target, enbs):
+    sc = RS._build("son_param_change", target=target)
+    t = sc.target
+    assert len(t.son_enbs) == 2 and t.son_enbs[0] == "600000"
+    if enbs:
+        assert t.son_enbs == enbs
     else:
-        sc = RS._build("son_param_change", target=target)
-    assert sc is not None and len(sc.target.cell_keys) <= 3
+        assert t.son_enbs[1] == S.son_near_enb(RS._grid_cells(), "600000")                # `+` = 가장 가까운 eNB
+    assert len({a for a, _ in t.cell_pairs}) == 6
 
 
-def test_the_rotation_history_keeps_the_pre_focus_key(tmp_path):
-    rt = RS._line_route()
+def test_explicit_targets_the_rule_rejects(capsys):
+    assert RS._build("son_param_change", target="ENB:600000,600001,600002") is None       # eNB 는 1~2개
+    assert RS._build("son_param_change", target="ENB:+,600001") is None                    # `+` 는 둘째 자리뿐
+    assert RS._build("son_param_change", target="ENB:999999") is None                      # 없는 eNB
+    assert RS._build("ran_radio", target="ENB:600000,600001") is None                      # 쉼표 목록은 25번만
+    out = capsys.readouterr().out
+    assert "1~2개" in out and "25번만 받는다" in out
+
+
+def test_box_target_uses_all_cells_of_the_first_mapped_enb_in_the_range():
+    cells = RS._grid_cells()
+    c0 = next(c for c in cells if c.enb_id == "600003")
+    box = f"BOX:{c0.latitude - 0.0003},{c0.longitude - 0.0003},{c0.latitude + 0.0003},{c0.longitude + 0.0003}"
+    sc = RS._build("son_param_change", target=box)
+    assert sc is not None and len(sc.target.son_enbs) == 1 and len({a for a, _ in sc.target.cell_pairs}) == 3
+
+
+def test_like_copies_the_earlier_target():
+    orig = RS._build("son_param_change", routes=[RS._line_route()], fid=1)
+    row = {"fault_id": 30, "kind": "son_param_change", "target": "LIKE:1", "start_ts": RS.T0 + timedelta(minutes=2),
+           "duration_min": 30, "intensity": 1.0}
+    sc = faults.build(row, RS._grid_cells(), RS.T0, faults.target_rng(7, 30), seed=7, routes=[RS._line_route()])
+    assert sc.target.cell_keys == orig.target.cell_keys
+
+
+def test_auto_target_picks_among_the_heaviest_enbs_and_rotates(tmp_path):
+    cells = [dataclasses.replace(c, traffic_weight=(5.0 if c.enb_id in ("600001", "600002") else 1.0)) for c in RS._grid_cells()]
+    h = faults.TargetHistory(tmp_path / "t.json")
+    seen = []
+    for fid in (1, 2, 3):
+        row = {"fault_id": fid, "kind": "son_param_change", "target": None,
+               "start_ts": RS.T0 + timedelta(minutes=2), "duration_min": 30, "intensity": 1.0}
+        sc = faults.build(row, cells, RS.T0, faults.target_rng(7, fid), seed=7, history=h)
+        seen.append(sc.target.son_enbs[0])
+    # 후보는 `traffic_weight` 합 상위 `SON_AUTO_TOP_ENBS` 개다 — 무거운 둘은 반드시 후보 안이고, 고른 eNB 를 거듭 고르지 않는다
+    per = {}
+    for c in cells:
+        per[c.enb_id] = per.get(c.enb_id, 0.0) + c.traffic_weight
+    cand = set(sorted(per, key=lambda e: (-per[e], e))[:S.SON_AUTO_TOP_ENBS])
+    assert {"600001", "600002"} <= cand and set(seen) <= cand and len(set(seen)) == 3
+
+
+def test_the_rotation_history_records_the_target_key_under_the_son_group(tmp_path):
     h = faults.TargetHistory(tmp_path / "t.json")
     row = {"fault_id": 5, "kind": "son_param_change", "target": None,
            "start_ts": RS.T0 + timedelta(minutes=2), "duration_min": 30, "intensity": 1.0}
-    sc = faults.build(row, RS._grid_cells(), RS.T0, faults.target_rng(7, 5), seed=7, routes=[rt], history=h)
+    sc = faults.build(row, RS._grid_cells(), RS.T0, faults.target_rng(7, 5), seed=7, history=h)
     rec = json.loads((tmp_path / "t.json").read_text())
     (slot, val), = rec.items()
-    assert slot.startswith("5:")
-    # 기록된 키는 좁힌 3셀이 아니라 고른 구간 전체의 키다 — 같은 구간을 또 고르지 않는다
-    assert val["key"] != faults.target_key(sc.target.cell_keys)
-    assert len(sc.target.cell_keys) == 3
+    assert slot.startswith("5:") and val["key"] == faults.target_key(sc.target.cell_keys)     # 11-13: 좁히기 전후 키가 같다(대상을 만들 때 이미 좁다)
+
+
+# ── 정답지 ──────────────────────────────────────────────────────────────────
+
+def test_the_truth_carries_son_enbs_cells_roles_gains_and_pairs():
+    sc = RS._build("son_param_change", target="ENB:600000,+")
+    tr = sc.as_truth()
+    assert tr["son_enbs"] == list(sc.target.son_enbs) and tr["son_pairs"] == [list(p) for p in sc.target.cell_pairs]
+    src = [c for c in tr["son_cells"] if c["role"] == "src"]
+    dst = [c for c in tr["son_cells"] if c["role"] == "dst"]
+    assert len(src) == 6 and all(0 < c["gain"] <= 1.0 for c in src) and all(c["gain"] is None for c in dst)
+    assert {c["cell"] for c in src}.isdisjoint({c["cell"] for c in dst})
+    assert set(tr["cells"]) >= {c["cell"] for c in tr["son_cells"]} if "cells" in tr else True
+
+
+def test_other_kinds_carry_no_son_keys():
+    tr = RS._build("mobility", routes=[RS._line_route()]).as_truth()
+    assert "son_enbs" not in tr and "son_cells" not in tr
+
+
+def test_expect_geo_is_measured_from_the_chosen_cells():
+    one = RS._build("son_param_change", target="ENB:600000").as_truth()
+    two = RS._build("son_param_change", target="ENB:600000,600059").as_truth()           # 멀리 떨어진 두 eNB
+    assert one["expect_geo_static"] == "POINT"
+    assert two["expect_geo"] != "POINT" or two["expect_geo_static"] == "POINT"             # 잰 값이 우선 — 고정값은 못 잴 때만
 
 
 # ── 배치 J-SC-25 ────────────────────────────────────────────────────────────
 
-def test_the_batch_scenario_has_three_cells_and_two_pairs():
+def test_the_batch_scenario_uses_the_same_son_focus_as_the_ui_injection():
     import inspect
     src = inspect.getsource(S.build_scenarios)
-    assert 'son_focus(Target(cell_keys={son_anchor.cell_key}' in src
+    assert "son_focus(cells, [son_anchor.enb_id]" in src
     assert 'int(KIND_SPECS["son_param_change"].get("focus_pairs") or 0)' in src
 
 

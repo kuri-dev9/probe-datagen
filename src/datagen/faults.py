@@ -76,9 +76,13 @@ _WIDE_AXIS_KINDS = ("auth_failure", "dns_degradation", "ue_model", "ims_pdn",
 #: 한 시군구 전 셀을 범위로 잡는 kind — 지리적으로 뭉치는 열화다
 #: 셀 쌍을 대상으로 받는 kind — eNB 를 찍으면 이웃과 짝을 짓는다.
 _PAIR_KINDS = ("mobility", "son_param_change", "ho_interruption")
-#: 셀 쌍을 노선 연속 구간으로 고르는 kind — 정답이 CORRIDOR 인 쌍 kind 전부(9·15·25번 · B안). 노선을 못
-#: 쓰면 `corridor_cells` 로 돌아간다. 구간은 fault 마다 다른 rng 로 섞어 고르므로 한 곳에 고정되지 않는다
-_ROUTE_KINDS = ("ho_interruption", "son_param_change", "mobility")
+#: 셀 쌍을 노선 연속 구간으로 고르는 kind — 정답이 CORRIDOR 인 쌍 kind(9·15번 · B안). 노선을 못
+#: 쓰면 `corridor_cells` 로 돌아간다. 구간은 fault 마다 다른 rng 로 섞어 고르므로 한 곳에 고정되지 않는다.
+#: **25번은 뺐다**(2026-11-13 사용자 결정) — 대상이 eNB 1~2개의 전 셀이다(`_son_target` · `S.son_focus`).
+#: 노선 순환 묶음(`route`)에서도 빠져 15번과 같은 구간을 나눠 쓰지 않는다
+_ROUTE_KINDS = ("ho_interruption", "mobility")
+#: 25번 대상 문자열의 eNB 수 상한 — `ENB:a` · `ENB:a,b` · `ENB:a,+`(a 와 가장 가까운 eNB). 사용자 결정 1~2개
+SON_MAX_ENBS = 2
 
 #: 군중 혼잡 kind — **상위 트래픽 대역**의 가까운 셀 8개(`busy_cluster`).
 #: 시군구 전체로 잡으면 한산한 셀이 섞여 ×1.8 을 해도 분모를 못 채운다.
@@ -124,6 +128,8 @@ def _rotate_group(kind: str) -> str | None:
 
 #: 창고(메시 사람 수·eNB 호율)로 후보를 좁히는 자동 대상의 순환 묶음
 _WAREHOUSE_GROUP = {"natural_disaster": "disaster", "ran_congestion": "mesh", "sa_fallback": "mesh",
+                    # 25번 — 셀 `traffic_weight` 상위 eNB 에서 돌려 고른다(`_son_target` · 2026-11-13)
+                    "son_param_change": "son",
                     "anchor_saturation": "anchor", "enb_s1_outage": "outage", "event_crowd": "venue"}
 
 
@@ -354,6 +360,57 @@ def _route_spread_target(routes, rng: random.Random, kind: str, pct: int | None,
     return Target(cell_keys={c.cell_key for c in cells_}, cell_pairs=pairs, route_seg=info)
 
 
+def _son_n() -> int:
+    """25번 출발 셀당 도착 셀 수(`KIND_SPECS.focus_pairs`)."""
+    return int((KIND_SPECS.get("son_param_change") or {}).get("focus_pairs") or 0)
+
+
+def _son_target(cells: list[Cell], rng: random.Random,
+                used: dict[str, int] | None = None) -> Target | None:
+    """25번 자동 대상 — 셀 `traffic_weight` 합이 큰 eNB 하나의 전 셀(2026-11-13 케이 결정 · 초기값).
+
+    "핸드오버가 많은 eNB"를 셀 마스터 가중으로 갈음한다 — 새 창고 조회가 없다. 표본이 모자라면 창고의
+    call_type 3·4·5 호 수로 바꾼다(결정 대기). 상위 `S.SON_AUTO_TOP_ENBS` 안에서 회차마다 돌려 고른다
+    (`_rotating` · 키는 `build` 가 기록하는 대상 셀 지문과 같다). 자동은 eNB 하나다 — 둘은 대상 문자열로 준다
+    """
+    per: dict[str, float] = {}
+    for c in cells:
+        if c.geo_status == "MAPPED":
+            per[c.enb_id] = per.get(c.enb_id, 0.0) + float(c.traffic_weight or 0.0)
+    cand = sorted(per, key=lambda e: (-per[e], str(e)))[:S.SON_AUTO_TOP_ENBS]
+    if not cand:
+        return None
+    n = _son_n()
+    made: dict[str, Target | None] = {}
+
+    def tgt(e: str) -> Target | None:
+        if e not in made:
+            made[e] = S.son_focus(cells, [e], n)
+        return made[e]
+
+    enb = _rotating(cand, lambda e: target_key((tgt(e) or Target()).cell_keys), used, rng)
+    print(f"  · 25번 대상 eNB {enb} (후보 {len(cand)}개)", flush=True)
+    return tgt(enb)
+
+
+def _son_enb_target(cells: list[Cell], text: str) -> Target | None:
+    """25번 `ENB:` 대상 — `a` · `a,b` · `a,+`(a 와 사이트가 가장 가까운 eNB · `S.son_near_enb`)."""
+    got = [x.strip() for x in text.split(",") if x.strip()]
+    if not got or len(got) > SON_MAX_ENBS or got[0] == "+":
+        print(f"  ! 25번 대상 ENB:{text} — eNB 1~{SON_MAX_ENBS}개(`a` · `a,b` · `a,+`)만 받는다", flush=True)
+        return None
+    if got[-1] == "+":
+        near = S.son_near_enb(cells, got[0])
+        if near is None:
+            print(f"  ! 25번 대상 ENB:{text} — {got[0]} 의 좌표가 없어 가까운 eNB 를 못 고른다", flush=True)
+            return None
+        got[-1] = near
+    have = {c.enb_id for c in cells}
+    if any(e not in have for e in got):
+        return None
+    return S.son_focus(cells, got, _son_n())
+
+
 def _auto_target(kind: str, cells: list[Cell], rng: random.Random,
                  routes=None, used: dict[str, int] | None = None) -> Target | None:
     """target 미지정 시 kind 별 기본 범위."""
@@ -411,8 +468,10 @@ def _auto_target(kind: str, cells: list[Cell], rng: random.Random,
             return None
         enb = mapped[rng.randrange(len(mapped))].enb_id
         return Target(cell_keys={c.cell_key for c in cells if c.enb_id == enb}, enb_id=enb)
+    if kind == "son_param_change":
+        return _son_target(cells, rng, used)
     if kind in _ROUTE_KINDS:
-        # 25번도 노선 구간이다(2026-11-07 · B안) — 정답 CORRIDOR 인데 방위각 띠(`corridor_cells`)는 도심
+        # 25번은 노선 구간이었다(2026-11-07 · B안 · 11-13 에 eNB 로 바꿨다 — 위 분기) — 정답 CORRIDOR 인데 방위각 띠(`corridor_cells`)는 도심
         # 셀 밀도에서 1km 안에 모여 10번 중 8번 POINT 였다. 노선 이웃 칸이 SON 이 손대는 전환 쌍이다.
         # 9번도 같다 — F-186 의 띠 15셀이 SCATTER 3.07km 였다(정답 CORRIDOR)
         target = _route_target(routes, rng, kind, used)
@@ -468,6 +527,12 @@ def _resolve_target(raw: str | None, kind: str, cells: list[Cell],
 
     if text.upper().startswith("ENB:"):
         num = text.split(":", 1)[1].strip()
+        if kind == "son_param_change":
+            return _son_enb_target(cells, num)
+        if "," in num:
+            # 쉼표 목록은 25번만 받는다 — 다른 kind 는 eNB 하나가 뜻이다(17번 정지는 `enb_id` 하나만 끈다)
+            print(f"  ! 대상 {text} — eNB 여러 개는 25번만 받는다", flush=True)
+            return None
         mine = [c for c in cells if c.enb_id == num]
         if not mine:
             return None
@@ -524,6 +589,9 @@ def _resolve_target(raw: str | None, kind: str, cells: list[Cell],
             return None
         keys = {c.cell_key for c in mine}
         anchor0 = next((c for c in mine if c.geo_status == "MAPPED"), None)
+        if kind == "son_param_change" and anchor0 is not None:
+            # 25번 — 범위 안 첫 매핑 셀의 eNB 전 셀(2026-11-13). 범위의 셀을 모두 출발 셀로 두면 eNB 장애가 아니다
+            return S.son_focus(cells, [anchor0.enb_id], _son_n())
         if kind in _PAIR_KINDS and anchor0 is not None:
             # 셀 쌍 장애는 범위 안 앵커에서 이웃과 짝을 짓는다 — ENB: 와 같은 이유
             anchor, band = corridor_cells(cells, rng, want=18, anchor=anchor0)
@@ -903,10 +971,8 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
         history.record(int(fault["fault_id"]), group, target_key(target.cell_keys))
         if fault["kind"] in _AUTO_NODE:
             history.record(int(fault["fault_id"]), _own_group(fault), target_key(target.cell_keys))
-    # 25번 — 실패를 셀 하나의 이웃 관계 1~2개로 좁힌다(`scenarios.son_focus`). **순환 기록 뒤다** —
-    # 순환은 고른 구간·띠 전체의 키로 비교하므로(`_route_target`) 좁힌 키를 적으면 같은 구간을 또 고른다
-    if int(spec.get("focus_pairs") or 0):
-        target = S.son_focus(target, int(spec["focus_pairs"]))
+    # 25번 좁히기(`son_focus`)는 대상을 만들 때 이미 했다(2026-11-13 · `_son_target`·`_son_enb_target`) — 전에는
+    # 노선 구간을 고른 뒤 여기서 셀 하나로 좁혔다
     if mode is not None:
         target.outage_mode = mode
     s = dict(spec)

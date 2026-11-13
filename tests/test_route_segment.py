@@ -323,12 +323,11 @@ def test_mobility_without_routes_keeps_the_azimuth_band_and_warns(capsys):
     assert "mobility 노선 구간을 못 골랐다" in capsys.readouterr().out
 
 
-def test_son_param_change_uses_the_route_segment_like_ho_interruption():
-    """25번도 노선 구간이다(2026-11-07 · B안) — 정답 CORRIDOR 인데 방위각 띠는 도심에서 POINT 가 됐다."""
+def test_son_param_change_no_longer_uses_the_route_segment():
+    """25번은 11-13 에 노선 구간에서 eNB 1~2개의 전 셀로 바뀌었다(`faults._son_target`) — 노선 정보가 정답지에 남지 않는다."""
     b = _build("son_param_change", routes=[_line_route()])
-    assert b.target.route_seg is not None
-    # 2026-11-09 — 구간은 노선에서 고르되 실패는 출발 셀 하나의 이웃 쌍 2개로 좁힌다(`scenarios.son_focus`)
-    assert all(x != y for x, y in b.target.cell_pairs) and len(b.target.cell_pairs) == 2
+    assert b.target.route_seg is None and b.target.son_enbs
+    assert all(x != y for x, y in b.target.cell_pairs) and b.target.cell_pairs
 
 
 def test_same_fault_id_and_seed_give_the_same_segment_across_builds():

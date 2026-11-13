@@ -2410,6 +2410,10 @@ function injScopes(p){
   const e=String(p.enb[0]), c=p.cells[0]||{};
   const nEnb=f=>new Set(D.cells.filter(f).map(x=>x.enb)).size;
   const out=[['one', T('이 eNB 만 ({e})',{e:enbName(e)}), `ENB:${e}`, 1]];
+  // 25번(SON)은 eNB 를 둘까지 받는다(2026-11-13) — 둘째는 사이트가 가장 가까운 eNB 다. 고르기는 생성기가 한다
+  // (`faults._son_enb_target` 의 `+`) — 화면과 생성기가 "가장 가까운"을 따로 재면 둘이 갈린다. 다른 시나리오는
+  // 생성기가 거절한다(주입 결과 메시지)
+  out.push(['near', T('이 eNB + 가장 가까운 eNB (25번)'), `ENB:${e},+`, 2]);
   if(c.tac!=null) out.push(['tac', T('같은 TAC {t}',{t:c.tac}), `TAC:${c.tac}`,
     nEnb(x=>String(x.tac)===String(c.tac))]);
   if(c.gu) out.push(['gu', T('같은 구 {g}',{g:c.gu}), `SGG:${c.gu}`,
