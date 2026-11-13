@@ -865,7 +865,7 @@ KIND_SPECS: dict[str, dict] = {
     # XDR 만으로는 `R-11` 이 `confidence_cap` 0.65 라 `R-17`(0.75)에 Top-1 을
     # 내준다 — `change_suspected` 와 같은 이유로 `TOP3` 다.
     "son_param_change": dict(
-        title="SON 파라미터 변경 후 계단형 저하 (H/O)",
+        title="기지국 설정 변경 후 계단형 저하 (SON)",
         truth_code="CHANGE_SUSPECTED", truth_category="CHANGE",
         # R-17 은 셀 쌍 전환 실패로 서지만 RAN_MOBILITY_ISSUE 를 낸다(11-04 25r4 에서 1위였다)
         # **대상은 eNB 1~2개의 전 셀이다**(2026-11-13 사용자 결정 · 전에는 노선 구간의 셀 하나). 파라미터는 eNB 에
@@ -919,7 +919,7 @@ KIND_SPECS: dict[str, dict] = {
         series=("lte_call", "transport"),
         scope_kind="CELL", expect_kpi="C-01",
     ),
-    # **자연재해 — 호 폭주 + 기지국 장애**(2026-11-04 사용자 결정 · CM_ERROR_SCENARIO 27 이 이것을
+    # **지진 — 통화 폭주 + 기지국 정지 + 문자 실패**(2026-11-14 개명 · 옛 이름 "자연재해 — 호 폭주 + 기지국 장애" · 2026-11-04 사용자 결정 · CM_ERROR_SCENARIO 27 이 이것을
     # 가리킨다). 지진(`earthquake`)을 대체한다 — 실제 재난에서 크게 보이는 것은 장비 손상이 아니라
     # 경보 뒤 **호 폭주**이고, 정지는 정전·전송로로 뒤따른다(총무성 백서 H23 · 포항 2017).
     # 상위 장비(SGW·PGW·MME)는 묶지 않는다. 국면은 kind 가 직접 만든다(`disaster_phase`) —
@@ -927,7 +927,7 @@ KIND_SPECS: dict[str, dict] = {
     # (호 폭주 + 몇몇 eNB 무호 + Emergency 접속 증가 · 2026-11-05 사용자 결정)이고, 프로브는 재난 종류를
     # 모르므로 지진이라 단정하지 않는다(graphio R-46). 재해는 망 밖 원인이라 `EXTERNAL` 이다
     "natural_disaster": dict(
-        title="자연재해 — 호 폭주 + 기지국 장애",
+        title="지진 — 통화 폭주 + 기지국 정지 + 문자 실패",
         truth_code="NATURAL_DISASTER_SUSPECTED", truth_category="EXTERNAL",
         expect_rules=("R-46",), expect_geo="CLUSTER",
         expect_alternatives={"R-36": "RAN_NODE_DOWN"},
@@ -2703,7 +2703,7 @@ def _quake_ring(plan, sc, intensity, rng, cell) -> bool:
 
 
 # --------------------------------------------------------------------------
-# J-SC-27 · natural_disaster — 자연재해 (호 폭주 + 기지국 장애)
+# J-SC-27 · natural_disaster — 지진 — 통화 폭주 + 기지국 정지 + 문자 실패
 # --------------------------------------------------------------------------
 #
 # 국면(장애 시작 분 기준 · **초기값**) —

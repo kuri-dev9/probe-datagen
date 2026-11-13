@@ -489,7 +489,8 @@ def test_enb_outage_emits_no_cplane_release_records_for_the_held_sessions(make):
 def test_the_old_earthquake_kind_is_still_a_separate_spec_with_its_own_behavior():
     assert "earthquake" in S.KIND_SPECS and "natural_disaster" in S.KIND_SPECS
     assert S.KIND_SPECS["earthquake"]["title"] != S.KIND_SPECS["natural_disaster"]["title"]
-    assert "자연재해" in S.KIND_SPECS["natural_disaster"]["title"]
+    t = S.KIND_SPECS["natural_disaster"]["title"]          # 2026-11-14 개명 — "지진 — 통화 폭주 + 기지국 정지 + 문자 실패"
+    assert "지진" in t and "기지국 정지" in t
     sc, _ = _unit_sc()
     eq = S.Scenario(id="E", start_minute=START, duration=25, **{**dict(S.KIND_SPECS["earthquake"]),
                     "kind": "earthquake", "target": sc.target})

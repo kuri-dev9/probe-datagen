@@ -167,5 +167,7 @@ def test_the_word_earthquake_is_not_in_the_27_truth():
     import json
 
     spec = S.KIND_SPECS["natural_disaster"]
-    text = json.dumps({k: str(v) for k, v in spec.items()}, ensure_ascii=False)
+    # 2026-11-14 — 제목은 사용자 결정으로 "지진 — 통화 폭주 + 기지국 정지 + 문자 실패" 가 됐다(사람이 읽는 이름).
+    # 정답·판정에 쓰는 나머지 칸(원인 코드·룰·대안)에는 여전히 지진을 단정하는 말이 없어야 한다
+    text = json.dumps({k: str(v) for k, v in spec.items() if k != "title"}, ensure_ascii=False)
     assert "지진" not in text and "earthquake" not in text.lower()
