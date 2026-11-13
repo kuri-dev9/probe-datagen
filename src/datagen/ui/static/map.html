@@ -872,7 +872,7 @@ const SEV_RANK={Critical:4, Major:3, Minor:2, Warning:1};
 //: 달리 본 것이다. 펼친 줄에는 조각마다 원래 칸 크기를 적는다
 const MESH_AXES=new Set(['MESH250','MESH500','MESH1K']);
 function partLabel(m, base){
-  return (m.axis==='GLOBAL'&&base.egress?T('도코모 본사'):MESH_AXES.has(m.axis)?T('체감 메시'):
+  return (m.axis==='GLOBAL'&&base.egress?T('도코모 본사'):MESH_AXES.has(m.axis)?T('체감 AREA'):
           PART_NAME[m.axis]||AXIS_NAME[m.axis]||GEO_NAME[m.axis]||m.axis)
     +' · '+(m.trigger_kpi||''); }
 function partGroups(h){
@@ -948,8 +948,9 @@ const coreOf=h=>(h.nodes||[]).filter(k=>!k.startsWith('pgw:'));
 // 추정 커버리지 원을 메시에 면적 비율로 나눈 것이다(`geo_coverage`).
 // 그래서 칸은 **"그 칸을 덮는 셀들의 체감이 나빴다"**이지 "단말이 그 칸에
 // 있었다"가 아니다. 선택 바에 그렇게 적는다.
-const GEO_NAME={MESH1K:T('1km 메시'), MESH500:T('500m 메시'), MESH250:T('250m 메시'),
-                ADM1:T('광역'), ADM2:T('구·시'), ADM3:T('정목'), GLOBAL:T('전국')};
+// 지역 단위 이름(2026-11-13 사용자 결정) — 시도·시군구·읍면동 · MESH 는 크기를 붙인 AREA(두 언어 모두 영어)
+const GEO_NAME={MESH1K:T('1km AREA'), MESH500:T('500m AREA'), MESH250:T('250m AREA'),
+                ADM1:T('시도'), ADM2:T('시군구'), ADM3:T('읍면동'), GLOBAL:T('전국')};
 //: 위치 없는 축 — 무슨 축인지는 적는다. "범위 없음"만 적으면 "위치를
 //: 모른다"로 읽히는데, 이것들은 **애초에 지역이 아닌** 장애다
 const AXIS_NAME={UE:T('단말 기종'), APN:'APN', DOMAIN:T('서비스 도메인')};
@@ -1223,7 +1224,7 @@ function drawGeoOf(h, col, box, only){
     if(g.kind==='rect'){ const [s_,w_,n_,e_]=g.b;
       q=el('path');
       q.setAttribute('d',`M${mx(w_)} ${-my(s_)}L${mx(e_)} ${-my(s_)}L${mx(e_)} ${-my(n_)}L${mx(w_)} ${-my(n_)}Z`);
-      q.dataset.t=T('{nm} {id}\n그 칸을 덮는 셀들의 체감이 나빴다 — 단말 실제 위치가 아니다',{nm,id:g.id}); }
+      q.dataset.t=T('{nm} {id}\n그 지역을 덮는 셀들의 체감이 나빴다 — 단말 실제 위치가 아니다',{nm,id:g.id}); }
     else if(g.kind==='ring'){ q=el('path');
       q.setAttribute('d','M'+g.ring.map(p=>`${mx(p[0])} ${-my(p[1])}`).join('L')+'Z');
       q.dataset.t=`${nm} ${g.name} (${g.id})`; }
@@ -1573,7 +1574,7 @@ function drawFocus(){
          :h.part&&(h.axis||!(h.enbs||[]).length)?'':`<span>eNB ${(h.enbs||[]).length}</span>`)
     + (!h.part&&pieces(h)?`<span>${pieces(h)}</span>`:'')
     + (evOn?`<span class=dimtag>${T(h.part?'선 = 이 이상징후의 범위':'선 = 장애 전체 범위')}</span>`:'')
-    + (nArea?`<span class=dimtag>${T('칸 = 이상징후가 판정한 메시·구역 {n}곳',{n:nArea.toLocaleString()})}</span>`:'')
+    + (nArea?`<span class=dimtag>${T('지역 = 이상징후가 판정한 AREA·행정구역 {n}곳',{n:nArea.toLocaleString()})}</span>`:'')
     + (nArea&&evtOf(h).areas_capped?`<span class=warn>${T('graphio 가 이상징후마다 {n}곳까지만 넘긴다 — 더 있을 수 있다',{n:GEO_CAP})}</span>`:'')
     + (core.length?`<span>${T('코어 {c}',{c:esc(core.join(', '))})}</span>`:'')
     + (h.root_code?`<span>${T('원인 {c}',{c:esc(h.root_code)})}${h.root_label?' — '+esc(h.root_label):''}</span>`:'')
@@ -1596,8 +1597,8 @@ function drawFocus(){
         + `<span class=dimtag>${T('graphio EV-12 노드 편향')}${h.bias.verdict?' — '+esc(h.bias.verdict):''}${T(' · 원인 확정 아님')}</span>`
       : !h.axis&&AXIS_NAME[h.axis_raw]&&!h.egress?`<span class=dimtag>${T('{ax} 축 — 지역과 무관',{ax:esc(AXIS_NAME[h.axis_raw])})}`
         + (h.axis_raw==='DOMAIN'?'':T(' · 특정 장비로 쏠리지 않았다'))+`</span>`:'')
-    + (!evOn&&h.axis&&h.axis.startsWith('MESH')?`<span class=dimtag>${T('칸 = 그 칸을 덮는 셀들의 체감 — 단말 실제 위치가 아니다')}</span>`:'')
-    + (!evOn&&h.axis==='ADM3'?`<span class=dimtag>${T('정목 경계 없음 — 중심점 근사')}</span>`:'')
+    + (!evOn&&h.axis&&h.axis.startsWith('MESH')?`<span class=dimtag>${T('지역 = 그 지역을 덮는 셀들의 체감 — 단말 실제 위치가 아니다')}</span>`:'')
+    + (!evOn&&h.axis==='ADM3'?`<span class=dimtag>${T('읍면동 경계 없음 — 중심점 근사')}</span>`:'')
     + (!evOn&&!h.part&&h.axis&&h.axis!=='GLOBAL'&&h.geo_ids.length>=GEO_CAP?`<span class=warn>${T('graphio 가 {n}곳까지만 넘긴다 — 더 있을 수 있다',{n:GEO_CAP})}</span>`:'')
     + (!evOn&&h.axis&&h.axis!=='GLOBAL'&&geoShapes(h).length===0?`<span class=warn>${T('구역 좌표를 찾지 못했다')}</span>`:'')
     + (!pts.length&&!h.axis&&!AXIS_NAME[h.axis_raw]?`<span class=warn>${T('지도에 그릴 범위가 없다')}</span>`

@@ -1,8 +1,8 @@
-"""15번 출퇴근 권장(`rush_hours`) · 25번 `select_geo` 와 `expect_geo` 분리 · 메시 칩 묶기 (2026-11-09 · 동구·케이 구현 고정).
+"""15번 출퇴근 권장(`rush_hours`) · 25번 `select_geo` 와 `expect_geo` 분리 · AREA 칩 묶기 (2026-11-09 · 동구·케이 구현 고정).
 
 * 15번은 출퇴근 시간대에만 서는 장애다 — 시나리오 선택 때 권장 시간대(07~09·17~19시, 초기값)와 가상 시각 버튼을 보인다. 안내일 뿐 막지 않는다.
 * 25번 정답 지리는 POINT 인데 대상은 노선 구간(CORRIDOR)으로 고른다 — 고르는 모양(`select_geo`)과 정답 모양(`expect_geo`)을 나눴다.
-* 지도 칩: 250m·500m·1km 메시 조각은 "체감 메시 · KPI" 한 칩이다(사용자 11-09 "응 묶어").
+* 지도 칩: 250m·500m·1km 메시 조각은 "체감 AREA · KPI" 한 칩이다(사용자 11-09 "응 묶어").
 DB·네트워크 없음 — 페이지 스크립트는 `node` 로만 본다(없으면 건너뛴다).
 """
 from __future__ import annotations
@@ -177,9 +177,9 @@ console.log(JSON.stringify([partGroups(h).map(g=>[g.label,g.idx]), partLabel(m('
     r = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=20)
     assert r.returncode == 0, r.stderr[-600:]
     groups, glob = json.loads(r.stdout)
-    assert groups[0] == ["체감 메시 · Q-02", [0, 1, 2]]                       # 세 크기가 한 칩
-    assert ["체감 메시 · Q-11", [3]] in groups                                 # KPI 가 다르면 따로
-    assert not any(g[0].startswith("체감 메시") and 4 in g[1] for g in groups)  # 다른 축은 안 섞인다
+    assert groups[0] == ["체감 AREA · Q-02", [0, 1, 2]]                       # 세 크기가 한 칩
+    assert ["체감 AREA · Q-11", [3]] in groups                                 # KPI 가 다르면 따로
+    assert not any(g[0].startswith("체감 AREA") and 4 in g[1] for g in groups)  # 다른 축은 안 섞인다
     assert glob.endswith(" · C-02")
 
 

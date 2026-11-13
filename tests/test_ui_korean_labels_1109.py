@@ -25,10 +25,10 @@ HQ_TITLE = ("NTT docomo 본사 (千代田区永田町2-11-1)\nPGW 16대를 한 �
 KEYS = {
     HQ_TITLE: "NTT docomo 本社 (千代田区永田町2-11-1)\nPGW 16台を1点に集約 — 実際のPGW位置ではない\nクリックするとSGWから集まる線が出る",
     "본사": "本社",
-    "정목": "丁目",
+    "읍면동": "町丁目",
     "APN · docomo 본사": "APN · docomo 本社",
     "외부(APP·PAY) · docomo 본사": "外部(APP·PAY) · docomo 本社",
-    "정목 경계 없음 — 중심점 근사": "丁目境界なし — 中心点で近似",
+    "읍면동 경계 없음 — 중심점 근사": "町丁目境界なし — 中心点で近似",
     "NTT docomo 본사 · PGW (대표)": "NTT docomo 本社 · PGW (代表)",
     "망 밖 · docomo 본사": "網外 · docomo 本社",
 }
@@ -44,7 +44,7 @@ def test_ja_map_is_a_dict_with_new_keys():
         assert ui._JA_MAP.get(k) == v, k
 
 
-@pytest.mark.parametrize("key", ["본사", "정목"])
+@pytest.mark.parametrize("key", ["본사", "읍면동"])
 def test_bare_keys_appear_once_in_the_map_source(key):
     # 딕셔너리 리터럴은 중복 키를 조용히 덮는다 — 소스에서 센다
     n = len(re.findall(r'(?m)^\s*"%s":|[{,]\s*"%s":' % (key, key), ja_map_src()))
@@ -57,7 +57,7 @@ def test_no_japanese_word_keys_left_in_the_map():
 
 
 def test_japanese_values_are_kept():
-    assert "本社" in ui._JA_MAP["본사"] and ui._JA_MAP["정목"] == "丁目"
+    assert "本社" in ui._JA_MAP["본사"] and ui._JA_MAP["읍면동"] == "町丁目"
 
 
 def _page_text(name):
@@ -73,8 +73,8 @@ def test_hq_title_and_cap_are_korean_and_match_key():
 
 
 def test_source_strings_match_keys():
-    for lit in ["T('APN · docomo 본사')", "T('외부(APP·PAY) · docomo 본사')", "T('정목 경계 없음 — 중심점 근사')",
-                "T('NTT docomo 본사 · PGW (대표)')", "ADM3:T('정목')"]:
+    for lit in ["T('APN · docomo 본사')", "T('외부(APP·PAY) · docomo 본사')", "T('읍면동 경계 없음 — 중심점 근사')",
+                "T('NTT docomo 본사 · PGW (대표)')", "ADM3:T('읍면동')"]:
         assert lit in SRC, lit
         assert lit[lit.index("'") + 1:lit.rindex("'")] in ui._JA_MAP if lit.startswith("T(") else True
 
