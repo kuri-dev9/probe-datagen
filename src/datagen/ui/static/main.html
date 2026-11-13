@@ -835,13 +835,42 @@ const vclockText = f => {
 // 자동 대상은 생성기가 고른 것을 함께 — 직접 고른 대상은 그 값이 곧 대상이다
 const targetText = f => f.target ? f.target
   : (f.resolved_target ? T("자동") + " → " + f.resolved_target : T("자동"));
+// 대상 문자열을 쉬운 말로(사용자 11-14 — 일반인이 봐도 알게). 원문은 툴팁·상세 줄에 남는다.
+// 문법의 정본은 `faults._resolve_target`·`_disaster_mode`·`ROUTE_RANGE_HEAD` 다. 모르는 꼴은 원문 그대로 둔다
+function targetPlain(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return T("자동 (생성기가 고름)");
+  const [head, ...rest] = text.split(":"), arg = rest.join(":").trim(), up = head.toUpperCase();
+  if (rest.length && (up === "LOCAL" || up === "WIDE"))
+    return T(up === "WIDE" ? "넓은 범위" : "좁은 범위") + (arg ? " · " + targetPlain(arg) : "");
+  if (rest.length) {
+    if (up === "ENB") return T("기지국 {n}곳 (지정)", {n: arg.split(",").filter(x => x.trim()).length});
+    if (up === "BOX") return T("지도에서 고른 사각형 범위");
+    if (up === "TAC") return T("위치 등록 구역 {v}", {v: arg});
+    if (up === "SGG") return T("시군구 한 곳 (지정)");
+    if (up === "APN") return T("접속 통로(APN) {v}", {v: arg});
+    if (up === "DOMAIN") return T("서비스 {v}", {v: arg});
+    if (up === "ROUTE%") return T("노선 범위 {v}%", {v: arg});
+    if (up === "QUAKE") {
+      const q = arg.split(",").map(x => x.trim()), n = Number(q[2]);
+      return q[2] && Number.isFinite(n) ? T("진도 {v} 지진 (진앙 지정)", {v: q[2]}) : T("지진 (진앙 지정)");
+    }
+  }
+  const node = /^(SGW|MME|PGW)-(\d+)$/i.exec(text);
+  if (node) return T("{k} {n}번 장비", {k: node[1].toUpperCase(), n: Number(node[2])});
+  return text;
+}
+// 목록·상세 창에 보이는 대상 — 쉬운 말. 원문(직접 고른 값·생성기가 고른 값)은 `targetText` 로 툴팁에
+const targetShown = f => targetPlain(f.target);
 function fmHead(f) {
   $("fm-m").textContent = [T("시작") + " " + ts(f.start_ts), T("지속") + " " + durText(f),
-    T("대상") + " " + targetText(f), shownStatus(f), memoOf(f)].filter(Boolean).join(" · ");
+    T("대상") + " " + targetShown(f), statusPlain(f), memoOf(f)].filter(Boolean).join(" · ");
+  $("fm-m").title = T("대상 원문") + " " + targetText(f);
   const ctx = f.inject_context && typeof f.inject_context === "object" ? f.inject_context : null;
   $("fm-c").textContent = [T("생성량") + " " + volText(f), T("가상 시각") + " " + vclockText(f),
-    T("실제 대상") + " " + (f.resolved_target || T("기록 전")),
-    ctx && ctx.gen_rev ? T("생성기") + " " + ctx.gen_rev : ""].filter(Boolean).join(" · ");
+    T("실제 대상") + " " + (f.resolved_target || T("기록 전"))].join(" · ");
+  // 생성기 판(`gen_rev`)은 기술 정보라 줄에 두지 않고 마우스를 올리면 보인다(사용자 11-14)
+  $("fm-c").title = ctx && ctx.gen_rev ? T("생성기") + " " + ctx.gen_rev : "";
   // **취소는 설명 화면에서만**(2026-11-11 사용자 요청 — 목록의 상태 옆 버튼은 지웠다). 진행 중·시작 전만
   const b = $("fm-cancel");
   b.hidden = !["pending", "active"].includes(f.status);
@@ -926,6 +955,9 @@ const stoppedMin = f => {
   return Math.max(0, Math.round((Date.parse(f.updated_at) - Date.parse(f.start_ts)) / 60000));
 };
 const shownStatus = f => stoppedMin(f) == null ? f.status : "done";
+// 상태는 쉬운 말로 보인다(사용자 11-14) — 칸의 색·정렬은 원래 값(`shownStatus`)으로 하고 원래 값은 툴팁에
+const STATUS_PLAIN = {pending: "시작 전", active: "진행 중", done: "끝남", cancelled: "취소됨"};
+const statusPlain = f => T(STATUS_PLAIN[shownStatus(f)] || shownStatus(f));
 const durText = f => { const m = stoppedMin(f);
   return m == null ? T("{n}분", {n: f.duration_min}) : T("{n}분 → {m}분에 중간 종료", {n: f.duration_min, m}); };
 let FSORT = {k: "id", dir: -1};
@@ -982,11 +1014,11 @@ function renderFaults() {
       <tr class="${shownStatus(f)}" data-fid="${f.fault_id}">
         ${td(f.fault_id)}
         ${nameTd(f)}
-        ${td(f.target || (f.resolved_target ? "→ " + f.resolved_target : T("자동")), targetText(f))}
+        ${td(targetShown(f), targetShown(f) + "\n" + T("대상 원문") + " " + targetText(f))}
         ${td(mdhm(f.start_ts), ts(f.start_ts))}
         ${td(stoppedMin(f) == null ? T("{n}분", {n: f.duration_min}) : T("{m}/{n}분", {n: f.duration_min, m: stoppedMin(f)}), durText(f))}
         ${td(volText(f), T("생성량") + " " + volText(f) + " · " + T("가상 시각") + " " + vclockText(f))}
-        <td><span class="st st-${shownStatus(f)}"${stoppedMin(f) == null ? "" : ` title="${esc(durText(f))}"`}>${shownStatus(f)}</span></td>
+        <td><span class="st st-${shownStatus(f)}" title="${esc(shownStatus(f) + (stoppedMin(f) == null ? "" : " · " + durText(f)))}">${esc(statusPlain(f))}</span></td>
       </tr>`).join("");
   if (!html) html = `<tr><td colspan="7" class="dim">${T("장애 이력이 없다")}</td></tr>`;
   // **마지막 쪽도 20줄 높이** — 빈 줄로 채워 카드 높이가 쪽마다 같다

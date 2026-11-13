@@ -1249,6 +1249,18 @@ function unitTag(h){
   if(h.event_unit==='L1_BUNDLE') return `<span class="ub l1">${T('장애')}</span>`;
   return '';
 }
+//: 일반인용 이름(사용자 11-14 — 일반인이 봐도 알게). 심각도·KPI·원인은 이름으로 보이고 코드는 툴팁(title)에 남긴다.
+//: KPI 이름은 시나리오 용어집(`/api/glossary`)에서 — 없는 코드는 코드 그대로 둔다(지어내지 않는다)
+const SEV_PLAIN={CRITICAL:'심각',MAJOR:'주요',MINOR:'경미',WARNING:'주의'};
+const sevName=v=>T(SEV_PLAIN[String(v||'').toUpperCase()]||String(v||''));
+const sevTag=v=>`<span title="${esc(v)}">${esc(sevName(v))}</span>`;
+let KPI_GL={};
+fetch('/api/glossary').then(r=>r.json()).then(d=>{ KPI_GL=(d&&d.terms)||{}; renderList(); }).catch(()=>{});
+const kpiName=v=>String(v||'').split(',').map(k=>k.trim()).filter(Boolean)
+  .map(k=>{ const t=KPI_GL[k], x=t&&(t[LANG]||t.ko); return x&&x.s ? x.s : k; }).join(', ');
+const kpiTag=v=>`<span title="${esc(v)}">${esc(kpiName(v))}</span>`;
+//: 원인 — graphio 가 준 이름(`root_label`)을 먼저, 코드는 툴팁. 이름이 없으면 코드다
+const causeTag=(code,label)=>`<span title="${esc(code||'')}">${esc(label||code||'?')}</span>`;
 const headOf=h=>isEvent(h)&&h.root_label&&h.root_code!=='UNDETERMINED' ? h.root_label : h.title;
 const pieces=h=>(h.event_members_cnt||1)>1 ? T('이상징후 {n}건',{n:h.event_members_cnt}) : '';
 const confOf=h=>isEvent(h)&&h.confidence!=null&&h.root_code&&h.root_code!=='UNDETERMINED' ? ` · ${Math.round(h.confidence*100)}%` : '';
@@ -1288,10 +1300,10 @@ function renderList(){
          pg.length?`PGW ${esc(pg.join(' '))}`:'', geo].filter(Boolean).join(' · ')
       : (h.centroid_lat!=null ? T('중심 좌표만') : `<span class=na>${T('지도에 범위 없음')}</span>`);
     return `<button class="it ${sev}${h.live?'':' old'}${h.incident_id===FOCUS?' on':''}${LINK&&LINK.ids.has(h.incident_id)?' hl':''}" data-id="${esc(h.incident_id)}">`
-      + `<span class=t>${h.live?`<span class=lv>${T('지금')}</span>`:''}${unitTag(h)}${esc(h.severity)} · ${esc(headOf(h))}${confOf(h)}</span>`
+      + `<span class=t>${h.live?`<span class=lv>${T('지금')}</span>`:''}${unitTag(h)}${sevTag(h.severity)} · ${esc(headOf(h))}${confOf(h)}</span>`
       + `<span class=m>${esc(md(h.opened_ts))} ${esc(hm(h.opened_ts))}`
       + (hm(h.updated_ts)&&hm(h.updated_ts)!==hm(h.opened_ts)?`~${esc(hm(h.updated_ts))}`:'')
-      + ` · ${esc(h.trigger_kpi)} · ${where}</span></button>`;
+      + ` · ${kpiTag(h.trigger_kpi)} · ${where}</span></button>`;
   }).join('');
 }
 // 이력에서 하나를 누른다 — 같은 것을 다시 누르면 푼다
@@ -1554,14 +1566,14 @@ function drawFocus(){
     + (ms.length>1?gs.map((g,k)=>`<button data-part="${k}" class="${PART===k?'on':''}" title="${esc(g.idx.map(i=>ms[i].title||'').join(' / '))}">`
         + `${k+1}. ${esc(g.label)}${g.idx.length>1?` ×${g.idx.length}`:''}</button>`).join(''):'')
     + `</span>`;
-  bar.innerHTML=`<b>${unitTag(base)}${esc(base.severity)} · ${esc(headOf(base))}${confOf(base)}</b>`
+  bar.innerHTML=`<b>${unitTag(base)}${sevTag(base.severity)} · ${esc(headOf(base))}${confOf(base)}</b>`
     + `<button id=unfocus>${T('해제')}</button><i></i>`
     + chips
-    + (h.part?`<span class=warn>${T('이상징후 {k}/{n}',{k:PART+1,n:gs.length})} · ${esc(h.severity)} · ${esc(h.title||'')}`
+    + (h.part?`<span class=warn>${T('이상징후 {k}/{n}',{k:PART+1,n:gs.length})} · ${sevTag(h.severity)} · ${esc(h.title||'')}`
         + (h.confidence!=null&&h.root_code&&h.root_code!=='UNDETERMINED'?` · ${Math.round(h.confidence*100)}%`:'')+`</span>`:'')
     // 묶음이면 조각마다 무엇(축 값)·결론을 한 줄씩 — 결론이 달라도 숨기지 않는다
     + (h.part&&h.part.group?h.part.group.map(m=>`<span>${MESH_AXES.has(m.axis)?esc(GEO_NAME[m.axis])+' ':''}${esc((m.axis_vals||[]).slice(0,3).join(', ')||m.incident_id)}`
-        + ` — ${esc(m.root_code||'?')}${m.root_code&&m.root_code!=='UNDETERMINED'&&m.confidence!=null?` ${Math.round(m.confidence*100)}%`:''}</span>`).join(''):'')
+        + ` — ${causeTag(m.root_code,m.root_label)}${m.root_code&&m.root_code!=='UNDETERMINED'&&m.confidence!=null?` ${Math.round(m.confidence*100)}%`:''}</span>`).join(''):'')
     // 뗀 셀 — 사건 범위가 아니라는 것과 graphio 가 적은 이유를 그대로(불변규칙 18)
     + (h.part&&h.part.detached?`<span class=warn>${T('이 이상징후의 셀 {n}개는 장애에서 뗐다',{n:h.part.detached})}`
         + (h.part.detached_kpis.length?` (${esc(h.part.detached_kpis.join(', '))})`:'')
@@ -1569,7 +1581,7 @@ function drawFocus(){
     + `<span>${esc(md(h.opened_ts))} ${esc(hm(h.opened_ts))}`
     + (hm(h.updated_ts)&&hm(h.updated_ts)!==hm(h.opened_ts)?`~${esc(hm(h.updated_ts))}`:'')
     + (h.live?T(' · 지금 진행'):T(' · 지난 장애'))+`</span>`
-    + `<span>${esc(h.trigger_kpi)}</span>`
+    + `<span>${kpiTag(h.trigger_kpi)}</span>`
     + (ev?`<span>${T(h.part?'이상징후 범위 eNB {e} · 셀 {c}':'장애 범위 eNB {e} · 셀 {c}',{e:ev.enbs.length.toLocaleString(), c:ev.cells.toLocaleString()})}</span>`
          :h.part&&(h.axis||!(h.enbs||[]).length)?'':`<span>eNB ${(h.enbs||[]).length}</span>`)
     + (!h.part&&pieces(h)?`<span>${pieces(h)}</span>`:'')
@@ -1577,7 +1589,7 @@ function drawFocus(){
     + (nArea?`<span class=dimtag>${T('지역 = 이상징후가 판정한 AREA·행정구역 {n}곳',{n:nArea.toLocaleString()})}</span>`:'')
     + (nArea&&evtOf(h).areas_capped?`<span class=warn>${T('graphio 가 이상징후마다 {n}곳까지만 넘긴다 — 더 있을 수 있다',{n:GEO_CAP})}</span>`:'')
     + (core.length?`<span>${T('코어 {c}',{c:esc(core.join(', '))})}</span>`:'')
-    + (h.root_code?`<span>${T('원인 {c}',{c:esc(h.root_code)})}${h.root_label?' — '+esc(h.root_label):''}</span>`:'')
+    + (h.root_code?`<span>${T('원인 {c}',{c:causeTag(h.root_code,h.root_label)})}</span>`:'')
     + (h.axis==='GLOBAL'?`<span class=warn>${T('전국 장애 — 특정 지역이 아니다')}</span>`
        : h.axis&&!evOn?`<span>${T('{geo} {n}곳',{geo:esc(GEO_NAME[h.axis]||h.axis), n:h.geo_ids.length})}</span>`:'')
     + (!h.axis&&AXIS_NAME[h.axis_raw]?`<span>${esc(AXIS_NAME[h.axis_raw])} ${esc((h.axis_vals||[]).join(', '))}</span>`:'')
@@ -2529,16 +2541,15 @@ function drawIncidents(){
                : Number(i.affected_subscribers).toLocaleString();
     const hm=v=>String(v||'').slice(11,16);
     return `<div class="inc ${esc(i.severity)}">`
-      + `<h5>${esc(i.severity)} · ${esc(i.title)}</h5>`
-      + `<p>${esc(i.trigger_kpi)}`+T(' · 셀 {n}',{n:i.cell_cnt==null?'—':i.cell_cnt})
+      + `<h5>${sevTag(i.severity)} · ${esc(i.title)}</h5>`
+      + `<p>${kpiTag(i.trigger_kpi)}`+T(' · 셀 {n}',{n:i.cell_cnt==null?'—':i.cell_cnt})
       + T(' · 영향 {s} ({i})',{s:esc(subs), i:esc(imp)})
       + ` · ${esc(String(i.opened_ts||'').slice(5,10))} ${esc(hm(i.opened_ts))}`
       + (i.updated_ts && hm(i.updated_ts)!==hm(i.opened_ts) ? `~${esc(hm(i.updated_ts))}` : '')
       + (i.status?` · ${esc(i.status)}`:'') + `</p>`
       + (i.statement_ko ? `<p class=why>${esc(i.statement_ko)}</p>` : '')
       + (i.root_code
-          ? `<p class=code>${esc(i.root_code)}`
-            + (i.root_label?` — ${esc(i.root_label)}`:'')
+          ? `<p class=code>${causeTag(i.root_code,i.root_label)}`
             + (i.confidence==null?'':T(' · 확신도 {p}%',{p:(i.confidence*100).toFixed(0)}))
             + `</p>`
           : '<p class=code>'+T('원인 분석 없음 — RCA 가 아직 돌지 않았다')+'</p>')

@@ -87,6 +87,16 @@ def api_scenario_fault_volume(fault: str):
     return {"fault": fid, "volume": found[0] if found else None, "volumes": found}
 
 
+@router.get("/api/glossary")
+def api_glossary():
+    """용어집만 — 지도 화면의 장애 이력이 KPI 코드를 쉬운 이름으로 보인다(사용자 11-14 · 일반인이 봐도 알게).
+
+    시나리오 자료(수백 KB)를 통째로 받지 않으려고 따로 둔다. 없거나 깨지면 ``terms`` 가 비고 화면은 코드를 그대로 둔다
+    """
+    gloss = _read_report(SCENARIO_GLOSSARY, "terms", dict)
+    return {"terms": gloss["doc"]["terms"] if gloss["ok"] else {}}
+
+
 @router.get("/api/scenario-report")
 def api_scenario_report(volume: int = 15):
     """요청마다 파일을 읽는다 — 캐시하면 재시작 전까지 옛 판정이 보인다.

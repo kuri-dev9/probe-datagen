@@ -41,7 +41,7 @@
   .unk { color:var(--yellow); }
   .dim { color:var(--dim); }
   details.sc { background:var(--panel); border:1px solid var(--line); border-radius:8px; margin-bottom:6px; }
-  details.sc>summary { display:grid; grid-template-columns:24px minmax(130px,1fr) 58px 168px minmax(0,2.4fr); gap:10px;
+  details.sc>summary { display:grid; grid-template-columns:24px minmax(130px,1fr) 58px 300px minmax(0,2fr); gap:10px;
             align-items:baseline; padding:6px 12px; cursor:pointer; list-style:none; }
   summary::-webkit-details-marker { display:none; }
   details.sc>summary:hover { background:var(--hover); border-radius:8px; }
@@ -119,6 +119,19 @@
   .tag { display:inline-block; margin-left:6px; padding:0 6px; border:1px solid var(--yellow);
          border-radius:999px; font-size:10.5px; color:var(--yellow); white-space:nowrap; }
   .sub { margin-top:12px; }
+  /* 일반인용 요약 세 칸(사용자 11-14 — "실제 결과를 다 보여 주지 말고 일반인이 봐도 알게").
+     기술 상세는 그 아래 "자세히 보기" 하나로 접는다. 지우지 않는다 */
+  .plain { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+  .plain>div { background:#f1f3f5; border:1px solid var(--line); border-radius:8px; padding:9px 12px; }
+  .plain>div.r-ok { border-color:var(--green); } .plain>div.r-warn { border-color:var(--yellow); }
+  .plain>div.r-bad { border-color:var(--red); }
+  .plain h3 { margin-bottom:6px; font-size:12px; }
+  .plain p { margin:0; font-size:13px; line-height:1.6; }
+  .plain .big { font-size:15px; font-weight:700; margin-bottom:8px; }
+  .plain .auto { margin-top:6px; font-size:11px; color:var(--dim); }
+  .psg { display:flex; flex-wrap:wrap; gap:4px; }
+  .tech>.sec:first-child { margin-top:10px; }
+  @media (max-width:980px) { .plain { grid-template-columns:1fr; } }
 </style>
 </head>
 <body>
@@ -148,6 +161,11 @@ const SG_STATE=[['ok','정상','✓','ok'],['partial','일부','△','warn'],['f
                 ['na','해당 없음','–','dim'],['unknown','미평가','?','dim']];
 //: 단계 칩의 짧은 이름 — 키(`D`·`L1`…)는 자료 값이라 그대로 두고 보이는 글자만 graphio 이름으로(2026-11-12)
 const SG_SHORT={D:'D',L1:'장애',L2:'통합',L3:'AI'};
+//: 일반인용 단계 이름(사용자 11-14) — 목록 줄·요약 칸이 쓴다. 원래 이름(`STAGES`)은 마우스를 올리면 나온다
+const SG_PLAIN={D:'이상 찾기',L1:'원인 판단',L2:'여러 장애 묶기',L3:'AI 설명'};
+//: 결과 한 줄 — `status` 를 문장으로. 표에 없는 값은 "상태 미확인"으로 둔다(`stName`)
+const ST_PLAIN={pass:'맞혔습니다',partial:'일부만 맞혔습니다',missed:'못 잡았습니다',pending:'아직 판정 전입니다',
+                not_run:'아직 돌려 보지 않았습니다',excluded:'이번 검증에서 뺀 시나리오입니다'};
 const REACHED=[['none','도달 없음'],['D','D'],['L1','장애'],['L2','통합 장애'],['L3','AI']];
 //: L3 단계는 **문답 검사(`latest.l3`)로만** 채운다(사용자 11-09) — 옛 `stages.L3`(도달·한 줄 소감)는 쓰지 않는다.
 //: 검사가 없으면 미평가다. 칸 뒤 괄호는 통과한 질의 회차 수다
@@ -270,10 +288,39 @@ const minutes=v=>v==null||v==='' ? unk() : esc(T('{n}분',{n:v}));
 //: 장애 ID — 누르면 그 회차의 탐지 이력을 지도로 연다(2026-11-09). `F-121` 꼴이 아니면 글자로 둔다
 const fmap=v=>{ const m=/^F-?(\d+)$/.exec(v==null?'':String(v).trim());
   return m ? `<a class=fmap href="#" data-fault="${m[1]}" title="${esc(T('이 회차를 지도에서 보기'))}">${esc(v)}</a><span class=fmsg></span>` : val(v); };
-// 목록 줄의 네 칸
+// 목록 줄의 네 칸 — 보이는 이름은 쉬운 말, 원래 약어·이름은 툴팁(사용자 11-14)
 const sgCells=s=>'<span class=sgs>'+STAGES.map(([k,name])=>{ const [st,lb,mark,c]=sgInfo(sgState(s,k));
   const n=k==='L3' ? l3Count(s.latest&&s.latest.l3) : '';
-  return `<span class="sg g-${c}" title="${esc(T(name))}: ${esc(T(lb))}">${esc(T(SG_SHORT[k]||k))} ${mark}${n?` (${n})`:''}</span>`; }).join('')+'</span>';
+  return `<span class="sg g-${c}" data-tip="${esc(k)} · ${esc(T(name))}: ${esc(T(lb))}">${esc(T(SG_PLAIN[k]||k))} ${mark}${n?` (${n})`:''}</span>`; }).join('')+'</span>';
+//: 요약 칸 ② 의 자동 문장 — `latest.plain` 이 비었을 때만. **기록된 값만 쓴다**(탐지까지 분·판정 원인의
+//: 용어집 이름). "처음엔 맞혔다가 바뀌었다" 같은 사정은 값으로 알 수 없어 판정하는 사람이 `plain` 에 쓴다
+const causeName=c=>{ const t=c&&GL[c]&&(GL[c][LANG]||GL[c].ko); return t ? t.s : c; };
+function plainAuto(s){
+  const l=s.latest||{}, out=[];
+  if(l.detect_min!=null&&l.detect_min!=='')
+    out.push(Number(l.detect_min)===0 ? T('주입하자마자 이상을 찾았습니다.') : T('주입하고 {n}분 뒤에 이상을 처음 찾았습니다.',{n:l.detect_min}));
+  else if(stOf(s)==='missed') out.push(T('이상을 찾지 못했습니다.'));
+  if(l.cause==='UNDETERMINED') out.push(T('원인은 정하지 못했습니다(판단 보류).'));
+  else if(l.cause) out.push(T('시스템이 고른 원인은 「{c}」입니다.',{c:causeName(l.cause)}));
+  return out.join(LANG==='ja' ? '' : ' ');     // 일본어는 문장 사이를 띄우지 않는다
+}
+//: 펼친 카드 맨 위의 요약 세 칸 — ① 무슨 일이 생기나 ② 시스템이 무엇을 찾았나 ③ 결과
+function plainTop(s){
+  const l=s.latest||{}, k=stOf(s), what=tr(HOW[String(s.no)],'brief')??s.what;
+  const auto=!l.plain, found=l.plain||plainAuto(s);
+  const rc=(STATUS.find(y=>y[0]===k)||[])[2]||'warn';
+  const box=(t,b,c='')=>`<div${c?` class=${c}`:''}><h3>${esc(T(t))}</h3>${b}</div>`;
+  return `<div class=plain>`
+    +box('무슨 일이 생기나',`<p>${what==null?unk():esc(what)}</p>`)
+    +box('시스템이 무엇을 찾았나',found ? `<p>${esc(found)}</p>`
+        +(auto?`<p class=auto>${esc(T('기록된 값으로 자동으로 만든 문장입니다'))}</p>`:'')
+      : `<p class=dim>${esc(T('아직 기록이 없습니다'))}</p>`)
+    +box('결과',`<div class="big s-${rc}">${esc(T(ST_PLAIN[k]||'상태 미확인'))}</div><div class=psg>`
+      +STAGES.map(([g,name])=>{ const [,lb,mark,c]=sgInfo(sgState(s,g));
+        return `<span class="sg g-${c}" data-tip="${esc(g)} · ${esc(T(name))}: ${esc(T(lb))}">${esc(T(SG_PLAIN[g]))} ${mark}</span>`; }).join('')
+      +`</div>`,'r-'+rc)
+    +`</div>`;
+}
 // 펼친 카드 맨 위의 단계 표
 const sgTable=s=>`<div class=stg>`
   +table(STAGES,['단계','상태','내용'],([k,name])=>{
@@ -343,7 +390,10 @@ function detail(s){
   const desc=Array.isArray(lines)&&lines.length
     ? '<div class=desc>'+lines.map(x=>`<p>${val(x)}</p>`).join('')+'</div>' : `<p>${val(s.what)}</p>`;
   const same=h.same_as!=null ? `<span class=tag>${esc(T('{n}번과 같은 데이터',{n:h.same_as}))}</span>` : '';
-  return `<div class=body>`
+  // 요약 세 칸 아래로 기존 구역을 전부 접는다 — 지우지 않는다(사용자 11-14)
+  return `<div class=body>`+plainTop(s)
+    +`<details class=fold data-k="${esc(s.no+':tech')}"${OPEN.has(s.no+':tech')?' open':''}>`
+    +`<summary>${esc(T('자세히 보기 (기술 상세)'))}</summary><div class=tech>`
     +sec(esc(T('시나리오 설명')),desc)
     +sec(`${esc(T('단계별 상태'))} · ${esc(T('도달 단계'))} ${esc(reachedName(reachedOf(s)))}`+hint('field:reached'),sgTable(s))
     +sec(esc(T('만드는 법'))+same,
@@ -375,7 +425,7 @@ function detail(s){
       table(s.history,['장애 ID','시각','상태','L3','요약'],x=>[fmap(x.fault),val(x.at),
         x.status==null?unk():`<span class="${stCls(x.status)}">${esc(stName(x.status))}</span>`,
         l3Badge(l3OfFault(s,x.fault)),val(x.summary)])) : '')
-    +`</div>`;
+    +`</div></details></div>`;
 }
 let DOC=null, HOW={}, TIMING={}, RAW=null, PICK='all', JA_LEFT=0, HASH_DONE=false, L3LOG=[], L3BROKEN=0;
 const OPEN=new Set();
@@ -424,7 +474,7 @@ function render(){
     +`<div class=chips><span class="lb gl" data-tip="${esc((GL['field:reached']?.[LANG]||GL['field:reached']?.ko||{}).l||'')}">${esc(T('도달 단계'))}</span>`
     +rk.map(k=>chip('r:'+k,'▸',reachedName(k),cnt(s=>reachedOf(s)===k),'')).join('')+`</div>`
     +`<table id=mx><tr><th class=rw>${esc(T('단계별'))}</th>${SG_STATE.map(x=>`<th class="s-${x[3]}">${x[2]} ${esc(T(x[1]))}</th>`).join('')}</tr>`
-    +STAGES.map(([k,name])=>`<tr><th class=rw>${esc(T(name))}</th>`+SG_STATE.map(([st,,,c])=>{ const key=`s:${k}:${st}`, v=cnt(s=>sgState(s,k)===st);
+    +STAGES.map(([k,name])=>`<tr><th class="rw gl" data-tip="${esc(k)} · ${esc(T(name))}">${esc(T(SG_PLAIN[k]))}</th>`+SG_STATE.map(([st,,,c])=>{ const key=`s:${k}:${st}`, v=cnt(s=>sgState(s,k)===st);
       return `<td class=m-${v?c:'z'}><button data-k="${key}" class="${PICK===key?'on':''}"><b>${v}</b></button></td>`;
     }).join('')+`</tr>`).join('')+`</table>`;
   const notes=Array.isArray(DOC.notes)?DOC.notes:[];
