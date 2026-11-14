@@ -81,6 +81,10 @@ pemdb1:
   geo_dong_shapes: /app/data/geo/jp/dong_shapes.json  # 읍면동 모양 (graphio geo-chome)
   # 장애 현황을 받아 오는 graphio API. **컨테이너 안 이름이다**
   graphio_api: http://web:8008
+  # 27번 지진 eNB 지반 증폭률(J-SHIS ARV · `tools/build_quake_arv.py` 가 만든다 · 2026-11-15). git 밖이지만
+  # 이미지에는 `COPY data/` 로 들어간다 — gen 재빌드 뒤에 보인다. 파일이 없으면 경고 뒤 1.0(거리만)이다
+  fault:
+    quake_arv_path: /app/data/quake/enb_arv.csv
   # 장애 주입 정답 파일. **베이스값은 호스트 기준 상대경로**
   # (`../graphio-probe-rca/...`)라 컨테이너에서는 `/app/..` = `/` 로 풀려
   # `/graphio-probe-rca` 를 만들려다 `PermissionError` 로 **gen 이 죽는다**.
