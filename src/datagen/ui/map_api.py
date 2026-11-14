@@ -703,7 +703,7 @@ def _bias_fetch(base: str, iid: str, axis_raw: str | None, dns_case: bool) -> di
 
 
 def _attach_dong(hist: list[dict]) -> None:
-    """ADM3(읍면동) 축의 **중심점과 모양**을 붙인다 — `CM_DONG_JP` 는 이름·중심좌표뿐이다.
+    """ADM3(읍면동) 축의 **중심점과 모양**을 붙인다 — 읍면동 표(`CM_GEO_UNIT` ADM3)는 이름·중심좌표뿐이다.
 
     모양(`rings`)은 graphio `geo-chome` 이 실제 정목 경계를 읍면동마다 이어 붙인 것이다(2026-11-14 ·
     graphio 지도와 같은 파일). 모양이 없는 읍면동만 화면이 중심점 원으로 그리고 "경계 없음"으로 센다
@@ -733,20 +733,34 @@ def _dong_shapes() -> dict[str, list]:
 
 
 def _dong_at(ids: list[str]) -> dict[str, dict]:
-    """읍면동 코드 → 이름·중심점(+ 모양이 있으면 `rings`). DB 가 안 닿으면 빈 채로 돌려준다."""
+    """읍면동 코드 → 이름·중심점(+ 모양이 있으면 `rings`). DB 가 안 닿으면 빈 채로 돌려준다.
+
+    **읍면동 정본은 graphio 의 `CM_GEO_UNIT` ADM3 다**(2026-11-15 B안). 그날부터 읍면동이 실제 町(9자리 ·
+    e-Stat)이라 `CM_DONG_JP`(생성기의 합성 동 · 8자리)에 없다. 옛 합성 동도 `CM_GEO_UNIT` 에 `USE_YN='N'`
+    로 남아 지난 장애도 여기서 찾는다. 거기 없는 코드만 `CM_DONG_JP` 로 한 번 더 본다.
+    """
     at: dict[str, dict] = {}
+
+    def put(d, name, lat, lon) -> None:
+        if lat and lon and str(d) not in at:
+            at[str(d)] = {"id": str(d), "name": name,
+                          "lat": round(float(lat), 6), "lon": round(float(lon), 6)}
+
     try:
         conn = _connect()
         try:
             with conn.cursor() as cur:
-                cur.execute("SELECT DONG_ID, DONG_NAME, LATITUDE, LONGITUDE "
-                            "FROM CM_DONG_JP WHERE DONG_ID IN ("
+                cur.execute("SELECT AREA_CD, AREA_NAME, CENTROID_LAT, CENTROID_LON FROM CM_GEO_UNIT "
+                            "WHERE AREA_LEVEL = 'ADM3' AND AREA_CD IN ("
                             + ",".join(["%s"] * len(ids)) + ")", ids)
-                for d, name, lat, lon in cur.fetchall():
-                    if lat and lon:
-                        at[str(d)] = {"id": str(d), "name": name,
-                                      "lat": round(float(lat), 6),
-                                      "lon": round(float(lon), 6)}
+                for row in cur.fetchall():
+                    put(*row)
+                rest = [d for d in ids if d not in at]
+                if rest:
+                    cur.execute("SELECT DONG_ID, DONG_NAME, LATITUDE, LONGITUDE FROM CM_DONG_JP "
+                                "WHERE DONG_ID IN (" + ",".join(["%s"] * len(rest)) + ")", rest)
+                    for row in cur.fetchall():
+                        put(*row)
         finally:
             conn.close()
     except pymysql.MySQLError:
