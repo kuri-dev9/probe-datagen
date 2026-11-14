@@ -381,8 +381,8 @@ def _at(e):
 
 
 def test_the_ramp_is_shorter_than_the_rise_and_is_an_initial_value():
-    """혼잡이 정점에 닿는 시간(10분)이 B 개통(20분)보다 짧다 — Q-11 의 5분 창 3칸 연속을 채우려 정점을 당겼다(F-152)."""
-    assert S.SHIFT_RAMP == 10 and S.SHIFT_RAMP < S.SHIFT_RISE == 20
+    """혼잡이 정점에 닿는 시간(10분)이 B 개통(30분 · 11-15 F-343 으로 20→30)보다 짧다 — Q-11 의 5분 창 3칸 연속을 채우려 정점을 당겼다(F-152)."""
+    assert S.SHIFT_RAMP == 10 and S.SHIFT_RAMP < S.SHIFT_RISE == 30
     assert S.SHIFT_RISE - S.SHIFT_RAMP >= 10, "정점 유지 구간이 5분 칸 둘 이상이다"
 
 

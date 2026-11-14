@@ -452,8 +452,17 @@ def _live_truth(P, gen, scs: list) -> None:
     # **채점 문항만 센다**(2026-10-29). 24번(증설 재현, `scored=False`)만
     # 걸려 있을 때 그대로 쓰면 `write_truth` 가 그것을 빼고 **빈 목록을
     # 써서 직전 장애의 정답을 지운다** — 실제로 한 번 지워졌다.
-    scs = [sc for sc in scs if getattr(sc, "scored", True)]
     path = getattr(gen, "truth_path", None)
+    # 채점하지 않는 회차는 **판정용 기록**만 따로 남긴다(2026-11-15 · `write_unscored_truth`)
+    free = [sc for sc in scs if not getattr(sc, "scored", True)]
+    if free and path is not None and gen.anchor is not None:
+        fkey = tuple(sorted((sc.id, sc.start_minute, sc.duration) for sc in free))
+        if fkey != getattr(gen, "_unscored_key", None):
+            upath = path.parent / P.UNSCORED_TRUTH_FILE
+            P.write_unscored_truth(upath, gen.anchor, free, getattr(gen, "standby", None))
+            gen._unscored_key = fkey
+            print(f"  판정용 기록(채점 제외) — {len(free)}건 → {upath}", flush=True)
+    scs = [sc for sc in scs if getattr(sc, "scored", True)]
     if path is None or gen.anchor is None or not scs:
         return
     key = tuple(sorted((sc.id, sc.kind, sc.start_minute, sc.duration)

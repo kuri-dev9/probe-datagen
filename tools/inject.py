@@ -28,7 +28,7 @@ gen-ui(:8009)의 주입 API 를 부른다. **예약은 gen 이 한다** — `sta
 **랜덤에서 빼는 것:**
 - `same_as` 가 있는 번호(18·19·20·26) — 원 번호와 같은 데이터다.
 - 17번 — 판정 재료가 없다(NO_EVIDENCE).
-- `--hours` 를 켜면(기본) 그 시각이 권장 시간대(`dur.hours`) 밖인 번호. 새벽에는 판정 표본이
+- `--hours` 를 켜면(기본) 그 시각이 권장 시간대(`dur.hours` · **가상 시각** — `offset`) 밖인 번호. 새벽에는 판정 표본이
   모자라 미탐이 났다(11-12 23·24번).
 
 지정 주입(`now`·`at`)은 위를 막지 않고 경고만 한다 — 사람이 고른 것이다.
@@ -99,13 +99,39 @@ def _dur(s: dict, override: int | None) -> int:
     return int(override or (s.get("dur") or {}).get("recommended") or 30)
 
 
+_OFFSET: list[timedelta] = []
+
+
+def offset() -> timedelta:
+    """gen 의 가상 시각 오프셋 — `/api/status` 의 `virtual_offset_sec`(2026-11-15).
+
+    **권장 시간대는 가상 시각 기준이다.** gen 이 실시각 + 오프셋의 호 곡선으로 만들므로, 실시각 01시에 넣어도
+    가상 10시면 낮 회차다. 전에는 실시각으로 비교해 그런 회차에 "시간대 밖" 경고를 냈고(11-15 18·24번),
+    반대로 실시각 18시에 가상 02시로 넣은 15번(11-14 F-339)에는 경고를 내지 않았다. 못 읽으면 0 이고
+    경고 문구가 "가상 시각 모름"을 말한다.
+    """
+    if not _OFFSET:
+        try:
+            st = _call("/api/status")
+            _OFFSET.append(timedelta(seconds=float(st.get("virtual_offset_sec"))))
+        except (TypeError, ValueError, SystemExit):
+            _OFFSET.append(None)                          # type: ignore[arg-type]
+    return _OFFSET[0] or timedelta(0)
+
+
+def virtual(t: datetime) -> datetime:
+    return t + offset()
+
+
 def in_hours(s: dict, t: datetime) -> bool:
-    """권장 시간대 안인가. `from`>`to` 는 자정을 넘는 구간(예: 5→3 = 05시~다음날 03시)."""
+    """권장 시간대 안인가 — ``t`` 는 **실시각**이고 가상 시각으로 바꿔 본다(`offset`).
+    `from`>`to` 는 자정을 넘는 구간(예: 5→3 = 05시~다음날 03시)."""
     h = (s.get("dur") or {}).get("hours") or {}
     a, b = h.get("from"), h.get("to")
     if h.get("all") or a is None or b is None:
         return True
-    return a <= t.hour < b if a < b else (t.hour >= a or t.hour < b)
+    hr = virtual(t).hour
+    return a <= hr < b if a < b else (hr >= a or hr < b)
 
 
 def _hours_text(s: dict) -> str:
@@ -150,7 +176,8 @@ def _post(no: int, s: dict, start: datetime | None, dur: int, note: str, dry: bo
 def _line(fid: str, no: int, s: dict, start: datetime, dur: int, warn: list[str]) -> str:
     end = start + timedelta(minutes=dur)
     w = f"  ⚠ {' · '.join(warn)}" if warn else ""
-    return (f"{fid:>10}  #{no:<2} {s['kind']:<18} {start:%m-%d %H:%M} → {end:%H:%M} "
+    v = f" [가상 {virtual(start):%H:%M}~{virtual(end):%H:%M}]" if offset() else ""
+    return (f"{fid:>10}  #{no:<2} {s['kind']:<18} {start:%m-%d %H:%M} → {end:%H:%M}{v} "
             f"({dur}분)  {s['name']}{w}")
 
 
@@ -161,7 +188,9 @@ def _warn(no: int, s: dict, start: datetime, dur: int) -> list[str]:
     if no in NO_EVIDENCE:
         out.append("판정 재료 없음(NO_EVIDENCE)")
     if not in_hours(s, start):
-        out.append(f"권장 시간대 밖({_hours_text(s)}) — 표본이 모자라 미탐일 수 있다")
+        v = (f"가상 {virtual(start):%H:%M}~{virtual(start + timedelta(minutes=dur)):%H:%M}"
+             if _OFFSET and _OFFSET[0] is not None else "가상 시각 모름 — 실시각으로 비교")
+        out.append(f"권장 시간대 밖({_hours_text(s)} · {v}) — 표본이 모자라 미탐일 수 있다")
     rec = int((s.get("dur") or {}).get("recommended") or 0)
     if rec and dur < rec:
         out.append(f"권장 {rec}분보다 짧다 — 탐지되지 않을 수 있다")

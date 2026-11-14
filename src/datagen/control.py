@@ -146,7 +146,7 @@ SCENARIOS: tuple[tuple[int, str, str | None, int | None, tuple[str, ...], str], 
     # (`write_truth`). 대상은 설정(`pemdb1.capacity_shift`)이 고정하므로
     # 발생 장비가 없다 — 지도에서 고른 eNB 에 걸리는 것처럼 보이면 안 된다.
     (24, "기지국 증설 뒤 손님이 옮겨 감 (장애 아님)", "capacity_shift", None, (),
-     "40분 고정 — A eNB 에 20분간 호가 몰려 혼잡 → 소등 eNB(B) 개통, "
+     "50분 고정 — A eNB 에 30분간 호가 몰려 혼잡 → 소등 eNB(B) 개통, "
      "A 40 · B 60 으로 나뉘며 A 회복 → 10분 분석 뒤 B 소등. 채점 제외"),
     (25, "설정 변경 직후 통화 끊김이 계단처럼 늘어남 (SON)", "son_param_change", None, ("ENB",),
      "기지국(eNB) 1~2곳의 핸드오버 설정이 바뀐 시각부터 그 기지국의 모든 셀에서 옆 셀로 넘어가는 통화가 "

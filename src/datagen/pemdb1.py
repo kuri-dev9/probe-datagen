@@ -5031,6 +5031,57 @@ def build_scenarios(gen: "PemdbGen", minutes: int, selected: str = "all",
     return scs, skipped
 
 
+#: 채점하지 않는 회차의 판정용 기록 — `ground_truth.json` 옆에 둔다(2026-11-15 · 24번 F-343)
+UNSCORED_TRUTH_FILE = "unscored_truth.json"
+
+
+def write_unscored_truth(path: Path, anchor: datetime, scenarios: list[Scenario],
+                         standby: dict | None = None) -> dict:
+    """채점하지 않는 회차(`scored=False`)의 **판정용 기록** — 무엇을 어디에 언제 넣었나.
+
+    **채점 파일과 가른다.** `ground_truth.json` 에 넣으면 정답 원인이 빈 문항이 생겨 graphio `score` 가
+    그 창의 판정을 오답으로 센다(`write_truth` 주석). 그래서 이 파일은 `score` 가 읽지 않는다. 대신
+    없으면 사람이 판정할 근거(대상 셀·국면 시각)가 남지 않는다 — F-343 은 gen `/api/status` 의 활성 행을
+    손으로 옮겨 적었다.
+
+    24번(`capacity_shift`)은 사용자 기준(11-15) 세 가지를 판정한다 — 원인 이름은 보지 않는다. 그래서
+    A·B 셀과 국면 시각을 적고 `judge` 에 볼 것을 적는다. **회차별로 쌓는다**(키 = fault ID) — 채점 파일처럼
+    활성 집합으로 덮으면 앞 회차 기록이 사라진다. 시각은 실시각이다(생성기 가상 시각은 `+offset`).
+    """
+    from . import scenarios as S
+
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except ValueError:
+        doc = {}
+    runs = doc.setdefault("runs", {})
+    for sc in scenarios:
+        if sc.scored:
+            continue
+        t0 = anchor + timedelta(minutes=sc.start_minute)
+        at = lambda m: (t0 + timedelta(minutes=m)).isoformat(sep=" ")   # noqa: E731
+        row = {**sc.as_truth(), "scored": False, "start": at(0), "end": at(sc.duration)}
+        if sc.kind == "capacity_shift":
+            b = sc.target.shift_to
+            row.update({
+                "a_enb": sc.target.enb_id, "a_cells": sorted(sc.target.cell_keys),
+                "b_enb": b, "b_cells": sorted(c.cell_key for c in (standby or {}).get(b, ())),
+                # 국면 — `scenarios.SHIFT_*` 와 같은 상수로 낸다(따로 적으면 상수를 바꿀 때 갈린다)
+                "phases": {"start": at(0), "peak": at(S.SHIFT_RAMP), "b_open": at(S.SHIFT_RISE),
+                           "a_recovered": at(S.SHIFT_RISE + S.SHIFT_RECOVER), "end": at(S.SHIFT_TOTAL)},
+                "judge": ["① 여러 셀 동시 이상징후 — a_cells 를 덮는 조각(칸 조각 Q-* 포함)이 b_open 전에 섰나",
+                          "② 셀마다 저장 — a_cells·b_cells 의 셀별 1분 행",
+                          "③ 한 장애로 묶임 — a_cells 를 덮는 L1 묶음 하나",
+                          "원인 이름은 판정하지 않는다(사용자 결정 2026-11-15)"],
+            })
+        runs[sc.id] = row
+    doc["_note"] = ("채점하지 않는 회차의 판정용 기록 — graphio score 가 읽지 않는다. "
+                    "pemdb1.write_unscored_truth 가 쓴다")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
+    return doc
+
+
 def write_truth(path: Path, start: datetime, minutes: int,
                 scenarios: list[Scenario],
                 cell_selection: dict | None = None) -> dict:

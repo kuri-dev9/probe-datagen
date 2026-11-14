@@ -161,7 +161,7 @@ def test_fractional_minutes_round_up(tmp_path_measured):
 
 # ---------------------------------------------------------------- 최소 길이 보호
 
-@pytest.mark.parametrize("kind,floor", [("capacity_shift", 40), ("natural_disaster", 30), ("earthquake", 20),
+@pytest.mark.parametrize("kind,floor", [("capacity_shift", 50), ("natural_disaster", 30), ("earthquake", 20),
                                         ("event_crowd", 25), ("enb_s1_outage", 20), ("dns_flap", 12)])
 def test_phase_step_and_flap_scenarios_are_never_cut_short(tmp_path_measured, kind, floor):
     _write(tmp_path_measured, {kind: [_run(correct=5, fault="A", to_l2_min=5), _run(correct=4, fault="B", to_l2_min=4)]})
@@ -171,8 +171,8 @@ def test_phase_step_and_flap_scenarios_are_never_cut_short(tmp_path_measured, ki
 
 
 def test_a_long_measurement_extends_even_a_phase_scenario(tmp_path_measured):
-    _write(tmp_path_measured, {"capacity_shift": [_run(correct=40)]})
-    assert _rec("capacity_shift")["recommended"] == 40
+    _write(tmp_path_measured, {"capacity_shift": [_run(correct=60)]})        # 11-15: 하한이 40→50 이라 하한보다 긴 실측으로 뜻을 살린다
+    assert _rec("capacity_shift")["recommended"] == 60
 
 
 def test_instant_offset_has_zero_ramp_out(tmp_path_measured):
