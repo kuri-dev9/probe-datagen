@@ -275,27 +275,27 @@ CREATE TABLE IF NOT EXISTS `{T_SCENARIO}` (
 -- RADIUS_KM 는 지반 1.0 에서 진도 3 이상인 진앙 거리, BASE_PCT·MAX_CELLS 는 정지 확률·최대 셀(설정값)이다 —
 -- 모두 생성기 참고값이고 `NOT NULL` 이라 남긴다(`scenarios.quake_new`)
 CREATE TABLE IF NOT EXISTS `{T_QUAKE}` (
-  `QUAKE_ID`      varchar(32)  NOT NULL                COMMENT '지진 키 — 시나리오는 Q-F<FAULT_ID>',
-  `FAULT_ID`      int              DEFAULT NULL        COMMENT '시나리오 장애 CM_DATAGEN_FAULT.FAULT_ID — 실제 지진이면 NULL',
-  `SOURCE`        varchar(16)  NOT NULL                COMMENT 'SCENARIO | P2P | JMA',
-  `ORIGIN_TIME`   datetime     NOT NULL                COMMENT '발생 시각',
-  `HYPO_NAME`     varchar(64)      DEFAULT NULL        COMMENT '진원 지명 — 시나리오는 진앙에 가장 가까운 셀의 시도·시군구',
-  `LAT`           decimal(9,6) NOT NULL                COMMENT '진앙 위도',
-  `LON`           decimal(9,6) NOT NULL                COMMENT '진앙 경도',
-  `DEPTH_KM`      decimal(5,1)     DEFAULT NULL        COMMENT '깊이 — 시나리오는 NULL',
-  `MAGNITUDE`     decimal(3,1)     DEFAULT NULL        COMMENT '규모 — 시나리오는 NULL',
-  `INTENSITY`     decimal(2,1) NOT NULL                COMMENT '진도 — 시나리오는 2.0~4.0 무작위(소수 한 자리)',
-  `SHAPE`         varchar(8)   NOT NULL                COMMENT '음영 모양 ROUND(원형) | LINEAR(선형)',
-  `AZIMUTH_DEG`   smallint         DEFAULT NULL        COMMENT 'LINEAR 선의 방향(0~359 · 0 = 북) — ROUND 는 NULL',
-  `LENGTH_KM`     decimal(5,1)     DEFAULT NULL        COMMENT 'LINEAR 선의 길이(진앙이 가운데) — ROUND 는 NULL',
-  `RADIUS_KM`     decimal(5,1) NOT NULL                COMMENT '음영 반경(선형이면 선에서의 거리) — 진도로 정한다',
-  `BASE_PCT`      decimal(4,1) NOT NULL                COMMENT '진앙 0km 에서의 정지 확률(%) — 거리에 비례해 줄어든다',
-  `MAX_CELLS`     int          NOT NULL                COMMENT '정지 셀 최대 개수',
-  `UPDATED_TIME`  datetime     NOT NULL,
+  `QUAKE_ID`      varchar(32)  NOT NULL                COMMENT '지진 키 — 시나리오는 Q-F<FAULT_ID>, 실제 지진은 받은 곳의 지진 ID',
+  `FAULT_ID`      int              DEFAULT NULL         COMMENT '시나리오 장애 CM_DATAGEN_FAULT.FAULT_ID — 실제 지진이면 NULL',
+  `SOURCE`        varchar(16)  NOT NULL                COMMENT '출처 SCENARIO(생성기 27번) | P2P(P2P 지진정보) | JMA(기상청)',
+  `ORIGIN_TIME`   datetime     NOT NULL                COMMENT '발생 시각(진원시) — EV-19 가 장애 시작 앞 quake.before_minutes ~ 뒤 after_minutes 에서 가장 늦은 한 건을 고르는 키. 시나리오는 장애 시작 시각',
+  `HYPO_NAME`     varchar(64)      DEFAULT NULL         COMMENT '진원 지명 — 시나리오는 진원역 이름(기상청 진앙 지명 원문). 모르면 NULL · EV-19 는 읽지 않는다',
+  `LAT`           decimal(9,6) NOT NULL                COMMENT '진앙 위도(십진 도) — EV-19 가 셀까지 진앙 거리를 잰다',
+  `LON`           decimal(9,6) NOT NULL                COMMENT '진앙 경도(십진 도) — EV-19 가 셀까지 진앙 거리를 잰다',
+  `DEPTH_KM`      decimal(5,1)     DEFAULT NULL         COMMENT '진원 깊이(km) — 모르면 NULL(0 아님). NULL 이면 EV-19 가 진도를 추정하지 않는다(available=false). 11-14 이전 시나리오 행은 NULL',
+  `MAGNITUDE`     decimal(3,1)     DEFAULT NULL         COMMENT '규모(M) — 모르면 NULL(0 아님). NULL 이면 EV-19 가 진도를 추정하지 않는다. 11-14 이전 시나리오 행은 NULL',
+  `INTENSITY`     decimal(2,1) NOT NULL                COMMENT '진도(계측 진도 · 소수 한 자리) — 시나리오는 진앙(지표 거리 0 · 지반 1.0)의 계산 진도, 실제 지진은 최대 진도. EV-19 는 max_intensity 로 싣기만 하고 판정에 쓰지 않는다. 11-14 이전 행은 2.0~4.0 무작위',
+  `SHAPE`         varchar(8)   NOT NULL                COMMENT '생성기 참고값 — 음영 모양. 11-14 부터 늘 ROUND, 이전 행은 ROUND | LINEAR. EV-19 는 읽지 않는다(운영 지진 정보에 없는 값)',
+  `AZIMUTH_DEG`   smallint         DEFAULT NULL         COMMENT '생성기 참고값 — LINEAR 선의 방향(도 · 0~359 · 0 = 북). ROUND 면 NULL. EV-19 는 읽지 않는다',
+  `LENGTH_KM`     decimal(5,1)     DEFAULT NULL         COMMENT '생성기 참고값 — LINEAR 선의 길이(km · 진앙이 가운데). ROUND 면 NULL. EV-19 는 읽지 않는다',
+  `RADIUS_KM`     decimal(5,1) NOT NULL                COMMENT '생성기 참고값 — 지반 1.0 에서 진도 quake_surge_intensity 이상이 되는 진앙 거리(km). 11-14 이전 행은 음영 반경. EV-19 는 읽지 않는다',
+  `BASE_PCT`      decimal(4,1) NOT NULL                COMMENT '생성기 참고값 — 진도 quake_down_intensity 이상 eNB 의 정지 확률(% · 설정 quake_down_pct). 11-14 이전 행은 진앙 0km 정지 확률. EV-19 는 읽지 않는다',
+  `MAX_CELLS`     int          NOT NULL                COMMENT '생성기 참고값 — 정지 셀 최대 개수(설정 quake_down_max_cells). EV-19 는 읽지 않는다',
+  `UPDATED_TIME`  datetime     NOT NULL                COMMENT '행을 쓴 시각 — 생성기는 INSERT IGNORE 라 처음 쓴 값(주입 당시)이 남는다',
   PRIMARY KEY (`QUAKE_ID`),
   KEY `IX_CM_QUAKE_EVENT_FAULT` (`FAULT_ID`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3 COLLATE=utf8mb3_general_ci
-  COMMENT='지진 정보 — 시나리오 시작 시 생성기가 입력, 실제 지진도 같은 모양으로 받는다';
+  COMMENT='지진 정보 — 지진 1건 = 1행(진앙 하나). 27번 시작 시 생성기가 쓰고 실제 지진(P2P·기상청)도 같은 모양으로 받는다. graphio EV-19 는 ORIGIN_TIME·LAT·LON·DEPTH_KM·MAGNITUDE·INTENSITY 만 읽는다. 단위 km·%·십진 도, 모르는 값은 NULL(0 아님)';
 CREATE TABLE IF NOT EXISTS `{T_APP}` (
   `APP_IDX`         varchar(20)  NOT NULL             COMMENT '앱 코드 → XDR App_ID',
   `ENDPOINT_SEQ`    int          NOT NULL DEFAULT 1   COMMENT '앱 안의 엔드포인트 번호 — 앱 하나에 IP·포트가 여럿일 수 있다',
