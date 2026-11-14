@@ -213,23 +213,6 @@ def _gkeys(cells, g):
     return {c.cell_key for c in cells if c.enb_id.startswith(f"{g:02d}")}
 
 
-def test_busy_disaster_area_skips_the_best_area_when_it_was_used(monkeypatch):
-    cells = _groups(4)
-    rate = {c.enb_id: 100.0 - int(c.enb_id[:2]) for c in cells}
-    rate.update(_patch_disaster(monkeypatch, {0: 5.0, 1: 9.0, 2: 7.0, 3: 1.0}))
-    assert faults._busy_disaster_area(cells, rate, 5, "local", "F-1") == _gkeys(cells, 1)
-    used = {faults.target_key(_gkeys(cells, 1)): 3}
-    assert faults._busy_disaster_area(cells, rate, 5, "local", "F-2", used=used) == _gkeys(cells, 2), "점수 순서를 지키되 안 쓴 첫 지역"
-
-
-def test_busy_disaster_area_reuses_the_oldest_when_all_used(monkeypatch):
-    cells = _groups(3)
-    rate = {c.enb_id: 100.0 for c in cells}
-    rate.update(_patch_disaster(monkeypatch, {0: 5.0, 1: 9.0, 2: 7.0}))
-    used = {faults.target_key(_gkeys(cells, g)): n for g, n in {0: 8, 1: 6, 2: 7}.items()}
-    assert faults._busy_disaster_area(cells, rate, 5, "local", "F-9", used=used) == _gkeys(cells, 1)
-
-
 def test_disaster_area_redraws_past_a_used_area(monkeypatch):
     cells = _groups(6)
     monkeypatch.setattr(S, "geo_shape", lambda picked: "CLUSTER")

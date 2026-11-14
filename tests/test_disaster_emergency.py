@@ -153,7 +153,7 @@ def test_truth_carries_the_disaster_cause_rule_and_category(g):
     scs, bad = g.set_fault_rows([_row(dur=25)])
     assert scs and not bad
     t = scs[0].as_truth()
-    assert (t["truth_code"], t["truth_category"]) == ("NATURAL_DISASTER_SUSPECTED", "EXTERNAL")
+    assert (t["truth_code"], t["truth_category"]) == ("EARTHQUAKE_IMPACT", "EXTERNAL")
     assert t["expect_rules"] == ["R-46"] and t["expect_alternatives"] == {"R-36": "RAN_NODE_DOWN"}
     assert t["expect_kpi"] == "C-01"
 
@@ -163,11 +163,11 @@ def test_no_rule_pending_flag_remains_on_27():
     assert not spec.get("rule_pending") and spec["expect_rules"] == ("R-46",)
 
 
-def test_the_word_earthquake_is_not_in_the_27_truth():
+def test_the_27_spec_is_the_earthquake_and_has_no_sms_word():
+    """2026-11-14 — 결론은 지진(`EARTHQUAKE_IMPACT`)이고 문자(SMS)는 이 시나리오의 근거가 아니다(사용자 "문자 자제")."""
     import json
 
     spec = S.KIND_SPECS["natural_disaster"]
-    # 2026-11-14 — 제목은 사용자 결정으로 "지진 — 통화 폭주 + 기지국 정지 + 문자 실패" 가 됐다(사람이 읽는 이름).
-    # 정답·판정에 쓰는 나머지 칸(원인 코드·룰·대안)에는 여전히 지진을 단정하는 말이 없어야 한다
-    text = json.dumps({k: str(v) for k, v in spec.items() if k != "title"}, ensure_ascii=False)
-    assert "지진" not in text and "earthquake" not in text.lower()
+    assert spec["truth_code"] == "EARTHQUAKE_IMPACT" and "NATURAL_DISASTER_SUSPECTED" not in json.dumps(spec)
+    text = json.dumps({k: str(v) for k, v in spec.items()}, ensure_ascii=False)
+    assert "문자" not in text and "SMS" not in text and "sms" not in text.lower()

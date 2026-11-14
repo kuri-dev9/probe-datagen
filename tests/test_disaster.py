@@ -58,6 +58,19 @@ def _row(kind="natural_disaster", start=START, dur=25, target=None, sec=0):
             "duration_min": dur, "intensity": 1.0}
 
 
+def _quake_down(monkeypatch, cells):
+    """27번 하니스가 정지 eNB 를 갖게 한다 — 11-14 부터 정지는 진도 4.5 이상 eNB 에서만 생기고, 지반 표가 없으면 0곳이다
+    (거리만으로는 도쿄 진도가 3.9 를 못 넘는다). 정지 이후의 동작(호 이동 · 세션 유지 · 재접속)을 시험하려고
+    **시험용 지반 표**(모든 eNB ARV 3.0) · 확률 100% · 최대 6셀(2 eNB) · 규모 6.2 로 고정한다. 값 자체는 시험용이다."""
+    import tempfile
+    path = Path(tempfile.mkdtemp()) / "arv.csv"
+    path.write_text("enb_id,arv\n" + "".join(f"{e},3.0\n" for e in sorted({c.enb_id for c in cells})), encoding="utf-8")
+    monkeypatch.setattr(S.FAULT, "quake_arv_path", str(path))
+    monkeypatch.setattr(S.FAULT, "quake_down_pct", 100.0)
+    monkeypatch.setattr(S.FAULT, "quake_down_max_cells", 6)
+    monkeypatch.setattr(S.FAULT, "quake_magnitude", (6.2, 6.2))
+
+
 @pytest.fixture
 def make(monkeypatch):
     def build(rate: int = 1500):
@@ -68,6 +81,7 @@ def make(monkeypatch):
         monkeypatch.setattr(P, "load_apps", lambda conn: None)
         g = P.PemdbGen(None, ROOT / "data", rates={"lte_call": rate, "transport": rate}, seed=11, subscriber_pool=2500)
         g.anchor = T0
+        _quake_down(monkeypatch, _master())      # 생성기가 설정을 읽은 **뒤**에 덮는다(읽기 전에 덮으면 yaml 값으로 돌아간다)
         return g
     return build
 
@@ -204,9 +218,13 @@ def test_wide_with_a_box_keeps_the_mode_and_uses_the_box():
     sc = _build(box)
     assert sc is not None and sc.target.outage_mode == "wide"
     assert sc.target.cell_keys
-    # 2026-11-13 — 상자는 진앙(상자 안 셀의 중심)을 정한다. 폭주 지역은 진앙에서 가까운 25셀 + 꺼진 eNB 의 셀이다
+    # 2026-11-14 — 상자는 **가까운 진원역**만 정한다(진앙은 실제 진원역에서 난다 · 도쿄 한가운데가 아니다).
+    # 폭주 지역은 진도가 높은 25셀 + 꺼진 eNB 의 셀이다
     q = sc.as_truth()["quake"]
-    assert 35.60 <= q["lat"] <= 35.66 and 139.60 <= q["lon"] <= 139.66
+    inside = [c for c in _master() if 35.60 <= c.latitude <= 35.66 and 139.60 <= c.longitude <= 139.66]
+    la = sum(c.latitude for c in inside) / len(inside)
+    lo = sum(c.longitude for c in inside) / len(inside)
+    assert q["region"] == S.quake_region(la, lo)[0] == q["hypo_name"]
     dead = set(sc.as_truth()["down_cells"])
     assert len(sc.target.cell_keys - dead) <= S.DISASTER_AREA_CELLS["wide"]
 
@@ -585,8 +603,8 @@ def _truth_sc(make, kind="natural_disaster", target=None):
 def test_disaster_truth_carries_the_context_phases_and_the_dead_enb_list(make):
     sc = _truth_sc(make)
     t = sc.as_truth()
-    # 11-05 사용자 결정: 세 신호(호 폭주 + eNB 무호 + Emergency 증가)를 합친 판정이 정답이다 — 지진 단정 없음
-    assert t["truth_code"] == "NATURAL_DISASTER_SUSPECTED" and t["expect_kpi"] == "C-01"
+    # 11-14 사용자 결정: "자연재해"를 지진으로 바꿨다(옛 코드 NATURAL_DISASTER_SUSPECTED 는 graphio 채점 별칭)
+    assert t["truth_code"] == "EARTHQUAKE_IMPACT" and t["expect_kpi"] == "C-01"
     assert t["truth_category"] == "EXTERNAL", "재해는 망 밖 원인이다"
     assert t["expect_rules"] == ["R-46"] and not t.get("rule_pending")
     assert t["expect_alternatives"] == {"R-36": "RAN_NODE_DOWN"}, "무호만 본 노드 장애는 대안으로 남는다"
@@ -621,7 +639,7 @@ def test_disaster_truth_is_written_by_the_live_truth_path(make, tmp_path):
     row = json.loads(path.read_text(encoding="utf-8"))["scenarios"][0]
     assert row["context"][0]["code"] == "CALL_SURGE" and row["context"][0]["to_min"] == 13
     assert row["down_enbs"] == sc.as_truth()["down_enbs"] and row["phases"]["down"] == [3, 23]
-    assert row["truth_code"] == "NATURAL_DISASTER_SUSPECTED", "채점이 읽는 주원인 키는 세 신호 판정이다"
+    assert row["truth_code"] == "EARTHQUAKE_IMPACT", "채점이 읽는 주원인 키는 지진 코드다(옛 코드는 graphio 별칭)"
     assert row["truth_category"] == "EXTERNAL" and row["expect_rules"] == ["R-46"]
 
 
@@ -657,6 +675,7 @@ def _sparse(monkeypatch, target="LOCAL", kind="natural_disaster", minutes=START 
         g = P.PemdbGen(None, ROOT / "data", rates={"lte_call": 1500, "transport": 1500}, seed=11,
                        subscriber_pool=2500)
         g.anchor = T0
+        _quake_down(monkeypatch, _sparse_master())
         runs, sc = _run(g, minutes, [_row(kind=kind, target=target)])
         _SPARSE[key] = (g, runs, sc)
     return _SPARSE[key]
@@ -790,3 +809,13 @@ def test_504_share_outside_dead_enbs_is_unchanged_by_the_surge(make):
     during, nd = share(range(START + 4, START + 13))
     assert nb >= 300 and nd >= 3000
     assert abs(during - before) <= 0.01 + 0.5 * before, f"504 비율 평소 {before:.4f} → 폭주 중 {during:.4f}"
+
+
+def test_27_injects_no_sms_error_causes_at_all(make):
+    """2026-11-14 사용자 "문자 자제" — 27번의 SMS 에러 주입(폭주 호의 8% · 정지 뒤 15%)을 걷었다. 여섯 칸이 평소 값(0)뿐이다."""
+    g = make()
+    runs, _sc = _disaster_run(g, minutes=START + 26)
+    for name in ("sms_mo_cp_error_cause", "sms_mo_rp_error_cause", "sms_mo_tp_error_cause",
+                 "sms_mt_cp_error_cause", "sms_mt_rp_error_cause", "sms_mt_tp_error_cause"):
+        i = _col(g, "lte_call", name)
+        assert {r[i] for m in range(len(runs)) for r in runs[m][0]} == {"0"}, name

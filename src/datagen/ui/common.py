@@ -38,7 +38,7 @@ KIND_LABELS = {
     "ran_congestion": "무선 용량 혼잡 (기존 가입자 품질 저하)",
     "ho_interruption": "전환 직후 정체 (코리도 4G↔5G)",
     "earthquake": "국지 다수 셀 정지 + 주변 부하 유입 (지진 · 옛 27번)",
-    "natural_disaster": "지진 — 통화 폭주 + 기지국 정지 + 문자 실패",
+    "natural_disaster": "지진 — 통화 폭주 + 기지국 정지",
     "sa_fallback": "SA→LTE 폴백 급증 (5G 측 장애 추정)",
     "cdn_degradation": "동영상 CDN 서버측 열화",
     "pay_dns_delay": "결제 앱 응답 지연 (DNS 기인)",

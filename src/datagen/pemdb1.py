@@ -2933,7 +2933,7 @@ class PemdbGen:
                                               ts, slot_start)
                 # 자연재해 호 폭주 — 더한 호의 절차는 `force_ct` 가 정한다(음성·발신 쪽으로)
                 yield from self._surge_drafts(minute, active, landed, n_calls,
-                                              ts, slot_start, force_ct, natural, emergency, sms_err)
+                                              ts, slot_start, force_ct, natural, emergency)
                 # SA 폴백(17번) — 숨은 5G 단말이 들어오는 TAU·Attach 와, 들어온 단말의 호
                 yield from self._sa_fallback_drafts(minute, active, n_calls, ts,
                                                     slot_start, force_ct, sa_entry)
@@ -2942,15 +2942,12 @@ class PemdbGen:
         force_ct: dict[int, str] = {}
         #: 폭주 호 중 Emergency 접속 — `id(rec)`. `force_ct` 와 같은 이유로 재배치 전에 꺼낸다
         emergency: set[int] = set()
-        #: 폭주 호에 얹을 SMS 에러 — `id(rec)` → (필드, 원인). 27번 · `scenarios.disaster_sms_error`(2026-11-13)
-        sms_err: dict[int, tuple[str, str]] = {}
         #: SA 폴백으로 **들어오는** 레코드 — `id(rec)` → 도착 시각. 직전 호 기록을 비우고 끝 시각을 맞춘다
         sa_entry: dict[int, float] = {}
         for rec, cell in drafts():
             fct = force_ct.pop(id(rec), None)
             emg = id(rec) in emergency
             emergency.discard(id(rec))
-            sms = sms_err.pop(id(rec), None)
             t_sa = sa_entry.pop(id(rec), None)
             landed[cell.cell_key] += 1
             dst = relocate(cell) if relocate is not None else None
@@ -2972,9 +2969,6 @@ class PemdbGen:
             self._coerce(rec, cell, force_call_type=fct)
             if emg:
                 rec.set("InitialUEMessage_RRC_Establishment_Cause", "0")
-            if sms is not None:
-                # `_coerce` 뒤다 — 절차를 고치며 필드를 템플릿 기본값(0)으로 되돌리지 않게
-                rec.set(*sms)
             if t_sa is not None:
                 self._sa_entry_fix(rec)
             # 노드 다운이 이 호를 바꾸면 끝 시각 하한(다운 시각) — **바꾸기 전 시각으로** 가른다
@@ -3082,15 +3076,14 @@ class PemdbGen:
     SURGE_CAP = 2.0
 
     def _surge_drafts(self, minute: int, active: list[Scenario], landed, n_calls: int,
-                      ts, slot_start: float, force_ct: dict, natural=None, emergency=None,
-                      sms_err=None):
+                      ts, slot_start: float, force_ct: dict, natural=None, emergency=None):
         """자연재해 호 폭주 — 경보 지역 셀에 **하한 전 평소량 × (배율 − 1)** 만큼 호를 더 낸다.
 
         세는 기준은 그 분 그 지역에 실제로 떨어진 호(`landed`)다 — 생성량(15%)이 달라도 모양이 같다.
         셀은 평소 호 수에 비례해 고른다(바쁜 셀이 더 바쁘다). 가입자는 고정 그룹이다(`_floor_drafts`
         와 같은 이유). 절차는 `DISASTER_SURGE_MIX` 에서 뽑아 `force_ct` 에 적는다. 발신 호의
         `disaster_emergency_share` 는 `emergency` 에 적는다 — 호출부가 Emergency 접속으로 찍는다.
-        SMS 에러(`scenarios.disaster_sms_error` · 2026-11-13)는 `sms_err` 에 적는다 — 평소 호는 지금처럼 0 이다
+        27번 SMS 에러 주입(2026-11-13)은 걷었다(2026-11-14 사용자 "문자 자제") — 폭주 호의 SMS 칸은 평소처럼 0 이다
         """
         gen = self.gen
         rng = gen.rng
@@ -3133,10 +3126,6 @@ class PemdbGen:
                 if (emergency is not None and ct in _scenarios.DISASTER_EMERGENCY_CALL_TYPES
                         and rng.random() < self.fault.disaster_emergency_share):
                     emergency.add(id(rec))
-                if sms_err is not None:
-                    got = _scenarios.disaster_sms_error(sc, minute, ct, rng)
-                    if got is not None:
-                        sms_err[id(rec)] = got
                 yield rec, cell
 
     #: 들어오는 레코드에서 비우는 직전 호 기록 — 프로브가 이 단말의 EPC 직전 호를 본 적이 없다
@@ -4011,8 +4000,8 @@ def enb_call_rate(conn, end: datetime, minutes: int = 60) -> dict[str, float]:
 
     graphio D4 의 λ 와 같은 결로 센다 — 분당 시도 평균과 무호 분 비율로 본 값(`−ln(무호 분 비율)`)
     중 **낮은 쪽**. 평균은 몰린 몇 분에 부풀고, 무호 분 비율이 실제 확정 속도를 정한다. 창은 장애
-    시작 시각 앞이라 **gen 이 다시 떠도 같은 값**이다(1분 통계는 백필 없음). 자연재해 자동 대상
-    (`faults._busy_disaster_area`)과 정답지 `down_enbs_rate` 가 쓴다
+    시작 시각 앞이라 **gen 이 다시 떠도 같은 값**이다(1분 통계는 백필 없음). 정답지 `down_enbs_rate` 가
+    쓴다(27번 자동 지역 고르기는 2026-11-14 부터 지진이 정한다 — 호율을 보지 않는다)
     """
     lo = end - timedelta(minutes=minutes)
     with conn.cursor() as cur:

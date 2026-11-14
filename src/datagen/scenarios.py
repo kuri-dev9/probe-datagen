@@ -119,6 +119,31 @@ class FaultCfg:
     #: 27번 폭주 호 중 발신 호(`DISASTER_EMERGENCY_CALL_TYPES`)의 Emergency 접속 비율. **초기값** —
     #: 현장 표본에 Emergency(0)가 없어 근거 값이 없다
     disaster_emergency_share: float = 0.02
+    #: 27번 지진 진원역 — `(이름, 위도, 경도, 깊이 km, 지진 유형 항 d)`. 도쿄역 100km 안 M4.5 이상 실제 진원의
+    #: 묶음(USGS 2000~ · 599건 · 2026-11-14 케이 조사)이고 d 는 司・翠川(1999) 의 판 경계 −0.02 · 판 내부 +0.12.
+    #: 진앙을 도쿄 한가운데에 두지 않으려는 것이다(사용자 11-14). 값은 yaml 이 덮는다
+    quake_regions: tuple[tuple[str, float, float, float, float], ...] = (
+        ("千葉県東方沖", 35.65, 140.64, 44.0, -0.02),
+        ("千葉県北西部", 35.58, 140.14, 64.0, 0.12),
+        ("茨城県南部", 36.06, 139.93, 65.0, 0.12),
+        ("神奈川・埼玉西部", 35.56, 139.33, 83.0, 0.12),
+    )
+    #: 진원역 안에서 흩뜨리는 폭 — 위도·경도 ±도, 깊이 ±km
+    quake_jitter_deg: float = 0.1
+    quake_jitter_depth_km: float = 10.0
+    #: 규모 범위 — 위 진원역의 실제 범위(최대 6.2)
+    quake_magnitude: tuple[float, float] = (4.5, 6.2)
+    #: 통화 폭주 셀 = 추정 진도 이 이상(graphio `rca.quake.area_intensity` 와 같은 값이어야 한다)
+    quake_surge_intensity: float = 3.0
+    #: 기지국 정지 후보 = 추정 진도 이 이상(진도 5약). 이 아래는 끄지 않는다
+    quake_down_intensity: float = 4.5
+    #: 정지 후보 eNB 하나가 실제로 꺼질 확률(%). **초기값 · 근거 없음 · 결정 대기**
+    quake_down_pct: float = 30.0
+    #: 정지 셀 최대 수 — 옛 진도표(`QUAKE_TABLE`)의 가장 큰 값 그대로다
+    quake_down_max_cells: int = 40
+    #: eNB → 지반 증폭률(ARV) 표 파일(CSV `enb_id,arv`). 비우거나 없으면 모든 eNB 가 1.0 이다(거리만).
+    #: J-SHIS 표층 지반(250m 메시 · V4)을 쓸 자리다 — 이용 조건 확인 전이라 받지 않았다(2026-11-14)
+    quake_arv_path: str = ""
     #: **하한 꼬리의 안전 상한(분)** (2026-11-02 · 카드 15 → 11-03 재설계).
     #: 꼬리는 크기로 끝난다(`floor_tail_eps`) — 이 값은 그보다 길게 남지 않게
     #: 하는 상한일 뿐이다. 11-02 판은 "셀당 1호를 40분 붙들다 한 번에 놓기"였고
@@ -178,12 +203,33 @@ class FaultCfg:
                     raise RuntimeError(f"pemdb1.fault.{k} 는 0 < 최소 ≤ 최대: {v}")
                 setattr(f, k, (lo, hi))
                 continue
+            if k == "quake_regions":
+                rows = []
+                for r in v or ():
+                    rows.append((str(r["name"]), float(r["lat"]), float(r["lon"]),
+                                 float(r["depth_km"]), float(r["d"])))
+                if not rows:
+                    raise RuntimeError("pemdb1.fault.quake_regions 가 비었다")
+                f.quake_regions = tuple(rows)
+                continue
+            if k == "quake_arv_path":
+                # 빈 값(yaml `~`)은 "표 없음"이다 — `str(None)` 이 "None" 경로가 되지 않게
+                f.quake_arv_path = str(v or "")
+                continue
+            if k == "quake_magnitude":
+                lo, hi = (float(x) for x in v)
+                if not 0 < lo <= hi:
+                    raise RuntimeError(f"pemdb1.fault.quake_magnitude 는 0 < 최소 ≤ 최대: {v}")
+                f.quake_magnitude = (lo, hi)
+                continue
             if k in ("floor_per_cell", "floor_max_cells", "floor_tail_min",
                      "floor_tail_half_min", "floor_tail_eps", "disaster_emergency_share",
                      "congestion_load", "congestion_user_share", "crowd_user_share",
                      "anchor_min_people", "anchor_min_cells", "congestion_meshes",
                      "floor_moved_share", "auto_node_min_share", "auto_wide_min_share",
-                     "outage_min_cells", "outage_min_rate"):
+                     "outage_min_cells", "outage_min_rate", "quake_jitter_deg",
+                     "quake_jitter_depth_km", "quake_surge_intensity", "quake_down_intensity",
+                     "quake_down_pct", "quake_down_max_cells"):
                 setattr(f, k, type(getattr(f, k))(v))
                 continue
             if k == "sa_fallback_call_boost":
@@ -919,16 +965,17 @@ KIND_SPECS: dict[str, dict] = {
         series=("lte_call", "transport"),
         scope_kind="CELL", expect_kpi="C-01",
     ),
-    # **지진 — 통화 폭주 + 기지국 정지 + 문자 실패**(2026-11-14 개명 · 옛 이름 "자연재해 — 호 폭주 + 기지국 장애" · 2026-11-04 사용자 결정 · CM_ERROR_SCENARIO 27 이 이것을
+    # **지진 — 통화 폭주 + 기지국 정지**(2026-11-14 · 문자 실패를 뺐다 · 사용자 "문자 자제" · 같은 날 개명 · 옛 이름 "자연재해 — 호 폭주 + 기지국 장애" · 2026-11-04 사용자 결정 · CM_ERROR_SCENARIO 27 이 이것을
     # 가리킨다). 지진(`earthquake`)을 대체한다 — 실제 재난에서 크게 보이는 것은 장비 손상이 아니라
     # 경보 뒤 **호 폭주**이고, 정지는 정전·전송로로 뒤따른다(총무성 백서 H23 · 포항 2017).
     # 상위 장비(SGW·PGW·MME)는 묶지 않는다. 국면은 kind 가 직접 만든다(`disaster_phase`) —
     # 강도 하나로 접을 수 없어 `HOLD` 다(capacity_shift 와 같다). 정답 원인은 **세 신호를 합친 판정**
-    # (호 폭주 + 몇몇 eNB 무호 + Emergency 접속 증가 · 2026-11-05 사용자 결정)이고, 프로브는 재난 종류를
-    # 모르므로 지진이라 단정하지 않는다(graphio R-46). 재해는 망 밖 원인이라 `EXTERNAL` 이다
+    # (호 폭주 + 몇몇 eNB 무호 + Emergency 접속 증가 · 2026-11-05 사용자 결정)이었고, 2026-11-14 부터 graphio
+    # 가 지진 정보(`CM_QUAKE_EVENT` · EV-19)로 지진을 먼저 알고 피해를 묶는다 — 결론 코드 `EARTHQUAKE_IMPACT`
+    # (옛 `NATURAL_DISASTER_SUSPECTED` 는 graphio 채점 별칭). 재해는 망 밖 원인이라 `EXTERNAL` 이다
     "natural_disaster": dict(
-        title="지진 — 통화 폭주 + 기지국 정지 + 문자 실패",
-        truth_code="NATURAL_DISASTER_SUSPECTED", truth_category="EXTERNAL",
+        title="지진 — 통화 폭주 + 기지국 정지",
+        truth_code="EARTHQUAKE_IMPACT", truth_category="EXTERNAL",
         expect_rules=("R-46",), expect_geo="CLUSTER",
         expect_alternatives={"R-36": "RAN_NODE_DOWN"},
         shape="HOLD", onset="instant", offset="instant",
@@ -2703,13 +2750,13 @@ def _quake_ring(plan, sc, intensity, rng, cell) -> bool:
 
 
 # --------------------------------------------------------------------------
-# J-SC-27 · natural_disaster — 지진 — 통화 폭주 + 기지국 정지 + 문자 실패
+# J-SC-27 · natural_disaster — 지진 — 통화 폭주 + 기지국 정지
 # --------------------------------------------------------------------------
 #
 # 국면(장애 시작 분 기준 · **초기값**) —
 #
-#   0 ~ 3분    호 폭주만 — 경보를 본 사람들이 안부 통화·문자·뉴스. 2분에 걸쳐 차오른다
-#   3분        기지국 다운(지진 정보로 고른 음영 eNB · `quake_plan` · 2026-11-13. 전에는 지역 eNB 의 40%)
+#   0 ~ 3분    호 폭주만 — 흔들림을 느낀 사람들이 안부 통화·뉴스. 2분에 걸쳐 차오른다
+#   3분        기지국 다운(진도 5약 이상 eNB 중 일부 · `quake_plan` · 2026-11-14. 0곳일 수 있다)
 #   3 ~ 13분   폭주 + 다운
 #   13 ~ 23분  다운만 — 폭주가 가라앉아도 무호가 남아야 장비 장애라는 근거가 선다
 #   23분       정상화
@@ -2736,8 +2783,9 @@ DISASTER_SURGE_MIX = (("7", 0.6 * 5 / 7), ("8", 0.6 * 2 / 7),
                       ("3", 0.4 * 5 / 7), ("4", 0.4 * 2 / 7))
 #: Emergency 접속을 찍는 절차 — 단말이 거는 발신뿐이다. 착신(4·8)의 접속 사유는 MT_ACCESS 다
 DISASTER_EMERGENCY_CALL_TYPES = frozenset(("3", "7"))
-#: 지역 셀 중 정지하는 eNB 비율 — 지진의 `QUAKE_DOWN` 그대로(확정대장 §11.3). 2026-11-13 부터는 지진 정보
-#: (`quake_plan`)가 없을 때만 쓴다 — 지난 기록 재생과 자동 지역 고르기(`faults._busy_disaster_area`)의 미리 셈
+#: 지역 셀 중 정지하는 eNB 비율 — 옛 `earthquake` 의 `QUAKE_DOWN` 그대로(확정대장 §11.3). 지진 정보
+#: (`quake_plan`)가 없는 경로만 쓴다 — `faults.build` 를 거치지 않은 시나리오(배치 `build_scenarios`)의 옛 규칙.
+#: 새로 주입하는 27번은 늘 지진 정보로 정한다(2026-11-14)
 DISASTER_DOWN_RATIO = QUAKE_DOWN
 #: 자동 선택 지역 크기(셀 수) — 국소 / 넓은 지역. 초기값
 DISASTER_AREA_CELLS = {"local": 25, "wide": 80}
@@ -2746,135 +2794,229 @@ DISASTER_AREA_CELLS = {"local": 25, "wide": 80}
 DISASTER_RECONNECT_S = (5.0, 30.0)
 
 
-# ── 지진 정보로 음영 eNB 를 고른다 (2026-11-13 사용자 결정 · 27번) ──────────────────────────
+# ── 지진 한 건 → 셀별 진도 → 폭주·정지 (2026-11-14 사용자 결정 B · 27번) ─────────────────────────
 #
-# 27번이 시작될 때 지진 한 건(진앙·진도·모양)을 정하고 `CM_QUAKE_EVENT` 에 적는다(`cli` · `control`).
-# 음영(정지) eNB 는 그 지진에서 고른다 — 전에는 지역 eNB 의 40%(`DISASTER_DOWN_RATIO`)였다. 호 폭주·
-# 국면(3분 정지 · 23분 정상화)은 그대로다. **아래 값은 모두 결과를 보고 조정할 초기값이다.**
+# 27번이 시작될 때 지진 한 건(진원역·진앙·깊이·규모)을 정하고 `CM_QUAKE_EVENT` 에 적는다(`cli` · `control`).
+# 셀마다 진원 거리로 진도를 계산하고(graphio `evidence.quake_intensity` 와 같은 식 + eNB 지반 증폭률),
+# **폭주는 진도 3 이상 · 정지는 진도 5약(4.5) 이상**에서만 생긴다. 전에는 진도 → (반경 · 정지 확률 ·
+# 최대 셀) 표(`QUAKE_TABLE`)로 진앙 둘레를 꺼서, 진도 2.8 에 eNB 6곳이 꺼지고 진앙이 도쿄 한가운데였다
+# (F-332). 그 표는 근거가 없어 걷어 냈다. 국면(3분 정지 · 23분 정상화)은 그대로다.
+#
+# 이 지역 지진은 깊이가 60~80km 라 도쿄 안 진원 거리가 비슷하다 — 거리만으로는 도쿄 안 진도 차가 0.2 도
+# 안 난다. 실제 지진(2021-10-07 · 2005-07-23 치바 북서부)에서 아다치·하네다가 더 세게 흔들린 것은 무른 땅
+# 때문이라 eNB 별 지반 증폭률(ARV)을 곱한다. 표가 없으면 1.0(거리만)이고, 그러면 정지는 대개 0곳이다 —
+# 실제로도 M6 급에서 도쿄 기지국 정지는 없거나 몇 곳이다.
 
-#: 시나리오 진도 범위 — 무작위 · 소수 한 자리(사용자 결정 2.0~4.0)
-QUAKE_INTENSITY_RANGE = (2.0, 4.0)
-#: 진도 → (음영 반경 km, 진앙 0km 정지 확률 %, 정지 셀 최대 수). 사이는 직선으로 잇는다. 확률·최대 셀은
-#: 사용자 값(2 → 10%·10셀, 3 → 30%·25셀, 4 → 50%·40셀), 반경은 케이 제안(3·6·10km)이다. 실측 근거는 없다
-QUAKE_TABLE = ((2.0, 3.0, 10.0, 10), (3.0, 6.0, 30.0, 25), (4.0, 10.0, 50.0, 40))
-#: 음영 모양 — ROUND(진앙에서의 거리) · LINEAR(진앙을 지나는 선분에서의 거리 · 단층을 따라 꺼지는 모양)
-QUAKE_SHAPES = ("ROUND", "LINEAR")
-#: LINEAR 선분 길이 = 반경 × 이 값(진앙이 선분 가운데). 초기값
-QUAKE_LINEAR_LEN_X = 2.0
-
-
-def quake_params(intensity: float) -> tuple[float, float, int]:
-    """진도 → (반경 km, 진앙 정지 확률 %, 최대 셀) — `QUAKE_TABLE` 사이를 직선으로 잇는다. 범위 밖은 끝값."""
-    t = QUAKE_TABLE
-    x = min(max(float(intensity), t[0][0]), t[-1][0])
-    for (x0, r0, p0, m0), (x1, r1, p1, m1) in zip(t, t[1:]):
-        if x <= x1:
-            f = (x - x0) / (x1 - x0) if x1 > x0 else 0.0
-            return (round(r0 + (r1 - r0) * f, 1), round(p0 + (p1 - p0) * f, 1),
-                    int(round(m0 + (m1 - m0) * f)))
-    return t[-1][1], t[-1][2], t[-1][3]
+#: `CM_QUAKE_EVENT.SHAPE` 에 적는 값 — 감쇠가 진원 거리라 영향은 늘 동심원이다. 칸은 `NOT NULL` 이라 남긴다.
+#: 이 방식에서 판정에 쓰는 칸은 발생 시각·진앙·깊이·규모·진도뿐이다(graphio EV-19)
+QUAKE_SHAPE = "ROUND"
 
 
-def quake_new(lat: float, lon: float, rng: random.Random, intensity: float | None = None,
-              shape: str | None = None) -> dict:
-    """지진 한 건 — 정하지 않은 값은 ``rng``(장애 ID 시드)로 뽑는다. 키는 `CM_QUAKE_EVENT` 컬럼과 같은 뜻이다."""
-    lo, hi = QUAKE_INTENSITY_RANGE
-    inten = round(rng.uniform(lo, hi), 1) if intensity is None else round(float(intensity), 1)
-    shape = shape if shape in QUAKE_SHAPES else QUAKE_SHAPES[rng.randrange(len(QUAKE_SHAPES))]
-    radius, base, most = quake_params(inten)
-    q = {"lat": round(float(lat), 6), "lon": round(float(lon), 6), "intensity": inten, "shape": shape,
-         "azimuth_deg": None, "length_km": None, "radius_km": radius, "base_pct": base, "max_cells": most}
-    if shape == "LINEAR":
-        q["azimuth_deg"] = rng.randrange(360)
-        q["length_km"] = round(radius * QUAKE_LINEAR_LEN_X, 1)
-    return q
+def quake_intensity(magnitude: float, depth_km: float, epi_km: float, d: float = 0.0,
+                    arv: float = 1.0) -> float:
+    """한 지점의 계측 진도 — graphio `evidence.quake_intensity` 와 **같은 식**에 지반 증폭률 ``arv`` 를 곱한다.
+
+    * 감쇠 司・翠川(1999): ``log PGV = 0.58M + 0.0038D + d − 1.29 − log(X + 0.0028·10^(0.5M)) − 0.002X``
+      (기준 지반 Vs 600m/s · X = 진원 거리 · D = 깊이)
+    * 환산 翠川 외(1999): ``I = 2.68 + 1.72·log(PGV × 1.41 × ARV)`` — 1.41 은 Vs 600 → 400m/s(松岡・翠川 1994)
+    graphio 는 지반을 모르므로 ``arv`` 를 넣지 않는다(1.0). 식을 고치면 두 곳을 함께 고친다
+    """
+    x = math.hypot(epi_km, depth_km)
+    log_pgv = (0.58 * magnitude + 0.0038 * depth_km + d - 1.29
+               - math.log10(x + 0.0028 * 10 ** (0.5 * magnitude)) - 0.002 * x)
+    return 2.68 + 1.72 * math.log10(10 ** log_pgv * 1.41 * max(arv, 1e-6))
 
 
-def quake_dist_km(q: dict, lat: float, lon: float) -> float:
-    """셀까지 거리 — ROUND 는 진앙, LINEAR 는 진앙을 가운데 둔 선분(방위 0 = 북 · 시계 방향)."""
+def quake_radius_km(magnitude: float, depth_km: float, d: float, intensity: float) -> float:
+    """지반 1.0 에서 진도가 ``intensity`` 이상인 진앙 거리(km). 진앙에서도 못 미치면 0.
+
+    거리에 대해 단조 감소라 이분법이다. `CM_QUAKE_EVENT.RADIUS_KM` 에 적는 **참고값**이다 — 판정은 이 칸을
+    읽지 않는다(graphio 가 같은 식으로 스스로 센다)
+    """
+    if quake_intensity(magnitude, depth_km, 0.0, d) < intensity:
+        return 0.0
+    lo, hi = 0.0, 2000.0
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        if quake_intensity(magnitude, depth_km, mid, d) >= intensity:
+            lo = mid
+        else:
+            hi = mid
+    return round(lo, 1)
+
+
+def quake_region(lat: float | None = None, lon: float | None = None, rng: random.Random | None = None,
+                 name: str | None = None) -> tuple:
+    """진원역 하나 — 이름이 있으면 그것(앞 글자 A·B·C·D 도 받는다), 좌표가 있으면 가장 가까운 것,
+    둘 다 없으면 ``rng`` 로 고른다. 좌표 지정 진앙도 깊이·d 는 가까운 진원역 값을 쓴다"""
+    regs = FAULT.quake_regions
+    if name:
+        n = name.strip()
+        if len(n) == 1 and n.upper() in "ABCDEFGH"[:len(regs)]:
+            return regs["ABCDEFGH".index(n.upper())]
+        for r in regs:
+            if r[0] == n:
+                return r
+        raise ValueError(f"모르는 진원역: {name}")
+    if lat is not None and lon is not None:
+        from .geo_lite import haversine_km
+        return min(regs, key=lambda r: haversine_km(lat, lon, r[1], r[2]))
+    return regs[(rng or random.Random()).randrange(len(regs))]
+
+
+def quake_new(rng: random.Random, region: str | None = None, lat: float | None = None,
+              lon: float | None = None, magnitude: float | None = None, depth_km: float | None = None,
+              mag_floor: Callable[[float, float, float, float], float | None] | None = None) -> dict:
+    """지진 한 건 — 정하지 않은 값은 ``rng``(장애 ID 시드)로 뽑는다. 키는 `CM_QUAKE_EVENT` 컬럼과 같은 뜻이다.
+
+    진앙을 주지 않으면 진원역 대표 위치에서 ±`quake_jitter_deg` 흩뜨린다. 깊이도 ±`quake_jitter_depth_km`.
+    규모는 `quake_magnitude` 범위에서 뽑되, ``mag_floor(lat, lon, depth, d)`` 가 주는 하한이 있으면 그 위에서
+    뽑는다 — 폭주 지역(진도 3 이상 셀)이 서는 가장 작은 규모다(`faults._quake_step`). 하한이 범위 위면 None
+    을 돌려준다 — 이 진원역·깊이로는 폭주가 서지 않는다
+    """
+    reg = quake_region(lat, lon, rng, region)
+    j, jd = FAULT.quake_jitter_deg, FAULT.quake_jitter_depth_km
+    if lat is None or lon is None:
+        lat = reg[1] + rng.uniform(-j, j)
+        lon = reg[2] + rng.uniform(-j, j)
+    depth = round(max(1.0, reg[3] + rng.uniform(-jd, jd)) if depth_km is None else float(depth_km), 1)
+    d = reg[4]
+    lo, hi = FAULT.quake_magnitude
+    if magnitude is None:
+        floor = mag_floor(lat, lon, depth, d) if mag_floor is not None else None
+        if floor is not None:
+            if floor > hi:
+                return None
+            lo = max(lo, floor)
+        magnitude = rng.uniform(lo, hi)
+    m = round(float(magnitude), 1)
+    return {"lat": round(float(lat), 6), "lon": round(float(lon), 6), "region": reg[0],
+            "depth_km": depth, "magnitude": m, "fault_type_d": d,
+            # 진앙(지표 거리 0 · 지반 1.0)의 계산 진도
+            "intensity": round(quake_intensity(m, depth, 0.0, d), 1),
+            "shape": QUAKE_SHAPE, "azimuth_deg": None, "length_km": None,
+            # 아래 넷은 생성기 참고값이다 — graphio 판정은 읽지 않는다(EV-19)
+            "radius_km": quake_radius_km(m, depth, d, FAULT.quake_surge_intensity),
+            "base_pct": FAULT.quake_down_pct, "max_cells": FAULT.quake_down_max_cells}
+
+
+_ARV_CACHE: dict[str, dict[str, float]] = {}
+
+
+def quake_arv(path: str | None = None) -> dict[str, float]:
+    """eNB → 지반 증폭률(ARV). 표가 없거나 못 읽으면 빈 사전 — 호출부가 1.0 을 쓴다(거리만).
+
+    CSV `enb_id,arv`(머리 줄은 있어도 없어도 된다). 정적 값이라 경로마다 한 번만 읽는다
+    """
+    path = FAULT.quake_arv_path if path is None else path
+    if not path:
+        return {}
+    if path in _ARV_CACHE:
+        return _ARV_CACHE[path]
+    out: dict[str, float] = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                parts = [x.strip() for x in line.split(",")]
+                if len(parts) < 2:
+                    continue
+                try:
+                    v = float(parts[1])
+                except ValueError:
+                    continue  # 머리 줄
+                if v > 0:
+                    out[parts[0]] = v
+    except OSError as e:
+        print(f"  ! 지반 증폭률 표를 못 읽었다({path}: {e}) — 모든 eNB 를 1.0 으로 둔다", flush=True)
+    _ARV_CACHE[path] = out
+    return out
+
+
+def quake_cell_intensity(cells: list[Cell], q: dict, arv: dict[str, float] | None = None) -> dict[str, float]:
+    """좌표 있는 셀 → 계산 진도. 좌표 없는 셀은 거리를 모르므로 넣지 않는다(폭주·정지 대상도 아니다)."""
     from .geo_lite import haversine_km
 
-    if q["shape"] != "LINEAR":
-        return haversine_km(q["lat"], q["lon"], lat, lon)
-    kx = 111.32 * math.cos(math.radians(q["lat"]))
-    x, y = (lon - q["lon"]) * kx, (lat - q["lat"]) * 111.0
-    a = math.radians(q["azimuth_deg"] or 0)
-    dx, dy = math.sin(a), math.cos(a)
-    half = (q["length_km"] or 0.0) / 2.0
-    t = max(-half, min(half, x * dx + y * dy))
-    return math.hypot(x - t * dx, y - t * dy)
+    arv = quake_arv() if arv is None else arv
+    m, depth, d = float(q["magnitude"]), float(q["depth_km"]), float(q.get("fault_type_d") or 0.0)
+    return {c.cell_key: quake_intensity(m, depth, haversine_km(q["lat"], q["lon"], c.latitude, c.longitude),
+                                        d, arv.get(str(c.enb_id), 1.0))
+            for c in cells if c.geo_status == "MAPPED"}
 
 
-def quake_plan(cells: list[Cell], q: dict, rng: random.Random,
-               want: int = 25) -> tuple[set[str], list[str], list[str]]:
-    """지진 → (폭주 지역 셀, 음영 eNB, 음영 셀).
+def quake_plan(cells: list[Cell], q: dict, rng: random.Random, want: int = 25,
+               arv: dict[str, float] | None = None) -> tuple[set[str], list[str], list[str]]:
+    """지진 → (폭주 지역 셀, 정지 eNB, 정지 셀).
 
-    반경 안 셀마다 정지 확률 `base × (1 − 거리/반경)` 을 두고 **가까운 셀부터** ``rng`` 로 뽑는다. 한 셀이
-    뽑히면 **그 eNB 의 셀을 함께** 끈다(실제 정전·전송 단절은 eNB 째 꺼진다 · 케이 제안). 함께 끄면 최대
-    셀 수를 넘는 eNB 는 건너뛰고, 최대에 닿으면 멈춘다. 좌표 없는 셀은 거리를 모르므로 넣지 않는다.
-
-    **폭주 지역은 기존 크기다**(``want`` = `DISASTER_AREA_CELLS` 국소 25 · 넓은 80 · 2026-11-13 정정). **진앙**
-    에서 가까운 셀부터 ``want`` 개에 꺼진 eNB 의 셀을 더한다 — 그래서 조금 넘을 수 있다. LINEAR 여도 폭주는
-    진앙 둘레다(2026-11-14 · 11-13 결정 "진앙 중심 25/80셀"). 선분 거리로 고르면 선분 위 셀이 모두 거리 0 으로
-    같아져 25셀이 선분 끝에 몰렸다(F-329 · 진앙에서 5~7.6km). 선분 거리는 정지 eNB 를 고를 때만 쓴다.
-    처음에는 반경 안 셀 전부였는데, 진도 4(10km)면 수백~수천 셀이 되어 전국 상한(`pemdb1.SURGE_CAP`)에
-    눌려 "지역만 40배 폭주"가 희석됐다. 사용자 결정은 "호 폭주는 기존과 동일"이다
+    * **폭주**: 진도 `quake_surge_intensity`(3) 이상인 셀 중 **진도가 높은 셀부터** ``want`` 개
+      (`DISASTER_AREA_CELLS` 국소 25 · 넓은 80 · 지금의 상한 그대로). 진도 4 짜리 M6 이면 도쿄 전역이
+      진도 3 이상이라, 상한이 없으면 전국 상한(`pemdb1.SURGE_CAP`)에 눌려 지역 폭주가 묽어진다
+    * **정지**: eNB 의 진도(셀 중 최대) `quake_down_intensity`(4.5 · 진도 5약) 이상인 eNB 만 후보다. 진도가
+      높은 eNB 부터 `quake_down_pct` 확률로 끄고 eNB 째 끈다(실제 정전·전송 단절은 eNB 째 꺼진다).
+      `quake_down_max_cells` 를 넘는 eNB 는 건너뛴다. **0곳이어도 정상이다**
+    폭주 지역 = 폭주 셀 + 정지 셀(정답 지역 · 케이 지시)
     """
-    r = float(q["radius_km"])
-    ranked = sorted(((quake_dist_km(q, c.latitude, c.longitude), c.cell_key, c) for c in cells
-                     if c.geo_status == "MAPPED"), key=lambda x: (x[0], x[1]))
-    near = [(d, c) for d, _k, c in ranked if d <= r]
+    inten = quake_cell_intensity(cells, q, arv)
+    thr = FAULT.quake_surge_intensity
+    surge = sorted(((-v, k) for k, v in inten.items() if v >= thr))
     per: dict[str, list[str]] = {}
     for c in cells:
         per.setdefault(str(c.enb_id), []).append(c.cell_key)
+    by_enb: dict[str, float] = {}
+    for c in cells:
+        v = inten.get(c.cell_key)
+        if v is not None:
+            e = str(c.enb_id)
+            by_enb[e] = max(by_enb.get(e, v), v)
+    cand = sorted(((-v, e) for e, v in by_enb.items() if v >= FAULT.quake_down_intensity))
     dead: list[str] = []
     n = 0
-    for d, c in near:
-        if n >= q["max_cells"]:
+    for _v, e in cand:
+        if n >= FAULT.quake_down_max_cells:
             break
-        e = str(c.enb_id)
-        if e in dead:
+        if rng.random() >= FAULT.quake_down_pct / 100.0:
             continue
-        if rng.random() >= q["base_pct"] / 100.0 * (1.0 - d / r if r > 0 else 0.0):
-            continue
-        if n + len(per[e]) > q["max_cells"]:
+        if n + len(per[e]) > FAULT.quake_down_max_cells:
             continue
         dead.append(e)
         n += len(per[e])
     dead_cells = sorted(k for e in dead for k in per[e])
-    from .geo_lite import haversine_km
-
-    by_epi = sorted((haversine_km(q["lat"], q["lon"], c.latitude, c.longitude), c.cell_key) for c in cells
-                    if c.geo_status == "MAPPED")
-    area = {k for _d, k in by_epi[:max(0, int(want))]} | set(dead_cells)
+    area = {k for _v, k in surge[:max(0, int(want))]} | set(dead_cells)
     return area, sorted(dead), dead_cells
 
 
-#: 27번 폭주 호에 얹는 SMS 에러(2026-11-13 사용자 결정) — 비율은 레코드 몫이고 **초기값**이다(현장 실측 없음).
-#: SMS 필드는 LTE 호 기록 안의 "마지막 SMS 에러 원인"이다 — 시도 여부 칸이 없어 성공률은 셀 수 없다
-DISASTER_SMS_SHARE = {"surge": 0.08, "down": 0.15}
-#: 발신(MO) — (필드, 원인) · 규격 `XDR_Cause_v0.5` SM_RP 42 Congestion · SM_CP 22 Congestion · SM_TP 192 SC busy
-DISASTER_SMS_MO = (("sms_mo_rp_error_cause", "42"), ("sms_mo_cp_error_cause", "22"),
-                   ("sms_mo_tp_error_cause", "192"))
-#: 착신(MT) — 음영 국면의 수신 도달 불가 · SM_RP 27 Destination out of order · 28 Unidentified subscriber
-DISASTER_SMS_MT = (("sms_mt_rp_error_cause", "27"), ("sms_mt_rp_error_cause", "28"))
-#: 착신 절차 — 4(데이터 착신) · 8(음성 착신). 나머지 폭주 절차(3·7)는 발신이다
-DISASTER_MT_CALL_TYPES = frozenset(("4", "8"))
+def quake_mag_floor(cells: list[Cell], want: int, arv: dict[str, float] | None = None):
+    """``(lat, lon, depth, d)`` → 진도 3 이상 셀이 ``want`` 개 서는 가장 작은 규모(소수 한 자리 올림).
 
-
-def disaster_sms_error(sc, minute: int, ct: str, rng: random.Random) -> tuple[str, str] | None:
-    """폭주 호 하나에 얹을 SMS 에러 `(필드, 원인)` — 없으면 None.
-
-    폭주만 있는 국면은 `DISASTER_SMS_SHARE["surge"]`, 음영이 생긴 뒤는 `"down"` 이다. 발신은 혼잡 원인
-    셋 중 하나, 착신은 음영이 있을 때만 도달 불가(27·28)다 — 음영 전에는 받을 사람이 다 살아 있다
+    `quake_new` 의 ``mag_floor`` 다. 바다 쪽 M4.5 는 도쿄가 진도 2 안팎이라 폭주 셀이 0 이 되어 주입이
+    아무것도 만들지 않는다 — 규모 범위의 아래를 그 진원에서 폭주가 서는 값으로 올린다(새 문턱이 아니라
+    `quake_surge_intensity` 와 폭주 셀 수 상한에서 나오는 값이다). 범위 끝에서도 안 서면 범위 위 값을 준다
     """
-    dead = disaster_dead_enbs(sc, minute)
-    share = DISASTER_SMS_SHARE["down" if dead else "surge"]
-    if rng.random() >= share:
-        return None
-    if ct in DISASTER_MT_CALL_TYPES:
-        return DISASTER_SMS_MT[rng.randrange(len(DISASTER_SMS_MT))] if dead else None
-    return DISASTER_SMS_MO[rng.randrange(len(DISASTER_SMS_MO))]
+    from .geo_lite import haversine_km
+
+    arv = quake_arv() if arv is None else arv
+    pts = [(c.latitude, c.longitude, arv.get(str(c.enb_id), 1.0)) for c in cells if c.geo_status == "MAPPED"]
+    need = max(1, min(int(want), len(pts)))
+
+    def count(m, lat, lon, depth, d):
+        thr = FAULT.quake_surge_intensity
+        return sum(1 for la, lo, a in pts
+                   if quake_intensity(m, depth, haversine_km(lat, lon, la, lo), d, a) >= thr)
+
+    def floor(lat, lon, depth, d):
+        lo, hi = FAULT.quake_magnitude
+        if count(hi, lat, lon, depth, d) < need:
+            return hi + 0.1
+        a, b = lo, hi
+        if count(a, lat, lon, depth, d) >= need:
+            return None
+        for _ in range(12):
+            mid = (a + b) / 2
+            if count(mid, lat, lon, depth, d) >= need:
+                b = mid
+            else:
+                a = mid
+        return math.ceil(b * 10 - 1e-9) / 10
+    return floor
 
 
 def disaster_elapsed(sc, minute: int) -> int:
@@ -2905,8 +3047,7 @@ def _disaster_rank(sc) -> dict[str, int]:
 
 
 def disaster_rank_of(cell_keys, pool, mode: str, sid: str) -> dict[str, int]:
-    """정지 순위의 본체 — 시나리오 없이도 부를 수 있게 뺐다(대상 자동 선택이 후보마다 미리 센다 ·
-    `faults._busy_disaster_area`). 규칙은 `_disaster_rank` 머리말 그대로다"""
+    """정지 순위의 본체 — 시나리오 없이도 부를 수 있게 뺐다. 규칙은 `_disaster_rank` 머리말 그대로다"""
     enbs = sorted({k.rsplit("-", 1)[0] for k in cell_keys})
     if mode == "local" and pool:
         from .geo_lite import haversine_km
@@ -2948,7 +3089,7 @@ def disaster_dead_enbs(sc, minute: int) -> set[str]:
 
 
 def _disaster_truth(sc) -> dict:
-    """자연재해 정답지 덧붙임 — 주원인(`NATURAL_DISASTER_SUSPECTED`)의 **맥락**을 싣는다.
+    """지진 정답지 덧붙임 — 주원인(`EARTHQUAKE_IMPACT`)의 **맥락**을 싣는다.
 
     graphio 채점은 모르는 키를 무시한다. 폭주 탐지가 생기면 `context` 를 읽는다. 분은 장애 시작
     기준 상대값이다(`start_minute` 에 더하면 절대 분)
@@ -2965,8 +3106,10 @@ def _disaster_truth(sc) -> dict:
     at = disaster_down_at(sc)
     rate = sc.__dict__.get("_enb_rate")
     return {
-        # 지진 한 건(`CM_QUAKE_EVENT` 와 같은 값 · 2026-11-13) — 옛 비율 규칙이면 None
+        # 지진 한 건(`CM_QUAKE_EVENT` 와 같은 값 + 진원역 이름·d · 2026-11-14) — 옛 비율 규칙이면 None
         "quake": quake,
+        # 정답 지역 셀의 계산 진도(소수 둘째 자리) — 폭주가 진도 순으로 골랐는지 정답지로 볼 수 있게
+        "cell_intensity": sc.__dict__.get("_quake_cell_intensity"),
         "down_cells": sc.__dict__.get("_quake_dead_cells"),
         # 정지 eNB 의 평소 호율(분당 시도 · 장애 시작 전 60분 · `pemdb1.enb_call_rate`). D4 확정에
         # 걸리는 분(N*)을 미리 셈하라고 싣는다. 창고를 못 읽었으면 None 이다(불변규칙 17)

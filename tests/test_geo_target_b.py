@@ -223,40 +223,6 @@ def test_disaster_area_gives_the_first_draw_and_warns_when_nothing_matches(monke
     assert "못 찾았다" in capsys.readouterr().out
 
 
-def test_busy_disaster_area_only_considers_areas_of_the_expected_shape(monkeypatch):
-    cells = _disaster_master()
-    rate = {c.enb_id: 5.0 for c in cells}
-    shapes = []
-
-    def spy(picked):
-        r = S.geo_shape.__wrapped__(picked) if hasattr(S.geo_shape, "__wrapped__") else real(picked)
-        shapes.append(r)
-        return r
-
-    real = S.geo_shape
-    monkeypatch.setattr(S, "geo_shape", spy)
-    keys = faults._busy_disaster_area(cells, rate, 25, "local", "F-1")
-    assert keys is not None and real([c for c in cells if c.cell_key in keys]) == "CLUSTER"
-
-
-def test_busy_disaster_area_falls_back_when_no_area_matches(monkeypatch, capsys):
-    cells = _disaster_master()
-    monkeypatch.setattr(S, "geo_shape", lambda picked: "POINT")
-    keys = faults._busy_disaster_area(cells, {c.enb_id: 5.0 for c in cells}, 25, "local", "F-9")
-    assert keys is not None
-    assert "F-9 자연재해" in capsys.readouterr().out
-
-
-def test_busy_disaster_area_is_deterministic_and_needs_rates():
-    cells = _disaster_master()
-    rate = {c.enb_id: 5.0 + int(c.enb_id) % 7 for c in cells}
-    a = faults._busy_disaster_area(cells, rate, 25, "local", "F-1")
-    assert a == faults._busy_disaster_area(cells, rate, 25, "local", "F-1")
-    assert faults._busy_disaster_area(cells, {}, 25, "local", "F-1") is None, "호율이 없으면 후보가 없다"
-
-
-# ---------------------------------------------------------------- 9번 · _ROUTE_KINDS · _route_target 모양 검사
-
 def test_route_kinds_cover_the_two_corridor_scenarios():
     """25번은 11-13 에 뺐다(eNB 1~2개의 전 셀). 노선 구간을 고르는 kind 는 9·15번뿐이다."""
     assert set(faults._ROUTE_KINDS) == {"ho_interruption", "mobility"}
@@ -323,18 +289,3 @@ def _patch_rank(monkeypatch, lam_by_group):
 def _group_keys(cells, g):
     return {c.cell_key for c in cells if c.enb_id.startswith(f"{g:02d}")}
 
-
-def test_busy_disaster_area_looks_at_every_matching_area_not_only_the_first_40(monkeypatch):
-    cells = _groups(60)
-    rate = {c.enb_id: 1000.0 - int(c.enb_id[:2]) for c in cells}           # 앵커 순서 = 지역 순서
-    rate.update(_patch_rank(monkeypatch, {50: [9.0]}))                     # 앵커 250번째 안팎(상위 40곳 밖)
-    keys = faults._busy_disaster_area(cells, rate, 5, "local", "F-1")
-    assert keys == _group_keys(cells, 50), "앵커 상위 40곳 밖이어도 정지 eNB 호율이 가장 높은 지역"
-
-
-def test_busy_disaster_area_maximises_the_minimum_dead_rate(monkeypatch):
-    cells = _groups(12)
-    rate = {c.enb_id: 100.0 - int(c.enb_id[:2]) for c in cells}
-    # 지역 2: 최솟값 5(합 55) · 지역 7: 최솟값 6(합 12) — 최솟값이 큰 쪽을 고른다
-    rate.update(_patch_rank(monkeypatch, {2: [5.0, 50.0], 7: [6.0, 6.0]}))
-    assert faults._busy_disaster_area(cells, rate, 5, "local", "F-1") == _group_keys(cells, 7)

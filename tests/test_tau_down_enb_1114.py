@@ -124,7 +124,15 @@ def _quake_row(target: str):
 def test_27_no_record_of_any_kind_at_a_dead_enb_while_down_but_live_taus_remain(pg):
     # 합성 마스터 중심(35.60+0.078, 139.60+0.078) 근처에 진도 4.0 으로 정지 eNB 를 여럿 만든다
     pg.anchor = T0
-    scs, bad = pg.set_fault_rows([_quake_row("QUAKE:35.678,139.678,4.0,ROUND")])
+    # 11-14 — 정지는 진도 4.5 이상 eNB 에서만 생기고 지반 표가 없으면 0곳이다. 시험용 지반 표(ARV 3.0)·확률 100%·규모 6.2 로
+    # 정지 eNB 를 만든다(`test_disaster._quake_down` 과 같은 방식 · 생성기가 설정을 읽은 뒤에 덮는다)
+    import tempfile
+    path = Path(tempfile.mkdtemp()) / "arv.csv"
+    path.write_text("enb_id,arv\n" + "".join(f"{c.enb_id},3.0\n" for c in _master()), encoding="utf-8")
+    mp = pytest.MonkeyPatch()
+    for k, v in (("quake_arv_path", str(path)), ("quake_down_pct", 100.0), ("quake_down_max_cells", 12)):
+        mp.setattr(S.FAULT, k, v)
+    scs, bad = pg.set_fault_rows([_quake_row("QUAKE:35.678,139.678,6.2,10")])
     assert scs and not bad
     sc = scs[0]
     dead = sorted(S.disaster_dead_enbs(sc, sc.start_minute + S.DISASTER_DOWN_AT + 1))
@@ -155,3 +163,4 @@ def test_27_no_record_of_any_kind_at_a_dead_enb_while_down_but_live_taus_remain(
     live_taus = sum(len(_tau_rows(pg, out[m])) for m in range(lo, hi))
     assert live_taus > 0, "살아 있는 셀로 가는 TAU 는 남아야 한다"
     assert sum(len(_first_last_enb_rows(pg, out[m], dead_set)) for m in range(hi, hi + 8)) > 0, "정상화 뒤에는 TAU 가 돌아온다"
+    mp.undo()

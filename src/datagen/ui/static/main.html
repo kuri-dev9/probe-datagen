@@ -852,8 +852,11 @@ function targetPlain(raw) {
     if (up === "DOMAIN") return T("서비스 {v}", {v: arg});
     if (up === "ROUTE%") return T("노선 범위 {v}%", {v: arg});
     if (up === "QUAKE") {
-      const q = arg.split(",").map(x => x.trim()), n = Number(q[2]);
-      return q[2] && Number.isFinite(n) ? T("진도 {v} 지진 (진앙 지정)", {v: q[2]}) : T("지진 (진앙 지정)");
+      // `QUAKE:<진원역 A~D>[,<규모>]` · `QUAKE:<위도>,<경도>[,<규모>[,<깊이>]]`(2026-11-14 — 전에는 셋째 값이 진도였다)
+      const q = arg.split(",").map(x => x.trim()), region = q[0] && !Number.isFinite(Number(q[0]));
+      const m = region ? q[1] : q[2];
+      if (region) return m ? T("진원역 {r} 규모 {v} 지진", {r: q[0], v: m}) : T("진원역 {r} 지진", {r: q[0]});
+      return m && Number.isFinite(Number(m)) ? T("규모 {v} 지진 (진앙 지정)", {v: m}) : T("지진 (진앙 지정)");
     }
   }
   const node = /^(SGW|MME|PGW)-(\d+)$/i.exec(text);

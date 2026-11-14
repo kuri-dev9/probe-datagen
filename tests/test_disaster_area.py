@@ -4,6 +4,10 @@
 N* 24~27분). 자동 대상이 **정지할 eNB 의 평소 호율이 가장 높은 지역**을 고르게 했다(임계·생산량은 그대로).
 정답지에는 정지 eNB 별 호율 `down_enbs_rate` 가 실린다.
 
+**2026-11-14 — 자동 대상이 "호율이 높은 지역"을 고르던 `faults._busy_disaster_area` 는 걷혔다**(지역은 진원역 지진의 진도 3 이상
+셀이 정한다 · `test_quake_1113.py`). 그 함수를 시험하던 9개(지역 선택 · 결정성 · 이동 · 정답지 호율 키)는 이 파일에서 뺐고, 호율을
+읽는 공급자·정답지 `down_enbs_rate` 의 남은 시험만 둔다.
+
 DB 를 쓰지 않는다 — 합성 셀 마스터 + 가짜 커서. 호율 공급자는 장애 시작 시각을 받아 `{eNB: λ}` 를 준다.
 """
 
@@ -151,88 +155,6 @@ def test_rate_reads_the_hour_before_the_given_time_and_the_enb_table():
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("mode,want", [("local", 25), ("wide", 80)])
-def test_area_is_picked_among_the_busy_enbs(mode, want):
-    rate = _rates()
-    keys = faults._busy_disaster_area(_master(), rate, want, mode, "F-27")
-    assert keys
-    enbs = _enbs(keys)
-    busy = {_enb(e) for e in range(50, 60)}
-    if mode == "local":
-        assert len(enbs & busy) / len(enbs) >= 0.5, f"{mode}: 붐비는 무리가 지역의 절반 미만이다 ({sorted(enbs)})"
-    else:
-        # 넓은 지역(80셀 ≈ eNB 27)은 붐비는 eNB(10개)보다 커서 비율이 아니라 **무리를 덮는지**를 본다
-        assert len(enbs & busy) >= 8, f"{mode}: 붐비는 eNB 10개 중 {len(enbs & busy)}개만 든다"
-
-
-@pytest.mark.parametrize("mode,want", [("local", 25), ("wide", 80)])
-def test_the_chosen_area_has_the_best_slowest_dead_enb_among_the_candidates(mode, want):
-    """고른 지역의 정지 eNB 호율 최솟값이 후보(호율 상위 40 eNB 중심)들 가운데 가장 크다 — D4 는 가장 느린 eNB 가 정한다."""
-    cells, rate = _master(), _rates()
-    chosen = faults._busy_disaster_area(cells, rate, want, mode, "F-27")
-
-    def slowest(keys):
-        picked = [c for c in cells if c.cell_key in keys]
-        rank = S.disaster_rank_of(keys, picked, mode, "F-27")
-        n = S.disaster_dead_n(len(rank))
-        return min(rate[e] for e, r in rank.items() if r < n)
-
-    first = {}
-    for c in cells:
-        first.setdefault(c.enb_id, c)
-    top = sorted(first, key=lambda e: (-rate[e], e))[:40]
-    cands = []
-    for e in top:
-        picked = faults.whole_enbs(cells, faults.area_cells(cells, random.Random(0), want=want, anchor=first[e]))
-        cands.append(slowest({c.cell_key for c in picked}))
-    assert slowest(chosen) == pytest.approx(max(cands))
-
-
-def test_area_choice_is_deterministic_for_the_same_input():
-    a = faults._busy_disaster_area(_master(), _rates(), 25, "local", "F-27")
-    b = faults._busy_disaster_area(_master(), _rates(), 25, "local", "F-27")
-    assert a == b
-    # 난수를 쓰지 않는다 — 전역 난수 상태가 달라도 같다
-    random.seed(12345)
-    assert faults._busy_disaster_area(_master(), _rates(), 25, "local", "F-27") == a
-
-
-def test_area_follows_the_busy_cluster_when_it_moves():
-    """붐비는 무리를 위쪽(eNB 0~9)으로 옮기면 지역도 따라간다 — 고정 좌표가 아니다."""
-    top = faults._busy_disaster_area(_master(), _rates(busy=range(0, 10)), 25, "local", "F-27")
-    bottom = faults._busy_disaster_area(_master(), _rates(busy=range(50, 60)), 25, "local", "F-27")
-    assert top != bottom
-    assert len(_enbs(top) & {_enb(e) for e in range(0, 10)}) >= len(_enbs(top)) / 2
-
-
-def test_no_rate_data_means_no_area():
-    assert faults._busy_disaster_area(_master(), {}, 25, "local", "F-27") is None
-    assert faults._busy_disaster_area(_master(), {_enb(1): 0.0}, 25, "local", "F-27") is None
-
-
-# --------------------------------------------------------------------------
-# 3. build — 공급자 · 예전 무작위로의 후퇴 · 지정 대상
-# --------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("target", [None, "", "LOCAL", "WIDE"])
-def test_auto_target_with_rates_picks_the_busy_area(target):
-    sc, calls = _build(_fault(target=target), rate=_rates())
-    assert sc is not None and len(calls) == 1
-    mode = "wide" if (target or "").upper() == "WIDE" else "local"
-    want = S.DISASTER_AREA_CELLS[mode]
-    expected = faults._busy_disaster_area(_master(), _rates(), want, mode, "F-27")
-    # 2026-11-13 — 고른 지역은 진앙(그 셀들의 중심)을 정한다. 폭주 지역은 진앙에서 가까운 `want`셀 + 꺼진 eNB 셀
-    by = {c.cell_key: c for c in _master()}
-    pts = [by[k] for k in expected]
-    t = sc.as_truth()
-    assert t["quake"]["lat"] == pytest.approx(sum(c.latitude for c in pts) / len(pts), abs=1e-5)
-    assert t["quake"]["lon"] == pytest.approx(sum(c.longitude for c in pts) / len(pts), abs=1e-5)
-    assert set(t["down_cells"]) <= sc.target.cell_keys
-    assert len(sc.target.cell_keys - set(t["down_cells"])) <= want
-    assert sc.target.outage_mode == mode
-
-
 @pytest.mark.parametrize("rate", [None, {}, RuntimeError("창고 끊김")])
 def test_missing_empty_or_failing_provider_falls_back_to_the_old_random_area(rate, capsys):
     sc, _calls = _build(_fault(), rate=rate)
@@ -240,13 +162,6 @@ def test_missing_empty_or_failing_provider_falls_back_to_the_old_random_area(rat
     assert sc is not None and sc.target.cell_keys == old.target.cell_keys, "예전 무작위 지역이어야 한다"
     if isinstance(rate, Exception):
         assert "호율 조회 실패" in capsys.readouterr().out, "실패는 조용히 넘기지 않고 로그를 남긴다"
-
-
-def test_old_random_area_is_not_the_busy_one():
-    """전제 — 호율을 주면 지역이 정말 바뀐다(그렇지 않으면 위 후퇴 테스트가 아무것도 가르지 못한다)."""
-    busy, _ = _build(_fault(), rate=_rates())
-    old = _build_plain(_fault())
-    assert busy.target.cell_keys != old.target.cell_keys
 
 
 @pytest.mark.parametrize("target", ["ENB:600003", "BOX:35.59,139.59,35.63,139.65"])
@@ -300,26 +215,11 @@ def test_other_kinds_never_use_the_rates_for_their_target():
 # --------------------------------------------------------------------------
 
 
-def test_truth_down_enbs_rate_has_the_same_keys_as_down_enbs_with_the_provider_values():
-    rate = _rates()
-    sc, _ = _build(_fault(), rate=rate)
-    t = sc.as_truth()
-    assert t["down_enbs"] and set(t["down_enbs_rate"]) == set(t["down_enbs"])
-    for e, v in t["down_enbs_rate"].items():
-        assert v == pytest.approx(round(rate[e], 3))
-
-
 def test_truth_down_enbs_rate_is_none_without_a_provider_or_data():
     sc = _build_plain(_fault())
     assert sc.as_truth()["down_enbs_rate"] is None, "창고를 못 읽었으면 None 이다(0 이 아니다 · 불변규칙 17)"
     sc2, _ = _build(_fault(), rate={})
     assert sc2.as_truth()["down_enbs_rate"] is None
-
-
-def test_truth_rate_is_carried_for_an_explicit_target_too():
-    sc, _ = _build(_fault(target="ENB:600055"), rate=_rates())
-    t = sc.as_truth()
-    assert t["down_enbs_rate"] and set(t["down_enbs_rate"]) == set(t["down_enbs"])
 
 
 def test_truth_down_enbs_rate_equals_the_actual_dead_set():

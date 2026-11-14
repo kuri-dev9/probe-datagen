@@ -153,9 +153,9 @@ SCENARIOS: tuple[tuple[int, str, str | None, int | None, tuple[str, ...], str], 
      "끊기기 시작한다 — 셀마다 정도가 다르고 같은 분에 함께 나빠진다"),
     (26, "특정 단말 SW 업데이트 후 등록 실패 → 기종 장애 재현", "ue_model", 8,
      ("SGW",), "8번과 같은 데이터 — SW 버전 필드가 XDR 에 없다"),
-    (27, "지진 — 통화 폭주 + 기지국 정지 + 문자 실패", "natural_disaster", None, ("ENB",),
-     "진앙 주변에서 통화가 몰리고(0~13분) 진도에 따라 가까운 기지국이 꺼진다(3~23분) · 문자 전송 실패가 늘어난다 — "
-     "진도 2.0~4.0 무작위, 원형 또는 선형으로 꺼진다(CM_QUAKE_EVENT)"),
+    (27, "지진 — 통화 폭주 + 기지국 정지", "natural_disaster", None, ("ENB",),
+     "도쿄 둘레 실제 진원역(바다·땅속 깊은 곳)에서 규모 4.5~6.2 지진이 난다 — 진도 3 이상 넓은 지역에서 통화가 "
+     "몰리고(0~13분) 진도 5약 이상인 무른 땅의 기지국만 일부 꺼진다(3~23분 · 0곳일 수 있다) · CM_QUAKE_EVENT"),
 )
 
 #: **증거 없음** — 데이터에 그 장애를 판정할 근거 필드가 없어 만들지 않는 번호.
@@ -271,7 +271,9 @@ CREATE TABLE IF NOT EXISTS `{T_SCENARIO}` (
 -- 쓴다(`cli` → `record_quakes`). 실제 지진(P2P·기상청)도 같은 모양으로 받는다 — 지진 1건 + 진앙 하나.
 -- 음영 셀 목록은 두지 않는다 — 정답지(down_enbs)에 있고 이 행과 시드로 다시 셀 수 있다. graphio 가
 -- 읽어도 되는 것은 운영에서도 받을 수 있는 이 지진 정보까지다(꺼진 셀은 D4 가 스스로 찾는다).
--- 반경·확률·최대 셀은 시나리오의 **초기값**이다(`scenarios.QUAKE_TABLE`)
+-- 2026-11-14 부터 판정이 쓰는 칸은 발생 시각·진앙·깊이·규모·진도다(graphio EV-19). SHAPE 는 늘 ROUND,
+-- RADIUS_KM 는 지반 1.0 에서 진도 3 이상인 진앙 거리, BASE_PCT·MAX_CELLS 는 정지 확률·최대 셀(설정값)이다 —
+-- 모두 생성기 참고값이고 `NOT NULL` 이라 남긴다(`scenarios.quake_new`)
 CREATE TABLE IF NOT EXISTS `{T_QUAKE}` (
   `QUAKE_ID`      varchar(32)  NOT NULL                COMMENT '지진 키 — 시나리오는 Q-F<FAULT_ID>',
   `FAULT_ID`      int              DEFAULT NULL        COMMENT '시나리오 장애 CM_DATAGEN_FAULT.FAULT_ID — 실제 지진이면 NULL',
