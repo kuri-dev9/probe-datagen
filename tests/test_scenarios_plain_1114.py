@@ -96,7 +96,7 @@ def test_japanese_phrases_exist_for_every_new_screen_string():
         assert ko in ui._JA_SCEN or ko in ui._JA_COMMON, ko
 
 
-def test_plain_sentences_for_25_and_27_exist_only_in_the_50_percent_report_with_ja():
+def test_plain_sentences_for_25_and_27_exist_in_the_50_percent_report():
     import pathlib
     root = pathlib.Path(__file__).resolve().parents[1] / "config"
     v50 = json.loads((root / "scenario_report_v50.json").read_text(encoding="utf-8"))
@@ -106,5 +106,32 @@ def test_plain_sentences_for_25_and_27_exist_only_in_the_50_percent_report_with_
     assert p25 and p27
     # 11-14 04:05~05:08 새 회차(F-327·F-328)로 갱신 — 27번도 지진 구현 이후 회차라 "이전 회차" 표시가 없어졌다
     assert "지진 구현 이전" not in p25 and "지진 구현 이전" not in p27
-    others = [n for n, s in sc.items() if n not in ("24", "25", "27") and (s.get("latest") or {}).get("plain")]
-    assert others == [], "나머지 번호는 비워 둔다(자동 문장) — 24번은 11-14 07:24 회차(F-330)부터 쉬운 문장이 있다"
+    # 2026-11-15: 화면을 일반 사용자 기준으로 가기로 해 쉬운 문장은 **모든 번호**에 둘 수 있다(허용 목록 폐지).
+    # 대신 쉬운 문장이 있는 번호는 일본어 사본에도 같은 번호의 `latest.plain` 이 있어야 하고 `scan()` 이 0이어야 한다
+
+
+def _v50_paths():
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[1] / "config"
+    return root / "scenario_report_v50.json", root / "scenario_report_v50_ja.json"
+
+
+def test_every_number_with_a_plain_sentence_has_the_same_plain_in_the_japanese_copy():
+    ko_p, ja_p = _v50_paths()
+    ko = json.loads(ko_p.read_text(encoding="utf-8"))["scenarios"]
+    ja = json.loads(ja_p.read_text(encoding="utf-8"))["scenarios"]
+    ko = {str(s["no"]): s for s in ko} if isinstance(ko, list) else {str(k): v for k, v in ko.items()}
+    withplain = [n for n, s in ko.items() if (s.get("latest") or {}).get("plain")]
+    assert {"24", "25", "27"} <= set(withplain)
+    missing = [n for n in withplain if not ((ja.get(n) or {}).get("latest.plain") or {}).get("ja")]
+    assert missing == [], f"일본어 사본에 latest.plain 이 없는 번호: {missing}"
+
+
+def test_scenario_ja_scan_is_all_zero_for_the_50_percent_report(monkeypatch):
+    from datagen import scenario_ja as S
+    ko_p, ja_p = _v50_paths()
+    monkeypatch.setattr(S, "REPORT", ko_p)
+    monkeypatch.setattr(S, "REPORT_JA", ja_p)
+    got = S.scan()
+    assert got and all(v == 0 for v in got.values()), got
+    assert S.todo() == {}
