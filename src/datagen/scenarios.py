@@ -721,7 +721,7 @@ KIND_SPECS: dict[str, dict] = {
     # R-18(확산)은 원인이 아니라 심각도 보조 룰(UNDETERMINED)이라 기대에 넣지 않는다 — RAMP 로 대상 셀이
     # 늘면 설 수 있다
     "gw_resource": dict(
-        title="SGW 세션 자원 소진",
+        title="데이터 관문 자원 바닥 (SGW·UPF)",
         truth_code="GW_RESOURCE_EXHAUSTION", truth_category="CORE_UP",
         # R-21(소통률만 악화)은 섰지만 SESSION_REJECT 를 낸다 — 정답 근거가 아니라 증상 쪽 후보로 옮긴다
         expect_rules=("R-05",), expect_geo="SCATTER",
@@ -733,13 +733,13 @@ KIND_SPECS: dict[str, dict] = {
     # (`TRANSPORT_LOSS` · down 재전송 EV-08 필수)이고 이 장애는 U-Plane 을 건드리지 않는다. R-20 은
     # "소통률 정상 + 절단만 급증" 장면용인데 이 장애는 접속 실패와 절단을 함께 낸다(`_ran_radio` 세 갈래)
     "ran_radio": dict(
-        title="특정 지역 무선 구간 열화",
+        title="전파가 약함",
         truth_code="RAN_RADIO_QUALITY", truth_category="RAN",
         expect_rules=("R-06", "R-22"), expect_geo="CLUSTER",
         shape="STEP", scope_kind="CELL", expect_kpi="C-02",
     ),
     "gw_node_down": dict(
-        title="SGW 노드 무응답",
+        title="데이터 관문 멈춤 (SGW)",
         # 규격의 R-04("F-08이 S11에 집중 + SGW/PGW 편중")가 지목하는 코드는
         # GW_NODE_DOWN 이다. NF_UNREACHABLE 은 구간 미특정 무응답에 쓴다.
         truth_code="GW_NODE_DOWN", truth_category="CORE_UP",
@@ -751,7 +751,7 @@ KIND_SPECS: dict[str, dict] = {
         onset="instant", offset="instant",
     ),
     "gw_pgw_restart": dict(
-        title="PGW 재기동 통보",
+        title="데이터 관문 재기동 통보 (PGW)",
         truth_code="GW_NODE_DOWN", truth_category="CORE_UP",
         # R-04 는 S11 **무응답**이 조건인데 이 장애는 Cause 72 **응답 거절**이라 서지 않는다. R-15 는
         # NF_UNREACHABLE 을 내는 경쟁 후보다
@@ -762,14 +762,14 @@ KIND_SPECS: dict[str, dict] = {
         onset="instant", offset="instant",
     ),
     "auth_failure": dict(
-        title="S6a 인증 거절 (응답 수신형)",
+        title="가입자 확인(인증) 거절",
         truth_code="AUTH_FAILURE", truth_category="CORE_CP",
         expect_rules=("R-01",), expect_geo="SCATTER",
         shape="STEP", scope_kind="GLOBAL", expect_kpi="P-01",
         onset="instant", offset="instant",
     ),
     "dns_degradation": dict(
-        title="DNS 응답 열화",
+        title="주소 찾기 느림 (DNS)",
         truth_code="DNS_DEGRADATION", truth_category="EXTERNAL",
         expect_rules=("R-14",), expect_geo="WIDE",
         shape="RAMP", series=("dns",), scope_kind="SERVICE", expect_kpi="U-29",
@@ -779,14 +779,14 @@ KIND_SPECS: dict[str, dict] = {
     # 지연이 생기지 않으므로 EV-08 판정이 "U-Plane 정상"이고 R-09b(up 축 급증 + down 정상 + 5xx 편중)가
     # 서지 않는 것이 맞다. R-09b 는 서버·경로가 느려져 TCP 지연까지 생기는 06b(`external_path_latency`) 몫이다
     "external_server": dict(
-        title="외부 서비스 5xx 급증",
+        title="외부 서버 오류 (5xx)",
         truth_code="EXTERNAL_SERVER", truth_category="EXTERNAL",
         expect_rules=("R-14b",), expect_geo="WIDE",
         shape="STEP", series=("http",), scope_kind="SERVICE", expect_kpi="U-25",
         onset="instant", offset="instant",
     ),
     "external_path_latency": dict(
-        title="외부 경로 지연 (백본)",
+        title="인터넷 연결 구간 지연 (백본)",
         truth_code="BACKBONE_DEGRADATION", truth_category="EXTERNAL",
         expect_rules=("R-09b",), expect_geo="WIDE",
         # R-09b 가 `EXTERNAL_SERVER` 를 내므로 Top-1 일치가 구조적으로 어렵다.
@@ -795,25 +795,25 @@ KIND_SPECS: dict[str, dict] = {
         scope_kind="SERVICE", expect_kpi="U-23", grade="TOP3",
     ),
     "transport_loss": dict(
-        title="국지 전송 구간 손실",
+        title="전송망에서 데이터 유실",
         truth_code="TRANSPORT_LOSS", truth_category="TRANSPORT",
         expect_rules=("R-09", "R-16"), expect_geo="CLUSTER",
         shape="STEP", series=("transport",), scope_kind="CELL", expect_kpi="U-12",
     ),
     "ue_model": dict(
-        title="특정 단말 기종 접속 실패",
+        title="특정 기종만 문제",
         truth_code="UE_MODEL_ISSUE", truth_category="UE",
         expect_rules=("R-10",), expect_geo="SCATTER",
         shape="STEP", scope_kind="UE", expect_kpi="C-02",
     ),
     "mobility": dict(
-        title="핸드오버 실패 (셀 쌍 집중)",
+        title="이동 중 옆 기지국으로 넘김 실패",
         truth_code="RAN_MOBILITY_ISSUE", truth_category="RAN",
         expect_rules=("R-17",), expect_geo="CORRIDOR",
         shape="STEP", scope_kind="CELL", expect_kpi="PSF",
     ),
     "mme_overload": dict(
-        title="MME 과부하 (확산 중)",
+        title="접속 관리 장비 과부하 (MME·AMF)",
         truth_code="MME_OVERLOAD", truth_category="CORE_CP",
         # R-18(확산)은 심각도 보조 룰, R-15 는 NF_UNREACHABLE 을 내는 경쟁 후보다
         expect_rules=("R-23",), expect_geo="SCATTER",
@@ -821,7 +821,7 @@ KIND_SPECS: dict[str, dict] = {
         shape="RAMP", spreading=True, scope_kind="CELL", expect_kpi="C-02",
     ),
     "change_suspected": dict(
-        title="계단형 급락 (변경 의심)",
+        title="설정 변경 직후 저하 (MME×APN)",
         truth_code="CHANGE_SUSPECTED", truth_category="CHANGE",
         # 경쟁 후보는 R-21 이다(11-05 F-125 실측 — 소통률만 떨어져 SESSION_REJECT 가 선다).
         # R-03 은 서지 않는다: 첫 오류가 S11 이라 ESM 30 은 하류 증상이다(graphio 불변규칙 7)
@@ -834,20 +834,20 @@ KIND_SPECS: dict[str, dict] = {
         grade="TOP3",
     ),
     "ims_pdn": dict(
-        title="VoLTE(ims PDN) 전용 접속 실패",
+        title="음성 통화 연결 장애 (IMS)",
         truth_code="IMS_PDN_ISSUE", truth_category="IMS",
         expect_rules=("R-30",), expect_geo="SCATTER",
         shape="STEP", scope_kind="GLOBAL", expect_kpi="C-21",
         onset="instant", offset="instant",
     ),
     "nsa_nr_leg": dict(
-        title="5G NSA NR 레그 연결 실패",
+        title="5G 추가 연결 실패",
         truth_code="NSA_NR_LEG_FAILURE", truth_category="NSA",
         expect_rules=("R-33",), expect_geo="CLUSTER",
         shape="RAMP", scope_kind="CELL", expect_kpi="N-02",
     ),
     "nsa_policy_restrict": dict(
-        title="DCNR 정책 제한",
+        title="5G 사용 정책 제한",
         truth_code="NSA_POLICY_RESTRICT", truth_category="NSA",
         expect_rules=("R-34",), expect_geo="WIDE",
         shape="STEP", ramp_in=2, scope_kind="CELL", expect_kpi="N-02",
@@ -855,7 +855,7 @@ KIND_SPECS: dict[str, dict] = {
     ),
     # ── 신규 8종 ──────────────────────────────────────────────────────────
     "auc_no_response": dict(
-        title="S6a 무응답 (TIMEOUT)",
+        title="가입자 확인 장비 응답 없음 (S6a TIMEOUT)",
         truth_code="NF_UNREACHABLE", truth_category="CORE_CP",
         # R-01 은 S6a 첫 오류가 대부분 TIMEOUT 이면 R-00b 에 양보하도록 돼 있다(graphio `_r01` · SC-14
         # 실측) — 무응답 장애라 서지 않는다. R-00b·R-15 는 정답과 같은 NF_UNREACHABLE 이다
@@ -864,7 +864,7 @@ KIND_SPECS: dict[str, dict] = {
         onset="instant", offset="instant",
     ),
     "dra_route_failure": dict(
-        title="S6a 라우팅 계층 이상 (Diameter 3xxx)",
+        title="가입자 확인 경로 이상 (S6a 라우팅)",
         truth_code="AUTH_FAILURE", truth_category="CORE_CP",
         expect_rules=("R-01",), expect_geo="SCATTER",
         # **계층까지만 맞히면 정답이다.** 장비를 맞히라고 요구하지 않는다.
@@ -873,7 +873,7 @@ KIND_SPECS: dict[str, dict] = {
         grade="LAYER",
     ),
     "s6a_undetermined": dict(
-        title="S6a 무응답 (장비 미특정)",
+        title="가입자 확인 응답 없음 (장비 미특정)",
         truth_code="NF_UNREACHABLE", truth_category="CORE_CP",
         # R-01 은 무응답이면 R-00b 에 양보한다(위 `auc_no_response` 와 같다)
         expect_rules=("R-00b",), expect_geo="SCATTER",
@@ -883,7 +883,7 @@ KIND_SPECS: dict[str, dict] = {
         grade="UNDETERMINED", expect_undetermined=True,
     ),
     "pgw_uplane_degradation": dict(
-        title="PGW 사용자평면 품질 저하",
+        title="데이터 관문 품질 저하 (PGW)",
         truth_code="GW_OVERLOAD", truth_category="CORE_UP",
         expect_rules=("R-09e",), expect_geo="SCATTER",
         shape="RAMP", series=("transport", "http"),
@@ -896,7 +896,7 @@ KIND_SPECS: dict[str, dict] = {
     # 정한다(확정대장 OPEN-41). 그때까지 이 시나리오는 주입은 되고
     # Incident 는 열리지 않는다.
     "anchor_saturation": dict(
-        title="5G 체감 품질 저하 (앵커 경합)",
+        title="5G는 잡히는데 느림 (4G 앵커 붐빔)",
         truth_code="SA_QUALITY_LOW", truth_category="5G",
         # POINT — 메시 한 칸에서 대상을 뽑으면 셀 반경이 0.9km 미만이다(F-156 · 0.61km)
         expect_rules=("R-39",), expect_geo="POINT",
@@ -911,7 +911,7 @@ KIND_SPECS: dict[str, dict] = {
     # XDR 만으로는 `R-11` 이 `confidence_cap` 0.65 라 `R-17`(0.75)에 Top-1 을
     # 내준다 — `change_suspected` 와 같은 이유로 `TOP3` 다.
     "son_param_change": dict(
-        title="기지국 설정 변경 후 계단형 저하 (SON)",
+        title="설정 변경 직후 통화 끊김이 계단처럼 늘어남 (SON)",
         truth_code="CHANGE_SUSPECTED", truth_category="CHANGE",
         # R-17 은 셀 쌍 전환 실패로 서지만 RAN_MOBILITY_ISSUE 를 낸다(11-04 25r4 에서 1위였다)
         # **대상은 eNB 1~2개의 전 셀이다**(2026-11-13 사용자 결정 · 전에는 노선 구간의 셀 하나). 파라미터는 eNB 에
@@ -934,7 +934,7 @@ KIND_SPECS: dict[str, dict] = {
     # 호는 늘리지 않고 기존 가입자의 일부가 나빠진다(2026-11-05 사용자 결정 · 스펙의 1.8배와 다르다).
     # 탐지 지표는 Q-11(RTT 초과 가입자 비율)이고 메시·정목 단위로 서서 인접 칸이 묶인다(`CLUSTER`)
     "ran_congestion": dict(
-        title="무선 용량 혼잡 (기존 가입자 품질 저하)",
+        title="저녁 러시로 역 주변 기지국이 붐빔",
         truth_code="RAN_CAPACITY_CONGESTION", truth_category="RAN",
         expect_rules=("R-47",), expect_geo="CLUSTER",
         shape="RAMP", series=("transport", "http"),
@@ -944,7 +944,7 @@ KIND_SPECS: dict[str, dict] = {
     # 일본 시연 `j-sc-15` — 야마노테선 전환 정체. 원인 코드·`Q-08`·
     # `CELL_PAIR` 축·룰이 전부 graphio 에 아직 없다(확정대장 §7.3 NEW 4).
     "ho_interruption": dict(
-        title="전환 직후 정체 (코리도 4G↔5G)",
+        title="야마노테선에서 4G↔5G 넘어갈 때 잠깐 멈춤",
         truth_code="RAN_HO_INTERRUPTION", truth_category="RAN",
         expect_rules=("R-40",), expect_geo="CORRIDOR",
         shape="RAMP", series=("lte_call", "transport"),
@@ -957,7 +957,7 @@ KIND_SPECS: dict[str, dict] = {
     # 다른 점은 **정지 셀의 가입자가 이웃 셀로 옮겨 붙는다**는 것이다.
     # 파형은 갑자기 선다 — 지진에 전조는 없다. 15분 뒤 복구가 시작된다.
     "earthquake": dict(
-        title="국지 다수 셀 정지 + 주변 부하 유입 (지진)",
+        title="옛 지진 — 국지 기지국 정지 (옛 27번)",
         truth_code="RAN_NODE_DOWN", truth_category="RAN",
         expect_rules=("R-36",), expect_geo="CLUSTER",
         shape="STEPS", steps=((15, 1.00), (18, 0.70), (20, 0.40)),
@@ -974,7 +974,7 @@ KIND_SPECS: dict[str, dict] = {
     # 가 지진 정보(`CM_QUAKE_EVENT` · EV-19)로 지진을 먼저 알고 피해를 묶는다 — 결론 코드 `EARTHQUAKE_IMPACT`
     # (옛 `NATURAL_DISASTER_SUSPECTED` 는 graphio 채점 별칭). 재해는 망 밖 원인이라 `EXTERNAL` 이다
     "natural_disaster": dict(
-        title="지진 — 통화 폭주 + 기지국 정지",
+        title="지진 — 통화 폭주·기지국 정지",
         truth_code="EARTHQUAKE_IMPACT", truth_category="EXTERNAL",
         expect_rules=("R-46",), expect_geo="CLUSTER",
         expect_alternatives={"R-36": "RAN_NODE_DOWN"},
@@ -989,7 +989,7 @@ KIND_SPECS: dict[str, dict] = {
     # **5G 능력 단말 수(N-01)와 Attach·TAU 의 급증**뿐이다. 원인 코드는 결정 대기(`SA_FALLBACK_SUSPECTED`
     # 제안 · graphio Taxonomy 에 없다) — 룰이 없으니 `rule_pending`
     "sa_fallback": dict(
-        title="SA→LTE 폴백 급증 (5G 측 장애 추정)",
+        title="5G 장애로 4G로 몰림",
         truth_code="SA_FALLBACK_SUSPECTED", truth_category="5G",
         expect_rules=("R-48",), expect_geo="CLUSTER",
         shape="HOLD", onset="instant", offset="instant",
@@ -1000,7 +1000,7 @@ KIND_SPECS: dict[str, dict] = {
     # 일본 시연 `j-sc-21` — CDN 서버측 열화. **지역 문제가 아니다**가 메시지
     # 이고(투자 ❌), 그 판정에 필요한 앱 축·`Q-06` 이 graphio 에 없다(§12.6 X-3·4).
     "cdn_degradation": dict(
-        title="동영상 CDN 서버측 열화",
+        title="동영상 서버(CDN) 느림",
         truth_code="EXTERNAL_SERVER", truth_category="EXTERNAL",
         expect_rules=(), rule_pending=True, expect_geo="WIDE",
         shape="RAMP", series=("transport", "http"),
@@ -1008,7 +1008,7 @@ KIND_SPECS: dict[str, dict] = {
     ),
     # 일본 시연 `j-sc-22` — 결제 앱 DNS 지연. `Q-07` 등급별 산식이 없다(X-4).
     "pay_dns_delay": dict(
-        title="결제 앱 응답 지연 (DNS 기인)",
+        title="결제 앱이 느림 — 주소 찾기(DNS) 지연",
         truth_code="DNS_DEGRADATION", truth_category="EXTERNAL",
         expect_rules=(), rule_pending=True, expect_geo="WIDE",
         shape="RAMP", series=("dns", "transport", "http"),
@@ -1021,7 +1021,7 @@ KIND_SPECS: dict[str, dict] = {
     # 정답 룰은 graphio `R-41`(2026-11-03 · 카드 23). 그 룰의 CLUSTER(⑤)·up 부
     # 근거(⑥)가 14번 `ran_congestion`(셀 하나 혼잡 · 룰 미배정)과의 경계다.
     "event_crowd": dict(
-        title="대형 이벤트 군중 혼잡 + 업링크",
+        title="행사장 군중으로 사진 올리기 막힘",
         truth_code="EVENT_CROWD", truth_category="RAN",
         expect_rules=("R-41",), expect_geo="POINT",
         shape="STEPS", steps=((3, 0.50), (23, 1.00), (25, 0.40)),
@@ -1036,14 +1036,14 @@ KIND_SPECS: dict[str, dict] = {
     # 실제로 탐지되지만(14번과 같은 식), 그것을 맞히는 것이 이 시나리오의
     # 목적이 아니다. 시간 모양은 `shift_*` 가 만든다(`HOLD`).
     "capacity_shift": dict(
-        title="기지국 증설 후 부하 이동",
+        title="기지국 증설 뒤 손님이 옮겨 감 (장애 아님)",
         truth_code="", truth_category="", scored=False,
         expect_rules=(), rule_pending=True, expect_geo="POINT",
         shape="HOLD", series=("transport", "http"),
         scope_kind="CELL", expect_kpi="Q-11",
     ),
     "enb_s1_outage": dict(
-        title="eNB 전송 단절 (무호)",
+        title="기지국 멈춤 (전송 단절)",
         truth_code="RAN_NODE_DOWN", truth_category="RAN",
         expect_rules=("R-36",), expect_geo="POINT",
         # 첫 2분 0.30 은 램프가 아니라 **전조**(S1AP 200 절단 · `OUTAGE_GATE`
@@ -1054,14 +1054,14 @@ KIND_SPECS: dict[str, dict] = {
         scope_kind="CELL", expect_kpi="C-01",
     ),
     "partial_recovery": dict(
-        title="부분 장애와 자동 복구",
+        title="부분 장애 뒤 단계적 회복",
         truth_code="GW_NODE_DOWN", truth_category="CORE_UP",
         expect_rules=("R-04", "R-00b"), expect_geo="SCATTER",
         shape="STEPS", steps=((5, 0.80), (12, 0.50), (20, 0.20)),
         scope_kind="CELL", expect_kpi="C-02",
     ),
     "apn_pdn_failure": dict(
-        title="APN 별 PDN 접속 실패",
+        title="접속 주소별 연결 실패 (APN)",
         # 2026-11-04 사용자 결정 — graphio 가 `SUBSCRIPTION_ERROR`(HSS 가입자 조회 실패 · R-01b)와
         # `APN_CONFIG_ERROR`(한 APN 의 정의·프로파일 오류 · R-07)를 나눴다. 이 장애는 후자다
         truth_code="APN_CONFIG_ERROR", truth_category="CORE_CP",
@@ -1070,14 +1070,14 @@ KIND_SPECS: dict[str, dict] = {
         onset="instant", offset="instant",
     ),
     "dns_flap": dict(
-        title="DNS 간헐 실패",
+        title="주소 찾기 간헐 실패 (DNS)",
         truth_code="DNS_DEGRADATION", truth_category="EXTERNAL",
         expect_rules=("R-14",), expect_geo="WIDE",
         shape="FLAP", flap_period=3, flap_low=0.0, series=("dns",),
         scope_kind="SERVICE", expect_kpi="U-29",
     ),
     "compound_causal_failure": dict(
-        title="복합 장애 (전송망 → DNS → HTTP)",
+        title="복합 장애 (전송망 → 주소 찾기 → 웹)",
         truth_code="TRANSPORT_LOSS", truth_category="TRANSPORT",
         expect_rules=("R-09", "R-16", "R-14"), expect_geo="CLUSTER",
         shape="RAMP", series=("transport", "dns"),

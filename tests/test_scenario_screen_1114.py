@@ -172,3 +172,41 @@ def test_glossary_cause_ja_equals_graphio_cause_labels_ja():
             assert t["ja"]["s"] == T.CAUSE_LABELS_JA[code], code
             checked += 1
     assert checked >= 20
+
+
+# ── 장애 종류 이름표(2026-11-14 · 맥스) ──────────────────────────────────────
+
+def test_kind_specs_title_equals_kind_labels_for_every_kind():
+    from datagen import scenarios as S
+    from datagen.ui import common
+    assert set(S.KIND_SPECS) == set(common.KIND_LABELS) and len(S.KIND_SPECS) == 36
+    assert {k: v["title"] for k, v in S.KIND_SPECS.items()} == dict(common.KIND_LABELS)
+
+
+def test_kind_labels_of_scenarios_14_to_27_equal_the_scenario_names():
+    """한 종류를 한 시나리오만 쓰면 이름표 = 시나리오 쉬운 이름. 둘 이상이 쓰는 종류(1·18 등)는 뺀다."""
+    from collections import defaultdict
+    from datagen.ui import common
+    use = defaultdict(list)
+    for r in control.SCENARIOS:
+        use[r[2]].append(r)
+    checked = 0
+    for kind, rows in use.items():
+        if len(rows) == 1 and rows[0][0] >= 14:
+            assert common.KIND_LABELS[kind] == rows[0][1], (kind, rows[0][0])
+            checked += 1
+    assert checked >= 10
+
+
+def test_every_kind_label_has_a_japanese_translation():
+    from datagen.ui import common
+    from datagen.ui.i18n_ja import _JA_COMMON, _JA_MAIN, _JA_MAP, _JA_SCEN, _JA_SHELL
+    ja = {**_JA_MAP, **_JA_COMMON, **_JA_MAIN, **_JA_SCEN, **_JA_SHELL}
+    miss = [k for k, v in common.KIND_LABELS.items() if v not in ja]
+    assert miss == []
+
+
+def test_kind_labels_have_no_japanese_words_leaking_into_korean():
+    from datagen.ui import common
+    bad = [v for v in common.KIND_LABELS.values() if re.search("丁目|本社", v)]
+    assert bad == []
