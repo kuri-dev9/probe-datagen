@@ -880,7 +880,12 @@ function partGroups(h){
   if(ev._groups) return ev._groups;
   const by=new Map();
   ms.forEach((m,i)=>{ const k=partLabel(m,h); if(!by.has(k)) by.set(k,{label:k, idx:[]}); by.get(k).idx.push(i); });
-  return ev._groups=[...by.values()];
+  // 탭에는 지표 코드를 빼고 이름만 보인다(사용자 11-15 "코드가 보이는 게 더 불편하다") — 묶는 열쇠는
+  // 코드까지 그대로라 지표가 다른 조각은 여전히 다른 탭이다. 이름이 겹칠 때만 코드를 붙여 가른다
+  const gs=[...by.values()], nm=g=>g.label.split(' · ')[0], dup=new Set();
+  gs.forEach((g,i)=>{ if(gs.some((o,j)=>j!==i&&nm(o)===nm(g))) dup.add(i); });
+  gs.forEach((g,i)=>{ g.name=dup.has(i)?g.label:nm(g); });
+  return ev._groups=gs;
 }
 //: 묶음의 조각들을 조각 하나 모양으로 합친다 — 값은 조각들이 준 것의 합집합뿐이다(불변규칙 18)
 function mergeParts(list){
@@ -1573,7 +1578,7 @@ function drawFocus(){
   const chips=`<span class=parts>`
     + `<button data-part="" class="${PART==null?'on':''}">${T('전체')}</button>`
     + (ms.length>1?gs.map((g,k)=>`<button data-part="${k}" class="${PART===k?'on':''}" title="${esc(g.idx.map(i=>ms[i].title||'').join(' / '))}">`
-        + `${k+1}. ${esc(g.label)}${g.idx.length>1?` ×${g.idx.length}`:''}</button>`).join(''):'')
+        + `${k+1}. ${esc(g.name)}${g.idx.length>1?` ×${g.idx.length}`:''}</button>`).join(''):'')
     + `</span>`;
   bar.innerHTML=`<b>${unitTag(base)}${sevTag(base.severity)} · ${esc(headOf(base))}${confOf(base)}</b>`
     + `<button id=unfocus>${T('해제')}</button><i></i>`
