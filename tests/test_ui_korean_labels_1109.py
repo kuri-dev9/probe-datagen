@@ -28,7 +28,7 @@ KEYS = {
     "읍면동": "町丁目",
     "APN · docomo 본사": "APN · docomo 本社",
     "외부(APP·PAY) · docomo 본사": "外部(APP·PAY) · docomo 本社",
-    "읍면동 경계 없음 — 중심점 근사": "町丁目境界なし — 中心点で近似",
+    "경계 없음 {n}곳 — 중심점 근사": "境界なし {n}か所 — 中心点で近似",
     "NTT docomo 본사 · PGW (대표)": "NTT docomo 本社 · PGW (代表)",
     "망 밖 · docomo 본사": "網外 · docomo 本社",
 }
@@ -73,7 +73,7 @@ def test_hq_title_and_cap_are_korean_and_match_key():
 
 
 def test_source_strings_match_keys():
-    for lit in ["T('APN · docomo 본사')", "T('외부(APP·PAY) · docomo 본사')", "T('읍면동 경계 없음 — 중심점 근사')",
+    for lit in ["T('APN · docomo 본사')", "T('외부(APP·PAY) · docomo 본사')", "T('경계 없음 {n}곳 — 중심점 근사'",
                 "T('NTT docomo 본사 · PGW (대표)')", "ADM3:T('읍면동')"]:
         assert lit in SRC, lit
         assert lit[lit.index("'") + 1:lit.rindex("'")] in ui._JA_MAP if lit.startswith("T(") else True

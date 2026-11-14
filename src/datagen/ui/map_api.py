@@ -703,11 +703,11 @@ def _bias_fetch(base: str, iid: str, axis_raw: str | None, dns_case: bool) -> di
 
 
 def _attach_dong(hist: list[dict]) -> None:
-    """ADM3(丁目) 축의 **중심점**을 붙인다 — `CM_DONG_JP` 는 이름·중심좌표뿐이다.
+    """ADM3(읍면동) 축의 **중심점과 모양**을 붙인다 — `CM_DONG_JP` 는 이름·중심좌표뿐이다.
 
-    graphio 도 丁目 을 최근접 중심점으로 귀속한다(`geo_coverage` 머리말의
-    `CENTROID`). 경계가 아니므로 화면은 점선 원으로 그리고 "근사"라고 적는다.
-    DB 가 안 닿으면 **빈 채로** 둔다 — 지도는 서고, 그 장애만 "좌표 없음"이 된다.
+    모양(`rings`)은 graphio `geo-chome` 이 실제 정목 경계를 읍면동마다 이어 붙인 것이다(2026-11-14 ·
+    graphio 지도와 같은 파일). 모양이 없는 읍면동만 화면이 중심점 원으로 그리고 "경계 없음"으로 센다
+    (graphio 불변규칙 12). DB 가 안 닿으면 **빈 채로** 둔다 — 지도는 서고, 그 장애만 "좌표 없음"이 된다.
     """
     ids = sorted({g for h in hist if h.get("axis") == "ADM3" for g in h["geo_ids"]})
     if not ids:
@@ -718,8 +718,22 @@ def _attach_dong(hist: list[dict]) -> None:
             h["dong"] = [at[g] for g in h["geo_ids"] if g in at]
 
 
+def _dong_shapes() -> dict[str, list]:
+    """읍면동 코드 → 고리 목록(`[[경도, 위도], …]` 들). 설정이 비었거나 파일이 없으면 빈 사전 — 원으로 그린다.
+
+    고리를 한 면으로 이어 그린다(구멍 고리는 방향이 반대라 nonzero 로 비어 보인다 · graphio `geo_chome`)
+    """
+    src, err = _layer_path("geo_dong_shapes")
+    if err:
+        return {}
+    try:
+        return _cached(src, "json", lambda p: json.loads(p.read_bytes()))
+    except (OSError, ValueError):
+        return {}
+
+
 def _dong_at(ids: list[str]) -> dict[str, dict]:
-    """丁目 코드 → 이름·중심점. DB 가 안 닿으면 빈 채로 돌려준다."""
+    """읍면동 코드 → 이름·중심점(+ 모양이 있으면 `rings`). DB 가 안 닿으면 빈 채로 돌려준다."""
     at: dict[str, dict] = {}
     try:
         conn = _connect()
@@ -737,6 +751,10 @@ def _dong_at(ids: list[str]) -> dict[str, dict]:
             conn.close()
     except pymysql.MySQLError:
         return {}
+    shapes = _dong_shapes()
+    for d, v in at.items():
+        if shapes.get(d):
+            v["rings"] = shapes[d]
     return at
 
 

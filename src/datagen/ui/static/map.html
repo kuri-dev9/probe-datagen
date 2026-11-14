@@ -975,7 +975,8 @@ function meshBox(code){
 //: 丁目 근사 원 반지름(도, 위도 기준) — 약 250m. 경계가 없어 **크기에
 //: 뜻이 없다.** 점 하나로는 안 보여 자리만 표시한다
 const DONG_R=0.00225;
-//: 구역의 그릴 모양 — {kind:'rect'|'ring'|'dot', ...}
+//: 구역의 그릴 모양 — {kind:'rect'|'ring'|'shape'|'dot', ...}. `shape` 는 읍면동의 실제 丁目 경계를 이어 붙인
+//: 모양(고리 여럿 · graphio `geo-chome` · 2026-11-14), `dot` 은 그 모양이 없는 읍면동의 중심점 원이다
 function geoShapes(h){
   const out=[];
   if(!h.axis) return out;
@@ -994,7 +995,8 @@ function geoShapes(h){
       for(const ring of f.rings) out.push({kind:'ring', id:c, name:f.name, ring}); }
   } else if(h.axis==='ADM3'){
     for(const d of (h.dong||[]))
-      out.push({kind:'dot', id:d.id, name:d.name, lat:d.lat, lon:d.lon});
+      out.push(d.rings&&d.rings.length ? {kind:'shape', id:d.id, name:d.name, rings:d.rings}
+                                       : {kind:'dot', id:d.id, name:d.name, lat:d.lat, lon:d.lon});
   }
   return out;
 }
@@ -1016,6 +1018,7 @@ function geoPoints(h){
   for(const g of geoShapes(h)){
     if(g.kind==='rect'){ pts.push([g.b[1],g.b[0]], [g.b[3],g.b[2]]); }
     else if(g.kind==='ring'){ if(!keep||keep.has(g.name)) for(const p of g.ring) pts.push(p); }
+    else if(g.kind==='shape'){ for(const r of g.rings) for(const p of r) pts.push(p); }
     else { pts.push([g.lon-DONG_R*1.25, g.lat-DONG_R], [g.lon+DONG_R*1.25, g.lat+DONG_R]); }
   }
   return pts;
@@ -1228,13 +1231,18 @@ function drawGeoOf(h, col, box, only){
     else if(g.kind==='ring'){ q=el('path');
       q.setAttribute('d','M'+g.ring.map(p=>`${mx(p[0])} ${-my(p[1])}`).join('L')+'Z');
       q.dataset.t=`${nm} ${g.name} (${g.id})`; }
+    else if(g.kind==='shape'){ q=el('path');
+      // 고리를 한 path 에 모은다 — 구멍 고리는 방향이 반대라 기본 채우기(nonzero)에서 비어 보인다
+      q.setAttribute('d',g.rings.map(r=>'M'+r.map(p=>`${mx(p[0])} ${-my(p[1])}`).join('L')+'Z').join(''));
+      q.dataset.t=T('{nm} {name}\n실제 정목 경계를 이어 붙인 모양 — 이름은 합성이고 셀 귀속과 조금 다를 수 있다',
+                    {nm,name:g.name}); }
     else { q=el('ellipse');
       // 메르카토르라 세로가 늘어난다 — 지상에서 원이 되게 가로를 1/cos 로 편다
       const cy=-my(g.lat), ry=my(g.lat+DONG_R)-my(g.lat);
       q.setAttribute('cx',mx(g.lon)); q.setAttribute('cy',cy);
       q.setAttribute('rx',DONG_R/Math.cos(g.lat*Math.PI/180)); q.setAttribute('ry',ry);
       q.dataset.t=T('{nm} {name}\n경계 없음 — 중심점 근사 (원 크기에 뜻이 없다)',{nm,name:g.name}); }
-    const shape=g.kind==='dot'?' ga-approx':g.kind==='ring'?' ga-ring':'';
+    const shape=g.kind==='dot'?' ga-approx':g.kind==='ring'||g.kind==='shape'?' ga-ring':'';
     q.setAttribute('class','ga'+shape);
     q.setAttribute('fill',col); q.setAttribute('stroke',col);
     box.appendChild(q);
@@ -1353,6 +1361,7 @@ function focusPoints(h){
     for(const {g} of geoKeep((evtOf(h)||{}).areas||[])){
       if(g.kind==='rect') out.push([g.b[1],g.b[0]], [g.b[3],g.b[2]]);
       else if(g.kind==='dot') out.push([g.lon-DONG_R*1.25, g.lat-DONG_R], [g.lon+DONG_R*1.25, g.lat+DONG_R]);
+      else if(g.kind==='shape') for(const r of g.rings) out.push(...r);
     }
   }
   for(const k of [...coreOf(h), ...(h.bias?[h.bias.node]:[])]){ const [t,i]=k.split(':');
@@ -1610,7 +1619,9 @@ function drawFocus(){
       : !h.axis&&AXIS_NAME[h.axis_raw]&&!h.egress?`<span class=dimtag>${T('{ax} 축 — 지역과 무관',{ax:esc(AXIS_NAME[h.axis_raw])})}`
         + (h.axis_raw==='DOMAIN'?'':T(' · 특정 장비로 쏠리지 않았다'))+`</span>`:'')
     + (!evOn&&h.axis&&h.axis.startsWith('MESH')?`<span class=dimtag>${T('지역 = 그 지역을 덮는 셀들의 체감 — 단말 실제 위치가 아니다')}</span>`:'')
-    + (!evOn&&h.axis==='ADM3'?`<span class=dimtag>${T('읍면동 경계 없음 — 중심점 근사')}</span>`:'')
+    // 모양이 없는 읍면동만 원으로 그리고 그 수를 센다(graphio 불변규칙 12 — 숨기지 않는다)
+    + (!evOn&&h.axis==='ADM3'&&geoShapes(h).some(g=>g.kind==='dot')
+        ?`<span class=dimtag>${T('경계 없음 {n}곳 — 중심점 근사',{n:geoShapes(h).filter(g=>g.kind==='dot').length})}</span>`:'')
     + (!evOn&&!h.part&&h.axis&&h.axis!=='GLOBAL'&&h.geo_ids.length>=GEO_CAP?`<span class=warn>${T('graphio 가 {n}곳까지만 넘긴다 — 더 있을 수 있다',{n:GEO_CAP})}</span>`:'')
     + (!evOn&&h.axis&&h.axis!=='GLOBAL'&&geoShapes(h).length===0?`<span class=warn>${T('구역 좌표를 찾지 못했다')}</span>`:'')
     + (!pts.length&&!h.axis&&!AXIS_NAME[h.axis_raw]?`<span class=warn>${T('지도에 그릴 범위가 없다')}</span>`
@@ -2042,8 +2053,8 @@ function drawBase(){
   // 공원·수역 — **면이라 축척을 안 탄다.** 멀리서도 녹지·물은 "거기가 어디인지"를 알려주는 표식이다
   for(const g of [...(GREEN||[]), ...(WATER||[])]) tiled('gGreen','gr gr-'+g.kind, g.rings||[], true);
   // 丁目 경계 — **확대했을 때만**(LOD 2 이상 = 화면 폭 7km 이하). 멀리서 2,969개를 그리면 구 경계가
-  // 묻히고 회색 그물이 된다. 이름은 그리지 않는다. **배경일 뿐이다** — 丁目 장애는 graphio 마스터가
-  // 합성 이름이라 이 경계와 이어지지 않는다(그쪽은 근사 원)
+  // 묻히고 회색 그물이 된다. 이름은 그리지 않는다. **배경일 뿐이다** — 읍면동 장애 칸은 이 배경이 아니라
+  // graphio `geo-chome` 이 넓은 범위에서 이어 붙인 모양(`geo_dong_shapes`)으로 따로 그린다(2026-11-14)
   if(CHOME && LOD>=2) tiled('gChome','ch', CHOME.flatMap(c=>c.r), true);
   // 도로 — 등급마다 보이기 시작하는 축척이 다르다(`ROAD_LOD`)
   const km=kmSpan();

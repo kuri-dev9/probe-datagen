@@ -128,6 +128,9 @@
   .plain h3 { margin-bottom:6px; font-size:12px; }
   .plain p { margin:0; font-size:13px; line-height:1.6; }
   .plain .big { font-size:15px; font-weight:700; margin-bottom:8px; }
+  /* 시나리오 한 장 그림(사용자 11-14 — "시나리오 자리에 함께") — 세 칸 위, 카드 너비. 누르면 원본이 새 탭에 열린다 */
+  .pic { display:block; margin-bottom:8px; }
+  .pic img { display:block; width:100%; height:auto; border:1px solid var(--line); border-radius:8px; }
   .plain .auto { margin-top:6px; font-size:11px; color:var(--dim); }
   .psg { display:flex; flex-wrap:wrap; gap:4px; }
   .tech>.sec:first-child { margin-top:10px; }
@@ -305,12 +308,21 @@ function plainAuto(s){
   return out.join(LANG==='ja' ? '' : ' ');     // 일본어는 문장 사이를 띄우지 않는다
 }
 //: 펼친 카드 맨 위의 요약 세 칸 — ① 무슨 일이 생기나 ② 시스템이 무엇을 찾았나 ③ 결과
+//: 한 장 그림이 있는 번호(`/api/scenario-pictures` · 14~27). 받기 전·실패면 비어 있고 그림 자리를 만들지 않는다 —
+//: 그림이 없는 번호(1~13)와 같은 모양이다. 그림은 한국어 한 벌이다(일본어 그림은 아직 없다)
+let PICS=new Set();
+fetch('/api/scenario-pictures').then(r=>r.json())
+  .then(d=>{ PICS=new Set(d.nos||[]); if(DOC){ RAW=null; render(); } }).catch(()=>{});
+const picTop=s=>!PICS.has(Number(s.no)) ? ''
+  : `<a class=pic href="/scenario-pictures/no${Number(s.no)}.svg" target=_blank rel=noopener `
+    +`title="${esc(T('누르면 원본 크기로 새 탭에 열립니다'))}"><img src="/scenario-pictures/no${Number(s.no)}.svg" `
+    +`alt="${esc(T('시나리오 {n} 그림',{n:s.no}))}" loading=lazy></a>`;
 function plainTop(s){
   const l=s.latest||{}, k=stOf(s), what=tr(HOW[String(s.no)],'brief')??s.what;
   const auto=!l.plain, found=l.plain||plainAuto(s);
   const rc=(STATUS.find(y=>y[0]===k)||[])[2]||'warn';
   const box=(t,b,c='')=>`<div${c?` class=${c}`:''}><h3>${esc(T(t))}</h3>${b}</div>`;
-  return `<div class=plain>`
+  return picTop(s)+`<div class=plain>`
     +box('무슨 일이 생기나',`<p>${what==null?unk():esc(what)}</p>`)
     +box('시스템이 무엇을 찾았나',found ? `<p>${esc(found)}</p>`
         +(auto?`<p class=auto>${esc(T('기록된 값으로 자동으로 만든 문장입니다'))}</p>`:'')

@@ -78,6 +78,7 @@ pemdb1:
   geo_boundary_map: /app/data/geo/jp/N03_map.json   # 행정경계 상세 (지도 전용)
   geo_water: /app/data/geo/jp/water.json            # 수역 relation OSM
   geo_chome: /app/data/geo/jp/chome.json            # 丁目 경계 e-Stat
+  geo_dong_shapes: /app/data/geo/jp/dong_shapes.json  # 읍면동 모양 (graphio geo-chome)
   # 장애 현황을 받아 오는 graphio API. **컨테이너 안 이름이다**
   graphio_api: http://web:8008
   # 장애 주입 정답 파일. **베이스값은 호스트 기준 상대경로**

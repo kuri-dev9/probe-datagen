@@ -9,8 +9,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+import re
+
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import HTMLResponse, Response
 
 from .common import KIND_LABELS
 from .i18n_ja import _JA_COMMON, _JA_MAIN, _JA_MAP, _JA_SCEN, _JA_SHELL
@@ -210,3 +212,24 @@ def topo_page():
 @router.get("/scenarios", response_class=HTMLResponse)
 def scenarios_page():
     return _HTML_SCEN
+
+
+#: 시나리오 한 장 그림(2026-11-14 · `static/scenario-pictures/gen.py` 가 굽는다). 이름을 `noNN.svg` 로만 받는다 —
+#: 경로를 그대로 받으면 `static/` 밖 파일을 열 수 있다
+_PIC_DIR = _STATIC / "scenario-pictures"
+_PIC_NAME = re.compile(r"no\d{1,2}\.svg")
+
+
+@router.get("/scenario-pictures/{name}")
+def scenario_picture(name: str):
+    p = _PIC_DIR / name
+    if not _PIC_NAME.fullmatch(name) or not p.is_file():
+        raise HTTPException(404, "그림이 없다")
+    return Response(p.read_bytes(), media_type="image/svg+xml",
+                    headers={"Cache-Control": "no-cache"})
+
+
+@router.get("/api/scenario-pictures")
+def scenario_picture_list():
+    """그림이 있는 시나리오 번호 — 화면이 그 번호에만 그림 자리를 만든다(없는 번호는 지금 모양 그대로)."""
+    return {"nos": sorted(int(p.stem[2:]) for p in _PIC_DIR.glob("no*.svg") if _PIC_NAME.fullmatch(p.name))}
