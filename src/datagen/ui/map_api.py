@@ -530,10 +530,71 @@ def api_map_event(incident_id: str):
     cells = doc.get("cells") or []
     for c in cells:
         at.setdefault(str(c.get("key") or "").rsplit("-", 1)[0], [c.get("lon"), c.get("lat")])
+    raw = doc.get("members") or []
+    members = _event_members(raw, cells + list(doc.get("detached_cells") or []))
+    silent, radius = _silent_cells(raw)
+    for m in members:
+        m["silent"] = silent.get(str(m.get("incident_id")), [])
     return {"enbs": sorted(at), "pts": list(at.values()), "cells": len(cells),
             "unmapped": doc.get("unmapped"), "areas": _event_areas(doc.get("areas") or []),
             "areas_capped": bool(doc.get("areas_capped")),
-            "members": _event_members(doc.get("members") or [], cells + list(doc.get("detached_cells") or []))}
+            "members": members, "silent_r": radius}
+
+
+def _silent_cells(rows: list[dict]) -> tuple[dict[str, list[str]], dict[str, float | None]]:
+    """구성 조각마다 **무호(C-01)로 판정된 셀** — 지도의 「정지 판정 영역」(2026-11-15 사용자 "음영을 기지국
+    장애와 함께 묶어서, 발생 위치로부터 어디까지 피해가 보는지").
+
+    graphio 가 쓴 D4 이벤트(`AI_ANOMALY_EVENT` · `DETECTOR='D4'` · `KPI='C-01'` · 셀 단위)를 **읽기만** 한다 —
+    트리거에 C-01 이 있는 조각의 셀 중 그 조각의 구간(`opened_ts`~`updated_ts`)에 무호 이벤트가 선 셀이다.
+    폭주(C-24)만 있는 셀은 꺼진 것이 아니라 붐비는 것이라 들어가지 않는다. 화면이 진도·거리로 추정하지 않는다.
+    반경은 정답 음영과 같은 셀별 추정 커버리지(`_cell_radius`). 못 읽으면 빈 값이다 — 칠하지 않는다
+    """
+    want = []
+    for m in rows:
+        if "C-01" not in str(m.get("trigger_kpi") or "").split(","):
+            continue
+        keys = sorted({str(k) for k in m.get("cells") or ()})
+        lo = str(m.get("opened_ts") or "").replace("T", " ")[:19]
+        hi = str(m.get("updated_ts") or "").replace("T", " ")[:19]
+        if keys and lo:
+            want.append((str(m.get("incident_id")), keys, lo, hi))
+    out: dict[str, list[str]] = {}
+    if not want:
+        return out, {}
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            for iid, keys, lo, hi in want:
+                cur.execute("SELECT DISTINCT SCOPE_ID FROM AI_ANOMALY_EVENT "
+                            "WHERE DETECTOR = 'D4' AND KPI = 'C-01' AND SCOPE_TYPE = 'CELL' "
+                            "AND COALESCE(CANCELLED, 0) = 0 AND EVENT_TIME >= %s"
+                            + (" AND EVENT_TIME <= %s" if hi else "")
+                            + " AND SCOPE_ID IN (" + ",".join(["%s"] * len(keys)) + ")",
+                            [lo, *([hi] if hi else []), *keys])
+                out[iid] = sorted(str(r[0]) for r in cur.fetchall())
+        radius = _cell_radius(conn, sorted({k for v in out.values() for k in v}))
+    except pymysql.err.ProgrammingError:
+        return {}, {}                          # 표가 없는 현장 — 모른다(칠하지 않는다)
+    finally:
+        conn.close()
+    return out, radius
+
+
+def _cell_radius(conn, keys: list[str]) -> dict[str, float | None]:
+    """셀 → 추정 커버리지 반경(m) — `CM_CELL_GEO_MAP.RADIUS_M`(MESH1K 행 · METHOD DENSITY). 체감 칸을 셀에 나눌 때
+    graphio 가 쓴 **같은 원**이다. 행정 행(ADM*)에는 반경이 없다. 모르면 None(그리지 않는다)"""
+    enbs = sorted({k.rsplit("-", 1)[0] for k in keys})
+    if not enbs:
+        return {}
+    got: dict[str, float | None] = {}
+    with conn.cursor() as cur:
+        cur.execute("SELECT ENB_ID, CELLNUM, MAX(RADIUS_M) FROM CM_CELL_GEO_MAP "
+                    "WHERE AREA_LEVEL = 'MESH1K' AND ENB_ID IN (" + ",".join(["%s"] * len(enbs)) + ") "
+                    "GROUP BY ENB_ID, CELLNUM", enbs)
+        for e, n, r in cur.fetchall():
+            got[f"{e}-{n}"] = float(r) if r is not None else None
+    return {k: got.get(k) for k in keys}
 
 
 def _event_members(rows: list[dict], cells: list[dict]) -> list[dict]:
@@ -1138,15 +1199,19 @@ def _quake_down(fault_id: int) -> dict | None:
     out = {"enbs": enbs, "cells": [], "source": "ground_truth"}
     if not enbs:
         return out
-    radius: dict[str, float] = {}
+    radius: dict[str, float | None] = {}
     conn = _connect()
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT ENB_ID, CELLNUM, MAX(RADIUS_M) FROM CM_CELL_GEO_MAP "
-                        "WHERE AREA_LEVEL = 'MESH1K' AND ENB_ID IN (" + ",".join(["%s"] * len(enbs)) + ") "
-                        "GROUP BY ENB_ID, CELLNUM", enbs)
-            for e, n, r in cur.fetchall():
-                radius[f"{e}-{n}"] = float(r) if r is not None else None
+        if keys:
+            radius = _cell_radius(conn, keys)
+        else:
+            # 옛 정답지(셀 목록 없음) — 꺼진 eNB 의 셀 전부. 셀 번호를 모르니 eNB 로 묻는다
+            with conn.cursor() as cur:
+                cur.execute("SELECT ENB_ID, CELLNUM, MAX(RADIUS_M) FROM CM_CELL_GEO_MAP "
+                            "WHERE AREA_LEVEL = 'MESH1K' AND ENB_ID IN (" + ",".join(["%s"] * len(enbs)) + ") "
+                            "GROUP BY ENB_ID, CELLNUM", enbs)
+                for e, n, r in cur.fetchall():
+                    radius[f"{e}-{n}"] = float(r) if r is not None else None
     except pymysql.err.ProgrammingError:
         pass                                   # 표가 없는 현장 — 반경 모름으로 내린다
     finally:

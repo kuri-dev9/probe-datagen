@@ -461,7 +461,14 @@
  #gDown{opacity:.5;pointer-events:none}
  #gDown ellipse{fill:#05070a;stroke:none}
  body[data-theme=light] #gDown{opacity:.35}
+ /* 정답(비교용) — 점선 테두리만. 칠하지 않아 주 음영(탐지)을 가리지 않는다 */
+ #gDownT{pointer-events:none}
+ #gDownT ellipse{fill:none;stroke:var(--map-fg);stroke-width:1px;stroke-dasharray:3 3;vector-effect:non-scaling-stroke;opacity:.7}
  #legend s.sdown{background:#05070a;border:1px solid #8a919c;border-radius:2px}
+ #legend s.sdownt{background:none;border:1px dashed #8a919c;border-radius:50%}
+ #legend .lg-down b{margin-left:auto;opacity:.7;font-weight:400;padding-left:8px}
+ #legend .lg-down-t{cursor:pointer;opacity:.55}
+ #legend .lg-down-t.on{opacity:1}
  #mini .ms{fill:#ff4d5e;stroke:var(--lb-halo);stroke-width:1px;vector-effect:non-scaling-stroke}
  #mini .mm{fill:var(--lb);font-weight:700;paint-order:stroke;stroke:var(--lb-halo);stroke-width:3px;
    vector-effect:non-scaling-stroke}
@@ -520,7 +527,7 @@
         <feGaussianBlur stdDeviation="0.0022"/>
       </filter>
     </defs>
-    <g id=gAdm></g><g id=gGreen></g><g id=gChome></g><g id=gRoad></g><g id=gRiv></g><g id=gRail></g><g id=gYmt></g><g id=gAll></g><g id=gKde></g><g id=gDown></g><g id=gGeo></g><g id=gCell></g>
+    <g id=gAdm></g><g id=gGreen></g><g id=gChome></g><g id=gRoad></g><g id=gRiv></g><g id=gRail></g><g id=gYmt></g><g id=gAll></g><g id=gKde></g><g id=gDown></g><g id=gDownT></g><g id=gGeo></g><g id=gCell></g>
     <g id=gPick></g><g id=gStn></g><g id=gNode></g></svg>
   <svg id=geofx></svg>
   <div id=fx><div id=fxin><div id=fxh></div><div id=fxb></div></div><div id=fxe><svg></svg><svg></svg><svg></svg></div></div>
@@ -898,35 +905,73 @@ function drawMini(){
   box.title=T(out?'진앙 {m} — 관동 지도 밖 (화살표 방향) · 네모 = 지금 보는 범위':'진앙 {m} — 관동 지도 (움직이지 않는다) · 네모 = 지금 보는 범위',{m:mag||T('규모 모름')});
   miniView();
 }
-//: 정지 기지국 영역 — 서버가 준 꺼진 셀(`down` · 생성기 정답지)만 칠한다. 좌표는 지도 셀(D.cells), 반경은
-//: 셀별 추정 커버리지(`r_m`). 둘 중 하나라도 없는 셀은 그리지 않는다(지어내지 않는다). 0곳이거나 모르면 비운다
+//: 정지 음영 두 겹 (2026-11-15 사용자 "음영을 기지국 장애와 함께 묶어서 — 발생 위치로부터 어디까지 피해를 보는지").
+//:  * **정지 판정 영역(주)** — 고른 지진 장애에서 graphio 가 **무호(C-01)로 판정한 셀**(`/api/map/event` 의 조각별
+//:    `silent` · D4 이벤트). 위 탭에서 조각을 고르면 그 조각들의 셀만. 폭주(C-24)만 있는 셀은 꺼진 게 아니라 붐비는
+//:    것이라 칠하지 않는다. 운영 화면에는 정답이 없으니 이것이 본 그림이다.
+//:  * **실제 정지(정답 · 비교용)** — 생성기가 실제로 끈 셀(`/api/map/quake` 의 `down` · 정답지). 점선 테두리만,
+//:    범례 견본을 눌러 켠다(기본 꺼짐). 탐지가 실제 정지를 얼마나 따라잡았는지 견준다.
+//: 둘 다 고른 장애가 지진(`MINI_Q`)일 때만 그린다. 좌표는 지도 셀(D.cells), 반경은 셀별 추정 커버리지(`r_m`) —
+//: 둘 중 하나라도 없는 셀은 그리지 않는다(지어내지 않는다)
+let SIL={}, SIL_WAIT={}, DOWN_T_ON=false, DOWN_T_N=0, DOWN_E=0, DOWN_TE=0;
+//: 정지 판정 셀은 **따로 받는다** — 사건 범위(`EVT`)는 한 번 받고 끝이라 진행 중인 지진이면 낡는다(정지는 몇 분씩
+//: 늦게 선다). 진행 중이면 30초마다 다시 묻는다(표시 주기 · 지진 폴링 10초의 세 번에 한 번)
+const SIL_TTL_MS=30000;
+function silentOf(h){
+  const id=h.incident_id, c=SIL[id], live=!h.closed_ts;
+  if((!c||(live&&Date.now()-c.t>SIL_TTL_MS))&&!SIL_WAIT[id])
+    SIL_WAIT[id]=fetch('/api/map/event/'+encodeURIComponent(id))
+      .then(r=>r.json()).then(d=>{ if(!d.error) SIL[id]={doc:d, t:Date.now()}; }).catch(()=>{})
+      .finally(()=>{ delete SIL_WAIT[id]; drawDown(); });
+  if(!c) return null;
+  const ms=c.doc.members||[], gs=isEvent(h)?partGroups(h):[];
+  // 위 탭의 조각 번호는 `EVT` 의 members 순서다 — 같은 graphio 응답이라 순서가 같지만, 번호가 아니라 조각 ID 로 짝짓는다
+  const evm=((evtOf(h)||{}).members)||ms;
+  const want=PART!=null&&gs[PART]?new Set(gs[PART].idx.map(i=>(evm[i]||{}).incident_id)):null;
+  const keys=[...new Set(ms.filter(m=>!want||want.has(m.incident_id)).flatMap(m=>m.silent||[]))];
+  return keys.map(k=>({key:k, r_m:(c.doc.silent_r||{})[k]}));
+}
+function downShape(c, r){
+  const e=el('ellipse'), cy=-my(c.lat);
+  e.setAttribute('cx', mx(c.lon)); e.setAttribute('cy', cy);
+  e.setAttribute('rx', r/(111320*Math.cos(c.lat*Math.PI/180)));
+  e.setAttribute('ry', cy-(-my(c.lat+r/110574)));
+  return e;
+}
 function drawDown(){
-  const g=document.getElementById('gDown'); if(!g) return;
-  const key=D&&DOWN?JSON.stringify(DOWN):'';
+  const g=document.getElementById('gDown'), gt=document.getElementById('gDownT'); if(!g||!gt) return;
+  const h=MINI_Q&&FOCUS?histOf(FOCUS):null;
+  const sil=h&&D?silentOf(h):null;
+  const key=JSON.stringify([!!D, sil, D&&DOWN?DOWN:null, DOWN_T_ON]);
   if(key===DOWN_KEY) return;
-  DOWN_KEY=key; g.replaceChildren();
+  DOWN_KEY=key; g.replaceChildren(); gt.replaceChildren();
   const at={}; if(D) for(const c of D.cells) at[c.key]=c;
-  let n=0;
-  for(const d of (DOWN&&D?DOWN.cells:[])){
-    const c=at[d.key]; if(!c||!(d.r_m>0)) continue;
-    const e=el('ellipse'), cy=-my(c.lat);
-    e.setAttribute('cx', mx(c.lon)); e.setAttribute('cy', cy);
-    e.setAttribute('rx', d.r_m/(111320*Math.cos(c.lat*Math.PI/180)));
-    e.setAttribute('ry', cy-(-my(c.lat+d.r_m/110574)));
-    g.appendChild(e); n++;
-  }
-  DOWN_N=n;
+  const draw1=(list, box)=>{ const enb=new Set(); let n=0;
+    for(const d of list||[]){ const c=at[d.key]; if(!c||!(d.r_m>0)) continue;
+      box.appendChild(downShape(c, d.r_m)); enb.add(String(c.enb)); n++; }
+    return {n, e:enb.size}; };
+  const a=draw1(sil, g);
+  DOWN_N=a.n; DOWN_E=a.e;
+  // 정답은 켰을 때만 그린다 — 수는 늘 센다(범례에 적어 켤 거리를 알린다)
+  const t=draw1(D&&DOWN?DOWN.cells:[], DOWN_T_ON?gt:document.createDocumentFragment());
+  DOWN_T_N=t.n; DOWN_TE=t.e;
   legendDown();
 }
 function legendDown(){
   const L=document.getElementById('legend'); if(!L) return;
-  L.querySelector('.lg-down')?.remove();
-  const n=DOWN?DOWN_N:0;
-  if(!n){ if(!L.children.length) L.style.display='none'; return; }
-  const div=document.createElement('div'); div.className='lg-down';
-  div.innerHTML=`<s class="sdown"></s>${T('정지 기지국 영역')}<b style="margin-left:auto;opacity:.7;font-weight:400">`
-    + `${T('eNB {e} · 셀 {c}',{e:DOWN.enbs.length,c:n})}</b>`;
-  L.appendChild(div); L.style.display='';
+  L.querySelectorAll('.lg-down').forEach(x=>x.remove());
+  const on=!!(MINI_Q&&FOCUS), rows=[];
+  // 지진을 골랐으면 판정 0곳도 적는다 — 탐지가 아직 못 잡은 것과 "음영 없음"이 구분돼야 한다(불변규칙 17)
+  if(on) rows.push(`<s class="sdown"></s>${T('정지 판정 영역')}<b>${T('eNB {e} · 셀 {c}',{e:DOWN_E,c:DOWN_N})}</b>`);
+  if(on&&DOWN_T_N) rows.push(`<s class="sdownt"></s>${T('실제 정지(정답)')}<b>${T('eNB {e} · 셀 {c}',{e:DOWN_TE,c:DOWN_T_N})}</b>`);
+  if(!rows.length){ if(!L.children.length) L.style.display='none'; return; }
+  rows.forEach((r,i)=>{ const div=document.createElement('div');
+    div.className='lg-down'+(i?' lg-down-t'+(DOWN_T_ON?' on':''):'');
+    div.innerHTML=r;
+    if(i){ div.title=T('눌러서 켜고 끈다 — 생성기가 실제로 끈 셀(정답 · 비교용)');
+      div.onclick=()=>{ DOWN_T_ON=!DOWN_T_ON; drawDown(); }; }
+    L.appendChild(div); });
+  L.style.display='';
 }
 //: 큰 지도의 지금 범위 — 너무 작으면(도쿄 한 구) 보이지 않으니 미니 폭의 3% 를 최소로 그린다(표시만)
 function miniView(){
@@ -1470,6 +1515,7 @@ async function focusInc(id){
     await loadEvt(h);
     if(FOCUS!==id) return;               // 그새 다른 장애를 눌렀다
     h=histOf(id)||h;
+    drawDown();                          // 정지 판정 셀은 사건 범위에 실려 온다
   }
   // 지도 전체를 다시 만들지 않는다 — 장애 표시만 바꾼다. 축척이 달라지면 이동 끝의 `draw` 가 맞춘다
   if(full) draw(); else { applyFaults(); drawPick(); drawFocus(); }
@@ -1771,7 +1817,7 @@ function drawFocus(){
   document.getElementById('unfocus').onclick=()=>focusInc(FOCUS);
   for(const b of bar.querySelectorAll('.parts button')) b.onclick=()=>{
     const k=b.dataset.part==='' ? null : +b.dataset.part;
-    if(k!==PART){ PART=k; applyFaults(); drawPick(); drawFocus(); }
+    if(k!==PART){ PART=k; applyFaults(); drawPick(); drawFocus(); drawDown(); }
     const fs2=focusSets(); if(!fs2) return;
     const hh=fs2.h;
     // 지역과 무관한 축(단말 기종·APN·도메인) 조각은 화면을 옮기지 않는다 — 옮길 자리가 graphio 중심 좌표뿐이다
