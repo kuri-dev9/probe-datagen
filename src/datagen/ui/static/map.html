@@ -447,6 +447,21 @@
  #wrap.mini-on #flist{max-height:calc(100% - 330px)}
  #mini .ml{fill:var(--land);stroke:var(--land-line);stroke-width:.6px;vector-effect:non-scaling-stroke}
  #mini .mv{fill:none;stroke:var(--map-fg);stroke-width:1px;vector-effect:non-scaling-stroke;opacity:.8}
+ /* ★ 에서 퍼지는 물결 — 사용자 "너무 과하지 않게". 얇은 선 셋이 3s 에 한 번씩 시차로 번지며 옅어진다.
+    움직임을 줄이라는 설정이면 물결을 아예 그리지 않는다(멈춘 원은 진앙 표시를 어지럽힌다) */
+ #mini .mw circle{fill:none;stroke:#ff4d5e;stroke-width:1px;vector-effect:non-scaling-stroke;opacity:0;
+   transform-box:fill-box;transform-origin:center;animation:miniWave 3s ease-out infinite}
+ #mini .mw circle:nth-child(2){animation-delay:-1s}
+ #mini .mw circle:nth-child(3){animation-delay:-2s}
+ @keyframes miniWave{0%{transform:scale(.15);opacity:.45}100%{transform:scale(1);opacity:0}}
+ @media (prefers-reduced-motion:reduce){#mini .mw{display:none}}
+ /* 정지 기지국 영역(27번 · 2026-11-15 사용자 "기지국이 꺼졌으니 영향받는 지형을 어두운 색 음영으로") —
+    꺼진 셀의 추정 커버리지 원을 **한 층으로** 칠한다. 원마다 투명도를 주면 겹친 곳이 더 진해져 "더 안 터진다"로
+    읽히므로 원은 불투명하게, 투명도는 층(g)에 준다. 폭주(주황 물결)와 겹쳐도 색·모양이 갈린다 */
+ #gDown{opacity:.5;pointer-events:none}
+ #gDown ellipse{fill:#05070a;stroke:none}
+ body[data-theme=light] #gDown{opacity:.35}
+ #legend s.sdown{background:#05070a;border:1px solid #8a919c;border-radius:2px}
  #mini .ms{fill:#ff4d5e;stroke:var(--lb-halo);stroke-width:1px;vector-effect:non-scaling-stroke}
  #mini .mm{fill:var(--lb);font-weight:700;paint-order:stroke;stroke:var(--lb-halo);stroke-width:3px;
    vector-effect:non-scaling-stroke}
@@ -505,7 +520,7 @@
         <feGaussianBlur stdDeviation="0.0022"/>
       </filter>
     </defs>
-    <g id=gAdm></g><g id=gGreen></g><g id=gChome></g><g id=gRoad></g><g id=gRiv></g><g id=gRail></g><g id=gYmt></g><g id=gAll></g><g id=gKde></g><g id=gGeo></g><g id=gCell></g>
+    <g id=gAdm></g><g id=gGreen></g><g id=gChome></g><g id=gRoad></g><g id=gRiv></g><g id=gRail></g><g id=gYmt></g><g id=gAll></g><g id=gKde></g><g id=gDown></g><g id=gGeo></g><g id=gCell></g>
     <g id=gPick></g><g id=gStn></g><g id=gNode></g></svg>
   <svg id=geofx></svg>
   <div id=fx><div id=fxin><div id=fxh></div><div id=fxb></div></div><div id=fxe><svg></svg><svg></svg><svg></svg></div></div>
@@ -822,24 +837,34 @@ async function pollStandby(){
 // 27번 진앙은 도쿄 밖 바다·땅속이라 장비 지도 화면 밖이다. 구석에 **움직이지 않는** 작은 지도를 두고 진앙 ★ 과
 // 규모만 찍는다. 범위는 관동과 그 앞바다다(같은 날 사용자 "100% 전도는 필요없고 도쿄와 먼바다쪽") — 서버가
 // 진원역 설정에서 계산해 `outline.bbox` 로 준다. 큰 지도에서 지금 보이는 범위는 네모로 — 진앙과 장비의 위치
-// 관계가 보인다. 어느 지진인가는 서버가 정한다(`/api/map/quake` — 진행 중인 27번, 아니면 고른 장애의 시작
-// 시각을 품은 27번). 지진이 없으면 숨긴다. 좌표는 큰 지도와 같은 체계(x=경도 · y=−메르카토르)라 네모는 VB 그대로다
-let MINI=null, MINI_Q=null, MINI_VB=null;
+// 관계가 보인다. 어느 지진인가는 서버가 정한다(`/api/map/quake?at=` — 고른 장애의 시작 시각을 품은 27번).
+// 고른 장애가 없거나 지진이 없으면 숨긴다. 좌표는 큰 지도와 같은 체계(x=경도 · y=−메르카토르)라 네모는 VB 그대로다
+let MINI=null, MINI_Q=null, MINI_VB=null, DOWN=null, DOWN_KEY=null, DOWN_N=0;
 async function pollQuake(){
+  // **고른 장애가 있을 때만 묻는다**(2026-11-15 사용자 "지진 시나리오 누를 때만 나와야"). 전에는 진행 중인
+  // 27번이 있으면 아무것도 안 골라도 미니 지도·음영이 늘 떴다. 고른 장애의 시작 시각(`at`)을 품은 27번이
+  // 있을 때만 서버가 지진을 준다 — 지진이 아닌 장애(그 시각에 27번 구간 밖)면 null 이라 둘 다 사라진다
   const h=FOCUS?histOf(FOCUS):null;
+  if(!h||!h.opened_ts){ MINI_Q=null; DOWN=null; drawMini(); drawDown(); return; }
   const q=new URLSearchParams();
   if(!MINI) q.set('outline','1');
-  if(h&&h.opened_ts) q.set('at', h.opened_ts);
+  q.set('at', h.opened_ts);
   let doc;
   try{ doc=await (await fetch('/api/map/quake?'+q)).json(); }catch(e){ return; }
   if(doc.outline&&!doc.outline.error) MINI=doc.outline;
   MINI_Q=doc.quake||null;
-  drawMini();
+  DOWN=MINI_Q&&doc.down||null;
+  drawMini(); drawDown();
 }
 function drawMini(){
   const box=document.getElementById('mini'), svg=document.getElementById('miniSvg');
   const q=MINI_Q;
   if(!q||!MINI||!MINI.bbox){ box.style.display='none'; box.parentNode.classList.remove('mini-on'); return; }
+  box.style.display='block'; box.parentNode.classList.add('mini-on');
+  // 10초마다 같은 지진이 다시 온다 — 다시 그리면 물결이 처음으로 튄다. 바뀌었을 때만 새로 그린다
+  const key=JSON.stringify([q,MINI.bbox]);
+  if(svg.dataset.k===key){ miniView(); return; }
+  svg.dataset.k=key;
   const [la0,lo0,la1,lo1]=MINI.bbox;
   const x0=lo0, x1=lo1, y0=-my(la1), y1=-my(la0);
   MINI_VB={x:x0, y:y0, w:x1-x0, h:y1-y0};
@@ -853,12 +878,14 @@ function drawMini(){
   let mark;
   if(out){
     const a=Math.atan2(qy-ey,qx-ex), pt=(r,t)=>`${(ex+r*Math.cos(t)).toFixed(3)} ${(ey+r*Math.sin(t)).toFixed(3)}`;
-    mark=`<path class=ms d="M${pt(5*u,a)}L${pt(4*u,a+2.4)}L${pt(4*u,a-2.4)}Z"/>`;
+    mark=`<path class="ms" d="M${pt(5*u,a)}L${pt(4*u,a+2.4)}L${pt(4*u,a-2.4)}Z"></path>`;
   }else{
     // 별 — 다섯 꼭짓점. 크기는 미니 지도 폭 비율이라 진앙이 어디든 같은 크기다
     const star=Array.from({length:10},(_,i)=>{ const r=i%2?2.1*u:5.2*u, a=-Math.PI/2+i*Math.PI/5;
       return `${(ex+r*Math.cos(a)).toFixed(3)} ${(ey+r*Math.sin(a)).toFixed(3)}`; }).join('L');
-    mark=`<path class=ms d="M${star}Z"/>`;
+    // 물결은 범위 안 ★ 에만 — 반지름은 미니 지도 폭의 14%(표시만)
+    mark=`<g class="mw">${[0,1,2].map(()=>`<circle cx="${ex}" cy="${ey}" r="${14*u}"></circle>`).join('')}</g>`
+      + `<path class="ms" d="M${star}Z"></path>`;
   }
   const mag=q.magnitude!=null?`M${q.magnitude.toFixed(1)}`:'';
   // 규모 글자는 진앙 오른쪽 — 동쪽 끝이면 왼쪽으로 넘긴다
@@ -869,8 +896,37 @@ function drawMini(){
     + mark
     + (mag?`<text class="mm" x="${right?ex+6.5*u:ex-6.5*u}" y="${ey+3*u}" font-size="${9*u}" text-anchor="${right?'start':'end'}">${mag}</text>`:'');
   box.title=T(out?'진앙 {m} — 관동 지도 밖 (화살표 방향) · 네모 = 지금 보는 범위':'진앙 {m} — 관동 지도 (움직이지 않는다) · 네모 = 지금 보는 범위',{m:mag||T('규모 모름')});
-  box.style.display='block'; box.parentNode.classList.add('mini-on');
   miniView();
+}
+//: 정지 기지국 영역 — 서버가 준 꺼진 셀(`down` · 생성기 정답지)만 칠한다. 좌표는 지도 셀(D.cells), 반경은
+//: 셀별 추정 커버리지(`r_m`). 둘 중 하나라도 없는 셀은 그리지 않는다(지어내지 않는다). 0곳이거나 모르면 비운다
+function drawDown(){
+  const g=document.getElementById('gDown'); if(!g) return;
+  const key=D&&DOWN?JSON.stringify(DOWN):'';
+  if(key===DOWN_KEY) return;
+  DOWN_KEY=key; g.replaceChildren();
+  const at={}; if(D) for(const c of D.cells) at[c.key]=c;
+  let n=0;
+  for(const d of (DOWN&&D?DOWN.cells:[])){
+    const c=at[d.key]; if(!c||!(d.r_m>0)) continue;
+    const e=el('ellipse'), cy=-my(c.lat);
+    e.setAttribute('cx', mx(c.lon)); e.setAttribute('cy', cy);
+    e.setAttribute('rx', d.r_m/(111320*Math.cos(c.lat*Math.PI/180)));
+    e.setAttribute('ry', cy-(-my(c.lat+d.r_m/110574)));
+    g.appendChild(e); n++;
+  }
+  DOWN_N=n;
+  legendDown();
+}
+function legendDown(){
+  const L=document.getElementById('legend'); if(!L) return;
+  L.querySelector('.lg-down')?.remove();
+  const n=DOWN?DOWN_N:0;
+  if(!n){ if(!L.children.length) L.style.display='none'; return; }
+  const div=document.createElement('div'); div.className='lg-down';
+  div.innerHTML=`<s class="sdown"></s>${T('정지 기지국 영역')}<b style="margin-left:auto;opacity:.7;font-weight:400">`
+    + `${T('eNB {e} · 셀 {c}',{e:DOWN.enbs.length,c:n})}</b>`;
+  L.appendChild(div); L.style.display='';
 }
 //: 큰 지도의 지금 범위 — 너무 작으면(도쿄 한 구) 보이지 않으니 미니 폭의 3% 를 최소로 그린다(표시만)
 function miniView(){
@@ -2008,7 +2064,7 @@ function legend(axis, vals){
   const L=document.getElementById('legend');
   // **단일 색일 때는 범례가 거짓말이 된다** — 색이 아무 뜻도 없는데
   // 색표를 띄우면 뜻이 있는 것처럼 읽힌다
-  if(axis==='none'){ L.style.display='none'; return; }
+  if(axis==='none'){ L.innerHTML=''; L.style.display='none'; legendDown(); return; }
   L.style.display='';
   const label={ta_list:T('TA 목록'), tac:'TAC', sgw:'SGW', mme:'MME'}[axis];
   // **몇 개인지가 아니라 얼마나 쏠렸는지가 중요하다.** 색만 9개 보이면
@@ -2027,6 +2083,7 @@ function legend(axis, vals){
       + `${cnt[v]||0}${pc>=10?` · ${pc}%`:''}</b></div>`;
   }).join('')
     + (vals.length>top.length ? `<div style="opacity:.55">${T('… 외 {n}개',{n:vals.length-top.length})}</div>` : '');
+  legendDown();
 }
 
 // ── 야마노테선 집기 ─────────────────────────────────────────────────────
@@ -2184,6 +2241,7 @@ function draw(){
   // 그림이다. `D.lines` 는 **야마노테 구간을 집는 자**로만 쓴다.
   const M=modeOf(), axis=M.axis;
   const vals=buildPal(axis); legend(axis, vals);
+  drawDown();
   const k = sizeK();                  // 확대해도 점 크기가 유지되게
   K_DRAWN=k; syncKs();                // 이 크기로 그렸다 — 되돌림 배율은 1
 

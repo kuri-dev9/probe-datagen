@@ -67,6 +67,7 @@ class _Conn:
 def _use(monkeypatch, **kw):
     c = _Conn(**kw)
     monkeypatch.setattr(map_api, "_connect", lambda: c)
+    monkeypatch.setattr(map_api, "_quake_down", lambda fid: None)      # 정답지 파일을 읽지 않는다(아래 별도 시험)
     return c
 
 
@@ -79,12 +80,24 @@ def _row(start=T0, dur=16, mag=5.9, status="done"):
 
 # ---------------------------------------------------------------- api_map_quake
 
-def test_active_quake_wins_regardless_of_at(monkeypatch):
+def test_at_given_means_window_match_only_even_when_a_quake_is_active(monkeypatch):
+    """11-15 사용자 "지진 시나리오 누를 때만 나와야" — 진행 중인 27번이 있어도 고른 장애가 그 구간 밖이면 None.
+    (전에는 active 를 먼저 봐서 DNS 장애를 골라도 지진이 떴다.) at 이 있으면 active 질의를 아예 하지 않는다."""
+    c = _use(monkeypatch, active=(349, 36.0, 141.0, 6.1, T0, "active"), by_time=_row())
+    assert map_api.api_map_quake(at="2026-11-15T09:10:00")["quake"] is None
+    assert not any("STATUS = 'active'" in s for s, _ in c.log) and len(c.log) == 1
+
+
+def test_at_inside_the_window_picks_that_quake_not_the_active_one(monkeypatch):
+    _use(monkeypatch, active=(349, 36.0, 141.0, 6.1, T0 + timedelta(hours=5), "active"), by_time=_row())
+    assert map_api.api_map_quake(at="2026-11-15T05:40:00")["quake"]["fault_id"] == 348
+
+
+def test_without_at_the_active_quake_is_still_returned_by_the_api(monkeypatch):
+    """화면은 고른 장애가 없으면 묻지 않지만 API 는 at 없이 부르면 진행 중인 지진을 준다(남긴 동작)."""
     _use(monkeypatch, active=(349, 36.0, 141.0, 6.1, T0, "active"), by_time=_row())
-    q = map_api.api_map_quake(at="2026-11-15T05:40:00")["quake"]
+    q = map_api.api_map_quake()["quake"]
     assert q["fault_id"] == 349 and q["active"] is True
-    q = map_api.api_map_quake()["quake"]               # at 이 없어도 진행 중이면 보인다
-    assert q["fault_id"] == 349
 
 
 def test_at_inside_injection_window_picks_that_quake(monkeypatch):
@@ -316,7 +329,7 @@ def _draw():
 
 def test_mini_draws_star_and_magnitude_only():
     fn = _draw()
-    assert 'class="ml"' in fn and 'class="mv"' in fn and 'class=ms' in fn and 'class="mm"' in fn
+    assert 'class="ml"' in fn and 'class="mv"' in fn and 'class="ms"' in fn and 'class="mm"' in fn
     assert fn.count("<text") == 1                       # 글자는 규모 하나 — 지명은 넣지 않는다
     assert "magnitude.toFixed(1)" in fn
     assert "hypo" not in fn and "name" not in fn.replace("className", "")
@@ -346,7 +359,7 @@ def test_regression_drawmini_output_has_siblings_not_children(tmp_path):
     js = tmp_path / "t.js"
     js.write_text("""
 const T=(s,o)=>s; const my=lat=>lat; let VB=null; 
-const els={mini:{style:{},parentNode:{classList:{add(){},remove(){}}}},miniSvg:{attrs:{},setAttribute(k,v){this.attrs[k]=v},innerHTML:''}};
+const els={mini:{style:{},parentNode:{classList:{add(){},remove(){}}}},miniSvg:{attrs:{},dataset:{},setAttribute(k,v){this.attrs[k]=v},innerHTML:''}};
 const document={getElementById:id=>els[id]||null};
 let MINI={bbox:[34.46,138.23,37.16,141.74],rings:[[[139,35],[140,35],[140,36],[139,35]]]}, MINI_Q=null, MINI_VB=null;
 function miniView(){}
@@ -362,7 +375,7 @@ console.log(JSON.stringify({inside,outside,title:els.mini.title}));
     for html in (out["inside"], out["outside"]):
         assert html.count("<rect") == 1 and html.count("</rect>") == 1
         assert re.search(r"<rect[^>]*></rect>", html)               # rect 는 비어 있다(자식 없음)
-        assert html.index("</rect>") < html.index('<path class=ms') < html.index("<text")
+        assert html.index("</rect>") < html.index('<path class="ms"') < html.index("<text")
         assert "M" in html and "5.9" in html or "6.5" in html
     assert "M5.9" in out["inside"] and "M6.5" in out["outside"]
     assert out["inside"].count("L") > 0
@@ -436,3 +449,342 @@ def test_old_japan_overview_phrases_are_gone():
     assert "일본 전도" not in MAP_HTML.replace("일본 전도를 두고", "")      # 머리 주석의 사용자 인용문만 남는다
     assert not any("일본 전도" in k or "日本全図" in v for k, v in _JA_MAP.items())
     assert "관동" in MAP_HTML and "関東地図" in _JA_MAP["진앙 {m} — 관동 지도 (움직이지 않는다) · 네모 = 지금 보는 범위"]
+
+
+# ══ 11-15 오후 — ★ 물결 · 정지 기지국 음영 · 지진을 골랐을 때만 · 정답지 읽기 전용 마운트 ══════════════════════════
+
+from datagen.ui import faults_api  # noqa: E402
+
+DOWN_TRUTH = {"scenario_id": "F-355", "down_enbs": ["132644", "134429"],
+              "down_cells": ["132644-0", "132644-1", "134429-0"]}
+
+
+class _DownCur:
+    def __init__(self, c):
+        self.c = c
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        self.c.log.append((sql, list(params or [])))
+        if self.c.boom:
+            raise pymysql.err.ProgrammingError(1146, "no table")
+
+    def fetchall(self):
+        return self.c.rows
+
+
+class _DownConn:
+    def __init__(self, rows=(), boom=False):
+        self.rows, self.boom, self.log, self.closed = list(rows), boom, [], False
+
+    def cursor(self):
+        return _DownCur(self)
+
+    def close(self):
+        self.closed = True
+
+
+def _down(monkeypatch, truth, rows=(), boom=False):
+    c = _DownConn(rows, boom)
+    monkeypatch.setattr(faults_api, "_truth_of", lambda fid: truth)
+    monkeypatch.setattr(map_api, "_connect", lambda: c)
+    return c
+
+
+# ── _quake_down ────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("truth", [{}, None, {"scenario_id": "F-355"}])
+def test_down_is_none_when_the_answer_sheet_has_no_such_fault_or_no_down_field(monkeypatch, truth):
+    """정답지는 최근 장애만 담는다 — 지난 회차는 None(모름)이다. 0곳과 다르다(불변규칙 17)."""
+    c = _down(monkeypatch, truth)
+    assert map_api._quake_down(355) is None and c.log == []        # 질의도 하지 않는다
+
+
+def test_down_with_zero_enbs_is_an_empty_list_not_none(monkeypatch):
+    """F-348 — 정지 0곳. None(모름)이 아니라 빈 목록이다. 질의 없이 돌려준다."""
+    c = _down(monkeypatch, {"down_enbs": []})
+    out = map_api._quake_down(348)
+    assert out == {"enbs": [], "cells": [], "source": "ground_truth"} and c.log == []
+
+
+def test_down_uses_down_cells_when_the_sheet_has_them(monkeypatch):
+    _down(monkeypatch, DOWN_TRUTH, rows=[("132644", 0, 353.0), ("132644", 1, 410.0), ("132644", 7, 500.0),
+                                        ("134429", 0, 441.0)])
+    out = map_api._quake_down(355)
+    assert out["enbs"] == ["132644", "134429"]
+    assert [c["key"] for c in out["cells"]] == ["132644-0", "132644-1", "134429-0"]      # 정답지가 준 키만 — -7 은 아니다
+    assert [c["r_m"] for c in out["cells"]] == [353.0, 410.0, 441.0]
+
+
+def test_down_without_down_cells_falls_back_to_every_cell_of_the_down_enbs(monkeypatch):
+    _down(monkeypatch, {"down_enbs": ["132644"]}, rows=[("132644", 1, 400.0), ("132644", 0, 353.0)])
+    out = map_api._quake_down(355)
+    assert [c["key"] for c in out["cells"]] == ["132644-0", "132644-1"]                  # 옛 정답지 — 정렬
+
+
+def test_down_unknown_radius_is_none_not_zero(monkeypatch):
+    _down(monkeypatch, DOWN_TRUTH, rows=[("132644", 0, None), ("132644", 1, 410.0)])
+    cells = {c["key"]: c["r_m"] for c in map_api._quake_down(355)["cells"]}
+    assert cells["132644-0"] is None and cells["134429-0"] is None and cells["132644-1"] == 410.0
+
+
+def test_down_missing_table_gives_unknown_radii_without_raising(monkeypatch):
+    c = _down(monkeypatch, DOWN_TRUTH, boom=True)
+    out = map_api._quake_down(355)
+    assert [x["r_m"] for x in out["cells"]] == [None, None, None] and c.closed
+
+
+def test_down_query_is_a_select_on_the_mesh_rows_only(monkeypatch):
+    c = _down(monkeypatch, DOWN_TRUTH, rows=[])
+    map_api._quake_down(355)
+    sql, params = c.log[0]
+    assert sql.lstrip().upper().startswith("SELECT") and "AREA_LEVEL = 'MESH1K'" in sql and "RADIUS_M" in sql
+    assert not re.search(r"\b(INSERT|UPDATE|DELETE|ALTER|DROP)\b", sql, re.I)
+    assert params == ["132644", "134429"] and sql.count("%s") == 2 and c.closed          # eNB 는 바인딩, 연결은 닫는다
+
+
+# ── api_map_quake 의 down ──────────────────────────────────────────────────────────────────
+
+def test_api_attaches_down_only_when_there_is_a_quake(monkeypatch):
+    _use(monkeypatch, by_time=_row())
+    monkeypatch.setattr(map_api, "_quake_down", lambda fid: {"enbs": ["1"], "cells": [], "fid": fid})
+    assert map_api.api_map_quake(at="2026-11-15T05:45:00")["down"] == {"enbs": ["1"], "cells": [], "fid": 348}
+    out = map_api.api_map_quake(at="2026-11-15T09:10:00")           # 구간 밖 — 지진 없음
+    assert out["quake"] is None and "down" not in out
+
+
+# ── gen-ui 가 정답지를 읽는다 — 읽기 전용 마운트 ────────────────────────────────────────────
+
+GRAPHIO = Path(__file__).resolve().parents[2] / "graphio-probe-rca"
+
+
+def _service(text, name):
+    m = re.search(rf"^  {re.escape(name)}:\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|^[A-Za-z]|\Z)", text, re.S | re.M)
+    assert m, name
+    return m.group(1)
+
+
+@pytest.mark.parametrize("compose", ["docker-compose.yml", "docker-compose.prod.yml"])
+def test_gen_ui_mounts_the_answer_sheet_read_only_and_gen_keeps_rw(compose):
+    f = GRAPHIO / compose
+    if not f.exists():
+        pytest.skip("graphio 저장소가 옆에 없다")
+    text = f.read_text(encoding="utf-8")
+    ui = _service(text, "gen-ui")
+    assert "./data/truth:/app/data/truth:ro" in ui and "/app/data/truth:rw" not in ui
+    assert "./data/truth:/app/data/truth:rw" in _service(text, "gen")          # 쓰는 쪽은 gen 하나다
+    for other in ("web", "corr"):
+        assert "./data/truth:/app/data/truth" not in _service(text, other)         # 다른 서비스에는 걸지 않는다
+
+
+@pytest.mark.parametrize("cfg", ["local.yaml", "prod.yaml.example"])
+def test_gen_ui_config_points_the_answer_sheet_inside_the_mount(cfg):
+    text = (Path(__file__).resolve().parents[1] / "config" / cfg).read_text(encoding="utf-8")
+    assert re.search(r"^\s*truth_out:\s*/app/data/truth/ground_truth\.json\s*$", text, re.M)
+
+
+# ── pollQuake · drawDown · legendDown — node 로 실제 함수를 돌린다 ─────────────────────────────
+
+def _fn(name, nxt=None, is_async=False):
+    start = MAP_HTML.index(("async function " if is_async else "function ") + name)
+    end = MAP_HTML.index(nxt, start) if nxt else MAP_HTML.index("\n}\n", start) + 3
+    return MAP_HTML[start:end]
+
+
+def _node(tmp_path, body):
+    js = tmp_path / "t.js"
+    js.write_text(body, encoding="utf-8")
+    r = subprocess.run([NODE, str(js)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    import json
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
+POLL = """
+const calls=[]; let FOCUS=null, H={}; const histOf=id=>H[id]||null;
+let MINI=null, MINI_Q=null, MINI_VB=null, DOWN=null, DOWN_KEY=null, DOWN_N=0;
+const drawMini=()=>calls.push('mini'), drawDown=()=>calls.push('down');
+let REPLY=null, FETCHED=[]; const fetch=async u=>{FETCHED.push(u); if(REPLY==='boom') throw new Error('x'); return {json:async()=>REPLY};};
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node 없음")
+def test_poll_without_a_focused_incident_asks_nothing_and_clears_both(tmp_path):
+    out = _node(tmp_path, POLL + _fn("pollQuake", is_async=True) + """
+(async()=>{
+  MINI_Q={x:1}; DOWN={cells:[1]};
+  await pollQuake();                              // FOCUS 없음
+  const a={fetched:FETCHED.length, q:MINI_Q, d:DOWN, calls:calls.slice()};
+  calls.length=0; FOCUS='I1'; H.I1={};            // 고른 장애에 시작 시각이 없다
+  MINI_Q={x:1}; DOWN={cells:[1]}; await pollQuake();
+  console.log(JSON.stringify({a, b:{fetched:FETCHED.length, q:MINI_Q, d:DOWN, calls:calls.slice()}}));
+})();""")
+    for k in ("a", "b"):
+        assert out[k]["fetched"] == 0 and out[k]["q"] is None and out[k]["d"] is None
+        assert out[k]["calls"] == ["mini", "down"]                  # 둘 다 다시 그려 지운다
+
+
+@pytest.mark.skipif(NODE is None, reason="node 없음")
+def test_poll_with_a_focused_incident_always_sends_at_and_asks_the_outline_once(tmp_path):
+    out = _node(tmp_path, POLL + _fn("pollQuake", is_async=True) + """
+(async()=>{
+  FOCUS='I1'; H.I1={opened_ts:'2026-11-15 11:40:00'};
+  REPLY={quake:{fault_id:355}, down:{enbs:['1'],cells:[]}, outline:{bbox:[1,2,3,4],rings:[]}};
+  await pollQuake(); const first=FETCHED[0];
+  await pollQuake(); const second=FETCHED[1];
+  console.log(JSON.stringify({first, second, q:MINI_Q, d:DOWN, calls:calls.slice(), mini:!!MINI}));
+})();""")
+    assert "at=2026-11-15+11%3A40%3A00" in out["first"] and "at=2026-11-15+11%3A40%3A00" in out["second"]
+    assert "outline=1" in out["first"] and "outline" not in out["second"]
+    assert out["q"] == {"fault_id": 355} and out["d"]["enbs"] == ["1"] and out["mini"] is True
+    assert out["calls"] == ["mini", "down", "mini", "down"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node 없음")
+def test_poll_ignores_down_when_the_server_gave_no_quake_and_survives_a_failed_fetch(tmp_path):
+    out = _node(tmp_path, POLL + _fn("pollQuake", is_async=True) + """
+(async()=>{
+  FOCUS='I1'; H.I1={opened_ts:'2026-11-15 09:10:00'};
+  REPLY={quake:null, down:{enbs:['9'],cells:[{key:'9-0',r_m:300}]}};        // DNS 장애 — 지진 없음
+  await pollQuake(); const r1={q:MINI_Q, d:DOWN};
+  REPLY='boom'; calls.length=0; MINI_Q={keep:1}; DOWN={keep:1};
+  await pollQuake();                                                         // 실패하면 그리지도 지우지도 않는다
+  console.log(JSON.stringify({r1, after:{q:MINI_Q, d:DOWN, calls:calls.slice()}}));
+})();""")
+    assert out["r1"] == {"q": None, "d": None}                       # 지진 없으면 down 이 와도 쓰지 않는다
+    assert out["after"] == {"q": {"keep": 1}, "d": {"keep": 1}, "calls": []}
+
+
+DRAW_DOWN = """
+const mkEl=tag=>({tag,attrs:{},setAttribute(k,v){this.attrs[k]=v}});
+const el=mkEl, mx=x=>x, my=y=>y;
+let D=null, DOWN=null, DOWN_KEY=null, DOWN_N=0, LEG=0;
+const T=(s,o)=>o?s.replace(/\\{(\\w+)\\}/g,(_,k)=>o[k]):s;
+const g={children:[],replaceCount:0,replaceChildren(){this.children=[];this.replaceCount++},appendChild(c){this.children.push(c)}};
+const legendBox={children:[],style:{display:''},rows:[],querySelector(){return {remove:()=>{this.children=this.children.filter(c=>c.className!=='lg-down')}}},
+  appendChild(c){this.children.push(c)}};
+const document={getElementById:id=>id==='gDown'?g:id==='legend'?legendBox:null,createElement:t=>({tag:t,className:'',innerHTML:''})};
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node 없음")
+def test_draw_down_paints_only_cells_with_position_and_radius_and_the_legend_counts_them(tmp_path):
+    out = _node(tmp_path, DRAW_DOWN + _fn("drawDown", "function legendDown") + _fn("legendDown") + """
+D={cells:[{key:'1-0',lat:35.7,lon:139.8},{key:'1-1',lat:35.71,lon:139.81},{key:'2-0',lat:35.72,lon:139.82}]};
+DOWN={enbs:['1','2'],cells:[{key:'1-0',r_m:353},{key:'1-1',r_m:null},{key:'2-0',r_m:441},{key:'9-9',r_m:300}]};
+drawDown();
+const e=g.children[0];
+console.log(JSON.stringify({n:g.children.length, rx:+e.attrs.rx, ry:+e.attrs.ry, cx:e.attrs.cx,
+  legend:legendBox.children.map(c=>c.innerHTML), display:legendBox.style.display, N:DOWN_N}));""")
+    assert out["n"] == 2 and out["N"] == 2                          # r_m null 한 셀 · 지도에 없는 셀 하나는 그리지 않는다
+    assert out["rx"] > 0 and out["ry"] > 0 and out["cx"] == 139.8
+    assert len(out["legend"]) == 1 and "정지 기지국 영역" in out["legend"][0] and "eNB 2 · 셀 2" in out["legend"][0]
+    assert out["display"] == ""                                      # 범례가 보인다
+
+
+@pytest.mark.skipif(NODE is None, reason="node 없음")
+def test_draw_down_draws_nothing_and_no_legend_row_when_down_is_null_or_empty(tmp_path):
+    out = _node(tmp_path, DRAW_DOWN + _fn("drawDown", "function legendDown") + _fn("legendDown") + """
+D={cells:[{key:'1-0',lat:35.7,lon:139.8}]};
+DOWN=null; drawDown(); const a={n:g.children.length, rows:legendBox.children.length, display:legendBox.style.display};
+DOWN={enbs:[],cells:[]}; DOWN_KEY=null; drawDown(); const b={n:g.children.length, rows:legendBox.children.length};
+console.log(JSON.stringify({a,b}));""")
+    assert out["a"] == {"n": 0, "rows": 0, "display": "none"}       # 비어 있고 다른 범례도 없으면 범례 상자 자체를 숨긴다
+    assert out["b"] == {"n": 0, "rows": 0}                          # F-348 — 정지 0곳이면 아무것도 그리지 않는다
+
+
+@pytest.mark.skipif(NODE is None, reason="node 없음")
+def test_draw_down_does_not_repaint_the_same_data_and_clears_when_deselected(tmp_path):
+    out = _node(tmp_path, DRAW_DOWN + _fn("drawDown", "function legendDown") + _fn("legendDown") + """
+D={cells:[{key:'1-0',lat:35.7,lon:139.8}]};
+DOWN={enbs:['1'],cells:[{key:'1-0',r_m:353}]};
+drawDown(); drawDown(); const same={replace:g.replaceCount, n:g.children.length};
+DOWN=null; drawDown(); const cleared={n:g.children.length, rows:legendBox.children.length};
+console.log(JSON.stringify({same,cleared}));""")
+    assert out["same"] == {"replace": 1, "n": 1}                    # 10초마다 같은 값이 와도 다시 칠하지 않는다
+    assert out["cleared"] == {"n": 0, "rows": 0}
+
+
+@pytest.mark.skipif(NODE is None, reason="node 없음")
+def test_draw_down_waits_for_the_map_cells(tmp_path):
+    out = _node(tmp_path, DRAW_DOWN + _fn("drawDown", "function legendDown") + _fn("legendDown") + """
+DOWN={enbs:['1'],cells:[{key:'1-0',r_m:353}]};
+drawDown(); const early=g.children.length;                     // 지도 셀(D)이 아직 없다
+D={cells:[{key:'1-0',lat:35.7,lon:139.8}]}; drawDown();
+console.log(JSON.stringify({early, late:g.children.length}));""")
+    assert out == {"early": 0, "late": 1}
+
+
+# ── 소스 검사 — 층 · 범례 · 물결 ───────────────────────────────────────────────────────────
+
+def test_down_layer_sits_between_the_kde_and_the_geo_layers_and_is_not_cleared_by_draw():
+    assert "<g id=gKde></g><g id=gDown></g><g id=gGeo></g>" in MAP_HTML       # 장애 윤곽·셀 점보다 아래에 깔린다
+    draw = MAP_HTML[MAP_HTML.index("function draw()"):][:3500]
+    assert "drawDown();" in draw and "gDown" not in draw                      # draw 가 부르되 비우지는 않는다(스스로 관리)
+
+
+def test_legend_keeps_the_down_row_in_both_branches():
+    leg = MAP_HTML[MAP_HTML.index("function legend("):MAP_HTML.index("// ── 야마노테선 집기")]
+    assert "if(axis==='none'){ L.innerHTML=''; L.style.display='none'; legendDown(); return; }" in leg
+    assert leg.rstrip().rstrip("}").rstrip().endswith("legendDown();")        # 축이 있을 때도 끝에서 붙인다
+
+
+def test_down_shading_is_one_dark_layer_distinct_from_the_orange_surge():
+    css = MAP_HTML[MAP_HTML.index("#gDown{"):][:400]
+    assert "opacity:.5" in css and "pointer-events:none" in css and "fill:#05070a" in css
+    assert "body[data-theme=light] #gDown{opacity:.35}" in MAP_HTML
+    assert "stroke:none" in css.split("#gDown ellipse")[1][:60]                # 원마다 투명도 없이 층에만 — 겹쳐도 안 진해진다
+    assert "ff" not in css.lower().split("fill:")[1][:8]                       # 주황(폭주)과 다른 색
+
+
+def test_wave_is_three_thin_faint_circles_only_for_an_in_view_star():
+    fn = _draw()
+    assert fn.count("[0,1,2].map") == 1 and '<g class="mw">' in fn
+    assert fn.index('<g class="mw">') > fn.index("}else{")                    # 범위 밖 화살표 갈래에는 물결이 없다
+    arrow = fn[fn.index("if(out){"):fn.index("}else{")]
+    assert "mw" not in arrow
+    css = MAP_HTML[MAP_HTML.index("#mini .mw circle{"):][:700]
+    assert "stroke-width:1px" in css and "animation:miniWave 3s ease-out infinite" in css
+    assert "animation-delay:-1s" in css and "animation-delay:-2s" in css      # 3 초 주기 · 시차 셋
+    assert re.search(r"@keyframes miniWave\{0%\{transform:scale\(\.15\);opacity:\.45\}100%\{transform:scale\(1\);opacity:0\}\}", css)
+
+
+def test_wave_respects_reduced_motion():
+    assert "@media (prefers-reduced-motion:reduce){#mini .mw{display:none}}" in MAP_HTML
+
+
+def test_mini_is_not_redrawn_when_the_same_quake_comes_again():
+    fn = _draw()
+    assert "const key=JSON.stringify([q,MINI.bbox]);" in fn
+    assert "if(svg.dataset.k===key){ miniView(); return; }" in fn
+    assert fn.index("if(svg.dataset.k===key)") < fn.index("svg.innerHTML=")    # 같으면 innerHTML 을 다시 쓰기 전에 나간다
+
+
+@pytest.mark.skipif(NODE is None, reason="node 없음")
+def test_drawmini_same_quake_twice_does_not_rewrite_the_svg_and_a_new_one_does(tmp_path):
+    start = MAP_HTML.index("function drawMini")
+    end = MAP_HTML.index("//: 큰 지도의 지금 범위")
+    out = _node(tmp_path, """
+const T=(s,o)=>s; const my=lat=>lat; let VB=null; let writes=0;
+const svg={attrs:{},dataset:{},setAttribute(k,v){this.attrs[k]=v}, set innerHTML(v){writes++; this._h=v}, get innerHTML(){return this._h}};
+const els={mini:{style:{},parentNode:{classList:{add(){},remove(){}}}},miniSvg:svg};
+const document={getElementById:id=>els[id]||null};
+let MINI={bbox:[34.46,138.23,37.16,141.74],rings:[[[139,35],[140,35],[140,36],[139,35]]]}, MINI_Q=null, MINI_VB=null;
+function miniView(){}
+"""+MAP_HTML[start:end]+"""
+MINI_Q={lat:35.5,lon:140.0,magnitude:6.2}; drawMini(); drawMini(); const same=writes;
+MINI_Q={lat:35.6,lon:140.0,magnitude:6.2}; drawMini(); const waves=(svg.innerHTML.match(/<circle/g)||[]).length;
+MINI_Q={lat:33.9,lon:142.6,magnitude:6.5}; drawMini(); const arrowWaves=(svg.innerHTML.match(/<circle/g)||[]).length;
+console.log(JSON.stringify({same, after:writes, waves, arrowWaves}));""")
+    assert out == {"same": 1, "after": 2 + 1, "waves": 3, "arrowWaves": 0}    # 같은 지진 둘째 호출은 쓰지 않는다 · 별 아래 물결 3 · 화살표는 0
+
+
+def test_down_legend_and_wave_phrases_are_translated():
+    for k in ("정지 기지국 영역", "eNB {e} · 셀 {c}"):
+        assert k in _JA_MAP and _JA_MAP[k].strip() and k in MAP_HTML, k
+    assert "停止基地局エリア" in _JA_MAP["정지 기지국 영역"] and "{e}" in _JA_MAP["eNB {e} · 셀 {c}"] and "{c}" in _JA_MAP["eNB {e} · 셀 {c}"]

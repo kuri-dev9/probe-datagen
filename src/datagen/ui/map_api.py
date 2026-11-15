@@ -1071,13 +1071,18 @@ def _mini_outline() -> dict:
 def api_map_quake(at: str = "", outline: int = 0):
     """미니 지도(관동)에 찍을 지진 하나 — `CM_QUAKE_EVENT`(생성기가 쓰는 표)를 **읽기만** 한다.
 
-    * **진행 중인 27번이 있으면 그 지진**이다(`STATUS='active'` 장애의 `FAULT_ID`).
-    * 없으면 ``at``(지도에서 고른 장애의 시작 시각)을 **주입 구간 안에 품은 27번**의 지진이다 — 시작
-      `START_TIME` ~ `START_TIME + DURATION_MIN`. 새 시간창을 정하지 않으려고 장애 자신의 구간을 쓴다.
-    * 둘 다 아니면 ``quake`` 가 None 이고 화면은 미니 지도를 숨긴다.
+    * ``at``(지도에서 고른 장애의 시작 시각)이 있으면 **그 시각을 주입 구간 안에 품은 27번**의 지진**만**이다
+      — 시작 `START_TIME` ~ `START_TIME + DURATION_MIN`. 새 시간창을 정하지 않으려고 장애 자신의 구간을 쓴다.
+      진행 중인 27번이 있어도 고른 장애가 그 구간 밖이면(지진이 아닌 장애) None 이다(2026-11-15 사용자
+      "지진 시나리오 누를 때만 나와야").
+    * ``at`` 이 없으면 진행 중인 27번(`STATUS='active'`)의 지진이다 — 화면은 고른 장애가 없으면 묻지 않는다.
+    * 해당이 없으면 ``quake`` 가 None 이고 화면은 미니 지도를 숨긴다.
 
     값은 진앙·규모·발생 시각뿐이다(사용자 — "별표시랑 매그니튜드만"). 규모를 모르면 None 이고 화면은
     「M ?」 대신 규모를 비운다(불변규칙 17). ``outline=1`` 이면 윤곽도 함께 준다 — 정적이라 화면이 한 번만 받는다
+
+    ``down`` 은 그 지진으로 **꺼진 기지국 셀**이다(같은 날 사용자 "기지국이 꺼졌으니 영향받는 지형을 음영으로")
+    — `_quake_down` 참조. 정답지에 그 장애가 없으면 None(모름)이고 화면은 아무것도 그리지 않는다
     """
     out: dict = {"quake": None}
     if outline:
@@ -1092,13 +1097,13 @@ def api_map_quake(at: str = "", outline: int = 0):
     conn = _connect()
     try:
         with conn.cursor() as cur:
-            cur.execute(sel + "WHERE f.STATUS = 'active' ORDER BY q.ORIGIN_TIME DESC LIMIT 1")
-            row = cur.fetchone()
-            if row is None and ts is not None:
+            if ts is not None:
                 cur.execute(sel + "WHERE f.START_TIME <= %s "
                             "AND f.START_TIME + INTERVAL f.DURATION_MIN MINUTE >= %s "
                             "ORDER BY q.ORIGIN_TIME DESC LIMIT 1", [ts, ts])
-                row = cur.fetchone()
+            else:
+                cur.execute(sel + "WHERE f.STATUS = 'active' ORDER BY q.ORIGIN_TIME DESC LIMIT 1")
+            row = cur.fetchone()
     except pymysql.err.ProgrammingError as e:
         # 표가 없는 환경(27번을 한 번도 안 넣은 현장) — 지진이 없는 것과 같다. 사유는 남긴다
         out["note"] = f"지진 정보 표를 읽지 못했다: {e.args[-1] if e.args else e}"
@@ -1110,4 +1115,43 @@ def api_map_quake(at: str = "", outline: int = 0):
         out["quake"] = {"fault_id": int(fid), "lat": float(lat), "lon": float(lon),
                         "magnitude": float(mag) if mag is not None else None,
                         "origin_time": t.isoformat() if t else None, "active": st == "active"}
+        out["down"] = _quake_down(int(fid))
+    return out
+
+
+def _quake_down(fault_id: int) -> dict | None:
+    """그 27번에서 꺼진 기지국 셀과 셀별 추정 커버리지 반경 — 큰 지도의 「정지 기지국 영역」(음영).
+
+    * **꺼진 셀은 생성기가 남긴 사실만 쓴다** — 정답지(`truth_out`)의 `down_cells`(없으면 `down_enbs` 의 모든
+      셀). 화면이 진도로 다시 추정하지 않는다. `CM_QUAKE_EVENT` 는 셀 목록을 두지 않는다(그 표 설명).
+      정답지는 **최근 장애만** 담으므로 지난 회차는 None(모름)이다 — 0곳과 다르다(불변규칙 17).
+    * 반경은 `CM_CELL_GEO_MAP.RADIUS_M`(MESH1K 행 · METHOD DENSITY) — 체감 칸을 셀에 나눌 때 graphio 가 쓴
+      **같은 추정 커버리지 원**이다. 행정 행(ADM*)에는 반경이 없다. 반경을 모르는 셀은 ``r_m`` None 이고
+      화면이 그리지 않는다(지어내지 않는다)
+    """
+    from .faults_api import _truth_of
+    t = _truth_of(fault_id)
+    if not t or "down_enbs" not in t:
+        return None
+    enbs = sorted({str(e) for e in t.get("down_enbs") or ()})
+    keys = [str(k) for k in t.get("down_cells") or ()]
+    out = {"enbs": enbs, "cells": [], "source": "ground_truth"}
+    if not enbs:
+        return out
+    radius: dict[str, float] = {}
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT ENB_ID, CELLNUM, MAX(RADIUS_M) FROM CM_CELL_GEO_MAP "
+                        "WHERE AREA_LEVEL = 'MESH1K' AND ENB_ID IN (" + ",".join(["%s"] * len(enbs)) + ") "
+                        "GROUP BY ENB_ID, CELLNUM", enbs)
+            for e, n, r in cur.fetchall():
+                radius[f"{e}-{n}"] = float(r) if r is not None else None
+    except pymysql.err.ProgrammingError:
+        pass                                   # 표가 없는 현장 — 반경 모름으로 내린다
+    finally:
+        conn.close()
+    if not keys:
+        keys = sorted(radius)                  # 옛 정답지(셀 목록 없음) — 꺼진 eNB 의 셀 전부
+    out["cells"] = [{"key": k, "r_m": radius.get(k)} for k in keys]
     return out
