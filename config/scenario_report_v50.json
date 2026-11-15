@@ -1,5 +1,5 @@
 {
- "updated_at": "2026-11-15 09:12",
+ "updated_at": "2026-11-15 09:37",
  "volume_pct": 50,
  "notes": [
   "생성량 50% 는 분당 XDR 약 1만 건이다. 시나리오 검증 기준인 15%(약 3천 건)의 약 3.3배다.",
@@ -3983,21 +3983,43 @@
    },
    "status": "partial",
    "latest": {
-    "fault": "F-341",
-    "run": "no22-v50-1114a",
-    "at": "2026-11-14 21:10",
-    "detect_min": 3,
+    "fault": "F-354",
+    "run": "no22-v50-1115a",
+    "at": "2026-11-15 09:35",
+    "detect_min": 1,
     "cause": "DNS_DEGRADATION",
-    "confidence": 0.716,
-    "plain": "11분 회차입니다. 최종 결론(결제 앱 DNS 지연)과 AI 설명은 정답입니다. 다만 사건 결론이 처음 6분(20:22~20:27)은 '전송 유실'로 잘못 나왔다가 DNS 조각이 판정된 뒤 정답으로 바뀌었습니다. 정답 밖 이벤트는 없었습니다.",
-    "summary": "생성량 50% 22번 11분 회차다(20:20~20:31, 가상 05:00~05:11 — 권장 05~04시 안, 정답지 F-341 `no22-v50-1114a`, 결제(PAY) 앱 DNS 지연·SGW-7·셀 547개·SERVICE·U-32·DNS_DEGRADATION·RAMP·SCATTER·TOP1, corr 19:27 재시작 `a5216ad` — EV-13b 대칭·연 분 제외·A안 앵커·K6 칸 조각 이음 반영 후 처음부터 끝까지). **D** 첫 이벤트는 U-12(셀) 20:21(지연 1분, 정답 KPI 아님)이고 정답 KPI U-32(DOMAIN)는 20:23(지연 3분)에 섰다(결제 도메인 9곳, 값 518~616 vs 기준 500). U-29 노드 이벤트 20:27~20:29. 정답 밖 이벤트 없음(셀 22개 전부 정답 셀 547 안). **L1** 조각 5: 셀 조각 3(IX…216360·238ba2·247d50, U-12 SCATTER·POINT·CORRIDOR)·도메인 조각 IX…23195b(U-32 WIDE)·노드 조각 IX…27b280(U-29). 셀 조각은 처음 UNDETERMINED→TRANSPORT_LOSS 0.732(20:23)→DNS_DEGRADATION 0.728(20:30), 도메인 조각은 20:24 UNDETERMINED→20:29 DNS_DEGRADATION 0.61(첫 결론 5분 뒤), 노드 조각 DNS_DEGRADATION 0.534→UNDETERMINED(20:33). **L2** 사건 EVT-f87df37584 한 건(구성 5·셀 22): 20:21 UNDETERMINED → **20:22 TRANSPORT_LOSS 0.732(틀림) → 20:28 DNS_DEGRADATION 0.716(정답)** 로 한 번 뒤집혀 끝까지(20:39 관찰 중 0.728·20:40 해소). 오답으로 6분(20:22~20:27)을 보냈다 — DNS 조각이 판정되기(20:28) 전까지 셀 재전송 조각만 보여 손실로 읽혔다. 사건 위치 모양은 기록되지 않았고 셀 조각 모양은 SCATTER·POINT·CORRIDOR. **셀:** 사건 셀 22개 전부 정답(밖 0), 정답 547셀 중 4.0% — 서비스(SERVICE) 범위 시나리오라 셀 재현율은 보조 지표다. **AI** 사건(L2_EVENT) 한 세션 1문(57초) used·버림 0: 원인 DNS 지연·'.komoju.com' 723.87ms 대 평시 20.0ms·PAY 앱 분류 재전송 99.2%·불량률 1.75→21.74%·20:21~20:35·셀 22·SGW-7 을 증거대로 설명(근거 EV-00·08b·08·08c·17·16·09). 판정 부분 — 최종 결론·L3 는 정답이나 사건 결론이 6분간 TRANSPORT_LOSS 로 뒤집혔다가 돌아왔다.",
+    "confidence": 0.808,
+    "plain": "결제 앱(PAY) 주소 찾기(DNS) 지연 11분 회차(09:09~09:20, 가상 17:49~18:00)입니다. 지난 F-341처럼 6분 동안 '전송 구간 손실'로 잘못 나오던 일이 이번에는 한 번도 없었습니다. 처음 1분만 '판정 없음'이었고 09:11부터 사건 결론이 정답 'DNS 지연'으로 끝까지 유지됐습니다(0.808). 찾은 셀은 37개 전부 정답이고 정답 밖은 0이지만 정답 687개의 5.4%뿐입니다. 도메인 조각은 이번에도 첫 판정이 7분(09:13~09:20) 걸렸습니다. AI 설명은 증거대로 말했습니다.",
+    "summary": "생성량 50% 22번 11분 회차(09:09~09:20, 가상 17:49~18:00, 정답지 F-354 `no22-v50-1115a`, SGW-1·APP PAY·셀 687·SERVICE·U-32·DNS_DEGRADATION·RAMP·SCATTER·TOP1, corr 09:20 재시작 전 판 → 확정 구간 일부 새 판). 이번 회차는 22번 수정(`dns_led` · `a1bf350`) 이후 첫 실주입. **D** 09:10(지연 1분) IX2611150910bc34 U-12 셀 32(SCATTER·品川・目黒・渋谷 3구) · 09:12 U-12 Core 노드 축(IX…121cc7)·U-32 도메인(IX…12b1a3) · 09:13 U-29 노드 DNS 실패(IX…139510) · 09:15 U-12 渋谷区 셀 5(IX…156186) · 09:16 U-32 도메인 둘째(IX…1657a6). 사건 셀 37 중 정답 37·밖 0 = 687 의 5.4%(F-341 4.0%). **L1·L2** 사건 EVT-4e60d04099: 09:10 NEW UNDETERMINED(1분) → 09:11 DNS_DEGRADATION 0.679 → 09:12 L2_EVENT·DNS 모양 0.729(구성 3) → 09:16 구성 6 · 0.796 → 최종 0.808, **TRANSPORT_LOSS 0분(F-341 은 6분)**. 대안 없음. 조각 결과: 대표 09:11:16 UNDETERMINED → 09:12:16 DNS_DEGRADATION 0.679 이후 끝까지(0.68~0.73). 도메인 조각 IX…12b1a3 는 09:13 UNDETERMINED → 09:20 DNS_DEGRADATION 0.61(**첫 판정 7분 지연** — F-341 의 5분 대기와 같은 문제, 이 수정으로 풀리지 않는다고 알려진 것). **룰·증거** R-14c 성립(0.9)은 09:12:16 부터 — PAY 재전송 비중 98.3→99.1%·재전송률 2.79→4.40%·다른 분류 0.0%·PAY DNS degraded true · 사건 R-14·R-14c·R-42 가 함께 섬(.kyash.co 757.18ms·평시 20.0ms·지연 도메인 4곳·PAY 불량률 0.28→7.94%·다른 분류 1.01→0.92%). **EV-08c `dns_led` 는 모든 판정에서 false** — `concentrated` 가 이미 true(폭 요건 통과)여서 새 경로가 쓰이지 않았다. 첫 결과(09:11:16)는 PAY 몫 53.1%(<0.6)로 concentrated·dns_led 모두 false 라 UNDETERMINED — 맞는 동작이다. 따라서 이번에 TRANSPORT_LOSS 가 없었던 것을 `dns_led` 덕이라고 말할 수 없다(F-341 은 셀 재전송 조각이 폭 요건에 걸린 모양이었음). **위치** 대표 조각 SCATTER · 사건 모양 DNS · 영향 지역 13109·13110·13113. **L3** L2_EVENT 한 세션 used·버림 0 — DNS 지연(.kyash.co 757.18ms·평시 20.0ms)·재전송 99.1% PAY·DNS 지연 19.0%·불량률 0.28→7.94%·다른 분류 0.92%·37셀(品川 14·目黒 10·世田谷 5·渋谷 5·杉並 2·大田 1)·'체감만 나쁘고 실패 없는 가입자 21명' 모두 증거 일치, 실패 0명을 영향 0명으로 말하지 않음. **남은 것** 09:25 에 사건과 무관한 U-12 1셀(千代田区) 조각 IX…ed39 가 DATA_QUALITY_SUSPECT 0.383 으로 따로 섬. 대표 조각 IX…bc34 는 09:24 까지 열려 있고 사건 EVT-4e60d04099 도 판정 시각(09:3x)까지 OPEN(주입 끝 09:20 뒤 꼬리).",
     "issues": [
-     "**사건 결론이 6분간 TRANSPORT_LOSS(0.732) — 20:28 에 DNS_DEGRADATION 으로 바뀜** — 셀 재전송 조각(U-12)이 먼저 서고 도메인 조각(U-32 20:23)은 20:29 에야 DNS_DEGRADATION 판정이 났다(처음 UNDETERMINED).",
-     "**도메인 조각 첫 결론 지연 5분** — U-32 DOMAIN 이벤트 20:23 → IX…23195b 20:24 UNDETERMINED → 20:29 DNS_DEGRADATION 0.61.",
-     "**노드 조각(U-29) 판정이 끝에 UNDETERMINED 로 돌아옴** — 사건 결론에는 영향 없음(구성 조각)."
+     "**도메인 조각 첫 판정 7분 지연** — U-32 DOMAIN 09:12 → IX…12b1a3 09:13 UNDETERMINED → 09:20 DNS_DEGRADATION 0.61. F-341 과 같은 5분 대기 문제로 이번 수정과 무관하다. 사건 결론은 이미 DNS 로 서 있어 영향은 조각 단위 L1 화면뿐이다.",
+     "**`dns_led` 가 쓰이지 않았다** — 모든 판정에서 EV-08c `dns_led` false·`concentrated` true. 이번에 오답 구간이 없었던 이유는 F-341 과 조각 순서·폭이 달랐기 때문일 수 있다. 수정이 실제로 필요한 모양(DNS 열화 + 셀 폭 요건 미달)에서 다시 확인이 필요하다.",
+     "**셀 재현율 5.4%(37/687)** — 정답 밖 0. 687셀 중 이상징후가 선 셀은 37뿐이다(F-341 4.0%). 해당 호량이 셀 단위로는 작아서다.",
+     "**사건이 주입 끝 뒤에도 열림** — 09:20 종료 뒤 14분 넘게 OPEN, 무관한 1셀 조각(DATA_QUALITY_SUSPECT 0.383)이 09:25 에 따로 섬."
     ]
    },
    "history": [
+    {
+     "fault": "F-341",
+     "run": "no22-v50-1114a",
+     "at": "2026-11-14 21:10",
+     "detect_min": 3,
+     "cause": "DNS_DEGRADATION",
+     "confidence": 0.716,
+     "plain": "11분 회차입니다. 최종 결론(결제 앱 DNS 지연)과 AI 설명은 정답입니다. 다만 사건 결론이 처음 6분(20:22~20:27)은 '전송 유실'로 잘못 나왔다가 DNS 조각이 판정된 뒤 정답으로 바뀌었습니다. 정답 밖 이벤트는 없었습니다.",
+     "summary": "생성량 50% 22번 11분 회차다(20:20~20:31, 가상 05:00~05:11 — 권장 05~04시 안, 정답지 F-341 `no22-v50-1114a`, 결제(PAY) 앱 DNS 지연·SGW-7·셀 547개·SERVICE·U-32·DNS_DEGRADATION·RAMP·SCATTER·TOP1, corr 19:27 재시작 `a5216ad` — EV-13b 대칭·연 분 제외·A안 앵커·K6 칸 조각 이음 반영 후 처음부터 끝까지). **D** 첫 이벤트는 U-12(셀) 20:21(지연 1분, 정답 KPI 아님)이고 정답 KPI U-32(DOMAIN)는 20:23(지연 3분)에 섰다(결제 도메인 9곳, 값 518~616 vs 기준 500). U-29 노드 이벤트 20:27~20:29. 정답 밖 이벤트 없음(셀 22개 전부 정답 셀 547 안). **L1** 조각 5: 셀 조각 3(IX…216360·238ba2·247d50, U-12 SCATTER·POINT·CORRIDOR)·도메인 조각 IX…23195b(U-32 WIDE)·노드 조각 IX…27b280(U-29). 셀 조각은 처음 UNDETERMINED→TRANSPORT_LOSS 0.732(20:23)→DNS_DEGRADATION 0.728(20:30), 도메인 조각은 20:24 UNDETERMINED→20:29 DNS_DEGRADATION 0.61(첫 결론 5분 뒤), 노드 조각 DNS_DEGRADATION 0.534→UNDETERMINED(20:33). **L2** 사건 EVT-f87df37584 한 건(구성 5·셀 22): 20:21 UNDETERMINED → **20:22 TRANSPORT_LOSS 0.732(틀림) → 20:28 DNS_DEGRADATION 0.716(정답)** 로 한 번 뒤집혀 끝까지(20:39 관찰 중 0.728·20:40 해소). 오답으로 6분(20:22~20:27)을 보냈다 — DNS 조각이 판정되기(20:28) 전까지 셀 재전송 조각만 보여 손실로 읽혔다. 사건 위치 모양은 기록되지 않았고 셀 조각 모양은 SCATTER·POINT·CORRIDOR. **셀:** 사건 셀 22개 전부 정답(밖 0), 정답 547셀 중 4.0% — 서비스(SERVICE) 범위 시나리오라 셀 재현율은 보조 지표다. **AI** 사건(L2_EVENT) 한 세션 1문(57초) used·버림 0: 원인 DNS 지연·'.komoju.com' 723.87ms 대 평시 20.0ms·PAY 앱 분류 재전송 99.2%·불량률 1.75→21.74%·20:21~20:35·셀 22·SGW-7 을 증거대로 설명(근거 EV-00·08b·08·08c·17·16·09). 판정 부분 — 최종 결론·L3 는 정답이나 사건 결론이 6분간 TRANSPORT_LOSS 로 뒤집혔다가 돌아왔다.",
+     "issues": [
+      "**사건 결론이 6분간 TRANSPORT_LOSS(0.732) — 20:28 에 DNS_DEGRADATION 으로 바뀜** — 셀 재전송 조각(U-12)이 먼저 서고 도메인 조각(U-32 20:23)은 20:29 에야 DNS_DEGRADATION 판정이 났다(처음 UNDETERMINED).",
+      "**도메인 조각 첫 결론 지연 5분** — U-32 DOMAIN 이벤트 20:23 → IX…23195b 20:24 UNDETERMINED → 20:29 DNS_DEGRADATION 0.61.",
+      "**노드 조각(U-29) 판정이 끝에 UNDETERMINED 로 돌아옴** — 사건 결론에는 영향 없음(구성 조각)."
+     ],
+     "stages": {
+      "D": "ok",
+      "L1": "ok",
+      "L2": "ok",
+      "L3": "ok"
+     }
+    },
     {
      "fault": "F-298",
      "run": "no22-v50n",
@@ -4090,23 +4112,32 @@
      }
     }
    ],
-   "next": "50% 재주행 22번 통과. 다음은 21번(F-299, 03:36 주입).",
+   "next": "22번 — 첫 L2 부터 DNS_DEGRADATION 으로 오답 구간이 사라졌다(F-341 6분 → 0분). 단 `dns_led` 는 이번엔 쓰이지 않아 수정 효과는 미확인이고, 도메인 조각 첫 판정 5분 대기는 그대로다.",
    "evidence": [
-    "runs.md no22-v50n",
-    "truth/no22-v50n.json",
-    "DB CM_DATAGEN_FAULT·AI_INCIDENT·AI_ANOMALY_EVENT·AI_RCA_EVENT·AI_RCA_EVENT_HIST·AI_RCA_RESULT 03:00~03:32 조회",
-    "/api/incidents/IX2611120308f31b/map(event_id)",
-    "geo_pattern(정답 셀 531)",
-    "PM_LINK_CELL_NODE_1M SGW-11 03:12~03:17 · PM_COR_UPLANE_CELL_1M 사건 셀 대조",
-    "/api/incidents/IX2611120308f31b/ask 1문 + /api/ai/ask 5문"
+    "runs.md no22-v50-1115a",
+    "truth/no22-v50-1115a.json",
+    "DB AI_INCIDENT·AI_INCIDENT_SCOPE·AI_RCA_EVENT·HIST·AI_RCA_RESULT 09:05~09:35",
+    "/api/incidents/IX2611150910bc34/ask L2_EVENT EVT-4e60d04099 한 세션"
    ],
    "stages": {
-    "D": "ok",
-    "L1": "ok",
-    "L2": "ok",
-    "L3": "ok"
+    "D": {
+     "state": "ok",
+     "detail": "U-12 09:10(지연 1분)·U-32 도메인 09:12·U-29 노드 09:13. 사건 셀 37 중 정답 37·밖 0(687 의 5.4%)."
+    },
+    "L1": {
+     "state": "partial",
+     "detail": "대표 조각 09:11:16 UNDETERMINED → 09:12:16 DNS_DEGRADATION 0.679 이후 유지. 도메인 조각은 09:13 UNDETERMINED → 09:20 DNS_DEGRADATION 0.61(7분 지연). TRANSPORT_LOSS 0분."
+    },
+    "L2": {
+     "state": "ok",
+     "detail": "사건 EVT-4e60d04099 09:11 DNS_DEGRADATION 0.679 → 09:12 L2_EVENT DNS 모양 0.729 → 최종 0.808 끝까지, 오답 구간 없음(F-341 은 6분). 위치 SCATTER·13109·13110·13113."
+    },
+    "L3": {
+     "state": "ok",
+     "detail": "L2_EVENT 한 세션 used·버림 0. DNS 지연·재전송 99.1% PAY·불량률 0.28→7.94%·37셀·체감 가입자 21명 증거 일치."
+    }
    },
-   "reached": null
+   "reached": "L3"
   },
   {
    "no": 23,
