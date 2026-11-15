@@ -1002,3 +1002,99 @@ def _geo_doc(src: Path):
             out.append((f.get("properties") or {}, rings))
         return out
     return _cached(src, "geo", make)
+
+
+# ── 미니 일본 전도 · 진앙 (2026-11-15 사용자) ───────────────────────────────
+#
+# 27번 진앙은 도쿄 밖 실제 진원역(바다·땅속 깊은 곳)이라 장비 지도 화면 밖이다. 큰 지도를 넓히면 기지국이
+# 점 하나로 뭉개진다 — 구석에 **움직이지 않는 일본 전도**를 얹어 진앙 ★ 과 규모만 찍는다(사용자 안).
+# 윤곽은 graphio 가 이미 들고 있는 도도부현 경계(`data/geo/jp/prefectures.json` · 국토수치정보 N03 ·
+# CC BY 4.0 · 그쪽 `SOURCE.txt`)를 서버에서 한 번 줄여 내린다 — 외부를 부르지 않는다.
+
+#: 미니 지도 윤곽의 단순화 허용오차(m) — 화면 표시 상수다. 일본 전도 폭 약 2,000km 를 200px 안팎에
+#: 그리면 1px 이 10km 남짓이라 3km 아래 굴곡은 보이지 않는다(점 8,007 → 수백)
+_MINI_TOL_M = 3000.0
+#: 이보다 작은 섬은 그리지 않는다(km²) — 화면 표시 상수다. 오가사와라·오키노토리시마까지 넣으면 범위가 동경
+#: 154°·북위 20°까지 늘어 본토가 작아진다. 오키나와 본섬(약 1,200km²)·사도·아와지·쓰시마는 남는다
+_MINI_MIN_KM2 = 300.0
+
+
+def _ring_km2(ring) -> float:
+    """고리 면적(km²) — 신발끈 공식, 경도는 고리 평균 위도로 줄인다(표시용 근사)."""
+    if len(ring) < 4:
+        return 0.0
+    lat0 = sum(p[1] for p in ring) / len(ring)
+    kx, ky = 111.32 * math.cos(math.radians(lat0)), 110.57
+    s = 0.0
+    for (x0, y0), (x1, y1) in zip(ring, ring[1:]):
+        s += x0 * y1 - x1 * y0
+    return abs(s) / 2 * kx * ky
+
+
+def _mini_outline() -> dict:
+    src, err = _layer_path("geo_prefectures")
+    if err:
+        return {"error": err, "rings": []}
+
+    def make(p: Path):
+        doc = json.loads(p.read_text(encoding="utf-8"))
+        rings = []
+        for f in doc.get("features", []):
+            g = f.get("geometry") or {}
+            polys = [g.get("coordinates")] if g.get("type") == "Polygon" else g.get("coordinates") or []
+            for poly in polys:
+                if not poly or _ring_km2(poly[0]) < _MINI_MIN_KM2:
+                    continue
+                r = _simplify(poly[0], _MINI_TOL_M)
+                rings.append([[round(x, 3), round(y, 3)] for x, y in r])
+        xs = [x for r in rings for x, _ in r]
+        ys = [y for r in rings for _, y in r]
+        return {"rings": rings, "bbox": [min(ys), min(xs), max(ys), max(xs)] if xs else None,
+                "source": "国土数値情報 行政区域 (国土交通省) · CC BY 4.0"}
+    return _cached(src, "mini", make)
+
+
+@router.get("/api/map/quake")
+def api_map_quake(at: str = "", outline: int = 0):
+    """미니 일본 전도에 찍을 지진 하나 — `CM_QUAKE_EVENT`(생성기가 쓰는 표)를 **읽기만** 한다.
+
+    * **진행 중인 27번이 있으면 그 지진**이다(`STATUS='active'` 장애의 `FAULT_ID`).
+    * 없으면 ``at``(지도에서 고른 장애의 시작 시각)을 **주입 구간 안에 품은 27번**의 지진이다 — 시작
+      `START_TIME` ~ `START_TIME + DURATION_MIN`. 새 시간창을 정하지 않으려고 장애 자신의 구간을 쓴다.
+    * 둘 다 아니면 ``quake`` 가 None 이고 화면은 미니 지도를 숨긴다.
+
+    값은 진앙·규모·발생 시각뿐이다(사용자 — "별표시랑 매그니튜드만"). 규모를 모르면 None 이고 화면은
+    「M ?」 대신 규모를 비운다(불변규칙 17). ``outline=1`` 이면 윤곽도 함께 준다 — 정적이라 화면이 한 번만 받는다
+    """
+    out: dict = {"quake": None}
+    if outline:
+        out["outline"] = _mini_outline()
+    try:
+        ts = datetime.fromisoformat(at.replace("Z", "")) if at else None
+    except ValueError:
+        raise HTTPException(400, f"at 이 시각이 아니다: {at}")
+    from ..control import T_QUAKE
+    sel = (f"SELECT q.FAULT_ID, q.LAT, q.LON, q.MAGNITUDE, q.ORIGIN_TIME, f.STATUS "
+           f"FROM {T_QUAKE} q JOIN {T_FAULT} f ON f.FAULT_ID = q.FAULT_ID ")
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sel + "WHERE f.STATUS = 'active' ORDER BY q.ORIGIN_TIME DESC LIMIT 1")
+            row = cur.fetchone()
+            if row is None and ts is not None:
+                cur.execute(sel + "WHERE f.START_TIME <= %s "
+                            "AND f.START_TIME + INTERVAL f.DURATION_MIN MINUTE >= %s "
+                            "ORDER BY q.ORIGIN_TIME DESC LIMIT 1", [ts, ts])
+                row = cur.fetchone()
+    except pymysql.err.ProgrammingError as e:
+        # 표가 없는 환경(27번을 한 번도 안 넣은 현장) — 지진이 없는 것과 같다. 사유는 남긴다
+        out["note"] = f"지진 정보 표를 읽지 못했다: {e.args[-1] if e.args else e}"
+        return out
+    finally:
+        conn.close()
+    if row:
+        fid, lat, lon, mag, t, st = row
+        out["quake"] = {"fault_id": int(fid), "lat": float(lat), "lon": float(lon),
+                        "magnitude": float(mag) if mag is not None else None,
+                        "origin_time": t.isoformat() if t else None, "active": st == "active"}
+    return out

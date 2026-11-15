@@ -79,6 +79,7 @@ pemdb1:
   geo_water: /app/data/geo/jp/water.json            # 수역 relation OSM
   geo_chome: /app/data/geo/jp/chome.json            # 丁目 경계 e-Stat
   geo_dong_shapes: /app/data/geo/jp/dong_shapes.json  # 읍면동 모양 (graphio geo-chome)
+  geo_prefectures: /app/data/geo/jp/prefectures.json  # 미니 일본 전도 (27번 진앙)
   # 장애 현황을 받아 오는 graphio API. **컨테이너 안 이름이다**
   graphio_api: http://web:8008
   # 27번 지진 eNB 지반 증폭률(J-SHIS ARV · `tools/build_quake_arv.py` 가 만든다 · 2026-11-15). git 밖이지만

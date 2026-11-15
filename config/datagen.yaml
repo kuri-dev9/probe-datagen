@@ -225,6 +225,9 @@ pemdb1:
       # 읍면동(합성 丁目) → 실제 丁目 경계를 이어 붙인 모양(2026-11-14 · graphio `python -m graphio geo-chome`
       # 이 굽는다). 장애 지도가 읍면동 칸을 원 대신 이 모양으로 그린다 — 없으면 지금처럼 중심점 원이다
       geo_dong_shapes: ../graphio-probe-rca/data/geo/jp/dong_shapes.json
+      # 미니 일본 전도(27번 진앙 · 2026-11-15) — 도도부현 경계 s0001(국토수치정보 N03 · CC BY 4.0). gen-ui 가
+      # 한 번 줄여(`map_api._mini_outline`) 지도 구석에 고정으로 그린다
+      geo_prefectures: ../graphio-probe-rca/data/geo/jp/prefectures.json
       scope:
         # 야마노테선 통과 12구 — 노선 순서(시나가와→시부야→신주쿠→이케부쿠로
         # →우에노→도쿄). `CM_GU_JP.GU_ID`
