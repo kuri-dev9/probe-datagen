@@ -380,6 +380,9 @@
    line-height:1.5}
  #sel b,#fbar b{color:#ff9ec4;margin-right:2px;order:-2}
  #sel span,#fbar span{opacity:.8;overflow-wrap:anywhere}
+ /* 쉬운 문장(무엇이 감지됐나 · 어디서) — 바에서 가장 먼저 읽혀야 해서 흐리게 두지 않는다 */
+ #fbar span.plain{opacity:1}
+ #fbar span.plain b{font-weight:600;opacity:.65;margin-right:2px}
  #sel button,#fbar button{margin-left:auto;order:-1}
  /* 이력 패널(오른쪽 320px)을 비키고 그 왼쪽 가운데에 선다 — 겹치면 해제 단추가 깔렸다 */
  #fbar{border-color:#ffb86b80;left:calc(50% - 170px);max-width:calc(100% - 370px)}
@@ -458,13 +461,22 @@
  /* 정지 기지국 영역(27번 · 2026-11-15 사용자 "기지국이 꺼졌으니 영향받는 지형을 어두운 색 음영으로") —
     꺼진 셀의 추정 커버리지 원을 **한 층으로** 칠한다. 원마다 투명도를 주면 겹친 곳이 더 진해져 "더 안 터진다"로
     읽히므로 원은 불투명하게, 투명도는 층(g)에 준다. 폭주(주황 물결)와 겹쳐도 색·모양이 갈린다 */
- #gDown{opacity:.5;pointer-events:none}
- #gDown ellipse{fill:#05070a;stroke:none}
- body[data-theme=light] #gDown{opacity:.35}
+ #gDown{opacity:.6;pointer-events:none}
+ #gDown ellipse{fill:#6b7280;stroke:none}
+ body[data-theme=light] #gDown{opacity:.5}
+ /* 셀 상태 음영(2026-11-15 사용자 "통화 품질이 적당히 나빠지면 노랑, 심하게 나빠지면 빨강") — 정지(회색)와 같은
+    원·같은 층 투명도 방식. 색은 표시만이고 노랑·빨강을 가르는 것은 탐지가 매긴 심각도 등급이다 */
+ #gSevY,#gSevR{pointer-events:none}
+ #gSevY{opacity:.4} #gSevY ellipse{fill:#f2c230;stroke:none}
+ #gSevR{opacity:.4} #gSevR ellipse{fill:#ff4d5e;stroke:none}
+ body[data-theme=light] #gSevY{opacity:.45} body[data-theme=light] #gSevR{opacity:.45}
+ #legend s.ssevy{background:#f2c23099;border:1px solid #f2c230;border-radius:2px}
+ #legend s.ssevr{background:#ff4d5e77;border:1px solid #ff4d5e;border-radius:2px}
+ #legend s.sdownt{background:none;border:1px dashed #c9ced6;border-radius:2px}
  /* 정답(비교용) — 점선 테두리만. 칠하지 않아 주 음영(탐지)을 가리지 않는다 */
  #gDownT{pointer-events:none}
  #gDownT ellipse{fill:none;stroke:var(--map-fg);stroke-width:1px;stroke-dasharray:3 3;vector-effect:non-scaling-stroke;opacity:.7}
- #legend s.sdown{background:#05070a;border:1px solid #8a919c;border-radius:2px}
+ #legend s.sdown{background:#6b7280aa;border:1px solid #8a919c;border-radius:2px}
  #legend .lg-down b{margin-left:auto;opacity:.7;font-weight:400;padding-left:8px}
 /* 영향 지역(추정 진도 · 2026-11-15 사용자 "영향은 넓게, 정지는 좁게") — 정지 음영 아래 옅은 띠. 진도 3 · 4 · 5약을
     조금씩 진하게. 색은 하나(호박색)이고 층 투명도만 다르다 — 과하지 않게 */
@@ -474,7 +486,6 @@
  body[data-theme=light] #gImpact .ib3{opacity:.07} body[data-theme=light] #gImpact .ib4{opacity:.12}
  body[data-theme=light] #gImpact .ib5m{opacity:.2}
  #legend s.simp{background:linear-gradient(90deg,#e9b44c22,#e9b44c66);border:1px solid #e9b44c66;border-radius:2px}
- #legend s.sdown{box-shadow:inset 0 0 0 1px #05070a, 0 0 0 1px #8a919c;outline:1px dashed #c9ced6;outline-offset:2px}
  #mini .ms{fill:#ff4d5e;stroke:var(--lb-halo);stroke-width:1px;vector-effect:non-scaling-stroke}
  #mini .mm{fill:var(--lb);font-weight:700;paint-order:stroke;stroke:var(--lb-halo);stroke-width:3px;
    vector-effect:non-scaling-stroke}
@@ -533,7 +544,7 @@
         <feGaussianBlur stdDeviation="0.0022"/>
       </filter>
     </defs>
-    <g id=gAdm></g><g id=gGreen></g><g id=gChome></g><g id=gRoad></g><g id=gRiv></g><g id=gRail></g><g id=gYmt></g><g id=gAll></g><g id=gKde></g><g id=gImpact></g><g id=gDown></g><g id=gDownT></g><g id=gGeo></g><g id=gCell></g>
+    <g id=gAdm></g><g id=gGreen></g><g id=gChome></g><g id=gRoad></g><g id=gRiv></g><g id=gRail></g><g id=gYmt></g><g id=gAll></g><g id=gKde></g><g id=gImpact></g><g id=gSevY></g><g id=gSevR></g><g id=gDown></g><g id=gDownT></g><g id=gGeo></g><g id=gCell></g>
     <g id=gPick></g><g id=gStn></g><g id=gNode></g></svg>
   <svg id=geofx></svg>
   <div id=fx><div id=fxin><div id=fxh></div><div id=fxb></div></div><div id=fxe><svg></svg><svg></svg><svg></svg></div></div>
@@ -919,14 +930,19 @@ function drawMini(){
 //:    범례 견본을 눌러 켠다(기본 꺼짐). 탐지가 실제 정지를 얼마나 따라잡았는지 견준다.
 //: 둘 다 고른 장애가 지진(`MINI_Q`)일 때만 그린다. 좌표는 지도 셀(D.cells), 반경은 셀별 추정 커버리지(`r_m`) —
 //: 둘 중 하나라도 없는 셀은 그리지 않는다(지어내지 않는다)
-let SIL={}, SIL_WAIT={}, DOWN_T_N=0, DOWN_E=0, DOWN_TE=0, IMPACT={}, IMPACT_WAIT={}, IMPACT_N=0;
+let SIL={}, SIL_WAIT={}, DOWN_T_N=0, DOWN_E=0, DOWN_TE=0, IMPACT={}, IMPACT_WAIT={}, IMPACT_N=0,
+    SEV_N={gray:0, red:0, yellow:0};
+//: 흔들림(추정 진도) 영향 층 — **기본 꺼짐**(2026-11-15 사용자 "XDR 로 흔들림을 감지한다는 게 말이 안 된다. 셀
+//: 기준으로 판단"). 진도는 지진 정보로 계산한 추정이라 탐지 화면의 사실이 아니다. 코드·API(`/impact`)는 남기고
+//: 켜는 곳은 여기 하나다 — 끄면 그리지도 묻지도 않고 범례 줄도 없다
+const IMPACT_ON=false;
 //: 정지 판정 셀은 **따로 받는다** — 사건 범위(`EVT`)는 한 번 받고 끝이라 진행 중인 지진이면 낡는다(정지는 몇 분씩
 //: 늦게 선다). 진행 중이면 30초마다 다시 묻는다(표시 주기 · 지진 폴링 10초의 세 번에 한 번)
 const SIL_TTL_MS=30000;
 function silentOf(h){
   const id=h.incident_id, c=SIL[id], live=!h.closed_ts;
   if((!c||(live&&Date.now()-c.t>SIL_TTL_MS))&&!SIL_WAIT[id])
-    SIL_WAIT[id]=fetch('/api/map/event/'+encodeURIComponent(id))
+    SIL_WAIT[id]=fetch('/api/map/event/'+encodeURIComponent(id)+'?states=1')
       .then(r=>r.json()).then(d=>{ if(!d.error) SIL[id]={doc:d, t:Date.now()}; }).catch(()=>{})
       .finally(()=>{ delete SIL_WAIT[id]; drawDown(); });
   if(!c) return null;
@@ -934,8 +950,16 @@ function silentOf(h){
   // 위 탭의 조각 번호는 `EVT` 의 members 순서다 — 같은 graphio 응답이라 순서가 같지만, 번호가 아니라 조각 ID 로 짝짓는다
   const evm=((evtOf(h)||{}).members)||ms;
   const want=PART!=null&&gs[PART]?new Set(gs[PART].idx.map(i=>(evm[i]||{}).incident_id)):null;
-  const keys=[...new Set(ms.filter(m=>!want||want.has(m.incident_id)).flatMap(m=>m.silent||[]))];
-  return keys.map(k=>({key:k, r_m:(c.doc.silent_r||{})[k]}));
+  const sel=ms.filter(m=>!want||want.has(m.incident_id));
+  // 셀 상태 — 회색(통화 끊김 · D4 무호) > 빨강(심각도 CRITICAL) > 노랑(MAJOR · MINOR · WARNING). 한 셀은 한 색만.
+  // 셀 등급은 조각마다 서버가 준다(`cell_sev` · 셀 행이 없으면 조각 등급). 여러 조각에 든 셀은 높은 쪽.
+  // INFO 와 모르는 등급은 칠하지 않는다(지어내지 않는다)
+  const gray=new Set(sel.flatMap(m=>m.silent||[])), rk={CRITICAL:2, MAJOR:1, MINOR:1, WARNING:1, WARN:1}, best={};
+  for(const m of sel) for(const [k,v] of Object.entries(m.cell_sev||{}))
+    if(!gray.has(k)&&(rk[v]||0)>(best[k]||0)) best[k]=rk[v];
+  const R=c.doc.cell_r||{}, S=c.doc.silent_r||{};
+  const pick=n=>Object.keys(best).filter(k=>best[k]===n).map(k=>({key:k, r_m:R[k]}));
+  return {gray:[...gray].map(k=>({key:k, r_m:S[k]??R[k]})), red:pick(2), yellow:pick(1)};
 }
 function downShape(c, r){
   const e=el('ellipse'), cy=-my(c.lat);
@@ -957,12 +981,13 @@ function impactOf(fid){
 }
 function drawDown(){
   const g=document.getElementById('gDown'), gt=document.getElementById('gDownT'),
-        gi=document.getElementById('gImpact'); if(!g||!gt||!gi) return;
+        gi=document.getElementById('gImpact'), gy=document.getElementById('gSevY'),
+        gr=document.getElementById('gSevR'); if(!g||!gt||!gi||!gy||!gr) return;
   const h=MINI_Q&&FOCUS?histOf(FOCUS):null;
-  const sil=h&&D?silentOf(h):null, imp=h?impactOf(MINI_Q.fault_id):null;
+  const sil=h&&D?silentOf(h):null, imp=h&&IMPACT_ON?impactOf(MINI_Q.fault_id):null;
   const key=JSON.stringify([!!D, sil, D&&h&&DOWN?DOWN:null, imp?imp.fault_id:null]);
   if(key===DOWN_KEY) return;
-  DOWN_KEY=key; g.replaceChildren(); gt.replaceChildren(); gi.replaceChildren();
+  DOWN_KEY=key; g.replaceChildren(); gt.replaceChildren(); gi.replaceChildren(); gy.replaceChildren(); gr.replaceChildren();
   // 영향 — 띠(3 · 4 · 5약)마다 한 층. 원은 불투명하게 두고 투명도는 층에 준다(겹쳐도 진해지지 않게)
   IMPACT_N=imp?imp.cells:0;
   if(imp){ const by={};
@@ -974,8 +999,9 @@ function drawDown(){
     for(const d of list||[]){ const c=at[d.key]; if(!c||!(d.r_m>0)) continue;
       box.appendChild(downShape(c, d.r_m)); enb.add(String(c.enb)); n++; }
     return {n, e:enb.size}; };
-  const a=draw1(sil, g);
+  const a=draw1(sil&&sil.gray, g);
   DOWN_N=a.n; DOWN_E=a.e;
+  SEV_N={gray:a.n, red:draw1(sil&&sil.red, gr).n, yellow:draw1(sil&&sil.yellow, gy).n};
   // 실제 정지(정답)는 탐지 음영과 **함께** 늘 그린다(사용자 "통화 끊김과 실제 정지를 묶어서 같이") — 점선이라
   // 탐지가 놓친 곳은 점선만 남는다
   const t=draw1(h&&D&&DOWN?DOWN.cells:[], gt);
@@ -987,8 +1013,12 @@ function legendDown(){
   L.querySelectorAll('.lg-down').forEach(x=>x.remove());
   const on=!!(MINI_Q&&FOCUS), rows=[];
   if(on&&IMPACT_N) rows.push(`<s class="simp"></s>${T('영향 지역(추정 진도)')}<b>${T('셀 {c}',{c:IMPACT_N})}</b>`);
-  // 지진을 골랐으면 탐지 0곳도 적는다 — 아직 못 잡은 것과 "정지 없음"이 구분돼야 한다(불변규칙 17)
-  if(on) rows.push(`<s class="sdown"></s>${T('기지국 정지')}<b>${T('탐지 eNB {e} · 실제 eNB {t}',{e:DOWN_E,t:DOWN_T_N?DOWN_TE:'?'})}</b>`);
+  // 지진을 골랐으면 0곳도 적는다 — 아직 못 잡은 것과 "없음"이 구분돼야 한다(불변규칙 17). 셀 수는 그려진 원
+  // (좌표·반경이 있는 셀)이다. 정답이 없으면 「?」
+  if(on) rows.push(`<s class="sdown"></s>${T('통화 끊김(정지)')}<b>${T('셀 {c}',{c:SEV_N.gray})}</b>`,
+    `<s class="ssevr"></s>${T('심하게 나빠짐')}<b>${T('셀 {c}',{c:SEV_N.red})}</b>`,
+    `<s class="ssevy"></s>${T('나빠짐')}<b>${T('셀 {c}',{c:SEV_N.yellow})}</b>`,
+    `<s class="sdownt"></s>${T('실제 정지(정답)')}<b>${T('eNB {n}',{n:DOWN_T_N?DOWN_TE:'?'})}</b>`);
   if(!rows.length){ if(!L.children.length) L.style.display='none'; return; }
   for(const r of rows){ const div=document.createElement('div'); div.className='lg-down'; div.innerHTML=r; L.appendChild(div); }
   L.style.display='';
@@ -1470,6 +1500,47 @@ fetch('/api/glossary').then(r=>r.json()).then(d=>{ KPI_GL=(d&&d.terms)||{}; rend
 const kpiName=v=>String(v||'').split(',').map(k=>k.trim()).filter(Boolean)
   .map(k=>{ const t=KPI_GL[k], x=t&&(t[LANG]||t.ko); return x&&x.s ? x.s : k; }).join(', ');
 const kpiTag=v=>`<span title="${esc(v)}">${esc(kpiName(v))}</span>`;
+//: **구성 조각의 쉬운 말**(사용자 11-15 "묶은 애들이 뭘로 감지되었는지 쉬운 사용방법으로"). KPI 이름표만으로는
+//: 끊김·몰림이 갈리지 않는다 — C-01 은 용어집에서 「호 시도수」라 지진의 정지 조각이 뜻이 반대로 읽혔다. graphio
+//: `members` 에는 탐지기·방향 칸이 없어서 **탐지가 무호(D4 · C-01)로 판정한 셀**(`/api/map/event` 의 `silent`)로
+//: 가른다 — 있으면 「통화 끊김」, C-01 인데 무호 셀이 없으면 「통화 시도 변화」(방향을 모르니 중립). 나머지는
+//: 용어집 이름 그대로다(C-24 「통화 몰림」도 용어집에서). 화면이 새 사실을 만들지 않는다 — 수는 받은 값뿐이다
+const codesOf=v=>String(v||'').split(',').map(k=>k.trim()).filter(Boolean);
+//: 몰림을 끊김 앞에 — 지진에서 먼저 일어나는 순서다(표시 순서만)
+const KPI_ORDER={'C-24':0, 'C-01':1};
+function partPlain(list){
+  const codes=[...new Set(list.flatMap(m=>codesOf(m.trigger_kpi)))]
+    .sort((a,b)=>(KPI_ORDER[a]??2)-(KPI_ORDER[b]??2));
+  const sil=new Set(list.flatMap(m=>m.silent||[])).size;
+  const names=codes.map(k=>k==='C-01' ? (sil?T('통화 끊김(기지국 정지 의심)'):T('통화 시도 변화')) : kpiName(k));
+  return {codes, sil, names};
+}
+//: 「무엇이 감지됐나」 한 문장 — 셀 수 ``cells`` 와 무호 셀 수만 쓴다(받지 않은 기준 배수 등은 쓰지 않는다)
+function whatPlain(p, cells){
+  const s=[], surge=p.codes.includes('C-24'), cut=p.codes.includes('C-01');
+  if(surge) s.push(T('셀 {c}개에서 통화가 평소보다 몰림',{c:cells.toLocaleString()}));
+  if(cut&&p.sil) s.push(surge?T('그중 셀 {n}개는 통화가 끊김(기지국 정지 의심)',{n:p.sil.toLocaleString()})
+                             :T('셀 {n}개에서 통화가 끊김(기지국 정지 의심)',{n:p.sil.toLocaleString()}));
+  else if(cut) s.push(T('셀 {c}개에서 통화 시도가 평소와 달라짐',{c:cells.toLocaleString()}));
+  const rest=p.codes.filter(k=>k!=='C-24'&&k!=='C-01').map(kpiName);
+  if(rest.length) s.push(cells?T('셀 {c}개에서 {k} 이상',{c:cells.toLocaleString(),k:rest.join(', ')}):T('{k} 이상',{k:rest.join(', ')}));
+  return s.join(', ');
+}
+//: 「어디서」 — graphio 가 준 조각 제목의 지역 나열만 옮긴다(「東京都 中央区, 東京都 港区 외 2곳 (시군구 5곳, 셀 96개) …」 →
+//: 「中央区, 港区 외」). 도도부현 이름은 뺀다(도쿄 안이 보통이라 길기만 하다). 꼴이 다르면 비운다(지어내지 않는다)
+function wherePlain(titles){
+  const out=[]; let more=false;
+  for(const t of titles){
+    const m=String(t||'').match(/^(.+?) \(/); if(!m) continue;
+    for(let p of m[1].split(', ')){
+      const x=p.match(/^(.*) 외 \d+곳$/); if(x){ p=x[1]; more=true; }
+      p=p.replace(/^\S+[都道府県] /,'').trim();
+      if(p&&!out.includes(p)) out.push(p);
+    }
+  }
+  if(!out.length) return '';
+  return out.slice(0,3).join(', ')+(more||out.length>3?T(' 외'):'');
+}
 //: 원인 — graphio 가 준 이름(`root_label`)을 먼저, 코드는 툴팁. 이름이 없으면 코드다
 const causeTag=(code,label)=>`<span title="${esc(code||'')}">${esc(label||code||'?')}</span>`;
 const headOf=h=>isEvent(h)&&h.root_label&&h.root_code!=='UNDETERMINED' ? h.root_label : h.title;
@@ -1775,16 +1846,30 @@ function drawFocus(){
   const ev=evtOf(h);
   // 조각 칩 — **"다시 맞추기" 자리다**(사용자 11-09). 고른 칩을 다시 누르면 다시 맞춘다
   const ms=((evtOf(base)||{}).members)||[], gs=partGroups(base);
+  // 쉬운 문장에 쓸 조각들 — 탭을 골랐으면 그 조각들, 아니면 사건 전체. 구성 조각이 없으면(사건 아님) 옛 표시
+  const vis=PART!=null&&gs[PART]?gs[PART].idx.map(i=>ms[i]):ms;
+  const plain=vis.length?(()=>{ const p=partPlain(vis), cells=h.part?(h.part.cells||0):(ev?ev.cells:vis.reduce((a,m)=>a+(m.cells||0),0));
+    const titles=vis.map(m=>m.title||'');
+    return {what:whatPlain(p, cells), where:wherePlain(titles), titles}; })():null;
   const chips=`<span class=parts>`
     + `<button data-part="" class="${PART==null?'on':''}">${T('전체')}</button>`
-    + (ms.length>1?gs.map((g,k)=>`<button data-part="${k}" class="${PART===k?'on':''}" title="${esc(g.idx.map(i=>ms[i].title||'').join(' / '))}">`
-        + `${k+1}. ${esc(g.name)}${g.idx.length>1?` ×${g.idx.length}`:''}</button>`).join(''):'')
+    + (ms.length>1?gs.map((g,k)=>{ const list=g.idx.map(i=>ms[i]), p=partPlain(list);
+        // 기지국 축(GEO)은 축 이름을 빼고 무엇이 감지됐나만 — 나머지 축(체감 AREA·코어 장비 등)은 축 이름을 앞에 둔다
+        const ax=list[0].axis==='GEO'?'':g.label.split(' · ')[0]+' · ';
+        const cnt=(g.idx.length>1?T('{n}건',{n:g.idx.length})+' · ':'')+(list.some(m=>m.cells)?T('셀 {c}',{c:list.reduce((a,m)=>a+(m.cells||0),0).toLocaleString()}):'');
+        return `<button data-part="${k}" class="${PART===k?'on':''}" title="${esc(g.label+'\n'+list.map(m=>m.title||'').join(' / '))}">`
+          + `${k+1}. ${esc(ax+p.names.join(' + '))}${cnt?' · '+esc(cnt.replace(/ · $/,'')):''}</button>`; }).join(''):'')
     + `</span>`;
   bar.innerHTML=`<b>${unitTag(base)}${sevTag(base.severity)} · ${esc(headOf(base))}${confOf(base)}</b>`
     + `<button id=unfocus>${T('해제')}</button><i></i>`
     + chips
-    + (h.part?`<span class=warn>${T('이상징후 {k}/{n}',{k:PART+1,n:gs.length})} · ${sevTag(h.severity)} · ${esc(h.title||'')}`
+    + (h.part?`<span class=warn title="${esc(h.title||'')}">${T('이상징후 {k}/{n}',{k:PART+1,n:gs.length})} · ${sevTag(h.severity)}`
         + (h.confidence!=null&&h.root_code&&h.root_code!=='UNDETERMINED'?` · ${Math.round(h.confidence*100)}%`:'')+`</span>`:'')
+    // 무엇이 감지됐나 · 어디서 — 사건이면(구성 조각을 받았으면) 쉬운 문장으로. 코드와 원래 제목은 툴팁에 남긴다
+    + (plain?`<span class=plain title="${esc((h.trigger_kpi||'')+'\n'+plain.titles.join('\n'))}">`
+        + `<b>${T('무엇')}</b> ${esc(plain.what)}`
+        + (plain.where?` · <b>${T('어디서')}</b> ${esc(plain.where)}`:'')
+        + (ev?` (eNB ${ev.enbs.length.toLocaleString()})`:'')+`</span>`:'')
     // 묶음이면 조각마다 무엇(축 값)·결론을 한 줄씩 — 결론이 달라도 숨기지 않는다
     + (h.part&&h.part.group?h.part.group.map(m=>`<span>${MESH_AXES.has(m.axis)?esc(GEO_NAME[m.axis])+' ':''}${esc((m.axis_vals||[]).slice(0,3).join(', ')||m.incident_id)}`
         + ` — ${causeTag(m.root_code,m.root_label)}${m.root_code&&m.root_code!=='UNDETERMINED'&&m.confidence!=null?` ${Math.round(m.confidence*100)}%`:''}</span>`).join(''):'')
@@ -1795,8 +1880,8 @@ function drawFocus(){
     + `<span>${esc(md(h.opened_ts))} ${esc(hm(h.opened_ts))}`
     + (hm(h.updated_ts)&&hm(h.updated_ts)!==hm(h.opened_ts)?`~${esc(hm(h.updated_ts))}`:'')
     + (h.live?T(' · 지금 진행'):T(' · 지난 장애'))+`</span>`
-    + `<span>${kpiTag(h.trigger_kpi)}</span>`
-    + (ev?`<span>${T(h.part?'이상징후 범위 eNB {e} · 셀 {c}':'장애 범위 eNB {e} · 셀 {c}',{e:ev.enbs.length.toLocaleString(), c:ev.cells.toLocaleString()})}</span>`
+    + (plain?'':`<span>${kpiTag(h.trigger_kpi)}</span>`)
+    + (plain?'':ev?`<span>${T(h.part?'이상징후 범위 eNB {e} · 셀 {c}':'장애 범위 eNB {e} · 셀 {c}',{e:ev.enbs.length.toLocaleString(), c:ev.cells.toLocaleString()})}</span>`
          :h.part&&(h.axis||!(h.enbs||[]).length)?'':`<span>eNB ${(h.enbs||[]).length}</span>`)
     + (!h.part&&pieces(h)?`<span>${pieces(h)}</span>`:'')
     + (evOn?`<span class=dimtag>${T(h.part?'선 = 이 이상징후의 범위':'선 = 장애 전체 범위')}</span>`:'')

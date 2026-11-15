@@ -502,7 +502,7 @@ def api_map_faults(minutes: int = 15, recent: bool = False):
 
 
 @router.get("/api/map/event/{incident_id}")
-def api_map_event(incident_id: str):
+def api_map_event(incident_id: str, states: bool = False):
     """사건 **전체** 범위 — 대표 조각이 아니라 구성 조각 합집합.
 
     이력 목록의 `enbs` 는 대표 조각 하나의 범위라, 조각 4건·셀 118개 사건이 5건으로
@@ -535,10 +535,20 @@ def api_map_event(incident_id: str):
     silent, radius = _silent_cells(raw)
     for m in members:
         m["silent"] = silent.get(str(m.get("incident_id")), [])
-    return {"enbs": sorted(at), "pts": list(at.values()), "cells": len(cells),
-            "unmapped": doc.get("unmapped"), "areas": _event_areas(doc.get("areas") or []),
-            "areas_capped": bool(doc.get("areas_capped")),
-            "members": members, "silent_r": radius}
+    out = {"enbs": sorted(at), "pts": list(at.values()), "cells": len(cells),
+           "unmapped": doc.get("unmapped"), "areas": _event_areas(doc.get("areas") or []),
+           "areas_capped": bool(doc.get("areas_capped")),
+           "members": members, "silent_r": radius}
+    # 셀 상태 음영(지진 화면만 묻는다 — `?states=1`). 사건 셀 전부를 DB 에 묻게 되므로 셀 수천 개짜리
+    # DNS 사건 목록 요청에는 싣지 않는다
+    if states:
+        sev, src, cell_r = _cell_severity(raw)
+        for m in members:
+            iid = str(m.get("incident_id"))
+            m["cell_sev"] = sev.get(iid, {})
+            m["sev_src"] = src.get(iid, {})
+        out["cell_r"] = cell_r
+    return out
 
 
 def _silent_cells(rows: list[dict]) -> tuple[dict[str, list[str]], dict[str, float | None]]:
@@ -579,6 +589,63 @@ def _silent_cells(rows: list[dict]) -> tuple[dict[str, list[str]], dict[str, flo
     finally:
         conn.close()
     return out, radius
+
+
+def _cell_severity(rows: list[dict]) -> tuple[dict, dict, dict]:
+    """구성 조각마다 **셀별 이상 심각도** — 지도의 셀 상태 음영(2026-11-15 사용자 "기지국이 꺼지면 회색, 통화
+    품질이 적당히 나빠지면 노랑, 심하게 나빠지면 빨강").
+
+    graphio 가 쓴 셀 단위 이상 판정(`AI_ANOMALY_EVENT` · `SCOPE_TYPE='CELL'` · 취소 제외)을 **읽기만** 한다 —
+    그 조각의 셀 · 그 조각의 구간(`opened_ts`~`updated_ts`) · **그 조각의 트리거 KPI** 행 중 가장 높은 등급.
+    KPI 를 좁히는 것은 조각이 그 KPI 로 묶였기 때문이다(graphio 불변규칙 10 의 결) — 같은 셀의 다른 KPI 이상을
+    끌어오면 이 사건이 아닌 일이 칠해진다. 셀 행이 없는 셀은 **그 조각의 `severity`** 를 쓰고, 어느 쪽인지
+    `src` 에 센다(`rows` · `member`). 화면이 새 기준값으로 나누지 않는다 — 등급은 탐지가 매긴 그대로다.
+    표가 없는 현장이면 전부 조각 등급이다
+    """
+    rank = {"CRITICAL": 4, "MAJOR": 3, "MINOR": 2, "WARNING": 2, "WARN": 2, "INFO": 1}
+    sev: dict[str, dict[str, str]] = {}
+    src: dict[str, dict[str, int]] = {}
+    allk: set[str] = set()
+    conn = None
+    try:
+        conn = _connect()
+        for m in rows:
+            iid = str(m.get("incident_id"))
+            keys = sorted({str(k) for k in m.get("cells") or ()})
+            kpis = [k.strip() for k in str(m.get("trigger_kpi") or "").split(",") if k.strip()]
+            lo = str(m.get("opened_ts") or "").replace("T", " ")[:19]
+            hi = str(m.get("updated_ts") or "").replace("T", " ")[:19]
+            got: dict[str, str] = {}
+            if keys and kpis and lo:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT SCOPE_ID, SEVERITY FROM AI_ANOMALY_EVENT "
+                                    "WHERE SCOPE_TYPE = 'CELL' AND COALESCE(CANCELLED, 0) = 0 "
+                                    "AND EVENT_TIME >= %s" + (" AND EVENT_TIME <= %s" if hi else "")
+                                    + " AND KPI IN (" + ",".join(["%s"] * len(kpis)) + ")"
+                                    + " AND SCOPE_ID IN (" + ",".join(["%s"] * len(keys)) + ")",
+                                    [lo, *([hi] if hi else []), *kpis, *keys])
+                        for k, v in cur.fetchall():
+                            v = str(v or "").upper()
+                            if rank.get(v, 0) > rank.get(got.get(str(k), ""), 0):
+                                got[str(k)] = v
+                except pymysql.err.ProgrammingError:
+                    got = {}                   # 표가 없는 현장 — 조각 등급으로 내린다
+            msev = str(m.get("severity") or "").upper()
+            n_rows = len(got)
+            for k in keys:
+                if k not in got and msev:
+                    got[k] = msev
+            sev[iid] = got
+            src[iid] = {"rows": n_rows, "member": len(got) - n_rows}
+            allk.update(got)
+        cell_r = _cell_radius(conn, sorted(allk))
+    except pymysql.err.OperationalError:
+        return {}, {}, {}                      # DB 에 닿지 않는다 — 모른다(칠하지 않는다)
+    finally:
+        if conn is not None:
+            conn.close()
+    return sev, src, cell_r
 
 
 def _cell_radius(conn, keys: list[str]) -> dict[str, float | None]:
