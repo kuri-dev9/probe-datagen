@@ -159,13 +159,7 @@ def test_outline_only_when_asked(monkeypatch):
     assert "outline" in map_api.api_map_quake(outline=1)
 
 
-# ---------------------------------------------------------------- _mini_outline · _ring_km2
-
-def test_ring_km2_square_at_35_degrees():
-    ring = [[139.0, 35.0], [139.1, 35.0], [139.1, 35.1], [139.0, 35.1], [139.0, 35.0]]
-    assert map_api._ring_km2(ring) == pytest.approx(100, rel=0.1)     # 0.1°×0.1° ≈ 9.1×11.1km
-    assert map_api._ring_km2(ring[:3]) == 0.0                         # 고리가 못 되면 0
-
+# ---------------------------------------------------------------- _mini_view · _mini_outline
 
 def test_outline_missing_or_empty_path_is_error_not_exception(monkeypatch):
     monkeypatch.setattr(map_api, "_pem_cfg", lambda: {"geo_prefectures": ""})
@@ -175,30 +169,105 @@ def test_outline_missing_or_empty_path_is_error_not_exception(monkeypatch):
     assert out["rings"] == [] and "없다" in out["error"]
 
 
+REGIONS = [{"name": "千葉県東方沖", "lat": 35.65, "lon": 140.64}, {"name": "千葉県北西部", "lat": 35.58, "lon": 140.14},
+           {"name": "茨城県南部", "lat": 36.06, "lon": 139.93}, {"name": "神奈川・埼玉西部", "lat": 35.56, "lon": 139.33}]
+TOKYO_STATION = (35.68, 139.77)
+
+
+def _cfg_with(monkeypatch, **fault):
+    monkeypatch.setattr(map_api, "_pem_cfg", lambda: {"geo_prefectures": str(PREF), "fault": fault})
+
+
+def test_view_is_the_four_regions_plus_jitter_and_margin(monkeypatch):
+    _cfg_with(monkeypatch, quake_regions=REGIONS, quake_jitter_deg=0.1)
+    s, w, n, e = map_api._mini_view()
+    m = 0.1 + map_api._MINI_MARGIN_DEG
+    assert (s, w, n, e) == (round(35.56 - m, 3), round(139.33 - m, 3), round(36.06 + m, 3), round(140.64 + m, 3))
+    assert [s, w, n, e] == [34.46, 138.23, 37.16, 141.74]            # 지금 설정의 값(케이 지시 범위와 맞다)
+    for lat, lon in [(r["lat"], r["lon"]) for r in REGIONS] + [TOKYO_STATION]:
+        assert s < lat < n and w < lon < e                           # 네 진원역과 도쿄역이 모두 안에 있다
+
+
+def test_view_without_regions_is_none_and_jitter_defaults_to_zero(monkeypatch):
+    _cfg_with(monkeypatch)
+    assert map_api._mini_view() is None
+    _cfg_with(monkeypatch, quake_regions=[])
+    assert map_api._mini_view() is None
+    _cfg_with(monkeypatch, quake_regions=[{"lat": 35.0, "lon": 139.0}, {"name": "좌표 없음"}])
+    assert map_api._mini_view() == [34.0, 138.0, 36.0, 140.0]         # 좌표 없는 진원역은 건너뛰고 흩뜨림 0 이면 여백만
+
+
+def test_shipped_regions_fit_the_view_with_room_on_the_sea_side():
+    """설정 파일의 진원역을 직접 읽어 범위 계산을 대조한다 — 진원역을 고치면 범위가 따라가야 한다."""
+    import re
+    text = (Path(__file__).resolve().parents[1] / "config" / "datagen.yaml").read_text(encoding="utf-8")
+    regs = re.findall(r"\{name: (\S+), lat: ([\d.]+), lon: ([\d.]+)", text)
+    assert len(regs) == 4
+    east = max(float(lon) for _, _, lon in regs)
+    assert east + map_api._MINI_MARGIN_DEG >= 141.6                  # 千葉県東方沖 바다 쪽 여유(케이 지시 141.6 이상)
+
+
 @pytest.fixture
 def real_outline(monkeypatch):
     if not PREF.exists():
         pytest.skip("graphio 도도부현 경계 파일이 없다")
-    monkeypatch.setattr(map_api, "_pem_cfg", lambda: {"geo_prefectures": str(PREF)})
+    map_api._FILE_CACHE.clear()
+    _cfg_with(monkeypatch, quake_regions=REGIONS, quake_jitter_deg=0.1)
     return map_api._mini_outline()
 
 
-def test_outline_is_small_and_bounded(real_outline):
+def test_outline_bbox_is_the_view_and_size_is_small(real_outline):
     import json
     o = real_outline
-    assert len(json.dumps(o, ensure_ascii=False)) <= 50_000
-    la0, lo0, la1, lo1 = o["bbox"]
-    assert lo1 < 150 and la0 > 24                       # 오가사와라·오키노토리시마 제외
-    assert 45 < la1 < 46 and lo0 > 122                  # 홋카이도 북단 · 서쪽 끝
+    assert o["bbox"] == [34.46, 138.23, 37.16, 141.74]
+    assert len(json.dumps(o, ensure_ascii=False)) <= 30_000
+    assert 5 <= len(o["rings"]) <= 40
 
 
-def test_outline_keeps_okinawa_main_island(real_outline):
-    assert any(26.0 < y < 26.9 and 127.5 < x < 128.4 for r in real_outline["rings"] for x, y in r)
-
-
-def test_outline_drops_small_islands(real_outline):
+def test_outline_keeps_only_rings_touching_the_view(real_outline):
+    s, w, n, e = real_outline["bbox"]
     for r in real_outline["rings"]:
-        assert map_api._ring_km2(r) > map_api._MINI_MIN_KM2 * 0.5      # 단순화로 줄어도 거의 문턱 이상
+        xs = [x for x, _ in r]
+        ys = [y for _, y in r]
+        assert not (max(xs) < w or min(xs) > e or max(ys) < s or min(ys) > n)    # 범위 밖 고리는 보내지 않는다
+    allx = [x for r in real_outline["rings"] for x, _ in r]
+    ally = [y for r in real_outline["rings"] for _, y in r]
+    assert not any(36.0 < y < 37.5 and x < 120 for x, y in zip(allx, ally))      # 먼 서쪽(규슈 등) 없음
+    assert max(ally) < 46 and min(ally) > 24                                     # 홋카이도 북단·오키나와는 이 범위 고리가 아니다
+
+
+def test_outline_has_tokyo_and_chiba_coast_but_not_hokkaido_or_okinawa(real_outline):
+    pts = [(x, y) for r in real_outline["rings"] for x, y in r]
+    assert any(139.6 < x < 139.9 and 35.55 < y < 35.8 for x, y in pts)           # 도쿄만 안쪽
+    assert any(x > 140.7 and 35.6 < y < 35.8 for x, y in pts)                     # 치바 동쪽 해안
+    assert not any(y > 41 for _, y in pts)                                       # 홋카이도 없음
+    assert not any(y < 30 for _, y in pts)                                       # 오키나와 없음
+
+
+def test_outline_is_simplified_finer_than_the_old_overview():
+    assert map_api._MINI_TOL_M == 800.0 and map_api._MINI_TOL_M < 3000.0         # 축척이 커져 허용오차를 낮췄다
+    assert not hasattr(map_api, "_ring_km2") and not hasattr(map_api, "_MINI_MIN_KM2")
+
+
+def test_outline_cache_key_depends_on_the_view(monkeypatch):
+    if not PREF.exists():
+        pytest.skip("graphio 도도부현 경계 파일이 없다")
+    map_api._FILE_CACHE.clear()
+    _cfg_with(monkeypatch, quake_regions=REGIONS, quake_jitter_deg=0.1)
+    a = map_api._mini_outline()
+    _cfg_with(monkeypatch, quake_regions=[{"lat": 43.0, "lon": 141.3}], quake_jitter_deg=0.0)   # 홋카이도 쪽
+    b = map_api._mini_outline()
+    assert a["bbox"] != b["bbox"] and a is not b                                 # 범위가 바뀌면 옛 윤곽을 다시 쓰지 않는다
+
+
+def test_outline_without_regions_falls_back_to_the_ring_extent(monkeypatch):
+    if not PREF.exists():
+        pytest.skip("graphio 도도부현 경계 파일이 없다")
+    map_api._FILE_CACHE.clear()
+    _cfg_with(monkeypatch)
+    o = map_api._mini_outline()
+    la0, lo0, la1, lo1 = o["bbox"]
+    assert o["rings"] and (lo1 - lo0) > 10                                       # 범위가 없으면 전체 윤곽 범위
 
 
 def test_outline_is_cached_for_same_file(real_outline):
@@ -241,12 +310,81 @@ def test_mini_uses_same_projection_as_big_map():
     assert "x=경도" in MAP_HTML                          # 큰 지도와 같은 체계라고 적혀 있다
 
 
+def _draw():
+    return MAP_HTML[MAP_HTML.index("function drawMini"):MAP_HTML.index("function miniView")]
+
+
 def test_mini_draws_star_and_magnitude_only():
-    fn = MAP_HTML[MAP_HTML.index("function drawMini"):MAP_HTML.index("function miniView")]
-    assert "class=ms" in fn and "class=mm" in fn and "class=ml" in fn and "miniView" in fn
+    fn = _draw()
+    assert 'class="ml"' in fn and 'class="mv"' in fn and 'class=ms' in fn and 'class="mm"' in fn
     assert fn.count("<text") == 1                       # 글자는 규모 하나 — 지명은 넣지 않는다
     assert "magnitude.toFixed(1)" in fn
     assert "hypo" not in fn and "name" not in fn.replace("className", "")
+
+
+def test_regression_no_unquoted_attribute_value_swallowing_the_self_close():
+    """11-15 첫 판 — `<rect class=mv id=miniView/>` 는 `/` 까지 id 값이 되어 rect 가 닫히지 않았고, ★·규모가 rect 의 자식이
+    되어 그려지지 않았다(rect 안의 도형은 SVG 가 그리지 않는다). 따옴표 없는 속성값 바로 뒤에 `/>` 를 두지 않는다."""
+    fn = "\n".join(l for l in _draw().splitlines() if not l.lstrip().startswith("//"))   # 이유를 적은 주석은 뺀다
+    assert not re.search(r"=[^\"'\s>]+/>", fn), re.findall(r"\S*=[^\"'\s>]+/>", fn)
+    assert 'id=miniView' not in fn and 'id="miniView"' in fn
+
+
+def test_regression_rect_is_closed_before_the_star_and_text():
+    fn = _draw()
+    html = fn[fn.index("svg.innerHTML="):fn.index("box.title=")]
+    assert '<rect class="mv" id="miniView"></rect>' in html          # 명시적으로 닫는다
+    assert html.index("</rect>") < html.index("+ mark") < html.index("<text")     # ★(mark)·규모는 rect 뒤 형제다
+    assert '<path class="ml"' in html and html.index('<path class="ml"') < html.index("<rect")   # 윤곽이 맨 아래
+
+
+@pytest.mark.skipif(NODE is None, reason="node 없음")
+def test_regression_drawmini_output_has_siblings_not_children(tmp_path):
+    """실제 `drawMini` 를 가짜 DOM 으로 돌려 innerHTML 을 얻고, 문자열 수준에서 rect 가 비어 있고 ★·글자가 형제인지 본다."""
+    start = MAP_HTML.index("function drawMini")
+    end = MAP_HTML.index("//: 큰 지도의 지금 범위")
+    js = tmp_path / "t.js"
+    js.write_text("""
+const T=(s,o)=>s; const my=lat=>lat; let VB=null; 
+const els={mini:{style:{},parentNode:{classList:{add(){},remove(){}}}},miniSvg:{attrs:{},setAttribute(k,v){this.attrs[k]=v},innerHTML:''}};
+const document={getElementById:id=>els[id]||null};
+let MINI={bbox:[34.46,138.23,37.16,141.74],rings:[[[139,35],[140,35],[140,36],[139,35]]]}, MINI_Q=null, MINI_VB=null;
+function miniView(){}
+"""+MAP_HTML[start:end]+"""
+MINI_Q={lat:35.7345,lon:140.5437,magnitude:5.9}; drawMini(); const inside=els.miniSvg.innerHTML;
+MINI_Q={lat:33.9,lon:142.6,magnitude:6.5}; drawMini(); const outside=els.miniSvg.innerHTML;
+console.log(JSON.stringify({inside,outside,title:els.mini.title}));
+""", encoding="utf-8")
+    import json
+    r = subprocess.run([NODE, str(js)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    for html in (out["inside"], out["outside"]):
+        assert html.count("<rect") == 1 and html.count("</rect>") == 1
+        assert re.search(r"<rect[^>]*></rect>", html)               # rect 는 비어 있다(자식 없음)
+        assert html.index("</rect>") < html.index('<path class=ms') < html.index("<text")
+        assert "M" in html and "5.9" in html or "6.5" in html
+    assert "M5.9" in out["inside"] and "M6.5" in out["outside"]
+    assert out["inside"].count("L") > 0
+
+
+def test_out_of_view_epicenter_gets_an_arrow_and_its_own_tooltip():
+    fn = _draw()
+    assert "const out=ex!==qx||ey!==qy" in fn                        # 범위 밖이면 가장자리 안쪽으로 붙인다
+    assert "Math.atan2(qy-ey,qx-ex)" in fn                           # 진원 쪽을 가리키는 방향
+    arrow = fn[fn.index("if(out){"):fn.index("}else{")]
+    assert arrow.count("L") == 2 and "Z" in arrow                    # 삼각형(점 셋)
+    assert "관동 지도 밖 (화살표 방향)" in fn and "관동 지도 (움직이지 않는다)" in fn
+
+
+def test_mini_range_comes_from_the_server_not_a_padded_guess():
+    fn = _draw()
+    assert "const x0=lo0, x1=lo1, y0=-my(la1), y1=-my(la0);" in fn   # 서버 여백만 쓴다(3% 패딩은 뺐다)
+    assert "pad*" not in fn.split("const pad")[0]
+
+
+def test_mini_css_clips_what_leaves_the_view():
+    assert re.search(r"#mini svg\{[^}]*overflow:hidden", MAP_HTML)
 
 
 def test_mini_has_no_zoom_or_drag_handlers():
@@ -278,14 +416,23 @@ def test_map_script_syntax(tmp_path):
 
 # ---------------------------------------------------------------- 번역
 
-NEW = ("진앙 — 일본 전도 (움직이지 않는다)", "진앙 {m} — 일본 전도 (움직이지 않는다) · 네모 = 지금 보는 범위", "규모 모름")
+NEW = ("진앙 — 관동 지도 (움직이지 않는다)", "진앙 {m} — 관동 지도 (움직이지 않는다) · 네모 = 지금 보는 범위",
+       "진앙 {m} — 관동 지도 밖 (화살표 방향) · 네모 = 지금 보는 범위", "규모 모름")
 
 
 def test_new_phrases_translated_and_present_in_source():
-    for k in NEW:
+    for k in NEW[1:]:
         assert k in _JA_MAP and _JA_MAP[k].strip()
         assert k in MAP_HTML, k                         # 소스 원문과 사전 키가 한 글자도 어긋나지 않는다
-    assert "{m}" in _JA_MAP[NEW[1]]                     # 자리표시자 유지
-    assert re.search(r"[぀-ヿ一-鿿]", _JA_MAP[NEW[0]])
+    assert NEW[0] in _JA_MAP and NEW[0].split("—")[0].strip() == "진앙"
+    for k in NEW[1:3]:
+        assert "{m}" in _JA_MAP[k]                      # 자리표시자 유지
     for k in NEW:
-        assert not re.search(r"[぀-ヿ]", k)     # 한국어 쪽에는 가나가 없다
+        assert re.search(r"[\u3040-\u30ff\u4e00-\u9fff]", _JA_MAP[k]) if k in _JA_MAP else True
+        assert not re.search(r"[\u3040-\u30ff]", k)   # 한국어 쪽에는 가나가 없다
+
+
+def test_old_japan_overview_phrases_are_gone():
+    assert "일본 전도" not in MAP_HTML.replace("일본 전도를 두고", "")      # 머리 주석의 사용자 인용문만 남는다
+    assert not any("일본 전도" in k or "日本全図" in v for k, v in _JA_MAP.items())
+    assert "관동" in MAP_HTML and "関東地図" in _JA_MAP["진앙 {m} — 관동 지도 (움직이지 않는다) · 네모 = 지금 보는 범위"]

@@ -1004,37 +1004,44 @@ def _geo_doc(src: Path):
     return _cached(src, "geo", make)
 
 
-# ── 미니 일본 전도 · 진앙 (2026-11-15 사용자) ───────────────────────────────
+# ── 미니 지도 · 진앙 (2026-11-15 사용자) ───────────────────────────────────
 #
 # 27번 진앙은 도쿄 밖 실제 진원역(바다·땅속 깊은 곳)이라 장비 지도 화면 밖이다. 큰 지도를 넓히면 기지국이
-# 점 하나로 뭉개진다 — 구석에 **움직이지 않는 일본 전도**를 얹어 진앙 ★ 과 규모만 찍는다(사용자 안).
+# 점 하나로 뭉개진다 — 구석에 **움직이지 않는 작은 지도**를 얹어 진앙 ★ 과 규모만 찍는다(사용자 안).
+# 범위는 **관동과 그 앞바다**다(같은 날 사용자 — "100% 전도는 필요없고 도쿄와 먼바다쪽, 실제 지진 나는
+# 쪽으로만"). 생성기 진원역(`pemdb1.fault.quake_regions`)이 모두 들어가게 그 설정에서 계산한다 — 진원역을
+# 고치면 범위도 따라간다.
 # 윤곽은 graphio 가 이미 들고 있는 도도부현 경계(`data/geo/jp/prefectures.json` · 국토수치정보 N03 ·
-# CC BY 4.0 · 그쪽 `SOURCE.txt`)를 서버에서 한 번 줄여 내린다 — 외부를 부르지 않는다.
+# CC BY 4.0 · 그쪽 `SOURCE.txt`)에서 범위에 걸치는 고리만 줄여 내린다 — 외부를 부르지 않는다.
+# 범위 밖으로 삐져나온 땅은 화면(SVG viewBox)이 자른다.
 
-#: 미니 지도 윤곽의 단순화 허용오차(m) — 화면 표시 상수다. 일본 전도 폭 약 2,000km 를 200px 안팎에
-#: 그리면 1px 이 10km 남짓이라 3km 아래 굴곡은 보이지 않는다(점 8,007 → 수백)
-_MINI_TOL_M = 3000.0
-#: 이보다 작은 섬은 그리지 않는다(km²) — 화면 표시 상수다. 오가사와라·오키노토리시마까지 넣으면 범위가 동경
-#: 154°·북위 20°까지 늘어 본토가 작아진다. 오키나와 본섬(약 1,200km²)·사도·아와지·쓰시마는 남는다
-_MINI_MIN_KM2 = 300.0
+#: 미니 지도 윤곽의 단순화 허용오차(m) — 화면 표시 상수다. 관동 폭 약 320km 를 190px 에 그리면 1px 이
+#: 1.7km 남짓이라 그 절반 아래 굴곡은 보이지 않는다
+_MINI_TOL_M = 800.0
+#: 진원역 묶음 바깥 여백(도) — 화면 표시 상수다. 진원역은 도쿄 100km 안이라 여백 없이 그리면 千葉県東方沖
+#: 바다 쪽이 가장자리에 붙고, 1° 면 앞바다·이즈 오시마·관동 산지까지 보인다(범위 약 경도 138.2~141.8)
+_MINI_MARGIN_DEG = 1.0
 
 
-def _ring_km2(ring) -> float:
-    """고리 면적(km²) — 신발끈 공식, 경도는 고리 평균 위도로 줄인다(표시용 근사)."""
-    if len(ring) < 4:
-        return 0.0
-    lat0 = sum(p[1] for p in ring) / len(ring)
-    kx, ky = 111.32 * math.cos(math.radians(lat0)), 110.57
-    s = 0.0
-    for (x0, y0), (x1, y1) in zip(ring, ring[1:]):
-        s += x0 * y1 - x1 * y0
-    return abs(s) / 2 * kx * ky
+def _mini_view():
+    """미니 지도 범위 [남, 서, 북, 동] — 진원역 묶음 ± 흩뜨림 폭(`quake_jitter_deg`) ± 여백.
+
+    진원역 설정이 없으면 None(윤곽 전체 범위를 쓴다)."""
+    f = _pem_cfg().get("fault") or {}
+    regs = [r for r in (f.get("quake_regions") or []) if isinstance(r, dict)]
+    pts = [(float(r["lat"]), float(r["lon"])) for r in regs if r.get("lat") is not None and r.get("lon") is not None]
+    if not pts:
+        return None
+    m = float(f.get("quake_jitter_deg") or 0) + _MINI_MARGIN_DEG
+    return [round(min(p[0] for p in pts) - m, 3), round(min(p[1] for p in pts) - m, 3),
+            round(max(p[0] for p in pts) + m, 3), round(max(p[1] for p in pts) + m, 3)]
 
 
 def _mini_outline() -> dict:
     src, err = _layer_path("geo_prefectures")
     if err:
         return {"error": err, "rings": []}
+    view = _mini_view()
 
     def make(p: Path):
         doc = json.loads(p.read_text(encoding="utf-8"))
@@ -1043,20 +1050,26 @@ def _mini_outline() -> dict:
             g = f.get("geometry") or {}
             polys = [g.get("coordinates")] if g.get("type") == "Polygon" else g.get("coordinates") or []
             for poly in polys:
-                if not poly or _ring_km2(poly[0]) < _MINI_MIN_KM2:
+                if not poly or len(poly[0]) < 4:
                     continue
+                if view:
+                    xs = [x for x, _ in poly[0]]
+                    ys = [y for _, y in poly[0]]
+                    if max(xs) < view[1] or min(xs) > view[3] or max(ys) < view[0] or min(ys) > view[2]:
+                        continue
                 r = _simplify(poly[0], _MINI_TOL_M)
                 rings.append([[round(x, 3), round(y, 3)] for x, y in r])
         xs = [x for r in rings for x, _ in r]
         ys = [y for r in rings for _, y in r]
-        return {"rings": rings, "bbox": [min(ys), min(xs), max(ys), max(xs)] if xs else None,
+        bbox = view or ([min(ys), min(xs), max(ys), max(xs)] if xs else None)
+        return {"rings": rings, "bbox": bbox,
                 "source": "国土数値情報 行政区域 (国土交通省) · CC BY 4.0"}
-    return _cached(src, "mini", make)
+    return _cached(src, f"mini:{view}", make)
 
 
 @router.get("/api/map/quake")
 def api_map_quake(at: str = "", outline: int = 0):
-    """미니 일본 전도에 찍을 지진 하나 — `CM_QUAKE_EVENT`(생성기가 쓰는 표)를 **읽기만** 한다.
+    """미니 지도(관동)에 찍을 지진 하나 — `CM_QUAKE_EVENT`(생성기가 쓰는 표)를 **읽기만** 한다.
 
     * **진행 중인 27번이 있으면 그 지진**이다(`STATUS='active'` 장애의 `FAULT_ID`).
     * 없으면 ``at``(지도에서 고른 장애의 시작 시각)을 **주입 구간 안에 품은 27번**의 지진이다 — 시작
