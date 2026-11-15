@@ -934,6 +934,11 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
     mode = None
     raw_target = fault.get("target")
     quake_in = None
+    if fault["kind"] == "natural_disaster":
+        # 기지국 정지 배치 — 대상 앞머리 `LOCAL:`·`WIDE:`(또는 그 낱말만). 장애 테이블에 인자 칸이
+        # 없어(DDL 없이) 대상 문자열로 받는다. 기본 ``local``. **진원 지정보다 먼저 뗀다** — `WIDE:QUAKE:B,6.2`
+        # (넓은 지역 80셀 + 진원 지정 · 2026-11-15 사용자 "일단 80개로 해보자")
+        mode, raw_target = _disaster_mode(raw_target)
     if fault["kind"] == "natural_disaster" and (raw_target or "").strip().upper().startswith("QUAKE:"):
         # 지진 지정(2026-11-14) — `QUAKE:<진원역>[,<규모>]` · `QUAKE:<위도>,<경도>[,<규모>[,<깊이>]]`
         quake_in = _quake_arg(raw_target)
@@ -942,10 +947,6 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
                   f"QUAKE:<위도>,<경도>[,<규모>[,<깊이>]] 꼴이 아니다", flush=True)
             return None
         raw_target = None
-    if fault["kind"] == "natural_disaster":
-        # 기지국 정지 배치 — 대상 앞머리 `LOCAL:`·`WIDE:`(또는 그 낱말만). 장애 테이블에 인자 칸이
-        # 없어(DDL 없이) 대상 문자열로 받는다. 기본 ``local``
-        mode, raw_target = _disaster_mode(raw_target)
     rng_pct = None
     if fault["kind"] in ROUTE_RANGE_KINDS:
         # 15번 범위(%) — 앞머리를 떼고 본다. 앞머리 없는 자동 대상(API 직접 호출)도 기본 범위다.
