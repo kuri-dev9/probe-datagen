@@ -272,7 +272,7 @@ CREATE TABLE IF NOT EXISTS `{T_SCENARIO}` (
 -- 음영 셀 목록은 두지 않는다 — 정답지(down_enbs)에 있고 이 행과 시드로 다시 셀 수 있다. graphio 가
 -- 읽어도 되는 것은 운영에서도 받을 수 있는 이 지진 정보까지다(꺼진 셀은 D4 가 스스로 찾는다).
 -- 2026-11-14 부터 판정이 쓰는 칸은 발생 시각·진앙·깊이·규모·진도다(graphio EV-19). SHAPE 는 늘 ROUND,
--- RADIUS_KM 는 지반 1.0 에서 진도 3 이상인 진앙 거리, BASE_PCT·MAX_CELLS 는 정지 확률·최대 셀(설정값)이다 —
+-- RADIUS_KM 는 지반 1.0 에서 진도 3 이상인 진앙 거리, BASE_PCT·MAX_CELLS 는 설정값(정지 확률 · 11-15 A안부터 미사용)·최대 셀이다 —
 -- 모두 생성기 참고값이고 `NOT NULL` 이라 남긴다(`scenarios.quake_new`)
 CREATE TABLE IF NOT EXISTS `{T_QUAKE}` (
   `QUAKE_ID`      varchar(32)  NOT NULL                COMMENT '지진 키 — 시나리오는 Q-F<FAULT_ID>, 실제 지진은 받은 곳의 지진 ID',
@@ -289,7 +289,7 @@ CREATE TABLE IF NOT EXISTS `{T_QUAKE}` (
   `AZIMUTH_DEG`   smallint         DEFAULT NULL         COMMENT '생성기 참고값 — LINEAR 선의 방향(도 · 0~359 · 0 = 북). ROUND 면 NULL. EV-19 는 읽지 않는다',
   `LENGTH_KM`     decimal(5,1)     DEFAULT NULL         COMMENT '생성기 참고값 — LINEAR 선의 길이(km · 진앙이 가운데). ROUND 면 NULL. EV-19 는 읽지 않는다',
   `RADIUS_KM`     decimal(5,1) NOT NULL                COMMENT '생성기 참고값 — 지반 1.0 에서 진도 quake_surge_intensity 이상이 되는 진앙 거리(km). 11-14 이전 행은 음영 반경. EV-19 는 읽지 않는다',
-  `BASE_PCT`      decimal(4,1) NOT NULL                COMMENT '생성기 참고값 — 진도 quake_down_intensity 이상 eNB 의 정지 확률(% · 설정 quake_down_pct). 11-14 이전 행은 진앙 0km 정지 확률. EV-19 는 읽지 않는다',
+  `BASE_PCT`      decimal(4,1) NOT NULL                COMMENT '생성기 참고값 — 설정 quake_down_pct. 11-15 A안부터 정지 선택에 쓰지 않는다(진도 5약 이상 eNB 를 흔들림 가중 무작위로 MAX_CELLS 까지 끈다). 11-14~11-15 행은 그 eNB 의 정지 확률(%), 11-14 이전 행은 진앙 0km 정지 확률. EV-19 는 읽지 않는다',
   `MAX_CELLS`     int          NOT NULL                COMMENT '생성기 참고값 — 정지 셀 최대 개수(설정 quake_down_max_cells). EV-19 는 읽지 않는다',
   `UPDATED_TIME`  datetime     NOT NULL                COMMENT '행을 쓴 시각 — 생성기는 INSERT IGNORE 라 처음 쓴 값(주입 당시)이 남는다',
   PRIMARY KEY (`QUAKE_ID`),

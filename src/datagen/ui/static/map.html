@@ -465,10 +465,16 @@
  #gDownT{pointer-events:none}
  #gDownT ellipse{fill:none;stroke:var(--map-fg);stroke-width:1px;stroke-dasharray:3 3;vector-effect:non-scaling-stroke;opacity:.7}
  #legend s.sdown{background:#05070a;border:1px solid #8a919c;border-radius:2px}
- #legend s.sdownt{background:none;border:1px dashed #8a919c;border-radius:50%}
  #legend .lg-down b{margin-left:auto;opacity:.7;font-weight:400;padding-left:8px}
- #legend .lg-down-t{cursor:pointer;opacity:.55}
- #legend .lg-down-t.on{opacity:1}
+/* 영향 지역(추정 진도 · 2026-11-15 사용자 "영향은 넓게, 정지는 좁게") — 정지 음영 아래 옅은 띠. 진도 3 · 4 · 5약을
+    조금씩 진하게. 색은 하나(호박색)이고 층 투명도만 다르다 — 과하지 않게 */
+ #gImpact{pointer-events:none}
+ #gImpact ellipse{fill:#e9b44c;stroke:none}
+ #gImpact .ib3{opacity:.05} #gImpact .ib4{opacity:.09} #gImpact .ib5m{opacity:.16}
+ body[data-theme=light] #gImpact .ib3{opacity:.07} body[data-theme=light] #gImpact .ib4{opacity:.12}
+ body[data-theme=light] #gImpact .ib5m{opacity:.2}
+ #legend s.simp{background:linear-gradient(90deg,#e9b44c22,#e9b44c66);border:1px solid #e9b44c66;border-radius:2px}
+ #legend s.sdown{box-shadow:inset 0 0 0 1px #05070a, 0 0 0 1px #8a919c;outline:1px dashed #c9ced6;outline-offset:2px}
  #mini .ms{fill:#ff4d5e;stroke:var(--lb-halo);stroke-width:1px;vector-effect:non-scaling-stroke}
  #mini .mm{fill:var(--lb);font-weight:700;paint-order:stroke;stroke:var(--lb-halo);stroke-width:3px;
    vector-effect:non-scaling-stroke}
@@ -527,7 +533,7 @@
         <feGaussianBlur stdDeviation="0.0022"/>
       </filter>
     </defs>
-    <g id=gAdm></g><g id=gGreen></g><g id=gChome></g><g id=gRoad></g><g id=gRiv></g><g id=gRail></g><g id=gYmt></g><g id=gAll></g><g id=gKde></g><g id=gDown></g><g id=gDownT></g><g id=gGeo></g><g id=gCell></g>
+    <g id=gAdm></g><g id=gGreen></g><g id=gChome></g><g id=gRoad></g><g id=gRiv></g><g id=gRail></g><g id=gYmt></g><g id=gAll></g><g id=gKde></g><g id=gImpact></g><g id=gDown></g><g id=gDownT></g><g id=gGeo></g><g id=gCell></g>
     <g id=gPick></g><g id=gStn></g><g id=gNode></g></svg>
   <svg id=geofx></svg>
   <div id=fx><div id=fxin><div id=fxh></div><div id=fxb></div></div><div id=fxe><svg></svg><svg></svg><svg></svg></div></div>
@@ -913,7 +919,7 @@ function drawMini(){
 //:    범례 견본을 눌러 켠다(기본 꺼짐). 탐지가 실제 정지를 얼마나 따라잡았는지 견준다.
 //: 둘 다 고른 장애가 지진(`MINI_Q`)일 때만 그린다. 좌표는 지도 셀(D.cells), 반경은 셀별 추정 커버리지(`r_m`) —
 //: 둘 중 하나라도 없는 셀은 그리지 않는다(지어내지 않는다)
-let SIL={}, SIL_WAIT={}, DOWN_T_ON=false, DOWN_T_N=0, DOWN_E=0, DOWN_TE=0;
+let SIL={}, SIL_WAIT={}, DOWN_T_N=0, DOWN_E=0, DOWN_TE=0, IMPACT={}, IMPACT_WAIT={}, IMPACT_N=0;
 //: 정지 판정 셀은 **따로 받는다** — 사건 범위(`EVT`)는 한 번 받고 끝이라 진행 중인 지진이면 낡는다(정지는 몇 분씩
 //: 늦게 선다). 진행 중이면 30초마다 다시 묻는다(표시 주기 · 지진 폴링 10초의 세 번에 한 번)
 const SIL_TTL_MS=30000;
@@ -938,13 +944,31 @@ function downShape(c, r){
   e.setAttribute('ry', cy-(-my(c.lat+r/110574)));
   return e;
 }
+//: 영향 지역(추정 진도) — 장애 ID 마다 한 번 받는다(정적). 받는 중이면 그리지 않고 끝나면 다시 그린다
+function impactOf(fid){
+  const c=IMPACT[fid];
+  if(c===undefined&&!IMPACT_WAIT[fid])
+    IMPACT_WAIT[fid]=fetch('/api/map/quake/'+fid+'/impact').then(r=>r.json())
+      .then(d=>{ IMPACT[fid]=d&&!d.error?d:null; })
+      // 받기 실패(서버 내려감 · 네트워크)도 「없음」으로 둔다 — 비워 두면 finally 의 drawDown 이 곧바로 다시 물어 끝없이 되풀이한다(11-15 에스터 시험). 새로고침하면 다시 묻는다
+      .catch(()=>{ IMPACT[fid]=null; })
+      .finally(()=>{ delete IMPACT_WAIT[fid]; drawDown(); });
+  return c||null;
+}
 function drawDown(){
-  const g=document.getElementById('gDown'), gt=document.getElementById('gDownT'); if(!g||!gt) return;
+  const g=document.getElementById('gDown'), gt=document.getElementById('gDownT'),
+        gi=document.getElementById('gImpact'); if(!g||!gt||!gi) return;
   const h=MINI_Q&&FOCUS?histOf(FOCUS):null;
-  const sil=h&&D?silentOf(h):null;
-  const key=JSON.stringify([!!D, sil, D&&DOWN?DOWN:null, DOWN_T_ON]);
+  const sil=h&&D?silentOf(h):null, imp=h?impactOf(MINI_Q.fault_id):null;
+  const key=JSON.stringify([!!D, sil, D&&h&&DOWN?DOWN:null, imp?imp.fault_id:null]);
   if(key===DOWN_KEY) return;
-  DOWN_KEY=key; g.replaceChildren(); gt.replaceChildren();
+  DOWN_KEY=key; g.replaceChildren(); gt.replaceChildren(); gi.replaceChildren();
+  // 영향 — 띠(3 · 4 · 5약)마다 한 층. 원은 불투명하게 두고 투명도는 층에 준다(겹쳐도 진해지지 않게)
+  IMPACT_N=imp?imp.cells:0;
+  if(imp){ const by={};
+    for(const [lon,lat,r,b] of imp.pts){ (by[b]=by[b]||[]).push(downShape({lon,lat}, r)); }
+    for(const b of ['3','4','5-']) if(by[b]){ const q=el('g'); q.setAttribute('class','ib'+b.replace('-','m'));
+      q.append(...by[b]); gi.appendChild(q); } }
   const at={}; if(D) for(const c of D.cells) at[c.key]=c;
   const draw1=(list, box)=>{ const enb=new Set(); let n=0;
     for(const d of list||[]){ const c=at[d.key]; if(!c||!(d.r_m>0)) continue;
@@ -952,8 +976,9 @@ function drawDown(){
     return {n, e:enb.size}; };
   const a=draw1(sil, g);
   DOWN_N=a.n; DOWN_E=a.e;
-  // 정답은 켰을 때만 그린다 — 수는 늘 센다(범례에 적어 켤 거리를 알린다)
-  const t=draw1(D&&DOWN?DOWN.cells:[], DOWN_T_ON?gt:document.createDocumentFragment());
+  // 실제 정지(정답)는 탐지 음영과 **함께** 늘 그린다(사용자 "통화 끊김과 실제 정지를 묶어서 같이") — 점선이라
+  // 탐지가 놓친 곳은 점선만 남는다
+  const t=draw1(h&&D&&DOWN?DOWN.cells:[], gt);
   DOWN_T_N=t.n; DOWN_TE=t.e;
   legendDown();
 }
@@ -961,16 +986,11 @@ function legendDown(){
   const L=document.getElementById('legend'); if(!L) return;
   L.querySelectorAll('.lg-down').forEach(x=>x.remove());
   const on=!!(MINI_Q&&FOCUS), rows=[];
-  // 지진을 골랐으면 판정 0곳도 적는다 — 탐지가 아직 못 잡은 것과 "음영 없음"이 구분돼야 한다(불변규칙 17)
-  if(on) rows.push(`<s class="sdown"></s>${T('정지 판정 영역')}<b>${T('eNB {e} · 셀 {c}',{e:DOWN_E,c:DOWN_N})}</b>`);
-  if(on&&DOWN_T_N) rows.push(`<s class="sdownt"></s>${T('실제 정지(정답)')}<b>${T('eNB {e} · 셀 {c}',{e:DOWN_TE,c:DOWN_T_N})}</b>`);
+  if(on&&IMPACT_N) rows.push(`<s class="simp"></s>${T('영향 지역(추정 진도)')}<b>${T('셀 {c}',{c:IMPACT_N})}</b>`);
+  // 지진을 골랐으면 탐지 0곳도 적는다 — 아직 못 잡은 것과 "정지 없음"이 구분돼야 한다(불변규칙 17)
+  if(on) rows.push(`<s class="sdown"></s>${T('기지국 정지')}<b>${T('탐지 eNB {e} · 실제 eNB {t}',{e:DOWN_E,t:DOWN_T_N?DOWN_TE:'?'})}</b>`);
   if(!rows.length){ if(!L.children.length) L.style.display='none'; return; }
-  rows.forEach((r,i)=>{ const div=document.createElement('div');
-    div.className='lg-down'+(i?' lg-down-t'+(DOWN_T_ON?' on':''):'');
-    div.innerHTML=r;
-    if(i){ div.title=T('눌러서 켜고 끈다 — 생성기가 실제로 끈 셀(정답 · 비교용)');
-      div.onclick=()=>{ DOWN_T_ON=!DOWN_T_ON; drawDown(); }; }
-    L.appendChild(div); });
+  for(const r of rows){ const div=document.createElement('div'); div.className='lg-down'; div.innerHTML=r; L.appendChild(div); }
   L.style.display='';
 }
 //: 큰 지도의 지금 범위 — 너무 작으면(도쿄 한 구) 보이지 않으니 미니 폭의 3% 를 최소로 그린다(표시만)

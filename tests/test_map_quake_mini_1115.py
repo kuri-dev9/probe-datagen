@@ -720,19 +720,22 @@ console.log(JSON.stringify({same, after:writes, waves, arrowWaves}));""")
 
 
 def test_down_phrases_are_translated_and_the_old_wording_is_gone():
-    for k in ("정지 판정 영역", "실제 정지(정답)", "눌러서 켜고 끈다 — 생성기가 실제로 끈 셀(정답 · 비교용)", "eNB {e} · 셀 {c}"):
+    """11-15 오후 — 영향 층 · 정지 한 줄로 묶음. 새 4개는 번역이 있고 화면에 쓰이며, 지운 3개는 소스에 남지 않는다."""
+    for k in ("영향 지역(추정 진도)", "셀 {c}", "기지국 정지", "탐지 eNB {e} · 실제 eNB {t}"):
         assert k in _JA_MAP and _JA_MAP[k].strip() and k in MAP_HTML, k
-    assert "停止判定エリア" in _JA_MAP["정지 판정 영역"] and "実際の停止" in _JA_MAP["실제 정지(정답)"]
-    assert all(p in _JA_MAP["eNB {e} · 셀 {c}"] for p in ("{e}", "{c}"))
-    assert "T('정지 기지국 영역')" not in MAP_HTML and "정지 기지국 영역" not in _JA_MAP    # 화면 문구는 「정지 판정 영역」으로 바뀌었다
+    assert all(p in _JA_MAP["탐지 eNB {e} · 실제 eNB {t}"] for p in ("{e}", "{t}"))
+    assert "{c}" in _JA_MAP["셀 {c}"]
+    for old in ("정지 판정 영역", "실제 정지(정답)", "눌러서 켜고 끈다 — 생성기가 실제로 끈 셀(정답 · 비교용)", "eNB {e} · 셀 {c}"):
+        assert old not in _JA_MAP and f"T('{old}'" not in MAP_HTML, old      # 주석에 옛 말이 남는 것은 상관없다 — 화면에 쓰는 것만
+    assert "T('정지 기지국 영역')" not in MAP_HTML and "정지 기지국 영역" not in _JA_MAP
 
 
 # ══ 11-15 낮 — 정지 음영 = 탐지(D4 C-01) 셀 · 정답은 점선 비교 · 첫 로드 회귀 ══════════════════════════════════
 
 def test_layers_are_ordered_kde_then_detected_down_then_truth_then_geo_and_draw_does_not_clear_them():
-    assert "<g id=gKde></g><g id=gDown></g><g id=gDownT></g><g id=gGeo></g>" in MAP_HTML
+    assert "<g id=gKde></g><g id=gImpact></g><g id=gDown></g><g id=gDownT></g><g id=gGeo></g>" in MAP_HTML
     draw = MAP_HTML[MAP_HTML.index("function draw()"):][:3500]
-    assert "drawDown();" in draw and "gDown" not in draw
+    assert "drawDown();" in draw and "gDown" not in draw and "gImpact" not in draw
 
 
 def test_truth_layer_is_dashed_outline_only_and_the_detected_layer_is_the_dark_fill():
@@ -836,34 +839,36 @@ def test_api_map_event_adds_silent_per_member_and_the_radius_table(monkeypatch):
 # ── 화면 함수 — node ───────────────────────────────────────────────────────────────────────
 
 DOWN2 = """
-const mkEl=tag=>({tag,attrs:{},setAttribute(k,v){this.attrs[k]=v}});
+const mkEl=tag=>({tag,attrs:{},children:[],setAttribute(k,v){this.attrs[k]=v},append(...c){this.children.push(...c)},appendChild(c){this.children.push(c)}});
 const el=mkEl, mx=x=>x, my=y=>y;
 const T=(s,o)=>o?s.replace(/\\{(\\w+)\\}/g,(_,k)=>o[k]):s;
-let D=null, DOWN=null, DOWN_KEY=null, DOWN_N=0, DOWN_E=0, DOWN_T_N=0, DOWN_TE=0, DOWN_T_ON=false, MINI_Q=null, FOCUS=null;
+let D=null, DOWN=null, DOWN_KEY=null, DOWN_N=0, DOWN_E=0, DOWN_T_N=0, DOWN_TE=0, IMPACT={}, IMPACT_WAIT={}, IMPACT_N=0, MINI_Q=null, FOCUS=null;
 let SIL={}, SIL_WAIT={}; const SIL_TTL_MS=30000; let PART=null, FETCHED=[];
 const H={}; const histOf=id=>H[id]||null; const isEvent=h=>!!h.members; const partGroups=h=>h.groups||[]; const evtOf=h=>h;
-const fetch=async u=>{FETCHED.push(u); return {json:async()=>({members:[]})};};
+let IMPACT_REPLY={fault_id:355,cells:0,pts:[]};
+const fetch=async u=>{FETCHED.push(u); if(IMPACT_REPLY==='boom'){ await new Promise(r=>setTimeout(r,1)); throw new Error('x'); }   // 실제 네트워크 실패처럼 한 틱 뒤
+  return {json:async()=>u.includes('/impact')?IMPACT_REPLY:({members:[]})};};
 const box=()=>({children:[],replaceCount:0,replaceChildren(){this.children=[];this.replaceCount++},appendChild(c){this.children.push(c)}});
-const g=box(), gt=box();
+const g=box(), gt=box(), gi=box();
 const legendBox={children:[],style:{display:''},
   querySelectorAll(){return {forEach:f=>this.children.filter(c=>c.className.startsWith('lg-down')).forEach(f)}},
   appendChild(c){this.children.push(c)}};
 const mkDiv=()=>({tag:'div',className:'',innerHTML:'',title:'',remove(){legendBox.children=legendBox.children.filter(c=>c!==this)}});
-const document={getElementById:id=>id==='gDown'?g:id==='gDownT'?gt:id==='legend'?legendBox:null,createElement:mkDiv,
+const document={getElementById:id=>id==='gDown'?g:id==='gDownT'?gt:id==='gImpact'?gi:id==='legend'?legendBox:null,createElement:mkDiv,
   createDocumentFragment:()=>box()};
 const CELLS=[{key:'1-0',enb:'1',lat:35.7,lon:139.8},{key:'1-1',enb:'1',lat:35.71,lon:139.81},{key:'2-0',enb:'2',lat:35.72,lon:139.82}];
 """
 
 
 def _down2(tmp_path, body):
-    fns = (_fn("silentOf") + _fn("downShape") + _fn("drawDown", "function legendDown") + _fn("legendDown"))
+    fns = (_fn("silentOf") + _fn("downShape") + _fn("impactOf") + _fn("drawDown", "function legendDown") + _fn("legendDown"))
     return _node(tmp_path, DOWN2 + fns + body)
 
 
 @pytest.mark.skipif(NODE is None, reason="node 없음")
 def test_main_shading_is_the_detected_silent_cells_with_radius_only(tmp_path):
     out = _down2(tmp_path, """
-D={cells:CELLS}; MINI_Q={fault_id:355}; FOCUS='I1';
+D={cells:CELLS}; MINI_Q={fault_id:355}; FOCUS='I1'; IMPACT[355]={fault_id:355,cells:0,pts:[]};
 H.I1={incident_id:'I1',closed_ts:'x',members:[{incident_id:'A'}],groups:[]};
 SIL.I1={t:Date.now(),doc:{members:[{incident_id:'A',silent:['1-0','1-1','2-0','9-9']}],silent_r:{'1-0':353,'1-1':null,'2-0':441,'9-9':300}}};
 drawDown();
@@ -871,7 +876,7 @@ console.log(JSON.stringify({n:g.children.length, truth:gt.children.length, N:DOW
   rows:legendBox.children.map(c=>c.innerHTML), display:legendBox.style.display, fetched:FETCHED.length}));""")
     assert out["n"] == 2 and out["N"] == 2 and out["E"] == 2          # 반경 null · 지도에 없는 셀 하나씩은 그리지 않는다
     assert out["truth"] == 0 and len(out["rows"]) == 1               # 정답은 DOWN 이 없으면 없다
-    assert "정지 판정 영역" in out["rows"][0] and "eNB 2 · 셀 2" in out["rows"][0] and out["display"] == ""
+    assert "기지국 정지" in out["rows"][0] and "탐지 eNB 2 · 실제 eNB ?" in out["rows"][0] and out["display"] == ""
     assert out["fetched"] == 0                                        # 끝난 장애는 캐시가 있으면 다시 묻지 않는다
 
 
@@ -912,39 +917,107 @@ const asked1=FETCHED.length;
 
 
 @pytest.mark.skipif(NODE is None, reason="node 없음")
-def test_truth_layer_is_drawn_only_when_toggled_but_always_counted_and_toggle_row_exists(tmp_path):
+def test_truth_layer_is_always_drawn_with_the_detected_one_and_there_is_no_toggle(tmp_path):
+    """11-15 오후 — 「통화 끊김과 실제 정지를 묶어서 같이」: 정답 점선이 토글 없이 처음부터 그려지고, 한 줄에 묶인다."""
     out = _down2(tmp_path, """
-D={cells:CELLS}; MINI_Q={fault_id:355}; FOCUS='I1';
+D={cells:CELLS}; MINI_Q={fault_id:355}; FOCUS='I1'; IMPACT[355]={fault_id:355,cells:0,pts:[]};
 H.I1={incident_id:'I1',closed_ts:'x',members:[{incident_id:'A'}],groups:[]};
 SIL.I1={t:Date.now(),doc:{members:[{incident_id:'A',silent:['1-0']}],silent_r:{'1-0':353}}};
 DOWN={enbs:['1','2'],cells:[{key:'1-0',r_m:353},{key:'1-1',r_m:353},{key:'2-0',r_m:441}]};
-drawDown(); const off={truth:gt.children.length, main:g.children.length, T:DOWN_T_N, rows:legendBox.children.map(c=>c.className)};
-legendBox.children[1].onclick();                                  // 정답 줄을 누른다
-const on={truth:gt.children.length, main:g.children.length, rows:legendBox.children.map(c=>c.className), title:legendBox.children[1].title};
-legendBox.children[1].onclick();
-const off2={truth:gt.children.length};
-console.log(JSON.stringify({off,on,off2}));""")
-    assert out["off"] == {"truth": 0, "main": 1, "T": 3, "rows": ["lg-down", "lg-down lg-down-t"]}      # 꺼짐 — 수는 센다
-    assert out["on"]["truth"] == 3 and out["on"]["main"] == 1 and out["on"]["rows"][1] == "lg-down lg-down-t on"
-    assert "눌러서 켜고 끈다" in out["on"]["title"] and out["off2"]["truth"] == 0
+drawDown();
+console.log(JSON.stringify({truth:gt.children.length, main:g.children.length, T:DOWN_T_N,
+  rows:legendBox.children.map(c=>[c.className,c.innerHTML,!!c.onclick])}));""")
+    assert out["truth"] == 3 and out["main"] == 1 and out["T"] == 3
+    assert len(out["rows"]) == 1 and out["rows"][0][0] == "lg-down" and out["rows"][0][2] is False      # 한 줄 · 눌러도 아무 일 없다
+    assert "탐지 eNB 1 · 실제 eNB 2" in out["rows"][0][1]
+    assert "DOWN_T_ON" not in MAP_HTML and "lg-down-t" not in MAP_HTML
+
+
+@pytest.mark.skipif(NODE is None, reason="node 없음")
+def test_truth_is_not_drawn_without_a_quake_focus_even_when_down_is_stale(tmp_path):
+    out = _down2(tmp_path, """
+D={cells:CELLS}; MINI_Q=null; FOCUS=null;
+DOWN={enbs:['1'],cells:[{key:'1-0',r_m:353}]};
+drawDown(); console.log(JSON.stringify({truth:gt.children.length, main:g.children.length, imp:gi.children.length, fetched:FETCHED.length}));""")
+    assert out == {"truth": 0, "main": 0, "imp": 0, "fetched": 0}
+
+
+@pytest.mark.skipif(NODE is None, reason="node 없음")
+def test_impact_is_drawn_per_band_in_one_layer_each_and_counted_in_the_legend(tmp_path):
+    out = _down2(tmp_path, """
+D={cells:CELLS}; MINI_Q={fault_id:355}; FOCUS='I1';
+H.I1={incident_id:'I1',closed_ts:'x',members:[],groups:[]};
+SIL.I1={t:Date.now(),doc:{members:[],silent_r:{}}};
+IMPACT[355]={fault_id:355,cells:9,enb:4,pts:[[139.8,35.7,300,'3'],[139.8,35.7,300,'4'],[139.8,35.7,300,'4'],[139.8,35.7,300,'5-']]};
+drawDown();
+console.log(JSON.stringify({layers:gi.children.map(c=>[c.attrs['class'],c.children.length]), N:IMPACT_N,
+  rows:legendBox.children.map(c=>c.innerHTML)}));""")
+    assert out["layers"] == [["ib3", 1], ["ib4", 2], ["ib5m", 1]]          # 띠 순서 3 → 4 → 5약 · 위로 갈수록 진하게
+    assert out["N"] == 9 and "셀 9" in out["rows"][0] and "영향 지역(추정 진도)" in out["rows"][0]
+    assert "기지국 정지" in out["rows"][1]
+
+
+@pytest.mark.skipif(NODE is None, reason="node 없음")
+def test_impact_is_asked_once_per_fault_and_redrawn_when_it_arrives(tmp_path):
+    out = _down2(tmp_path, """
+D={cells:CELLS}; MINI_Q={fault_id:355}; FOCUS='I1';
+H.I1={incident_id:'I1',closed_ts:'x',members:[],groups:[]};
+SIL.I1={t:Date.now(),doc:{members:[],silent_r:{}}};
+IMPACT_REPLY={fault_id:355,cells:2,pts:[[139.8,35.7,300,'4']]};
+drawDown(); drawDown(); const early=gi.children.length, asked=FETCHED.filter(u=>u.includes('/impact')).length;
+(async()=>{ await new Promise(r=>setTimeout(r,30));
+  const late=gi.children.length; drawDown(); drawDown();
+  console.log(JSON.stringify({early,asked,late,total:FETCHED.filter(u=>u.includes('/impact')).length,url:FETCHED[0],
+    rows:legendBox.children.length})); })();""")
+    assert out["early"] == 0 and out["asked"] == 1 and out["late"] == 1 and out["total"] == 1
+    assert out["url"] == "/api/map/quake/355/impact" and out["rows"] == 2
+
+
+@pytest.mark.skipif(NODE is None, reason="node 없음")
+def test_impact_failure_or_server_error_draws_no_impact_and_keeps_the_down_row(tmp_path):
+    out = _down2(tmp_path, """
+D={cells:CELLS}; MINI_Q={fault_id:355}; FOCUS='I1';
+H.I1={incident_id:'I1',closed_ts:'x',members:[],groups:[]};
+SIL.I1={t:Date.now(),doc:{members:[],silent_r:{}}};
+IMPACT_REPLY={error:'규모·깊이를 모른다',enbs:[]};
+drawDown();
+(async()=>{ await new Promise(r=>setTimeout(r,30));
+  console.log(JSON.stringify({imp:gi.children.length, N:IMPACT_N, cached:IMPACT[355]===null,
+    rows:legendBox.children.map(c=>c.innerHTML)})); })();""")
+    assert out["imp"] == 0 and out["N"] == 0 and out["cached"] is True      # 모름 — 지어내지 않는다
+    assert len(out["rows"]) == 1 and "기지국 정지" in out["rows"][0]           # 정지 줄은 그대로
+
+
+@pytest.mark.skipif(NODE is None, reason="node 없음")
+def test_impact_network_failure_is_not_retried_in_a_tight_loop(tmp_path):
+    """받기가 실패(서버 내려감 · 네트워크)하면 한 번만 묻고 포기해야 한다 — 실패한 뒤 `finally` 가 `drawDown` 을 부르는데
+    캐시가 비어 있으면 다시 묻고 또 실패하고… 를 무한히 되풀이한다(11-15 맥스 구현 · 에스터 시험이 잡음)."""
+    out = _down2(tmp_path, """
+D={cells:CELLS}; MINI_Q={fault_id:355}; FOCUS='I1'; IMPACT_REPLY='boom';
+H.I1={incident_id:'I1',closed_ts:'x',members:[],groups:[]};
+SIL.I1={t:Date.now(),doc:{members:[],silent_r:{}}};
+drawDown();
+setTimeout(()=>{ console.log(JSON.stringify({asked:FETCHED.filter(u=>u.includes('/impact')).length, imp:gi.children.length}));
+  process.exit(0); },60);""")
+    assert out["imp"] == 0 and out["asked"] <= 2, f"실패한 영향 요청을 {out['asked']}번 되풀이했다"
 
 
 @pytest.mark.skipif(NODE is None, reason="node 없음")
 def test_legend_row_is_kept_with_zero_when_a_quake_is_selected_and_absent_otherwise(tmp_path):
     out = _down2(tmp_path, """
-D={cells:CELLS}; H.I1={incident_id:'I1',closed_ts:'x',members:[],groups:[]};
+D={cells:CELLS}; H.I1={incident_id:'I1',closed_ts:'x',members:[],groups:[]}; IMPACT[355]={fault_id:355,cells:0,pts:[]};
 SIL.I1={t:Date.now(),doc:{members:[],silent_r:{}}};
 MINI_Q={fault_id:355}; FOCUS='I1'; drawDown(); const quake=legendBox.children.map(c=>c.innerHTML);
 MINI_Q=null; DOWN_KEY=null; drawDown(); const none={rows:legendBox.children.length, main:g.children.length, display:legendBox.style.display};
 console.log(JSON.stringify({quake,none}));""")
-    assert len(out["quake"]) == 1 and "eNB 0 · 셀 0" in out["quake"][0]     # 0곳도 적는다 — 아직 못 잡은 것과 음영 없음의 구분
+    assert len(out["quake"]) == 1 and "탐지 eNB 0 · 실제 eNB ?" in out["quake"][0]     # 0곳도 적는다 — 아직 못 잡은 것과 음영 없음의 구분
     assert out["none"] == {"rows": 0, "main": 0, "display": "none"}         # 지진을 고르지 않았으면 줄도 음영도 없다
 
 
 @pytest.mark.skipif(NODE is None, reason="node 없음")
 def test_draw_down_skips_when_nothing_changed_and_waits_for_the_map(tmp_path):
     out = _down2(tmp_path, """
-MINI_Q={fault_id:355}; FOCUS='I1';
+MINI_Q={fault_id:355}; FOCUS='I1'; IMPACT[355]={fault_id:355,cells:0,pts:[]};
 H.I1={incident_id:'I1',closed_ts:'x',members:[{incident_id:'A'}],groups:[]};
 SIL.I1={t:Date.now(),doc:{members:[{incident_id:'A',silent:['1-0']}],silent_r:{'1-0':353}}};
 drawDown(); const early=g.children.length;                           // 지도 셀(D) 아직 없음 — 그리지 않는다

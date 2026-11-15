@@ -2810,6 +2810,9 @@ DISASTER_RECONNECT_S = (5.0, 30.0)
 #: `CM_QUAKE_EVENT.SHAPE` 에 적는 값 — 감쇠가 진원 거리라 영향은 늘 동심원이다. 칸은 `NOT NULL` 이라 남긴다.
 #: 이 방식에서 판정에 쓰는 칸은 발생 시각·진앙·깊이·규모·진도뿐이다(graphio EV-19)
 QUAKE_SHAPE = "ROUND"
+#: 환산 翠川 외(1999) 의 기울기 — 진도 1.72 차 = 지반 속도(PGV) 10배. 정지 eNB 를 뽑는 가중치(`quake_plan`)도
+#: 이 값으로 진도 차를 속도 비로 되돌린다(새 기준값이 아니라 같은 식의 상수다)
+QUAKE_I_SLOPE = 1.72
 
 
 def quake_intensity(magnitude: float, depth_km: float, epi_km: float, d: float = 0.0,
@@ -2824,7 +2827,7 @@ def quake_intensity(magnitude: float, depth_km: float, epi_km: float, d: float =
     x = math.hypot(epi_km, depth_km)
     log_pgv = (0.58 * magnitude + 0.0038 * depth_km + d - 1.29
                - math.log10(x + 0.0028 * 10 ** (0.5 * magnitude)) - 0.002 * x)
-    return 2.68 + 1.72 * math.log10(10 ** log_pgv * 1.41 * max(arv, 1e-6))
+    return 2.68 + QUAKE_I_SLOPE * math.log10(10 ** log_pgv * 1.41 * max(arv, 1e-6))
 
 
 def quake_radius_km(magnitude: float, depth_km: float, d: float, intensity: float) -> float:
@@ -2950,9 +2953,14 @@ def quake_plan(cells: list[Cell], q: dict, rng: random.Random, want: int = 25,
     * **폭주**: 진도 `quake_surge_intensity`(3) 이상인 셀 중 **진도가 높은 셀부터** ``want`` 개
       (`DISASTER_AREA_CELLS` 국소 25 · 넓은 80 · 지금의 상한 그대로). 진도 4 짜리 M6 이면 도쿄 전역이
       진도 3 이상이라, 상한이 없으면 전국 상한(`pemdb1.SURGE_CAP`)에 눌려 지역 폭주가 묽어진다
-    * **정지**: eNB 의 진도(셀 중 최대) `quake_down_intensity`(4.5 · 진도 5약) 이상인 eNB 만 후보다. 진도가
-      높은 eNB 부터 `quake_down_pct` 확률로 끄고 eNB 째 끈다(실제 정전·전송 단절은 eNB 째 꺼진다).
-      `quake_down_max_cells` 를 넘는 eNB 는 건너뛴다. **0곳이어도 정상이다**
+    * **정지**: eNB 의 진도(셀 중 최대) `quake_down_intensity`(4.5 · 진도 5약) 이상인 eNB 만 후보다. 후보 전체를
+      **흔들림에 비례한 가중 무작위 순서**로 세우고(가중치 = 지반 속도 비 ``10^((I − 4.5)/1.72)`` · 비복원 ·
+      Efraimidis–Spirakis 열쇠 ``u^(1/w)``) 그 순서대로 `quake_down_max_cells` 가 찰 때까지 eNB 째 끈다(실제
+      정전·전송 단절은 eNB 째 꺼진다). 넣으면 상한을 넘는 eNB 는 건너뛴다. 후보가 없으면 **0곳이어도 정상이다**.
+      2026-11-15 사용자 A안 — 전에는 진도가 높은 eNB 부터 `quake_down_pct`(30%) 관문으로 끄고 40셀에서 멈춰,
+      무른 땅(ARV 2.2~2.5)인 荒川・北에만 정지가 몰리고 中央・港・品川 후보(5약 이상)에는 차례가 오지 않았다
+      (F-355). 확률 관문은 걷었다 — 개수는 상한까지 ("정했던 만큼 어느 정도 꺼지게").
+      ``rng`` 는 장애 ID 시드라 같은 장애면 같은 eNB 가 꺼진다
     폭주 지역 = 폭주 셀 + 정지 셀(정답 지역 · 케이 지시)
     """
     inten = quake_cell_intensity(cells, q, arv)
@@ -2967,14 +2975,16 @@ def quake_plan(cells: list[Cell], q: dict, rng: random.Random, want: int = 25,
         if v is not None:
             e = str(c.enb_id)
             by_enb[e] = max(by_enb.get(e, v), v)
-    cand = sorted(((-v, e) for e, v in by_enb.items() if v >= FAULT.quake_down_intensity))
+    lo = FAULT.quake_down_intensity
+    # 순서를 정해 두고 난수를 뽑는다 — dict 순서에 기대면 같은 시드라도 다른 eNB 가 꺼질 수 있다
+    cand = sorted(e for e, v in by_enb.items() if v >= lo)
+    keyed = sorted(((rng.random() ** (1.0 / 10 ** ((by_enb[e] - lo) / QUAKE_I_SLOPE)), e) for e in cand),
+                   reverse=True)
     dead: list[str] = []
     n = 0
-    for _v, e in cand:
+    for _k, e in keyed:
         if n >= FAULT.quake_down_max_cells:
             break
-        if rng.random() >= FAULT.quake_down_pct / 100.0:
-            continue
         if n + len(per[e]) > FAULT.quake_down_max_cells:
             continue
         dead.append(e)

@@ -193,8 +193,10 @@ def test_the_down_threshold_is_exactly_4_5_and_the_probability_and_cap_apply(mon
     q = _weak()
     arv = {c.enb_id: 2.5 for c in cells}
     monkeypatch.setattr(S.FAULT, "quake_down_pct", 0.0)
-    assert S.quake_plan(cells, q, random.Random(0), 25, arv)[1] == []              # 확률 0 이면 후보여도 안 꺼진다
+    a0 = S.quake_plan(cells, q, random.Random(0), 25, arv)
+    assert a0[1], "확률 관문은 걷었다 — pct 0 이어도 후보가 있으면 꺼진다(11-15 A안)"
     monkeypatch.setattr(S.FAULT, "quake_down_pct", 100.0)
+    assert S.quake_plan(cells, q, random.Random(0), 25, arv) == a0                  # pct 는 결과에 영향이 없다
     monkeypatch.setattr(S.FAULT, "quake_down_max_cells", 7)
     _a, dead, dc = S.quake_plan(cells, q, random.Random(0), 25, arv)
     assert dead and len(dc) <= 7 and len(dc) == 3 * len(dead)                      # 최대 셀을 넘기는 eNB 는 건너뛴다(3셀씩)
@@ -207,7 +209,7 @@ def test_the_down_threshold_is_exactly_4_5_and_the_probability_and_cap_apply(mon
 
 @pytest.mark.parametrize("want", (25, 80))
 def test_surge_cells_are_the_highest_intensity_cells_not_the_nearest(want, monkeypatch):
-    monkeypatch.setattr(S.FAULT, "quake_down_pct", 0.0)
+    monkeypatch.setattr(S.FAULT, "quake_down_intensity", 99.0)                      # 정지 후보 없음 — 폭주 선택만 본다
     cells = _grid()
     q = _weak()
     far_soft = {c.enb_id: 1.8 for c in cells if haversine_km(35.0, 139.0, c.latitude, c.longitude) > 4.0}

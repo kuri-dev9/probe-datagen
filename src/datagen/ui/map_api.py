@@ -1220,3 +1220,82 @@ def _quake_down(fault_id: int) -> dict | None:
         keys = sorted(radius)                  # 옛 정답지(셀 목록 없음) — 꺼진 eNB 의 셀 전부
     out["cells"] = [{"key": k, "r_m": radius.get(k)} for k in keys]
     return out
+
+
+#: 진도 띠 — 기상청 계급 경계(계측 진도 3.5 = 震度4 · 4.5 = 震度5弱). 화면 색 단계만 가른다(판정 아님)
+_JMA_BANDS = ((4.5, "5-"), (3.5, "4"))
+_IMPACT_CACHE: dict = {}
+
+
+@router.get("/api/map/quake/{fault_id}/impact")
+def api_map_quake_impact(fault_id: int):
+    """그 27번 지진의 **영향 지역** — 생성 범위 eNB 마다 추정 진도(2026-11-15 사용자 "영향받았다고 표시되는 게
+    훨씬 넓어야 하고, 음영과 실제 정지는 좁아야").
+
+    * 진도는 생성기와 **같은 식·같은 지반 표**다(`scenarios.quake_cell_intensity` · `quake_arv_path`). 진원역 d 는
+      진원 지명(`HYPO_NAME`)으로 `quake_regions` 에서 찾고, 없으면 0 이다(graphio `fault_type_d` 기본과 같다).
+    * 폭주 문턱 `quake_surge_intensity`(진도 3) 이상인 셀이 영향 지역이다 — 새 기준이 아니라 생성기가 폭주
+      지역을 고르는 값이다. eNB 하나에 셀 진도가 여럿이면 가장 큰 값, 그리는 원은 그 eNB 셀 중 가장 큰 추정 커버리지
+      반경(`_cell_radius` 와 같은 MESH1K 행)이다. 반경을 모르는 eNB 는 그리지 않는다(지어내지 않는다).
+    * 규모·깊이를 모르면(옛 행) 계산하지 않는다 — ``error`` 와 빈 목록(불변규칙 17).
+    정적이라 장애마다 한 번 계산해 캐시한다
+    """
+    from .. import scenarios as S
+    from ..control import T_QUAKE
+
+    if fault_id in _IMPACT_CACHE:
+        return _IMPACT_CACHE[fault_id]
+    fc = S.FaultCfg.from_cfg(_pem_cfg().get("fault") or {})
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT LAT, LON, DEPTH_KM, MAGNITUDE, HYPO_NAME FROM {T_QUAKE} WHERE FAULT_ID = %s "
+                        "ORDER BY ORIGIN_TIME DESC LIMIT 1", [fault_id])
+            row = cur.fetchone()
+        if not row:
+            return {"error": f"F-{fault_id} 의 지진 정보가 없다", "enbs": []}
+        lat, lon, depth, mag, hypo = row
+        if depth is None or mag is None:
+            return {"error": "규모·깊이를 모른다 — 진도를 계산하지 않는다", "enbs": []}
+        d = next((r[4] for r in fc.quake_regions if r[0] == hypo), None)
+        q = {"lat": float(lat), "lon": float(lon), "depth_km": float(depth), "magnitude": float(mag),
+             "fault_type_d": d or 0.0}
+        cells = _cells(conn)
+        arv_path = fc.quake_arv_path
+        if arv_path and not Path(arv_path).is_absolute():
+            arv_path = str((HERE / arv_path).resolve())
+        arv = S.quake_arv(arv_path) if arv_path else {}
+        inten = S.quake_cell_intensity(cells, q, arv)
+        thr = fc.quake_surge_intensity
+        by_enb: dict[str, list] = {}
+        n_cells = 0
+        for c in cells:
+            v = inten.get(c.cell_key)
+            if v is None or v < thr:
+                continue
+            n_cells += 1
+            e = by_enb.setdefault(str(c.enb_id), [c.longitude, c.latitude, v, 0])
+            e[2] = max(e[2], v)
+            e[3] += 1
+        enbs = sorted(by_enb)
+        radius: dict[str, float] = {}
+        if enbs:
+            with conn.cursor() as cur:
+                cur.execute("SELECT ENB_ID, MAX(RADIUS_M) FROM CM_CELL_GEO_MAP WHERE AREA_LEVEL = 'MESH1K' "
+                            "AND ENB_ID IN (" + ",".join(["%s"] * len(enbs)) + ") GROUP BY ENB_ID", enbs)
+                radius = {str(e): float(r) for e, r in cur.fetchall() if r is not None}
+    except pymysql.err.ProgrammingError as e:
+        return {"error": f"표를 읽지 못했다: {e.args[-1] if e.args else e}", "enbs": []}
+    finally:
+        conn.close()
+
+    def band(v: float) -> str:
+        return next((b for lo, b in _JMA_BANDS if v >= lo), "3")
+    pts = [[round(by_enb[e][0], 6), round(by_enb[e][1], 6), round(radius[e]), band(by_enb[e][2])]
+           for e in enbs if e in radius]
+    vals = [v for v in inten.values()]
+    out = {"fault_id": fault_id, "threshold": thr, "cells": n_cells, "enb": len(enbs), "pts": pts,
+           "max": round(max(vals), 2) if vals else None, "arv": bool(arv),
+           "d": d, "d_source": "region" if d is not None else "default"}
+    _IMPACT_CACHE[fault_id] = out
+    return out
