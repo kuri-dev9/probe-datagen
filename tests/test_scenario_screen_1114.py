@@ -133,15 +133,25 @@ def test_control_scenarios_use_the_table_names():
     assert got == want
 
 
+#: 현황 화면 목록 줄 이름(11-16 사용자 "한 줄로") — 14~27번. 표(원인-쉬운이름)·`control.SCENARIOS` 이름은
+#: 긴 정본 그대로고 화면 정의 파일(`scenario_report*.json`)만 줄였다. 둘이 갈라진 것은 의도다
+LIST_NAMES = {
+    14: "역 주변 저녁 러시 혼잡", 15: "야마노테선 4G↔5G 전환 때 잠깐 멈춤",
+    16: "5G 잡히는데 느림 (4G 앵커 혼잡)", 17: "5G 장애로 4G에 몰림",
+    18: "5G 데이터 관문(UPF) 자원 바닥", 19: "5G 접속 관리(AMF) 과부하 확산",
+    20: "음성 통화만 안 걸림 (VoNR)", 21: "동영상 서버(CDN) 느림", 22: "결제 앱 느림 (DNS 지연)",
+    23: "행사장 인파로 사진 올리기 막힘", 24: "기지국 증설 뒤 이용자 이동 (장애 아님)",
+    25: "설정 변경 뒤 통화 끊김 계단 증가 (SON)", 26: "SW 업데이트한 기종만 접속 실패",
+    27: "지진 — 통화 몰림·기지국 정지",
+}
+
+
 @pytest.mark.parametrize("fn", ["scenario_report.json", "scenario_report_v50.json"])
-def test_report_names_follow_the_table(fn):
-    want = _md_names()
+def test_report_names_are_the_one_line_list_names(fn):
     rep = json.loads((ROOT / "config" / fn).read_text(encoding="utf-8"))
     rows = rep.get("scenarios", rep) if isinstance(rep, dict) else rep
-    if isinstance(rows, dict):
-        rows = [dict(v, no=int(k)) if isinstance(v, dict) else v for k, v in rows.items()]
-    got = {int(r["no"]): r["name"] for r in rows if isinstance(r, dict) and "no" in r and int(r["no"]) in want}
-    assert got == {n: want[n] for n in got} and len(got) == 14
+    got = {int(r["no"]): r["name"] for r in rows if isinstance(r, dict) and 14 <= int(r.get("no", 0)) <= 27}
+    assert got == LIST_NAMES
 
 
 def test_scenario_ja_check_is_all_zero():

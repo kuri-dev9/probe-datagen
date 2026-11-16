@@ -41,12 +41,19 @@
   .unk { color:var(--yellow); }
   .dim { color:var(--dim); }
   details.sc { background:var(--panel); border:1px solid var(--line); border-radius:8px; margin-bottom:6px; }
-  details.sc>summary { display:grid; grid-template-columns:24px minmax(130px,1fr) 58px 300px minmax(0,2fr); gap:10px;
+  /* 줄 오른쪽 설명은 뺐다(사용자 11-16 — 설명은 펼친 카드에 있다). 이름은 한 줄이다 */
+  details.sc>summary { display:grid; grid-template-columns:24px minmax(0,1fr) 150px 300px; gap:10px;
             align-items:baseline; padding:6px 12px; cursor:pointer; list-style:none; }
   summary::-webkit-details-marker { display:none; }
   details.sc>summary:hover { background:var(--hover); border-radius:8px; }
   summary .no { color:var(--dim); font-variant-numeric:tabular-nums; }
-  summary .nm { font-weight:600; }
+  summary .nm { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  /* 배지 자리는 늘 비워 둔다 — 판정 글자가 줄마다 같은 자리에 오게 */
+  summary .stc { display:grid; grid-template-columns:64px auto; gap:6px; align-items:baseline; white-space:nowrap; }
+  summary .stc>.eq { justify-self:start; }
+  /* 장비 장애 배지 — 코어 장비가 원인인 시나리오(나중에 빠질 수 있어 따로 보이게 · 사용자 11-16) */
+  .eq { font-size:10.5px; line-height:16px; padding:0 5px; border-radius:4px; border:1px solid #8a94a3;
+        color:#3b434f; background:#e6e9ee; }
   summary .st { font-size:12px; font-weight:600; }
   /* 단계 네 칸 — 색만으로 말하지 않게 기호를 함께 둔다 */
   .sgs { display:flex; gap:3px; }
@@ -54,9 +61,6 @@
         text-align:center; white-space:nowrap; border:1px solid transparent; }
   .g-ok { background:#c9dacf; color:#234a35; } .g-warn { background:#e0d6b8; color:#54410f; }
   .g-bad { background:#e3c9c6; color:#6f2b26; } .g-dim { border-color:var(--line); color:var(--dim); }
-  /* 한 줄로 자른다 — 전체는 마우스를 올리면 나온다(`#tip`) */
-  summary .ln { font-size:12px; color:#3b434f; line-height:1.45; min-width:0;
-                white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   /* 접는 칸 — 처음에는 접혀 있다 */
   details.fold { margin-top:12px; }
   details.fold>summary { cursor:pointer; list-style:none; font-size:12.5px; font-weight:600; color:var(--accent); }
@@ -74,8 +78,8 @@
   .desc p { margin:0 0 3px; }
   .stg td:first-child { white-space:nowrap; } .stg td:nth-child(2) { white-space:nowrap; }
   @media (max-width:980px) {
-    details.sc>summary { grid-template-columns:24px minmax(0,1fr) 58px; }
-    summary .sgs, summary .ln { grid-column:1/-1; } }
+    details.sc>summary { grid-template-columns:24px minmax(0,1fr) 150px; }
+    summary .sgs { grid-column:1/-1; } }
   .l3t td:nth-child(1), .l3t td:nth-child(2), .l3t td:nth-child(5) { white-space:nowrap; }
   /* 답 원문 — 줄바꿈을 살리고 너무 길면 칸 안에서 스크롤한다 */
   .ans { white-space:pre-wrap; max-height:260px; overflow:auto; font-size:12px; }
@@ -465,7 +469,7 @@ function detail(s){
         l3Badge(l3OfFault(s,x.fault)),val(x.summary)])) : '')
     +`</div></details></div>`;
 }
-let DOC=null, HOW={}, TIMING={}, RAW=null, PICK='all', JA_LEFT=0, HASH_DONE=false, L3LOG=[], L3BROKEN=0;
+let EQUIP=new Set(), DOC=null, HOW={}, TIMING={}, RAW=null, PICK='all', JA_LEFT=0, HASH_DONE=false, L3LOG=[], L3BROKEN=0;
 const OPEN=new Set();
 //: 생성량 탭(사용자 11-10) — 15% 가 시나리오 검증 기준이고 50% 결과는 따로 쌓는다. 주소의 `?vol=50` 으로
 //: 남겨 새로고침·링크에서도 같은 탭이 열린다. `#no=23` 은 해시라 함께 쓴다
@@ -526,11 +530,11 @@ function render(){
   };
   const rows=all.filter(hit);
   document.getElementById('list').innerHTML=rows.length ? rows.map(s=>{ const k=stOf(s);
-    const ln=tr(HOW[String(s.no)],'brief')??s.what;
+    const eq=EQUIP.has(s.kind) ? `<span class=eq>${esc(T('장비 장애'))}</span>` : '<span></span>';
     return `<details class=sc data-k="${esc(s.no)}"${OPEN.has(String(s.no))?' open':''}><summary>`
-      +`<span class=no>${esc(s.no)}</span><span class=nm>${s.name==null?unk():esc(s.name)}</span>`
-      +`<span class="st ${stCls(k)}">${esc(stName(k))}</span>`+sgCells(s)
-      +`<span class=ln data-tip="${esc(ln??'')}">${ln==null?unk():esc(ln)}</span></summary>${fromFault(s)}${detail(s)}</details>`;
+      +`<span class=no>${esc(s.no)}</span><span class=nm data-tip="${esc(s.name??'')}">${s.name==null?unk():esc(s.name)}</span>`
+      +`<span class=stc>${eq}<span class="st ${stCls(k)}">${esc(stName(k))}</span></span>`+sgCells(s)
+      +`</summary>${fromFault(s)}${detail(s)}</details>`;
   }).join('') : `<p class=dim>${esc(T('해당하는 시나리오가 없습니다'))}</p>`;
 }
 //: 장애 창에서 넘어온 장애가 이 카드의 어느 회차에도 없으면 — 판정 전이다. 아래 "최신 결과"가 그 장애인 줄
@@ -558,8 +562,8 @@ async function load(){
   // 만드는 방법은 없으면 칸만 숨긴다. 깨진 것은 말한다 — 조용히 숨기면 없는 것으로 읽힌다
   warn(d.how_error ? T('자료 파일이 깨졌습니다 — {p} · {e}',{p:d.how_error.path,e:d.how_error.detail}) : '');
   // 내용이 그대로면 다시 그리지 않는다 — 읽던 자리와 스크롤을 건드리지 않게
-  const raw=JSON.stringify([d.report,d.how,d.report_ja,d.glossary,d.timing,d.l3,d.l3_broken]); if(raw===RAW) return;
-  RAW=raw; DOC=LANG==='ja'&&d.report_ja||d.report; HOW=d.how||{}; TIMING=d.timing||{}; JA_LEFT=d.ja_left||0;
+  const raw=JSON.stringify([d.equip_kinds,d.report,d.how,d.report_ja,d.glossary,d.timing,d.l3,d.l3_broken]); if(raw===RAW) return;
+  RAW=raw; EQUIP=new Set(Array.isArray(d.equip_kinds)?d.equip_kinds:[]); DOC=LANG==='ja'&&d.report_ja||d.report; HOW=d.how||{}; TIMING=d.timing||{}; JA_LEFT=d.ja_left||0;
   L3LOG=Array.isArray(d.l3)?d.l3:[]; L3BROKEN=d.l3_broken||0;
   setGloss(d.glossary);
   render();

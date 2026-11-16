@@ -97,6 +97,25 @@ def api_glossary():
     return {"terms": gloss["doc"]["terms"] if gloss["ok"] else {}}
 
 
+#: 장비 장애로 묶는 정답 분류 — 생성기 정의(`KIND_SPECS.truth_category`)의 코어 두 갈래(사용자 11-16 "장비장애를
+#: 별도 표시 · 나중에 제외될 수도"). 새 기준이 아니라 이미 있는 분류를 읽는다
+EQUIP_CATEGORIES = ("CORE_UP", "CORE_CP")
+
+
+def _equip_kinds() -> list[str]:
+    """장애 종류(`kind`) 중 장비 장애 — 화면이 목록 줄에 배지를 단다. 못 읽으면 빈 목록(배지 없음)"""
+    try:
+        from ..faults import KIND_SPECS
+    except Exception:  # noqa: BLE001 — 배지는 보조 표시다. 못 읽어도 현황은 보여 준다
+        return []
+    out = []
+    for k, sp in KIND_SPECS.items():
+        cat = sp.get("truth_category") if isinstance(sp, dict) else getattr(sp, "truth_category", None)
+        if cat in EQUIP_CATEGORIES:
+            out.append(k)
+    return sorted(out)
+
+
 @router.get("/api/scenario-report")
 def api_scenario_report(volume: int = 15):
     """요청마다 파일을 읽는다 — 캐시하면 재시작 전까지 옛 판정이 보인다.
@@ -112,7 +131,8 @@ def api_scenario_report(volume: int = 15):
     rep = _read_report(report_file, "scenarios", list)
     if not rep["ok"]:
         return rep
-    out = {"ok": True, "report": rep["doc"], "how": {}, "timing": _timing(rep["doc"])}
+    out = {"ok": True, "report": rep["doc"], "how": {}, "timing": _timing(rep["doc"]),
+           "equip_kinds": _equip_kinds()}
     how = _read_report(SCENARIO_HOW, "scenarios", dict)
     if how["ok"]:
         out["how"] = how["doc"]["scenarios"]
