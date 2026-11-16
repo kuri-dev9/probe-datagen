@@ -24,6 +24,7 @@ README.md
 # 그것만 남긴다. 이미지가 350MB 가벼워지고 반출·빌드가 그만큼 빨라진다.
 data/pemdb1/*
 !data/pemdb1/_distributions.json
+!data/pemdb1/ue_share_jp.json
 data/repairs
 
 # ── 현장 설정은 이미지에 굽지 않는다 (2026-10-20) ─────────────────

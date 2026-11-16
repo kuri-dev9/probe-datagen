@@ -102,8 +102,14 @@
  /* 움직이는 동안(끌기·휠·날기)은 **이미 그린 그림을 밀고 키운다** — 일반 지도와 같은 방식이다(사용자 11-09
     "줌·이동이 느리다"). 도형 수만 개를 프레임마다 다시 그리지 않고 합성만 한다. 멈추면 viewBox 를 한 번
     바꿔 다시 그린다. 원래 화면 밖에 있던 부분도 보이게 그 동안만 넘침을 연다 */
- #wrap.gest #svg,#wrap.gest #geofx{overflow:visible;will-change:transform}
- #svg,#geofx{transform-origin:0 0}
+ #wrap.gest #svg,#wrap.gest #geofx,#wrap.gest .ovl{overflow:visible;will-change:transform}
+ #svg,#geofx,.ovl{transform-origin:0 0}
+ /* 움직이는 지진 효과의 겉층(정지 깜박임 · 셀 물결 셋 · 정답 고리 — 2026-11-16). 지도 본체 SVG 안에서 그룹 투명도를
+    돌리면 매 프레임 본체 전체를 다시 칠해, 칠하기를 못 따라간 타일이 **빈 띠**로 남았다(사용자 "UI 깨진다"). 그래서
+    `#geofx` 처럼 본체와 같은 viewBox 의 **별도 svg** 에 그리고 요소째 `opacity` 만 돌린다 — 합성만 한다.
+    겉층 안의 **그룹**에 투명도를 돌리면 안 된다 — 한 장으로 합쳐 그룹째 돌려 봤더니 레티나에서 확대하면 화면 전체가
+    비었다(11-16 실측). 도는 것은 진행 중인 지진을 고른 뒤 잠깐뿐이다(`fxGate` · 아래 「도는 조건」) */
+ .ovl{position:absolute;inset:0;pointer-events:none}
  svg{width:100%;height:100%;display:block}
  .adm{fill:var(--land);stroke:var(--land-line);stroke-width:1px;
    vector-effect:non-scaling-stroke}
@@ -446,33 +452,68 @@
    background:color-mix(in srgb,var(--sea) 88%,transparent);border:1px solid var(--land-line);border-radius:6px;
    padding:4px;user-select:none}
  #mini svg{display:block;width:100%;height:auto;overflow:hidden}
+ /* 진앙 ★·물결·규모는 해안선 위 **별도 svg** 에(11-16 실측) — 같은 svg 에서 물결을 키우면 매 프레임 관동 해안선
+    전체를 다시 칠했다. 같은 viewBox 를 같은 칸에 겹친다 */
+ #mini #miniFx{position:absolute;left:4px;top:4px;width:calc(100% - 8px);height:calc(100% - 8px);pointer-events:none}
  /* 미니 지도가 떠 있으면 장애 이력이 그 위에서 멈춘다 — 이력(z 4)이 길게 펼쳐지면 미니 지도를 덮었다 */
  #wrap.mini-on #flist{max-height:calc(100% - 330px)}
  #mini .ml{fill:var(--land);stroke:var(--land-line);stroke-width:.6px;vector-effect:non-scaling-stroke}
  #mini .mv{fill:none;stroke:var(--map-fg);stroke-width:1px;vector-effect:non-scaling-stroke;opacity:.8}
  /* ★ 에서 퍼지는 물결 — 사용자 "너무 과하지 않게". 얇은 선 셋이 3s 에 한 번씩 시차로 번지며 옅어진다.
     움직임을 줄이라는 설정이면 물결을 아예 그리지 않는다(멈춘 원은 진앙 표시를 어지럽힌다) */
- #mini .mw circle{fill:none;stroke:#ff4d5e;stroke-width:1px;vector-effect:non-scaling-stroke;opacity:0;
+ /* 11-16 사용자 "붉은 파형 표시 좀 세게" — 원 다섯·굵게·진하게·더 넓게(반지름 미니 폭의 30%). 표시만이다 */
+ #mini .mw circle{fill:#ff2d40;fill-opacity:.08;stroke:#ff2d40;opacity:0;
    transform-box:fill-box;transform-origin:center;animation:miniWave 3s ease-out infinite}
- #mini .mw circle:nth-child(2){animation-delay:-1s}
- #mini .mw circle:nth-child(3){animation-delay:-2s}
- @keyframes miniWave{0%{transform:scale(.15);opacity:.45}100%{transform:scale(1);opacity:0}}
- @media (prefers-reduced-motion:reduce){#mini .mw{display:none}}
+ #mini .mw circle:nth-child(2){animation-delay:-.6s}
+ #mini .mw circle:nth-child(3){animation-delay:-1.2s}
+ #mini .mw circle:nth-child(4){animation-delay:-1.8s}
+ #mini .mw circle:nth-child(5){animation-delay:-2.4s}
+ @keyframes miniWave{0%{transform:scale(.08);opacity:1}70%{opacity:.45}100%{transform:scale(1);opacity:0}}
+ /* 지진이 진행 중이면(`quake.active`) 전도 테두리가 붉게 맥박친다 — 끝나면 꺼진다(11-16 사용자) */
+ /* 맥박은 그림자를 바꾸지 않고(매 프레임 칠하기) 고정 그림자를 단 의사 요소의 opacity 만 돌린다 — 합성만 한다 */
+ #mini.live{border-color:#ff4d5e}
+ #mini.live::after{content:'';position:absolute;inset:-1px;border-radius:6px;pointer-events:none;
+   box-shadow:0 0 0 2px #ff4d5e,0 0 18px 6px #ff4d5ecc;opacity:.2;
+   animation:miniPulse 1.6s ease-in-out infinite}
+ @keyframes miniPulse{0%,100%{opacity:.2}50%{opacity:1}}
+ @media (prefers-reduced-motion:reduce){#mini .mw{display:none} #mini.live::after{animation:none;opacity:.8}}
  /* 정지 기지국 영역(27번 · 2026-11-15 사용자 "기지국이 꺼졌으니 영향받는 지형을 어두운 색 음영으로") —
     꺼진 셀의 추정 커버리지 원을 **한 층으로** 칠한다. 원마다 투명도를 주면 겹친 곳이 더 진해져 "더 안 터진다"로
     읽히므로 원은 불투명하게, 투명도는 층(g)에 준다. 폭주(주황 물결)와 겹쳐도 색·모양이 갈린다 */
  #gDown{pointer-events:none}
  /* 음영지역(2026-11-15 사용자 "회색을 칠하긴 했는데 음역지역이라는 느낌이 덜하네") — 셀 원 하나하나가 흐린 점으로
     보였다. 세 겹으로 **한 덩어리**를 만든다: 테두리 원(굵은 선) 위에 같은 원을 칠해 안쪽 선을 덮으면 바깥 둘레만
-    남고, 그 위에 빗금. 투명도는 층(#gDown) 하나에만 준다 — 겹친 곳이 진해지지 않는다. 바탕은 어둡게 눌러 「꺼진
+    남고, 그 위에 빗금(11-16 빗금은 걷었다 — 아래). 투명도는 층(#gDown) 하나에만 준다 — 겹친 곳이 진해지지 않는다. 바탕은 어둡게 눌러 「꺼진
     땅」으로, 빗금·둘레는 밝게(어두운 테마). 밝은 테마는 반대. 색은 표시만이다 */
- #gDown{--dn-base:#05070a;--dn-edge:#d8dee9;--dn-hatch:#aeb6c2;opacity:.82}
- body[data-theme=light] #gDown{--dn-base:#4b5563;--dn-edge:#111827;--dn-hatch:#111827;opacity:.6}
- #gDown .do ellipse{fill:var(--dn-base);stroke:var(--dn-edge);stroke-width:3px;vector-effect:non-scaling-stroke}
+ /* 11-16 사용자 "빗금 치지 말고 어두운색으로 칠하고 그 자체가 깜박이듯이 — 구멍 난 것처럼". 빗금 층을 걷고 어두운
+    바탕만 남겨 층째 불투명도를 오르내린다(완전 불투명은 아니다 — 선로·경계가 비친다). 둘레 선은 옅게 */
+ #gDown{--dn-base:#020305;--dn-edge:#000}
+ body[data-theme=light] #gDown{--dn-base:#1f2937;--dn-edge:#111827}
+ #downfx{opacity:.8;animation:downBlink 2.4s ease-in-out infinite}
+ body[data-theme=light] #downfx{opacity:.6;animation-name:downBlinkL}
+ @keyframes downBlink{0%,100%{opacity:.88}50%{opacity:.5}}
+ @keyframes downBlinkL{0%,100%{opacity:.7}50%{opacity:.35}}
+ #gDown .do ellipse{fill:var(--dn-base);stroke:var(--dn-edge);stroke-width:2px;vector-effect:non-scaling-stroke}
  #gDown .df ellipse{fill:var(--dn-base)}
- #gDown .dh ellipse{fill:url(#downHatch)}
- #downHatch rect{fill:#aeb6c2}
- body[data-theme=light] #downHatch rect{fill:#111827}
+ /* 셀 안 물결(11-16 사용자 "영향도가 셀 가운데서 밖으로 퍼져 나가듯이") — 영향 셀마다 원 반지름의 35·65·95% 고리를
+    세 층에 나눠 그리고 **층째** 불투명도만 시차로 돌린다(셀 수백 개여도 원마다 애니메이션을 걸지 않는다).
+    끌기·확대 중에는 멈춘다(`#wrap.gest`) */
+ .ripfx ellipse{fill:none;stroke-width:1.6px;vector-effect:non-scaling-stroke}
+ .ripfx .ry ellipse{stroke:#f2c230} .ripfx .rr ellipse{stroke:#ff4d5e}
+ .ripfx{opacity:0;animation:cellRip 2.4s linear infinite}
+ #ripfx1{animation-delay:.8s} #ripfx2{animation-delay:1.6s}
+ @keyframes cellRip{0%{opacity:0}15%{opacity:.75}55%{opacity:0}100%{opacity:0}}
+ #wrap.gest #downfx,#wrap.gest .ripfx{animation-play-state:paused}
+ /* **도는 조건**(2026-11-16 케이 지시 · 사용자 "여전히 조금 깨지고 느리다"): 진행 중인 지진(`quake.active`)을 고른
+    뒤 `FX_SEC` 동안만 돈다(`body.fxlive`). 그 밖(지난 지진 · 시간이 지남)은 애니메이션을 **떼고** 멈춘 모습으로
+    둔다 — 멈춤(paused)만 하면 합성 층이 남는다. 미니 물결은 그 자리에서 멈춰 다섯 크기로 남는다 */
+ body:not(.fxlive) #downfx{animation:none;opacity:.8}
+ body[data-theme=light]:not(.fxlive) #downfx{opacity:.6}
+ body:not(.fxlive) .ripfx{animation:none} body:not(.fxlive) #ripfx0{opacity:.35}
+ body:not(.fxlive) #mini.live::after{animation:none;opacity:.8}
+ body:not(.fxlive) #legend s.sdown{animation:none}
+ body:not(.fxlive) #mini .mw circle{animation-play-state:paused}
+ @media (prefers-reduced-motion:reduce){#downfx{animation:none} .ripfx{display:none}}
  /* 셀 상태 음영(2026-11-15 사용자 "통화 품질이 적당히 나빠지면 노랑, 심하게 나빠지면 빨강") — 정지(회색)와 같은
     원·같은 층 투명도 방식. 색은 표시만이고 노랑·빨강을 가르는 것은 탐지가 매긴 심각도 등급이다 */
  #gSevY,#gSevR{pointer-events:none}
@@ -489,8 +530,8 @@
     어느 것과도 겹치지 않는 색이고, 채우지 않아 아래 탐지 음영이 그대로 비친다(놓친 곳은 고리만 남는다) */
  #gDownT ellipse{fill:none;stroke:#22c55e;stroke-width:2.5px;vector-effect:non-scaling-stroke}
  body[data-theme=light] #gDownT ellipse{stroke:#15803d}
- #legend s.sdown{background:repeating-linear-gradient(45deg,#aeb6c2 0 1.5px,#05070acc 1.5px 5px);border:1px solid #d8dee9;border-radius:2px}
- body[data-theme=light] #legend s.sdown{background:repeating-linear-gradient(45deg,#111827 0 1.5px,#4b556399 1.5px 5px);border-color:#111827}
+ #legend s.sdown{background:#020305;border:1px solid #6b7280;border-radius:2px;animation:downBlink 2.4s ease-in-out infinite}
+ body[data-theme=light] #legend s.sdown{background:#1f2937;border-color:#111827}
  #legend .lg-down b{margin-left:auto;opacity:.7;font-weight:400;padding-left:8px}
 /* 영향 지역(추정 진도 · 2026-11-15 사용자 "영향은 넓게, 정지는 좁게") — 정지 음영 아래 옅은 띠. 진도 3 · 4 · 5약을
     조금씩 진하게. 색은 하나(호박색)이고 층 투명도만 다르다 — 과하지 않게 */
@@ -558,14 +599,16 @@
       <filter id=kdeblurS x="-150%" y="-150%" width="400%" height="400%">
         <feGaussianBlur stdDeviation="0.0022"/>
       </filter>
-      <!-- 정지 음영 빗금. 좌표가 도(degree) 단위라 칸 크기는 `hatchFit` 이 화면 픽셀에 맞춰 바꾼다(줌해도 같은 간격) -->
-      <pattern id=downHatch patternUnits=userSpaceOnUse width="0.001" height="0.001" patternTransform="rotate(45)">
-        <rect x="0" y="0" width="0.0002" height="0.001"></rect>
-      </pattern>
+      <!-- 정지 영역 구멍 — 흰 바탕에 정지 원을 검게. 노랑·빨강·물결 층이 정지와 겹친 곳은 그리지 않는다(11-16 사용자
+           "셀 이벤트랑 겹치는 부분은 셀 이벤트 안 보이게"). 좌표는 지도와 같은 도 단위다 -->
+      <mask id=downMask maskUnits=userSpaceOnUse x="100" y="-70" width="80" height="60"><rect x="100" y="-70" width="80" height="60" fill="#fff"></rect><g id=downMaskG fill="#000"></g></mask>
     </defs>
-    <g id=gAdm></g><g id=gGreen></g><g id=gChome></g><g id=gRoad></g><g id=gRiv></g><g id=gRail></g><g id=gYmt></g><g id=gAll></g><g id=gKde></g><g id=gImpact></g><g id=gSevY></g><g id=gSevR></g><g id=gDown></g><g id=gDownT></g><g id=gGeo></g><g id=gCell></g>
+    <g id=gAdm></g><g id=gGreen></g><g id=gChome></g><g id=gRoad></g><g id=gRiv></g><g id=gRail></g><g id=gYmt></g><g id=gAll></g><g id=gKde></g><g id=gImpact></g><g id=gSevY></g><g id=gSevR></g><g id=gGeo></g><g id=gCell></g>
     <g id=gPick></g><g id=gStn></g><g id=gNode></g></svg>
   <svg id=geofx></svg>
+  <svg id=downfx class=ovl><g id=gDown></g></svg>
+  <svg id=ripfx0 class="ovl ripfx"><g></g></svg><svg id=ripfx1 class="ovl ripfx"><g></g></svg><svg id=ripfx2 class="ovl ripfx"><g></g></svg>
+  <svg id=truthfx class=ovl><g id=gDownT></g></svg>
   <div id=fx><div id=fxin><div id=fxh></div><div id=fxb></div></div><div id=fxe><svg></svg><svg></svg><svg></svg></div></div>
   <div id=glob></div>
   <div id=hq title="NTT docomo 본사 (千代田区永田町2-11-1)&#10;PGW 16대를 한 점으로 — 실제 PGW 위치가 아니다&#10;누르면 SGW 에서 모이는 선이 나온다">
@@ -581,7 +624,7 @@
   <div id=labels></div>
   <div id=loading>지도 불러오는 중…</div>
   <div id=tip></div><div id=legend></div><div id=scale></div><div id=src></div>
-  <div id=mini title="진앙 — 관동 지도 (움직이지 않는다)"><svg id=miniSvg></svg></div>
+  <div id=mini title="진앙 — 관동 지도 (움직이지 않는다)"><svg id=miniSvg></svg><svg id=miniFx></svg></div>
 </div>
 <script>
 /*__I18N__*/
@@ -592,6 +635,10 @@ const el=(n)=>document.createElementNS('http://www.w3.org/2000/svg',n);
 applyLang();
 const svg=document.getElementById('svg'), tip=document.getElementById('tip');
 const geofx=document.getElementById('geofx');
+//: 본체와 viewBox·이동을 같이 하는 겉층 — 구역 효과(`geofx`)와 지진 효과(정지 깜박임·셀 물결·정답 고리)
+const OVL=[geofx, ...document.querySelectorAll('svg.ovl')];
+const ovlVB=v=>{ for(const o of OVL) o.setAttribute('viewBox',`${v.x} ${v.y} ${v.w} ${v.h}`); };
+const ovlTr=t=>{ for(const o of OVL) o.style.transform=t; };
 //: 그려 둔 viewBox(`VBC`)와 지금 보여야 할 화면(`VB`) — 움직이는 동안은 둘이 다르고, 그 차이를 CSS transform 으로
 //: 메운다. `GEST` 동안에는 다시 그리기·라벨 배치를 미룬다
 let VBC=null, GEST=null, GEST_RAF=0;
@@ -622,10 +669,10 @@ function gestShow(pan){
     // 안에서만 밀고 키우면 칠할 넓이가 화면의 4배를 넘지 않고, 다시 그리기는 날기 한 번에 몇 번뿐이다
     if(k<GEST_K_MIN||k>1/GEST_K_MIN){
       VBC={...VB}; svg.setAttribute('viewBox',`${VB.x} ${VB.y} ${VB.w} ${VB.h}`);
-      geofx.setAttribute('viewBox',`${VB.x} ${VB.y} ${VB.w} ${VB.h}`);
+      ovlVB(VB);
       ({k,tx,ty}=gestXform()); }
     const tr=`translate(${tx}px,${ty}px) scale(${k})`;
-    svg.style.transform=tr; geofx.style.transform=tr;
+    svg.style.transform=tr; ovlTr(tr);
     // 끌기(축척 그대로)면 화면 좌표의 겉층(라벨·효과·본사)도 같이 민다 — 숨기지 않아 깜빡이지 않는다
     for(const id of ['labels','fx','hq']) document.getElementById(id).style.translate=GEST.pan&&Math.abs(k-1)<1e-6?`${tx}px ${ty}px`:'';
     drawScale(); });
@@ -923,11 +970,24 @@ function quakeLine(){
   if(q.origin_time) bits.push(T('{t} 발생',{t:esc(hm(q.origin_time))}));
   return bits.length?`<span class=plain><b>${T('지진')}</b> ${bits.join(' · ')}</span>`:'';
 }
+//: 효과가 도는 조건 — 지진을 고른 뒤 `FX_SEC` 초 동안만 — 지난 지진도 고르면 돈다(2026-11-16 사용자 "켠 뒤로 20초"). 처음엔 진행 중만이었다(사용자 "깨지고 느리다").
+//: 같은 장애를 10초마다 다시 받아도 고른 시각은 그대로 둔다. 표시만이다 — 판정과 무관
+const FX_SEC=20;
+let FX_KEY=null, FX_T0=0, FX_TM=null;
+function fxGate(){
+  const q=MINI_Q, k=q&&QFOR===FOCUS?FOCUS+'|'+q.fault_id:null;
+  if(k!==FX_KEY){ FX_KEY=k; FX_T0=Date.now(); }
+  const left=FX_T0+FX_SEC*1000-Date.now(), on=!!(k&&left>0);
+  document.body.classList.toggle('fxlive', on);
+  clearTimeout(FX_TM); if(on) FX_TM=setTimeout(fxGate, left+50);
+}
 function drawMini(){
+  fxGate();
   const box=document.getElementById('mini'), svg=document.getElementById('miniSvg');
   const q=MINI_Q;
-  if(!q||!MINI||!MINI.bbox){ box.style.display='none'; box.parentNode.classList.remove('mini-on'); return; }
+  if(!q||!MINI||!MINI.bbox){ box.style.display='none'; box.classList.remove('live'); box.parentNode.classList.remove('mini-on'); return; }
   box.style.display='block'; box.parentNode.classList.add('mini-on');
+  box.classList.toggle('live', !!q.active);
   // 10초마다 같은 지진이 다시 온다 — 다시 그리면 물결이 처음으로 튄다. 바뀌었을 때만 새로 그린다
   const key=JSON.stringify([q,MINI.bbox]);
   if(svg.dataset.k===key){ miniView(); return; }
@@ -950,8 +1010,8 @@ function drawMini(){
     // 별 — 다섯 꼭짓점. 크기는 미니 지도 폭 비율이라 진앙이 어디든 같은 크기다
     const star=Array.from({length:10},(_,i)=>{ const r=i%2?2.1*u:5.2*u, a=-Math.PI/2+i*Math.PI/5;
       return `${(ex+r*Math.cos(a)).toFixed(3)} ${(ey+r*Math.sin(a)).toFixed(3)}`; }).join('L');
-    // 물결은 범위 안 ★ 에만 — 반지름은 미니 지도 폭의 14%(표시만)
-    mark=`<g class="mw">${[0,1,2].map(()=>`<circle cx="${ex}" cy="${ey}" r="${14*u}"></circle>`).join('')}</g>`
+    // 물결은 범위 안 ★ 에만 — 반지름은 미니 지도 폭의 30%(표시만 · 11-16 사용자 "세게")
+    mark=`<g class="mw">${[0,1,2,3,4].map(()=>`<circle cx="${ex}" cy="${ey}" r="${30*u}"></circle>`).join('')}</g>`
       + `<path class="ms" d="M${star}Z"></path>`;
   }
   const mag=q.magnitude!=null?`M${q.magnitude.toFixed(1)}`:'';
@@ -959,8 +1019,13 @@ function drawMini(){
   const right=ex+30*u<x1;
   // 속성값은 따옴표로 감싼다 — 11-15 첫 판의 `id=miniView/>` 는 `/` 까지 id 가 되어 rect 가 닫히지 않았고,
   // ★·규모가 rect 의 자식으로 들어가 그려지지 않았다(rect 안의 도형은 SVG 가 그리지 않는다)
-  svg.innerHTML=`<path class="ml" d="${d}"></path><rect class="mv" id="miniView"></rect>`
-    + mark
+  svg.innerHTML=`<path class="ml" d="${d}"></path><rect class="mv" id="miniView"></rect>`;
+  const fx=document.getElementById('miniFx');
+  fx.setAttribute('viewBox',`${x0} ${y0} ${x1-x0} ${y1-y0}`);
+  // 물결 선 굵기 2.6px 는 지도 단위로 적는다 — 커지는 원에 `non-scaling-stroke` 를 두면 매 프레임 레이아웃·칠하기를
+  // 다시 한다(11-16 실측: 이것만으로 초당 칠하기 121회 · 레이아웃 60회)
+  const pw=svg.getBoundingClientRect().width||182;
+  fx.innerHTML=mark.replace('<g class="mw">',`<g class="mw" stroke-width="${(2.6*(x1-x0)/pw).toFixed(5)}">`)
     + (mag?`<text class="mm" x="${right?ex+6.5*u:ex-6.5*u}" y="${ey+3*u}" font-size="${9*u}" text-anchor="${right?'start':'end'}">${mag}</text>`:'');
   box.title=T(out?'진앙 {m} — 관동 지도 밖 (화살표 방향) · 네모 = 지금 보는 범위':'진앙 {m} — 관동 지도 (움직이지 않는다) · 네모 = 지금 보는 범위',{m:mag||T('규모 모름')});
   miniView();
@@ -1033,7 +1098,8 @@ function impactOf(fid){
 function drawDown(){
   const g=document.getElementById('gDown'), gt=document.getElementById('gDownT'),
         gi=document.getElementById('gImpact'), gy=document.getElementById('gSevY'),
-        gr=document.getElementById('gSevR'); if(!g||!gt||!gi||!gy||!gr) return;
+        gr=document.getElementById('gSevR'), gm=document.getElementById('downMaskG'),
+        gps=[0,1,2].map(i=>document.querySelector(`#ripfx${i}>g`)); if(!g||!gt||!gi||!gy||!gr||!gm||gps.some(x=>!x)) return;
   // 셀 상태 음영은 **셀 탭**이면 어느 장애든(2026-11-16 표식 형태별 탭 — D·L1·L2 모두). 지진 층(흔들림 ·
   // 정답 점선)은 고른 장애가 지진일 때만
   const hf=FOCUS?histOf(FOCUS):null, cellTab=!!(hf&&curForm(hf)==='CELL');
@@ -1042,6 +1108,7 @@ function drawDown(){
   const key=JSON.stringify([!!D, sil, D&&h&&DOWN?DOWN:null, imp?imp.fault_id:null, TRUTH_ON]);
   if(key===DOWN_KEY) return;
   DOWN_KEY=key; g.replaceChildren(); gt.replaceChildren(); gi.replaceChildren(); gy.replaceChildren(); gr.replaceChildren();
+  for(const x of gps) x.replaceChildren(); gm.replaceChildren();
   // 영향 — 띠(3 · 4 · 5약)마다 한 층. 원은 불투명하게 두고 투명도는 층에 준다(겹쳐도 진해지지 않게)
   IMPACT_N=imp?imp.cells:0;
   if(imp){ const by={};
@@ -1053,27 +1120,25 @@ function drawDown(){
     for(const d of list||[]){ const c=at[d.key]; if(!c||!(d.r_m>0)) continue;
       box.appendChild(downShape(c, d.r_m)); enb.add(String(c.enb)); n++; }
     return {n, e:enb.size}; };
-  // 정지는 세 겹(둘레 · 바탕 · 빗금)에 같은 원을 그려 한 덩어리로 보이게 한다 — CSS 머리말
-  const lay=['do','df','dh'].map(k=>{ const q=el('g'); q.setAttribute('class',k); g.appendChild(q); return q; });
+  // 정지는 두 겹(둘레 · 바탕)에 같은 원을 그려 한 덩어리로 보이게 한다 — CSS 머리말(빗금은 11-16 에 걷었다)
+  const lay=['do','df'].map(k=>{ const q=el('g'); q.setAttribute('class',k); g.appendChild(q); return q; });
   const a=draw1(sil&&sil.gray, lay[0]);
   for(const q of lay.slice(1)) for(const e of lay[0].children) q.appendChild(e.cloneNode());
-  hatchFit();
+  // 정지 원을 마스크에도 — 셀 효과 층(노랑·빨강·물결)이 그 자리에서 비게. 정지가 없으면 마스크를 떼어 비용을 없앤다
+  for(const e of lay[0].children) gm.appendChild(e.cloneNode());
+  for(const x of [gy,gr,...gps]) a.n ? x.setAttribute('mask','url(#downMask)') : x.removeAttribute('mask');
   DOWN_N=a.n; DOWN_E=a.e;
   SEV_N={gray:a.n, red:draw1(sil&&sil.red, gr).n, yellow:draw1(sil&&sil.yellow, gy).n};
+  // 셀 안 물결 — 색마다 고리 세 층(반지름 35·65·95%). 좌표·반경이 있는 셀만(지어내지 않는다)
+  for(const [cls,list] of [['ry',sil&&sil.yellow],['rr',sil&&sil.red]]){
+    const cs=(list||[]).map(d=>[at[d.key], d.r_m]).filter(([c,r])=>c&&r>0); if(!cs.length) continue;
+    [.35,.65,.95].forEach((k,i)=>{ const q=el('g'); q.setAttribute('class',cls);
+      for(const [c,r] of cs) q.appendChild(downShape(c, r*k)); gps[i].appendChild(q); }); }
   // 실제 정지(정답)는 위 막대의 「정답 표시」를 켰을 때만 그린다(2026-11-16 사용자 "누를 때만 보여주도록") —
   // 정답은 시험 판정용이지 탐지 화면의 사실이 아니다. 켜면 점선이라 탐지가 놓친 곳은 점선만 남는다
   const t=draw1(q&&TRUTH_ON&&D&&DOWN?DOWN.cells:[], gt);
   DOWN_T_N=t.n; DOWN_TE=t.e; DOWN_TOFF=!(q&&TRUTH_ON);
   legendDown();
-}
-//: 빗금 칸을 화면 픽셀에 맞춘다 — 좌표가 도 단위라 그대로 두면 줌할 때 빗금이 굵어지거나 사라진다(표시만:
-//: 7px 간격 · 1.5px 선)
-function hatchFit(){
-  const p=document.getElementById('downHatch'), sv=document.getElementById('svg');
-  if(!p||!VB||!sv||!sv.clientWidth) return;
-  const u=VB.w/sv.clientWidth, w=7*u;
-  p.setAttribute('width', w); p.setAttribute('height', w);
-  const r=p.firstElementChild; r.setAttribute('width', 1.5*u); r.setAttribute('height', w);
 }
 function legendDown(){
   const L=document.getElementById('legend'); if(!L) return;
@@ -2242,9 +2307,9 @@ function setVB(v, opt={}){
   if(!keep) v=snapVB(v);
   VB_FREE=!!keep;
   VB=v; VBC={...v}; svg.setAttribute('viewBox',`${v.x} ${v.y} ${v.w} ${v.h}`);
-  geofx.setAttribute('viewBox',`${v.x} ${v.y} ${v.w} ${v.h}`);   // 구역 겉층도 같이
-  svg.style.transform=''; geofx.style.transform='';
-  drawScale(); syncKs(); miniView(); hatchFit();
+  ovlVB(v);   // 구역·지진 겉층도 같이
+  svg.style.transform=''; ovlTr('');
+  drawScale(); syncKs(); miniView();
   // **단계가 바뀌면 draw 가 placeLabels 까지 한다** — 여기서 또 부르면 두 번이다
   if(D && MAP_READY && lodOf()!==LOD){ draw(); return; }
   // 같은 단계 안에서도 배경 선을 그린 축척에서 많이 멀어지면 그 층만 다시 솎는다(`drawBase`)

@@ -69,6 +69,13 @@ _AUTO_NODE = {
     "pay_dns_delay": "sgw_id",      # 5번과 같은 자리
 }
 
+#: **자동 선택이면 장비 없이 그 기종의 호 전체에 거는 시나리오 번호**(2026-11-16 사용자 결정 A · 26번).
+#: 「SW 업데이트한 기종」은 어느 장비를 지나든 그 기종 전체에서 난다. SGW 아래 셀로 좁히면 기종 축(C-02)에서
+#: 그 SGW 를 지나는 몫(5~7%)만큼 묽어져 실패율이 70% → 2~5% 가 됐고, 고른 SGW 에 따라 통과(F-297)와
+#: 미탐지(F-351)가 갈렸다. 6번(외부 서버 5xx)과 같은 모양이다 — 장비 표시(`SGW`)와 `SGW-n` 지정 경로는
+#: 남고, 지정하면 그 SGW 로 좁힌다. 같은 kind 인 8번은 그대로 SGW 다(`scenario_no` 로 가른다)
+_MODEL_WIDE_SCENARIOS = (26,)
+
 #: 장비에 걸지만 **전국 축**(도메인·기종·전국 합)으로 판정하는 kind — 신호가 그 장비 몫만큼 묽어진다.
 _WIDE_AXIS_KINDS = ("auth_failure", "dns_degradation", "ue_model", "ims_pdn",
                     "cdn_degradation", "pay_dns_delay")
@@ -857,7 +864,7 @@ def _is_num(text: str) -> bool:
 
 
 def _quake_step(fault: dict, cells: list[Cell], target: Target, given: dict | None,
-                mode: str | None = None) -> dict | None:
+                mode: str | None = None, place_names: dict | None = None) -> dict | None:
     """27번 지진 한 건과 폭주 지역·정지 eNB(2026-11-14 사용자 결정 B).
 
     진앙은 **실제 진원역**(`S.FAULT.quake_regions` · 도쿄 한가운데가 아니다)에서 정한다 —
@@ -880,8 +887,18 @@ def _quake_step(fault: dict, cells: list[Cell], target: Target, given: dict | No
             lo = sum(c.longitude for c in pts) / len(pts)
             region = S.quake_region(la, lo)[0]
             print(f"  · F-{fid} 27번 — 고른 셀 가까운 진원역 {region} 에서 진앙을 정한다", flush=True)
+    # **좌표로 준 진앙은 그 자리 이름이다**(2026-11-16 사용자 "진원지가 왜 내 맘대로 안 되는데"). 전에는 가장
+    # 가까운 진원역 이름을 빌려 도쿄 한가운데(35.68, 139.76)가 「千葉県北西部」로 나왔다. 셀 마스터 범위 밖
+    # (바다 등)이면 가까운 진원역 이름 + 付近. 깊이는 지정하지 않으면 지금처럼 가까운 진원역 값이고, d 는 기본값
+    # (`QUAKE_D_UNNAMED`)이다 — graphio·gen-ui 가 진원 지명으로 d 를 찾으므로 진원역이 아닌 이름이면 기본값을 쓴다
+    named = g.get("lat") is None
     q = S.quake_new(qrng, region, g.get("lat"), g.get("lon"), g.get("magnitude"), g.get("depth_km"),
-                    mag_floor=S.quake_mag_floor(cells, want, arv))
+                    mag_floor=S.quake_mag_floor(cells, want, arv),
+                    fault_type_d=None if named else S.QUAKE_D_UNNAMED)
+    hypo = None
+    if q is not None:
+        hypo = q["region"] if named else (S.quake_place_name(cells, q["lat"], q["lon"], place_names)
+                                          or f"{q['region']}付近")
     if q is None:
         print(f"  ! F-{fid} 27번 — 규모 범위 끝에서도 진도 {S.FAULT.quake_surge_intensity} 이상 셀이 "
               f"{want}개 서지 않는다 · 걸지 않는다", flush=True)
@@ -900,10 +917,10 @@ def _quake_step(fault: dict, cells: list[Cell], target: Target, given: dict | No
            "origin_time": fault["start_ts"].strftime("%Y-%m-%d %H:%M:%S"),
            # 진원 지명 — 진원역 이름(기상청 진앙 지명처럼 진원 쪽 이름이다). 전에는 진앙에 가장 가까운 셀의
            # 시도·시군구였는데, 진앙이 바다·땅속 깊은 곳이라 그 셀은 진원과 상관없는 곳이 된다
-           "hypo_name": q["region"],
+           "hypo_name": hypo,
            **q, "down_enb_cnt": len(dead), "down_cell_cnt": len(dead_cells)}
     hi = max(inten.values()) if inten else None
-    print(f"  · F-{fid} 27번 지진 {q['region']} M{q['magnitude']} 깊이 {q['depth_km']}km 진앙 진도 "
+    print(f"  · F-{fid} 27번 지진 {hypo} M{q['magnitude']} 깊이 {q['depth_km']}km 진앙 진도 "
           f"{q['intensity']} — 폭주 지역 셀 {len(area)} · 정지 둘레 셀 {len(ring)} · 최대 진도 "
           f"{'산출 불가' if hi is None else f'{hi:.2f}'} · 정지 eNB {len(dead)} · 셀 {len(dead_cells)}"
           f"{'' if arv else ' (지반 표 없음 · 거리만)'}", flush=True)
@@ -914,7 +931,8 @@ def _quake_step(fault: dict, cells: list[Cell], target: Target, given: dict | No
 def build(fault: dict, cells: list[Cell], anchor: datetime,
           rng: random.Random, seed: int | None = None,
           enb_rate=None, routes=None, nr_on=None, mesh_load=None,
-          history: TargetHistory | None = None) -> Scenario | None:
+          history: TargetHistory | None = None,
+          place_names: dict | None = None) -> Scenario | None:
     """CM_DATAGEN_FAULT 한 행을 Scenario 로 바꾼다.
 
     시간창은 anchor(분 인덱스 0의 시각) 기준 분 좌표로 옮긴다 — Scenario 가
@@ -1011,6 +1029,9 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
                 target = _congestion_target(pick, rng, fault, mesh_load, used)
             elif fault["kind"] in ROUTE_RANGE_KINDS:
                 target = _route_spread_target(routes, rng, fault["kind"], rng_pct, used)
+            elif fault["kind"] == "ue_model" and scenario_no(fault) in _MODEL_WIDE_SCENARIOS:
+                # 기종만 — 셀·장비 없이 전국(`_MODEL_WIDE_SCENARIOS`). 기종은 생성기가 고른다(`vendor_model`)
+                target = Target()
         if target is None:
             target = _resolve_target(raw_target, fault["kind"], pick, rng, routes,
                                      None if (raw_target or "").strip() else used)
@@ -1026,7 +1047,7 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
     if fault["kind"] == "natural_disaster":
         # **지진 한 건 → 폭주 지역·정지 eNB**(2026-11-13 · 11-14 진원역·셀별 진도). 순환 기록 **뒤**다 — 셀 대상
         # (`ENB:` 등)은 진앙을 정하는 데만 쓰고(가까운 진원역) 지역은 지진이 다시 정한다
-        quake = _quake_step(fault, cells, target, quake_in, mode)
+        quake = _quake_step(fault, cells, target, quake_in, mode, place_names)
         if quake is None:
             return None
         target = Target(cell_keys=set(quake["area"]) | set(quake["ring"]))
@@ -1046,7 +1067,7 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
         # 화면 기본값(10분)으로 자르면 B 가 켜지는 순간 창이 끝난다.
         dur = S.SHIFT_TOTAL
     if fault["kind"] == "natural_disaster":
-        # 국면(폭주 → 다운 → 다운만 → 정상화)이 23분이다 — 짧게 주면 다운만 남는 국면이 잘린다
+        # 국면(폭주 → 다운 → eNB 별 복구)이 `DISASTER_DOWN_END`(18분)까지다 — 짧게 주면 복구 전에 잘린다
         dur = max(dur, S.DISASTER_DOWN_END)
     steps = s.get("steps") or ()
     if steps:
@@ -1067,6 +1088,10 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
     shape = S.geo_shape(mine) if mine else "UNKNOWN"
     if shape != "UNKNOWN":
         sc._geo_shape = shape
+    elif fault["kind"] == "ue_model" and not target.cell_keys:
+        # 기종 호 전체(26번 A안 · `_MODEL_WIDE_SCENARIOS`)는 전국에 흩어진다 — graphio 기종 축 Incident 의 관측도
+        # WIDE 다(F-362 · 정답 SCATTER 로 두니 `geo_hit` 이 거짓이었다). 8번(SGW 셀)은 위에서 잰 모양 그대로다
+        sc._geo_shape = "WIDE"
     if fault["kind"] in ("natural_disaster", "earthquake"):
         # 정지 순위(`_disaster_rank` local)가 좌표를 본다 — 대상 셀을 실어 둔다
         by_key = {c.cell_key: c for c in cells}
@@ -1166,6 +1191,7 @@ def resolve_active(cells: list[Cell], anchor: datetime, seed: int,
                    cache: dict[int, tuple[tuple, Scenario]],
                    enb_rate=None, routes=None, nr_on=None, mesh_load=None,
                    history: TargetHistory | None = None,
+                   place_names: dict | None = None,
                    ) -> tuple[list[Scenario], list[int]]:
     """활성 fault 행 목록 → (Scenario 목록, 해석 실패한 fault_id 목록).
 
@@ -1192,7 +1218,7 @@ def resolve_active(cells: list[Cell], anchor: datetime, seed: int,
             continue
         frng = target_rng(seed, fid)
         sc = build(f, cells, anchor, frng, seed=seed, enb_rate=enb_rate, routes=routes,
-                   nr_on=nr_on, mesh_load=mesh_load, history=history)
+                   nr_on=nr_on, mesh_load=mesh_load, history=history, place_names=place_names)
         if sc is None:
             bad.append(fid)
         else:

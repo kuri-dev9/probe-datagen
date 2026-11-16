@@ -1,0 +1,909 @@
+{
+ "_doc": "일본 단말 기종 비율(2026-11-16 · 26번 · 사용자 \"단말 기종 테이블을 보고 실제 단말 비율처럼, 임의로 지정하지 말고\" · 케이 결정 ③ 데이터 파일). locale jp 일 때만 `pemdb1.Distributions.vendor_model` 이 이 파일을 쓴다 — kr 은 `_distributions.json` 의 한국 상용 실측 20쌍 그대로다. 빈 값(Vendor·Model IE 부재)의 몫은 실측(`_distributions.json`) 그대로 두고, 나머지 몫을 이 파일의 `models.w`(합 1)로 나눈다.",
+ "source": {
+  "name": "StatCounter Global Stats — Mobile Vendor Market Share, Japan",
+  "url": "https://gs.statcounter.com/vendor-market-share/mobile/japan",
+  "csv": "https://gs.statcounter.com/chart.php?device=Mobile&device_hidden=mobile&statType_hidden=vendor&region_hidden=JP&granularity=monthly&statType=Mobile%20Vendor&region=Japan&fromInt=202610&toInt=202610&fromMonthYear=2026-10&toMonthYear=2026-10&csv=1",
+  "period": "2026-10 (월간)",
+  "metric": "웹 페이지뷰 기준 사용 점유(출하·판매 대수가 아니다)",
+  "fetched": "2026-11-16",
+  "raw_pct": {
+   "Apple": 53.87,
+   "Samsung": 10.79,
+   "Xiaomi": 7.96,
+   "Google": 7.42,
+   "Sony": 4.72,
+   "Unknown": 2.62,
+   "Oppo": 2.29,
+   "Sharp": 2.13,
+   "Vivo": 1.99,
+   "Huawei": 1.19,
+   "Motorola": 0.9,
+   "OnePlus": 0.86,
+   "Honor": 0.77,
+   "FCNT": 0.6,
+   "Realme": 0.25,
+   "Fujitsu": 0.24,
+   "Nothing": 0.24,
+   "ZTE": 0.19,
+   "Nubia": 0.19,
+   "Asus": 0.19,
+   "Kyocera": 0.17,
+   "Lenovo": 0.1,
+   "Infinix": 0.08,
+   "Tecno": 0.06,
+   "LG": 0.04,
+   "Meizu": 0.03,
+   "Nokia": 0.02,
+   "Vocal": 0.02,
+   "Daria": 0.02,
+   "Other": 0.06
+  }
+ },
+ "method": [
+  "제조사 몫 = StatCounter 값. 사전(CM_UE_MODEL · USE_YN=Y)에 있는 제조사 15곳만 생성에 쓰고 그 합(95.9%)으로 다시 정규화한다",
+  "같은 제조사 안의 모델별 몫은 근거가 없다 — 사전에 있는 그 제조사 기종에 같은 몫으로 나눈다",
+  "사전에 없는 제조사는 버리지 않고 `pending_dictionary` 에 적는다(생성에는 쓰지 않는다 · 사전 행 추가 대기 — 운영 DB 행이라 승인 필요)",
+  "`Unknown`(2.62%)은 제조사를 알 수 없는 웹 요청이라 기종 몫이 아니다 — 쓰지 않는다",
+  "2026-11-16 사용자 \"추가해줘\" — 일본 제조사 4곳(Sharp·FCNT·Fujitsu·Kyocera)을 사전에 더했다(graphio `docs/ddl/2026-11-16-ue-model-jp.sql` · 실제 docomo·au 판매 모델 · VENDOR·MODEL 코드는 PoC 배정). 나머지 외국 제조사는 `pending_dictionary` 에 남는다"
+ ],
+ "used_pct_total": 95.9,
+ "pending_dictionary": [
+  {
+   "vendor_name": "Realme",
+   "pct": 0.25,
+   "jp_maker": false
+  },
+  {
+   "vendor_name": "Nothing",
+   "pct": 0.24,
+   "jp_maker": false
+  },
+  {
+   "vendor_name": "ZTE",
+   "pct": 0.19,
+   "jp_maker": false
+  },
+  {
+   "vendor_name": "Nubia",
+   "pct": 0.19,
+   "jp_maker": false
+  },
+  {
+   "vendor_name": "Asus",
+   "pct": 0.19,
+   "jp_maker": false
+  },
+  {
+   "vendor_name": "Lenovo",
+   "pct": 0.1,
+   "jp_maker": false
+  },
+  {
+   "vendor_name": "Infinix",
+   "pct": 0.08,
+   "jp_maker": false
+  },
+  {
+   "vendor_name": "Tecno",
+   "pct": 0.06,
+   "jp_maker": false
+  },
+  {
+   "vendor_name": "LG",
+   "pct": 0.04,
+   "jp_maker": false
+  },
+  {
+   "vendor_name": "Meizu",
+   "pct": 0.03,
+   "jp_maker": false
+  },
+  {
+   "vendor_name": "Nokia",
+   "pct": 0.02,
+   "jp_maker": false
+  },
+  {
+   "vendor_name": "Vocal",
+   "pct": 0.02,
+   "jp_maker": false
+  },
+  {
+   "vendor_name": "Daria",
+   "pct": 0.02,
+   "jp_maker": false
+  },
+  {
+   "vendor_name": "Other",
+   "pct": 0.06,
+   "jp_maker": false
+  }
+ ],
+ "models": [
+  {
+   "vendor": "100OA",
+   "model": "A1DE",
+   "brand": "apple",
+   "name": "iPhone 16 Plus",
+   "w": 0.031207
+  },
+  {
+   "vendor": "100OA",
+   "model": "A2HT",
+   "brand": "apple",
+   "name": "iPhone 16",
+   "w": 0.031207
+  },
+  {
+   "vendor": "100OA",
+   "model": "A3EU",
+   "brand": "apple",
+   "name": "iPhone 16 Pro",
+   "w": 0.031207
+  },
+  {
+   "vendor": "100OA",
+   "model": "A3EV",
+   "brand": "apple",
+   "name": "iPhone 15 Pro Max (China mainland, Hong Kong, Macao)",
+   "w": 0.031207
+  },
+  {
+   "vendor": "100OA",
+   "model": "A3EW",
+   "brand": "apple",
+   "name": "iPhone 13 Pro Max",
+   "w": 0.031207
+  },
+  {
+   "vendor": "100OA",
+   "model": "A3TD",
+   "brand": "apple",
+   "name": "iPhone 16 Pro Max",
+   "w": 0.031207
+  },
+  {
+   "vendor": "100OA",
+   "model": "A4CP",
+   "brand": "apple",
+   "name": "iPhone 15 Pro Max",
+   "w": 0.031207
+  },
+  {
+   "vendor": "100OA",
+   "model": "A55Y",
+   "brand": "apple",
+   "name": "iPhone 14 Pro Max",
+   "w": 0.031207
+  },
+  {
+   "vendor": "100OA",
+   "model": "A5HR",
+   "brand": "apple",
+   "name": "iPhone 17e",
+   "w": 0.031207
+  },
+  {
+   "vendor": "100OA",
+   "model": "A5JK",
+   "brand": "apple",
+   "name": "iPhone 15",
+   "w": 0.031207
+  },
+  {
+   "vendor": "100OA",
+   "model": "A5JL",
+   "brand": "apple",
+   "name": "iPhone 15 Plus",
+   "w": 0.031207
+  },
+  {
+   "vendor": "100OA",
+   "model": "A5TT",
+   "brand": "apple",
+   "name": "iPhone 17 Pro Max",
+   "w": 0.031207
+  },
+  {
+   "vendor": "100OA",
+   "model": "A5W7",
+   "brand": "apple",
+   "name": "iPhone Air",
+   "w": 0.031207
+  },
+  {
+   "vendor": "100OA",
+   "model": "A63D",
+   "brand": "apple",
+   "name": "iPhone 15 Pro",
+   "w": 0.031207
+  },
+  {
+   "vendor": "100OA",
+   "model": "A66H",
+   "brand": "apple",
+   "name": "iPhone 14 Pro",
+   "w": 0.031207
+  },
+  {
+   "vendor": "100OA",
+   "model": "A66J",
+   "brand": "apple",
+   "name": "iPhone 17 Pro",
+   "w": 0.031207
+  },
+  {
+   "vendor": "100OA",
+   "model": "A6W1",
+   "brand": "apple",
+   "name": "iPhone 16e",
+   "w": 0.031207
+  },
+  {
+   "vendor": "100OA",
+   "model": "OEM2",
+   "brand": "apple",
+   "name": "iPhone 17",
+   "w": 0.031207
+  },
+  {
+   "vendor": "100SS",
+   "model": "A012",
+   "brand": "samsung",
+   "name": "Galaxy Quantum3",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A0M0",
+   "brand": "samsung",
+   "name": "Galaxy S25 Ultra",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A15T",
+   "brand": "samsung",
+   "name": "Galaxy A31",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A2VQ",
+   "brand": "samsung",
+   "name": "Galaxy S23",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A2XC",
+   "brand": "samsung",
+   "name": "Galaxy Z Fold5",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A35V",
+   "brand": "samsung",
+   "name": "Galaxy Z Flip7",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A3VU",
+   "brand": "samsung",
+   "name": "Galaxy S24",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A3WY",
+   "brand": "samsung",
+   "name": "Galaxy S24 Ultra",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A459",
+   "brand": "samsung",
+   "name": "Galaxy A32",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A4CM",
+   "brand": "samsung",
+   "name": "Galaxy A52 5G",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A4T2",
+   "brand": "samsung",
+   "name": "Galaxy S23 Ultra",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A4TN",
+   "brand": "samsung",
+   "name": "Galaxy A35 5G",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A4TQ",
+   "brand": "samsung",
+   "name": "Galaxy Z Flip5",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A555",
+   "brand": "samsung",
+   "name": "Galaxy A42 5G",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A55W",
+   "brand": "samsung",
+   "name": "Galaxy A36 5G",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A597",
+   "brand": "samsung",
+   "name": "Galaxy Z Flip6",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A5JM",
+   "brand": "samsung",
+   "name": "Galaxy A51 5G",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A5JV",
+   "brand": "samsung",
+   "name": "Galaxy Z Flip7 FE",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A5TY",
+   "brand": "samsung",
+   "name": "Galaxy Z Flip8",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A5UV",
+   "brand": "samsung",
+   "name": "Galaxy A30",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A5W5",
+   "brand": "samsung",
+   "name": "Galaxy Quantum2",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A66N",
+   "brand": "samsung",
+   "name": "Galaxy A50",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A6QU",
+   "brand": "samsung",
+   "name": "Galaxy Quantum4",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A6SC",
+   "brand": "samsung",
+   "name": "Galaxy A33 5G",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A6SE",
+   "brand": "samsung",
+   "name": "Galaxy A34 5G",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A6VV",
+   "brand": "samsung",
+   "name": "Galaxy Quantum6",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A6VX",
+   "brand": "samsung",
+   "name": "Galaxy A53 5G",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A6VY",
+   "brand": "samsung",
+   "name": "Galaxy A52s 5G",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A72X",
+   "brand": "samsung",
+   "name": "Galaxy Quantum5",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100SS",
+   "model": "A7F6",
+   "brand": "samsung",
+   "name": "Galaxy A40",
+   "w": 0.00375
+  },
+  {
+   "vendor": "100OS",
+   "model": "A361",
+   "brand": "xiaomi",
+   "name": "Xiaomi 14",
+   "w": 0.009223
+  },
+  {
+   "vendor": "100XX",
+   "model": "A4FY",
+   "brand": "xiaomi",
+   "name": "REDMI Note 17 Pro / REDMI Note 17 Pro 焕新版",
+   "w": 0.009223
+  },
+  {
+   "vendor": "100XX",
+   "model": "A4TR",
+   "brand": "xiaomi",
+   "name": "REDMI Note 15 Pro",
+   "w": 0.009223
+  },
+  {
+   "vendor": "100XX",
+   "model": "A4XT",
+   "brand": "xiaomi",
+   "name": "REDMI Turbo 5",
+   "w": 0.009223
+  },
+  {
+   "vendor": "100XX",
+   "model": "A55Z",
+   "brand": "xiaomi",
+   "name": "REDMI Note 15",
+   "w": 0.009223
+  },
+  {
+   "vendor": "100XX",
+   "model": "A5W9",
+   "brand": "xiaomi",
+   "name": "REDMI Note 17",
+   "w": 0.009223
+  },
+  {
+   "vendor": "100XX",
+   "model": "A66L",
+   "brand": "xiaomi",
+   "name": "REDMI R70 5G / REDMI R70m 5G",
+   "w": 0.009223
+  },
+  {
+   "vendor": "100XX",
+   "model": "A6C4",
+   "brand": "xiaomi",
+   "name": "Redmi Note 14 Pro+",
+   "w": 0.009223
+  },
+  {
+   "vendor": "100XX",
+   "model": "A6LN",
+   "brand": "xiaomi",
+   "name": "REDMI Note 15 Pro+",
+   "w": 0.009223
+  },
+  {
+   "vendor": "100CG",
+   "model": "A1XF",
+   "brand": "google",
+   "name": "Pixel 11 Pro XL",
+   "w": 0.019343
+  },
+  {
+   "vendor": "100CG",
+   "model": "A4CQ",
+   "brand": "google",
+   "name": "Pixel 11 Pro Fold",
+   "w": 0.019343
+  },
+  {
+   "vendor": "100CG",
+   "model": "B001",
+   "brand": "google",
+   "name": "Pixel 11 Pro",
+   "w": 0.019343
+  },
+  {
+   "vendor": "100CG",
+   "model": "B002",
+   "brand": "google",
+   "name": "Pixel 11",
+   "w": 0.019343
+  },
+  {
+   "vendor": "100LS",
+   "model": "B003",
+   "brand": "sony",
+   "name": "Xperia 5 V",
+   "w": 0.016406
+  },
+  {
+   "vendor": "100LS",
+   "model": "B004",
+   "brand": "sony",
+   "name": "Xperia 1 V",
+   "w": 0.016406
+  },
+  {
+   "vendor": "100LS",
+   "model": "B005",
+   "brand": "sony",
+   "name": "Xperia 5 IV",
+   "w": 0.016406
+  },
+  {
+   "vendor": "100OE",
+   "model": "A49C",
+   "brand": "oppo",
+   "name": "OPPO K15s",
+   "w": 0.00398
+  },
+  {
+   "vendor": "100OE",
+   "model": "A59A",
+   "brand": "oppo",
+   "name": "OPPO K15x",
+   "w": 0.00398
+  },
+  {
+   "vendor": "100OE",
+   "model": "A5CU",
+   "brand": "oppo",
+   "name": "OPPO K15 Pro",
+   "w": 0.00398
+  },
+  {
+   "vendor": "100OE",
+   "model": "A5UW",
+   "brand": "oppo",
+   "name": "OPPO K15 Pro+",
+   "w": 0.00398
+  },
+  {
+   "vendor": "100OE",
+   "model": "A6HW",
+   "brand": "oppo",
+   "name": "OPPO K15",
+   "w": 0.00398
+  },
+  {
+   "vendor": "100OS",
+   "model": "A4R5",
+   "brand": "oppo",
+   "name": "OPPO Find X7",
+   "w": 0.00398
+  },
+  {
+   "vendor": "100HB",
+   "model": "A0O0",
+   "brand": "vivo",
+   "name": "iQOO 15 Ultra",
+   "w": 0.003458
+  },
+  {
+   "vendor": "100HB",
+   "model": "A5CT",
+   "brand": "vivo",
+   "name": "iQOO 15T",
+   "w": 0.003458
+  },
+  {
+   "vendor": "100HB",
+   "model": "A5KV",
+   "brand": "vivo",
+   "name": "iQOO 15",
+   "w": 0.003458
+  },
+  {
+   "vendor": "100HB",
+   "model": "A5W6",
+   "brand": "vivo",
+   "name": "iQOO 12 Pro",
+   "w": 0.003458
+  },
+  {
+   "vendor": "100HB",
+   "model": "A6QV",
+   "brand": "vivo",
+   "name": "iQOO 13",
+   "w": 0.003458
+  },
+  {
+   "vendor": "100OS",
+   "model": "A2UP",
+   "brand": "vivo",
+   "name": "vivo X100 Pro",
+   "w": 0.003458
+  },
+  {
+   "vendor": "100KS",
+   "model": "A38G",
+   "brand": "huawei",
+   "name": "HUAWEI nova 14 活力版",
+   "w": 0.001773
+  },
+  {
+   "vendor": "100KS",
+   "model": "A3YD",
+   "brand": "huawei",
+   "name": "HUAWEI nova 14",
+   "w": 0.001773
+  },
+  {
+   "vendor": "100KS",
+   "model": "A45K",
+   "brand": "huawei",
+   "name": "HUAWEI nova 14 Pro",
+   "w": 0.001773
+  },
+  {
+   "vendor": "100KS",
+   "model": "A4KY",
+   "brand": "huawei",
+   "name": "HUAWEI nova 13 Pro",
+   "w": 0.001773
+  },
+  {
+   "vendor": "100KS",
+   "model": "A4R3",
+   "brand": "huawei",
+   "name": "HUAWEI nova 14 Ultra",
+   "w": 0.001773
+  },
+  {
+   "vendor": "100KS",
+   "model": "A5LZ",
+   "brand": "huawei",
+   "name": "HUAWEI nova 13",
+   "w": 0.001773
+  },
+  {
+   "vendor": "100OS",
+   "model": "A3TC",
+   "brand": "huawei",
+   "name": "HUAWEI Mate 60 Pro",
+   "w": 0.001773
+  },
+  {
+   "vendor": "100NL",
+   "model": "A3TE",
+   "brand": "motorola",
+   "name": "moto X70 Air Pro",
+   "w": 0.001043
+  },
+  {
+   "vendor": "100NL",
+   "model": "A4T6",
+   "brand": "motorola",
+   "name": "moto X70 Air",
+   "w": 0.001043
+  },
+  {
+   "vendor": "100NL",
+   "model": "A5JN",
+   "brand": "motorola",
+   "name": "moto razr fold",
+   "w": 0.001043
+  },
+  {
+   "vendor": "100NL",
+   "model": "EDDN",
+   "brand": "motorola",
+   "name": "moto g100s",
+   "w": 0.001043
+  },
+  {
+   "vendor": "100NL",
+   "model": "NLE8",
+   "brand": "motorola",
+   "name": "moto razr 70 Ultra",
+   "w": 0.001043
+  },
+  {
+   "vendor": "100PT",
+   "model": "A4R4",
+   "brand": "motorola",
+   "name": "moto edge 60 Pro",
+   "w": 0.001043
+  },
+  {
+   "vendor": "100PT",
+   "model": "A4VE",
+   "brand": "motorola",
+   "name": "moto razr 60 Pro",
+   "w": 0.001043
+  },
+  {
+   "vendor": "100PT",
+   "model": "A6VW",
+   "brand": "motorola",
+   "name": "moto razr 60",
+   "w": 0.001043
+  },
+  {
+   "vendor": "100PT",
+   "model": "PTAC",
+   "brand": "motorola",
+   "name": "moto g100",
+   "w": 0.001043
+  },
+  {
+   "vendor": "100ZZ",
+   "model": "B006",
+   "brand": "oneplus",
+   "name": "一加 Ace 7 Pro",
+   "w": 0.002989
+  },
+  {
+   "vendor": "100ZZ",
+   "model": "B007",
+   "brand": "oneplus",
+   "name": "一加 Ace 7",
+   "w": 0.002989
+  },
+  {
+   "vendor": "100ZZ",
+   "model": "B008",
+   "brand": "oneplus",
+   "name": "一加 Ace 6 至尊版",
+   "w": 0.002989
+  },
+  {
+   "vendor": "100OD",
+   "model": "A3EX",
+   "brand": "honor",
+   "name": "荣耀 X60 GT",
+   "w": 0.001606
+  },
+  {
+   "vendor": "100OD",
+   "model": "A3TF",
+   "brand": "honor",
+   "name": "荣耀 X70i",
+   "w": 0.001606
+  },
+  {
+   "vendor": "100OD",
+   "model": "A5HW",
+   "brand": "honor",
+   "name": "荣耀 X70 Pro Max",
+   "w": 0.001606
+  },
+  {
+   "vendor": "100OD",
+   "model": "A5JT",
+   "brand": "honor",
+   "name": "荣耀 X70",
+   "w": 0.001606
+  },
+  {
+   "vendor": "100OD",
+   "model": "ODH1",
+   "brand": "honor",
+   "name": "HONOR Magic6 Pro",
+   "w": 0.001606
+  },
+  {
+   "vendor": "100SH",
+   "model": "JS01",
+   "brand": "sharp",
+   "name": "AQUOS sense9",
+   "w": 0.005553
+  },
+  {
+   "vendor": "100SH",
+   "model": "JS02",
+   "brand": "sharp",
+   "name": "AQUOS sense8",
+   "w": 0.005553
+  },
+  {
+   "vendor": "100SH",
+   "model": "JS03",
+   "brand": "sharp",
+   "name": "AQUOS wish4",
+   "w": 0.005553
+  },
+  {
+   "vendor": "100SH",
+   "model": "JS04",
+   "brand": "sharp",
+   "name": "AQUOS R9",
+   "w": 0.005553
+  },
+  {
+   "vendor": "100FC",
+   "model": "JF01",
+   "brand": "fcnt",
+   "name": "arrows We2",
+   "w": 0.001564
+  },
+  {
+   "vendor": "100FC",
+   "model": "JF02",
+   "brand": "fcnt",
+   "name": "arrows N",
+   "w": 0.001564
+  },
+  {
+   "vendor": "100FC",
+   "model": "JF03",
+   "brand": "fcnt",
+   "name": "arrows We",
+   "w": 0.001564
+  },
+  {
+   "vendor": "100FC",
+   "model": "JF04",
+   "brand": "fcnt",
+   "name": "らくらくスマートフォン",
+   "w": 0.001564
+  },
+  {
+   "vendor": "100FJ",
+   "model": "JU01",
+   "brand": "fujitsu",
+   "name": "arrows Be4",
+   "w": 0.001251
+  },
+  {
+   "vendor": "100FJ",
+   "model": "JU02",
+   "brand": "fujitsu",
+   "name": "らくらくスマートフォン me",
+   "w": 0.001251
+  },
+  {
+   "vendor": "100KC",
+   "model": "JY01",
+   "brand": "kyocera",
+   "name": "あんしんスマホ",
+   "w": 0.000886
+  },
+  {
+   "vendor": "100KC",
+   "model": "JY02",
+   "brand": "kyocera",
+   "name": "TORQUE G06",
+   "w": 0.000886
+  }
+ ]
+}

@@ -257,7 +257,7 @@ def test_the_tab_click_handler_selects_a_form_and_redraws_without_an_all_option(
 # ── 이식 메모 가 말한 소스 이름이 실제로 있는가 ───────────────────────────
 
 @pytest.mark.parametrize("name", ["formOf", "pieceForm", "partGroups", "curPart", "curForm", "formCount", "formTag", "formPlain",
-                                  "viewOf", "focusSets", "silentOf", "drawDown", "legendDown", "downShape", "hatchFit"])
+                                  "viewOf", "focusSets", "silentOf", "drawDown", "legendDown", "downShape"])   # hatchFit 은 11-16 빗금과 함께 걷었다
 def test_functions_named_in_the_porting_memo_exist_exactly_once(name):
     n = len(re.findall(rf"^(?:async )?function {name}\(|^const {name}=", MAP_HTML, re.M))
     assert n == 1, (name, n)

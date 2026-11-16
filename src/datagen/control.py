@@ -40,6 +40,20 @@ T_SCENARIO = "CM_ERROR_SCENARIO"
 T_QUAKE = "CM_QUAKE_EVENT"
 #: 앱 사전 — 정의와 적재는 `apps` 가 갖고 DDL 만 여기 모은다
 from .apps import T_APP  # noqa: E402
+#: 27번 국면 시각은 생성기 상수가 정본이다 — 설명이 따로 숫자를 들고 있으면 국면을 바꿀 때 DB 설명만 옛 시각으로
+#: 남는다(2026-11-16 정지를 eNB 별 복구로 줄이며 「3~23분」이 그렇게 남았다). 일본어 칸(`i18n_ja`)도 이 문장을 쓴다
+from .scenarios import (DISASTER_DOWN_AT, DISASTER_DOWN_END, DISASTER_SURGE_END,  # noqa: E402
+                        DISASTER_UP_FROM)
+QUAKE_DESC = (
+    "도쿄 둘레 실제 진원역(바다·땅속 깊은 곳)에서 규모 4.5~6.2 지진이 난다 — 진도 3 이상 넓은 지역에서 통화가 "
+    f"몰리고(0~{DISASTER_SURGE_END}분) 진도 5약 이상인 무른 땅의 기지국만 일부 꺼진다({DISASTER_DOWN_AT}분 정지 · "
+    f"eNB 마다 {DISASTER_UP_FROM}~{DISASTER_DOWN_END}분 사이 따로 복구 · {DISASTER_DOWN_END}분 정상화 · "
+    "0곳일 수 있다) · CM_QUAKE_EVENT")
+QUAKE_DESC_JA = (
+    "東京周辺の実際の震源域(海域・地下深く)でM4.5~6.2の地震が起きる — 震度3以上の広い地域で通話が集中し"
+    f"(0~{DISASTER_SURGE_END}分)、震度5弱以上の軟弱地盤の基地局だけが一部停止する({DISASTER_DOWN_AT}分に停止 · "
+    f"eNBごとに{DISASTER_UP_FROM}~{DISASTER_DOWN_END}分の間で個別に復旧 · {DISASTER_DOWN_END}分に正常化 · "
+    "0局の場合もある) · CM_QUAKE_EVENT")
 
 #: 주입 가능한 장애 종류 — **`scenarios.KIND_SPECS` 의 키와 1:1 이어야 한다.**
 #:
@@ -120,42 +134,40 @@ SCENARIOS: tuple[tuple[int, str, str | None, int | None, tuple[str, ...], str], 
      "IMS 접속만 실패, 데이터는 정상"),
     (13, "NSA NR leg 실패", "nsa_nr_leg", None, ("ENB",),
      "5G NSA 단말의 NR 레그 미성립"),
-    (14, "저녁 러시로 역 주변 기지국이 붐빔", "ran_congestion", None, ("ENB",),
+    (14, "역 주변 저녁 러시 혼잡", "ran_congestion", None, ("ENB",),
      "역 주변 셀의 기존 가입자 60% 처리율·RTT 악화·정체(호는 늘지 않음) — CP 정상"),
-    (15, "야마노테선에서 4G↔5G 넘어갈 때 잠깐 멈춤", "ho_interruption", None, ("ENB",),
+    (15, "야마노테선 4G↔5G 전환 때 잠깐 멈춤", "ho_interruption", None, ("ENB",),
      "코리도 셀 쌍에서 전환 직후 3–8초 down 정체 + NR 레그 해제 — CP 정상"),
-    (16, "5G는 잡히는데 느림 (4G 앵커 붐빔)", "anchor_saturation", None, ("ENB",),
+    (16, "5G 잡히는데 느림 (4G 앵커 혼잡)", "anchor_saturation", None, ("ENB",),
      "LTE 앵커 경합으로 5G 체감 저하"),
-    (17, "5G 장애로 4G로 몰림", "sa_fallback", None, ("ENB",),
+    (17, "5G 장애로 4G에 몰림", "sa_fallback", None, ("ENB",),
      "평소 SA 에 있어 안 보이던 5G 단말이 한 지역 LTE 에 TAU·Attach 로 몰려 나타난다 — "
      "5G 장비는 주장하지 않는다(시스템 간 전환 필드가 XDR 에 없다)"),
-    (18, "데이터 관문 자원 바닥 (5G UPF)", "gw_resource", 1, ("SGW",),
+    (18, "5G 데이터 관문(UPF) 자원 바닥", "gw_resource", 1, ("SGW",),
      "1번과 같은 데이터 — UPF 라고 주장하지 않는다"),
-    (19, "접속 관리 장비 과부하가 번짐 (5G AMF)", "mme_overload", 10, ("MME",),
+    (19, "5G 접속 관리(AMF) 과부하 확산", "mme_overload", 10, ("MME",),
      "10번과 같은 데이터 — AMF 라고 주장하지 않는다"),
-    (20, "음성 통화만 안 걸림 (VoNR·IMS)", "ims_pdn", 12,
+    (20, "음성 통화만 안 걸림 (VoNR)", "ims_pdn", 12,
      ("SGW", "PGW"), "12번과 같은 데이터 — 음성 분기를 주장하지 않는다"),
     (21, "동영상 서버(CDN) 느림", "cdn_degradation", None, ("SGW",),
      "동영상 CDN 호스트 사이트 하나가 느리게 답한다 — HTTP 응답 지연·처리율 하락, 망은 정상"),
-    (22, "결제 앱이 느림 — 주소 찾기(DNS) 지연", "pay_dns_delay", None, ("SGW",),
+    (22, "결제 앱 느림 (DNS 지연)", "pay_dns_delay", None, ("SGW",),
      "결제 등급 도메인만 DNS 응답시간 상승(일부 실패) — 도메인 패턴으로 등급 판정"),
-    (23, "행사장 군중으로 사진 올리기 막힘", "event_crowd", None, ("ENB",),
+    (23, "행사장 인파로 사진 올리기 막힘", "event_crowd", None, ("ENB",),
      "행사장 셀 8개 활성 가입자 3배·2시간 + 업로드 급증으로 업링크 처리율·RTT 악화"),
     # 24 는 **장애가 아니다**(2026-10-29) — 정답 원인이 `—`(효과 검증)이고
     # 판정 자리가 스펙 §8.3 투자 효과 검증이다. 그래서 채점에서 빠진다
     # (`write_truth`). 대상은 설정(`pemdb1.capacity_shift`)이 고정하므로
     # 발생 장비가 없다 — 지도에서 고른 eNB 에 걸리는 것처럼 보이면 안 된다.
-    (24, "기지국 증설 뒤 손님이 옮겨 감 (장애 아님)", "capacity_shift", None, (),
+    (24, "기지국 증설 뒤 이용자 이동 (장애 아님)", "capacity_shift", None, (),
      "50분 고정 — A eNB 에 30분간 호가 몰려 혼잡 → 소등 eNB(B) 개통, "
      "A 40 · B 60 으로 나뉘며 A 회복 → 10분 분석 뒤 B 소등. 채점 제외"),
-    (25, "설정 변경 직후 통화 끊김이 계단처럼 늘어남 (SON)", "son_param_change", None, ("ENB",),
+    (25, "설정 변경 뒤 통화 끊김 계단 증가 (SON)", "son_param_change", None, ("ENB",),
      "기지국(eNB) 1~2곳의 핸드오버 설정이 바뀐 시각부터 그 기지국의 모든 셀에서 옆 셀로 넘어가는 통화가 "
      "끊기기 시작한다 — 셀마다 정도가 다르고 같은 분에 함께 나빠진다"),
-    (26, "SW 업데이트한 특정 기종만 접속 실패", "ue_model", 8,
+    (26, "SW 업데이트한 기종만 접속 실패", "ue_model", 8,
      ("SGW",), "8번과 같은 데이터 — SW 버전 필드가 XDR 에 없다"),
-    (27, "지진 — 통화 폭주·기지국 정지", "natural_disaster", None, ("ENB",),
-     "도쿄 둘레 실제 진원역(바다·땅속 깊은 곳)에서 규모 4.5~6.2 지진이 난다 — 진도 3 이상 넓은 지역에서 통화가 "
-     "몰리고(0~13분) 진도 5약 이상인 무른 땅의 기지국만 일부 꺼진다(3~23분 · 0곳일 수 있다) · CM_QUAKE_EVENT"),
+    (27, "지진 — 통화 몰림·기지국 정지", "natural_disaster", None, ("ENB",), QUAKE_DESC),
 )
 
 #: **증거 없음** — 데이터에 그 장애를 판정할 근거 필드가 없어 만들지 않는 번호.

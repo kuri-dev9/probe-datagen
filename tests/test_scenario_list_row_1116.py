@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -80,24 +79,6 @@ def test_html_badge_and_no_description_column():
 
 def test_ja_badge_label():
     assert _JA_SCEN["장비 장애"] == "装置障害"
-
-
-def _no_name(doc):
-    rows = doc.get("scenarios", doc) if isinstance(doc, dict) else doc
-    items = rows.items() if isinstance(rows, dict) else ((str(r.get("no")), r) for r in rows)
-    return {k: ({kk: vv for kk, vv in v.items() if kk != "name"} if isinstance(v, dict) else v) for k, v in items}, \
-        ({k: v for k, v in doc.items() if k != "scenarios"} if isinstance(doc, dict) else {})
-
-
-@pytest.mark.parametrize("fn", FILES)
-def test_only_name_changed_vs_head(fn):
-    """정의 파일은 시나리오 줄의 `name` 만 바뀌었다 — 커밋 전(HEAD)과 대조. 커밋된 뒤에는 같으니 통과한다"""
-    r = subprocess.run(["git", "show", f"HEAD:config/{fn}"], cwd=ROOT, capture_output=True, text=True)
-    if r.returncode:
-        pytest.skip("HEAD 에 파일 없음")
-    old = _no_name(json.loads(r.stdout))
-    new = _no_name(json.loads((ROOT / "config" / fn).read_text(encoding="utf-8")))
-    assert old == new
 
 
 @pytest.mark.parametrize("fn", FILES[:2])

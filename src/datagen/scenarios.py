@@ -902,7 +902,7 @@ KIND_SPECS: dict[str, dict] = {
     # 정한다(확정대장 OPEN-41). 그때까지 이 시나리오는 주입은 되고
     # Incident 는 열리지 않는다.
     "anchor_saturation": dict(
-        title="5G는 잡히는데 느림 (4G 앵커 붐빔)",
+        title="5G 잡히는데 느림 (4G 앵커 혼잡)",
         truth_code="SA_QUALITY_LOW", truth_category="5G",
         # POINT — 메시 한 칸에서 대상을 뽑으면 셀 반경이 0.9km 미만이다(F-156 · 0.61km)
         expect_rules=("R-39",), expect_geo="POINT",
@@ -917,7 +917,7 @@ KIND_SPECS: dict[str, dict] = {
     # XDR 만으로는 `R-11` 이 `confidence_cap` 0.65 라 `R-17`(0.75)에 Top-1 을
     # 내준다 — `change_suspected` 와 같은 이유로 `TOP3` 다.
     "son_param_change": dict(
-        title="설정 변경 직후 통화 끊김이 계단처럼 늘어남 (SON)",
+        title="설정 변경 뒤 통화 끊김 계단 증가 (SON)",
         truth_code="CHANGE_SUSPECTED", truth_category="CHANGE",
         # R-17 은 셀 쌍 전환 실패로 서지만 RAN_MOBILITY_ISSUE 를 낸다(11-04 25r4 에서 1위였다)
         # **대상은 eNB 1~2개의 전 셀이다**(2026-11-13 사용자 결정 · 전에는 노선 구간의 셀 하나). 파라미터는 eNB 에
@@ -940,7 +940,7 @@ KIND_SPECS: dict[str, dict] = {
     # 호는 늘리지 않고 기존 가입자의 일부가 나빠진다(2026-11-05 사용자 결정 · 스펙의 1.8배와 다르다).
     # 탐지 지표는 Q-11(RTT 초과 가입자 비율)이고 메시·정목 단위로 서서 인접 칸이 묶인다(`CLUSTER`)
     "ran_congestion": dict(
-        title="저녁 러시로 역 주변 기지국이 붐빔",
+        title="역 주변 저녁 러시 혼잡",
         truth_code="RAN_CAPACITY_CONGESTION", truth_category="RAN",
         expect_rules=("R-47",), expect_geo="CLUSTER",
         shape="RAMP", series=("transport", "http"),
@@ -950,7 +950,7 @@ KIND_SPECS: dict[str, dict] = {
     # 일본 시연 `j-sc-15` — 야마노테선 전환 정체. 원인 코드·`Q-08`·
     # `CELL_PAIR` 축·룰이 전부 graphio 에 아직 없다(확정대장 §7.3 NEW 4).
     "ho_interruption": dict(
-        title="야마노테선에서 4G↔5G 넘어갈 때 잠깐 멈춤",
+        title="야마노테선 4G↔5G 전환 때 잠깐 멈춤",
         truth_code="RAN_HO_INTERRUPTION", truth_category="RAN",
         expect_rules=("R-40",), expect_geo="CORRIDOR",
         shape="RAMP", series=("lte_call", "transport"),
@@ -980,7 +980,7 @@ KIND_SPECS: dict[str, dict] = {
     # 가 지진 정보(`CM_QUAKE_EVENT` · EV-19)로 지진을 먼저 알고 피해를 묶는다 — 결론 코드 `EARTHQUAKE_IMPACT`
     # (옛 `NATURAL_DISASTER_SUSPECTED` 는 graphio 채점 별칭). 재해는 망 밖 원인이라 `EXTERNAL` 이다
     "natural_disaster": dict(
-        title="지진 — 통화 폭주·기지국 정지",
+        title="지진 — 통화 몰림·기지국 정지",
         truth_code="EARTHQUAKE_IMPACT", truth_category="EXTERNAL",
         expect_rules=("R-46",), expect_geo="CLUSTER",
         expect_alternatives={"R-36": "RAN_NODE_DOWN"},
@@ -995,7 +995,7 @@ KIND_SPECS: dict[str, dict] = {
     # **5G 능력 단말 수(N-01)와 Attach·TAU 의 급증**뿐이다. 원인 코드는 결정 대기(`SA_FALLBACK_SUSPECTED`
     # 제안 · graphio Taxonomy 에 없다) — 룰이 없으니 `rule_pending`
     "sa_fallback": dict(
-        title="5G 장애로 4G로 몰림",
+        title="5G 장애로 4G에 몰림",
         truth_code="SA_FALLBACK_SUSPECTED", truth_category="5G",
         expect_rules=("R-48",), expect_geo="CLUSTER",
         shape="HOLD", onset="instant", offset="instant",
@@ -1014,7 +1014,7 @@ KIND_SPECS: dict[str, dict] = {
     ),
     # 일본 시연 `j-sc-22` — 결제 앱 DNS 지연. `Q-07` 등급별 산식이 없다(X-4).
     "pay_dns_delay": dict(
-        title="결제 앱이 느림 — 주소 찾기(DNS) 지연",
+        title="결제 앱 느림 (DNS 지연)",
         truth_code="DNS_DEGRADATION", truth_category="EXTERNAL",
         expect_rules=(), rule_pending=True, expect_geo="WIDE",
         shape="RAMP", series=("dns", "transport", "http"),
@@ -1027,7 +1027,7 @@ KIND_SPECS: dict[str, dict] = {
     # 정답 룰은 graphio `R-41`(2026-11-03 · 카드 23). 그 룰의 CLUSTER(⑤)·up 부
     # 근거(⑥)가 14번 `ran_congestion`(셀 하나 혼잡 · 룰 미배정)과의 경계다.
     "event_crowd": dict(
-        title="행사장 군중으로 사진 올리기 막힘",
+        title="행사장 인파로 사진 올리기 막힘",
         truth_code="EVENT_CROWD", truth_category="RAN",
         expect_rules=("R-41",), expect_geo="POINT",
         shape="STEPS", steps=((3, 0.50), (23, 1.00), (25, 0.40)),
@@ -1042,7 +1042,7 @@ KIND_SPECS: dict[str, dict] = {
     # 실제로 탐지되지만(14번과 같은 식), 그것을 맞히는 것이 이 시나리오의
     # 목적이 아니다. 시간 모양은 `shift_*` 가 만든다(`HOLD`).
     "capacity_shift": dict(
-        title="기지국 증설 뒤 손님이 옮겨 감 (장애 아님)",
+        title="기지국 증설 뒤 이용자 이동 (장애 아님)",
         truth_code="", truth_category="", scored=False,
         expect_rules=(), rule_pending=True, expect_geo="POINT",
         shape="HOLD", series=("transport", "http"),
@@ -2763,9 +2763,13 @@ def _quake_ring(plan, sc, intensity, rng, cell) -> bool:
 #
 #   0 ~ 3분    호 폭주만 — 흔들림을 느낀 사람들이 안부 통화·뉴스. 2분에 걸쳐 차오른다
 #   3분        기지국 다운(진도 5약 이상 eNB 중 일부 · `quake_plan` · 2026-11-14. 0곳일 수 있다)
-#   3 ~ 13분   폭주 + 다운
-#   13 ~ 23분  다운만 — 폭주가 가라앉아도 무호가 남아야 장비 장애라는 근거가 선다
-#   23분       정상화
+#   3 ~ 13분   폭주 + 다운 — **eNB 마다 8~18분 사이에 따로 복구한다**(`disaster_up_min`)
+#   13 ~ 18분  남은 정지 eNB 만
+#   18분       마지막 eNB 복구 · 정상화
+#
+# **다운만 남는 국면(13~23분)을 걷었다**(2026-11-16 사용자 "폭주 이후 정지를 짧게 가자 … 아니면 각 셀이
+# 정상화되는 것도 함께"). 전에는 모든 정지 eNB 가 23분에 한꺼번에 살아나 40분 주입의 뒤 17분이 비었고,
+# 폭주가 끝난 뒤 10분 동안 무호만 남았다. 지금은 eNB 마다 복구 분이 다르다 — 결정론(장애 ID · eNB)이다
 #
 # **다운 eNB 의 세션은 코어에 살아 있다**(2026-11-04 원칙 · SGW 다운과 다르다). 데이터는 다운
 # 시각에 멈추고(`freeze`), 이웃 살아 있는 셀에서 같은 세션으로 이어진다(`relocator`) — 그 셀에서
@@ -2775,7 +2779,15 @@ def _quake_ring(plan, sc, intensity, rng, cell) -> bool:
 DISASTER_SURGE_RAMP = 2
 DISASTER_DOWN_AT = 3
 DISASTER_SURGE_END = 13
-DISASTER_DOWN_END = 23
+#: eNB 별 복구 분의 범위(장애 시작 기준 · 양끝 포함) — **초기값**. 가장 늦은 eNB 는 늘 `DISASTER_UP_TO` 에
+#: 복구한다. 앞끝 8분은 정지 5분 — 평소 호가 많은 eNB(분당 4호 안팎)는 D4 가 2분 안에 무호를 확정한다(F-361
+#: 실측 15:53 정지 → 15:55). 호가 적은 eNB 는 확정 전에 살아날 수 있다. 끝은 **폭주 끝 5분 뒤 18분**이다
+#: (2026-11-16 케이 권장안 나 · 사용자 답 대기 중 진행) — 폭주 직후(14분)면 F-361 기준 D4 가 19곳 중 약 9곳, 18분이면
+#: 약 11곳, 옛 23분 일괄 복구면 15곳을 잡았다. 탐지 기준이 아니라 정지 길이로 정한다
+DISASTER_UP_FROM = 8
+DISASTER_UP_TO = 18
+#: 정지 국면의 끝 — 마지막 eNB 의 복구 분이다(주입 길이의 하한 · `faults.build`)
+DISASTER_DOWN_END = DISASTER_UP_TO
 #: 폭주 정점 — 경보 지역 셀의 평소 호 대비 배율(강도 1.0 일 때). **초기값 · 결정 대기**(11-05 케이
 #: 잠정안). 실측 발신 약 50배·착신 약 20배(동일본 대지진 · 도코모)에 맞춰 40 으로 올렸다(첫 값 6).
 #: 처리 용량 때문에 전국 합은 평소의 3배로 묶는다(`pemdb1` 의 `SURGE_CAP` · 사용자 "최대치의
@@ -2806,7 +2818,7 @@ DISASTER_RECONNECT_S = (5.0, 30.0)
 # 셀마다 진원 거리로 진도를 계산하고(graphio `evidence.quake_intensity` 와 같은 식 + eNB 지반 증폭률),
 # **폭주는 진도 3 이상 · 정지는 진도 5약(4.5) 이상**에서만 생긴다. 전에는 진도 → (반경 · 정지 확률 ·
 # 최대 셀) 표(`QUAKE_TABLE`)로 진앙 둘레를 꺼서, 진도 2.8 에 eNB 6곳이 꺼지고 진앙이 도쿄 한가운데였다
-# (F-332). 그 표는 근거가 없어 걷어 냈다. 국면(3분 정지 · 23분 정상화)은 그대로다.
+# (F-332). 그 표는 근거가 없어 걷어 냈다. 국면(3분 정지 · eNB 별 복구)은 `disaster_up_min` 이다.
 #
 # 이 지역 지진은 깊이가 60~80km 라 도쿄 안 진원 거리가 비슷하다 — 거리만으로는 도쿄 안 진도 차가 0.2 도
 # 안 난다. 실제 지진(2021-10-07 · 2005-07-23 치바 북서부)에서 아다치·하네다가 더 세게 흔들린 것은 무른 땅
@@ -2854,6 +2866,33 @@ def quake_radius_km(magnitude: float, depth_km: float, d: float, intensity: floa
     return round(lo, 1)
 
 
+#: 진원역이 아닌 진원 지명의 d — graphio `rca.quake.fault_type_d`(지각 내 0.0)와 **같은 값**이다. graphio EV-19 와
+#: gen-ui 영향 지도는 d 를 진원 지명(`HYPO_NAME`)으로 진원역 표에서 찾고, 없으면 이 기본값을 쓴다. 좌표로 준 진앙의
+#: 이름은 시군구(「東京都千代田区付近」)라 표에 없다 — 생성기도 같은 값을 써야 세 곳의 진도가 갈리지 않는다(2026-11-16)
+QUAKE_D_UNNAMED = 0.0
+
+
+def quake_place_name(cells, lat: float, lon: float, names: dict | None) -> str | None:
+    """좌표가 든 시군구 이름 — 「<시도><시군구>付近」(2026-11-16 · 27번 진원 지명).
+
+    gen 에는 행정경계 도형이 없다 — 가장 가까운 좌표 셀의 시군구를 고르고, 그 시군구 셀들의 위경도 범위 안일 때만
+    그 이름을 쓴다(새 거리 기준을 두지 않는다). 범위 밖(바다·마스터 밖)이거나 이름을 모르면 None — 호출부가 진원역
+    이름 + 付近 으로 쓴다"""
+    if not names:
+        return None
+    pts = [c for c in cells if c.geo_status == "MAPPED" and c.adm_sgg_cd]
+    if not pts:
+        return None
+    near = min(pts, key=lambda c: (c.latitude - lat) ** 2 + ((c.longitude - lon) * math.cos(math.radians(lat))) ** 2)
+    gu = str(near.adm_sgg_cd)
+    same = [c for c in pts if str(c.adm_sgg_cd) == gu]
+    if not (min(c.latitude for c in same) <= lat <= max(c.latitude for c in same)
+            and min(c.longitude for c in same) <= lon <= max(c.longitude for c in same)):
+        return None
+    city, sgg = names.get(gu, ("", ""))
+    return f"{city}{sgg}付近" if sgg else None
+
+
 def quake_region(lat: float | None = None, lon: float | None = None, rng: random.Random | None = None,
                  name: str | None = None) -> tuple:
     """진원역 하나 — 이름이 있으면 그것(앞 글자 A·B·C·D 도 받는다), 좌표가 있으면 가장 가까운 것,
@@ -2875,7 +2914,8 @@ def quake_region(lat: float | None = None, lon: float | None = None, rng: random
 
 def quake_new(rng: random.Random, region: str | None = None, lat: float | None = None,
               lon: float | None = None, magnitude: float | None = None, depth_km: float | None = None,
-              mag_floor: Callable[[float, float, float, float], float | None] | None = None) -> dict:
+              mag_floor: Callable[[float, float, float, float], float | None] | None = None,
+              fault_type_d: float | None = None) -> dict:
     """지진 한 건 — 정하지 않은 값은 ``rng``(장애 ID 시드)로 뽑는다. 키는 `CM_QUAKE_EVENT` 컬럼과 같은 뜻이다.
 
     진앙을 주지 않으면 진원역 대표 위치에서 ±`quake_jitter_deg` 흩뜨린다. 깊이도 ±`quake_jitter_depth_km`.
@@ -2889,7 +2929,8 @@ def quake_new(rng: random.Random, region: str | None = None, lat: float | None =
         lat = reg[1] + rng.uniform(-j, j)
         lon = reg[2] + rng.uniform(-j, j)
     depth = round(max(1.0, reg[3] + rng.uniform(-jd, jd)) if depth_km is None else float(depth_km), 1)
-    d = reg[4]
+    # 진원 유형 항 d — 주지 않으면 진원역 값이다(좌표 지정 진앙은 `QUAKE_D_UNNAMED` 를 준다 · `faults._quake_step`)
+    d = reg[4] if fault_type_d is None else float(fault_type_d)
     lo, hi = FAULT.quake_magnitude
     if magnitude is None:
         floor = mag_floor(lat, lon, depth, d) if mag_floor is not None else None
@@ -3134,20 +3175,41 @@ def disaster_dead_n(n_enbs: int) -> int:
     return math.ceil(DISASTER_DOWN_RATIO * n_enbs - 1e-9)
 
 
+def disaster_dead_all(sc) -> list[str]:
+    """정지하는 eNB 전부(복구 시각과 무관) — 정렬. 지진 정보로 고른 음영 eNB(2026-11-13), 없으면 옛 비율 규칙."""
+    q = sc.__dict__.get("_quake_dead")
+    if q is not None:
+        return sorted(q)
+    rank = _disaster_rank(sc)
+    n = disaster_dead_n(len(rank))
+    return sorted(k for k, r in rank.items() if r < n)
+
+
+def disaster_up_min(sc) -> dict[str, int]:
+    """정지 eNB → 복구 분(장애 시작 기준). `DISASTER_UP_FROM`~`DISASTER_UP_TO` 에서 고르게, 장애 ID·eNB 로
+    결정한다(틱·gen 재시작마다 같다). 가장 늦게 뽑힌 eNB 는 `DISASTER_UP_TO` 로 끌어 맞춘다 — 정지 국면이 폭주
+    끝 바로 뒤에 닫힌다. `sc` 에 한 번만 만든다"""
+    up = sc.__dict__.get("_dis_up")
+    if up is not None:
+        return up
+    span = DISASTER_UP_TO - DISASTER_UP_FROM + 1
+    up = {e: DISASTER_UP_FROM + zlib.crc32(f"{sc.id}:up:{e}".encode()) % span for e in disaster_dead_all(sc)}
+    if up:
+        last = max(up, key=lambda e: (up[e], e))
+        up[last] = DISASTER_UP_TO
+    sc.__dict__["_dis_up"] = up
+    return up
+
+
 def disaster_dead_enbs(sc, minute: int) -> set[str]:
-    """그 분에 정지해 있는 eNB — 다운 국면에만. 정지 집합은 고정이다(분마다 흔들리지 않는다)."""
+    """그 분에 정지해 있는 eNB — 다운 국면(`DISASTER_DOWN_AT` 부터 그 eNB 의 복구 분 전까지)에만.
+    정지 집합은 고정이고 줄어들기만 한다 — 같은 eNB 가 꺼졌다 켜졌다 하지 않는다."""
     if sc.kind != "natural_disaster":
         return set()
     e = disaster_elapsed(sc, minute)
     if not (DISASTER_DOWN_AT <= e < DISASTER_DOWN_END):
         return set()
-    q = sc.__dict__.get("_quake_dead")
-    if q is not None:
-        # 지진 정보로 고른 음영 eNB(2026-11-13) — 없을 때만 옛 비율 규칙이다(지난 기록 재생)
-        return set(q)
-    rank = _disaster_rank(sc)
-    n = disaster_dead_n(len(rank))
-    return {k for k, r in rank.items() if r < n}
+    return {k for k, u in disaster_up_min(sc).items() if e < u}
 
 
 def _disaster_truth(sc) -> dict:
@@ -3159,12 +3221,8 @@ def _disaster_truth(sc) -> dict:
     if sc.kind != "natural_disaster":
         return {}
     quake = sc.__dict__.get("_quake")
-    if sc.__dict__.get("_quake_dead") is not None:
-        dead = sorted(sc._quake_dead)
-    else:
-        rank = _disaster_rank(sc)
-        n = disaster_dead_n(len(rank))
-        dead = sorted(k for k, r in rank.items() if r < n)
+    dead = disaster_dead_all(sc)
+    up = disaster_up_min(sc)
     at = disaster_down_at(sc)
     rate = sc.__dict__.get("_enb_rate")
     return {
@@ -3187,9 +3245,14 @@ def _disaster_truth(sc) -> dict:
                      "cells": sorted(sc.__dict__.get("_surge_keys") or sc.target.cell_keys)}],
         # 정지 셀마다 가장 가까운 살아 있는 셀 — 정지 셀의 이용자가 옮겨 오고 혼잡(0.6 배)이 걸린다
         "ring_cells": sc.__dict__.get("_quake_ring"),
+        # 정지 국면은 마지막 eNB 의 복구 분에 닫힌다(정지 없으면 시작 분 그대로 · 2026-11-16)
         "phases": {"surge": [0, DISASTER_SURGE_END],
-                   "down": [DISASTER_DOWN_AT, DISASTER_DOWN_END]},
+                   "down": [DISASTER_DOWN_AT, max(up.values(), default=DISASTER_DOWN_AT)]},
         "down_enbs": dead,
+        # eNB 별 복구 분(장애 시작 기준)과 시각(epoch) — 그 분의 시작부터 다시 호를 낸다(2026-11-16)
+        "down_up_min": up,
+        "down_up_ts": ({e: math.floor(sc.start_ts / 60.0) * 60.0 + u * 60.0 for e, u in up.items()}
+                       if sc.__dict__.get("start_ts") is not None else None),
         # epoch 초 — 레코드 시각(`slot_start`)과 같은 기준. 장애 기록 시각보다 최대 59초 늦다
         "down_at_ts": at,
     }

@@ -793,6 +793,22 @@ class Baseline:
 # --------------------------------------------------------------------------
 
 
+#: 나라별 기종 비율 파일 — 없는 나라는 실측(`_distributions.json`) 그대로다
+VENDOR_SHARE_FILES = {"jp": "ue_share_jp.json"}
+
+
+def _vendor_share_path(data_dir: Path, locale: str | None) -> Path | None:
+    """그 나라의 기종 비율 파일 경로. 표에 없는 나라면 None, 표에는 있는데 파일이 없으면 경고하고 None."""
+    name = VENDOR_SHARE_FILES.get(str(locale or ""))
+    if name is None:
+        return None
+    path = Path(data_dir) / "pemdb1" / name
+    if not path.exists():
+        print(f"  ! 기종 비율 파일 {path} 이 없다 — 실측(한국) 기종 분포를 쓴다", flush=True)
+        return None
+    return path
+
+
 class Distributions:
     """`_distributions.json` 의 실측 구성비 샘플러.
 
@@ -827,7 +843,9 @@ class Distributions:
                  call_type_floor: float | None = None,
                  baseline: "Baseline | None" = None,
                  #: APN 값 변환표(`region.apn_map`). 비면 실측(한국) 값 그대로다.
-                 apn_map: dict[str, str] | None = None):
+                 apn_map: dict[str, str] | None = None,
+                 #: 기종 비율 파일(`ue_share_jp.json`). None 이면 실측(한국) 20쌍 그대로다
+                 vendor_share: Path | None = None):
         d = json.loads(path.read_text(encoding="utf-8"))
         self.rng = rng
         self.success_only = success_only
@@ -876,6 +894,8 @@ class Distributions:
 
         self.vendor_models = [(e["vendor"], e["model"]) for e in d["vendor_model"]]
         self.vendor_model_w = [e["n"] for e in d["vendor_model"]]
+        if vendor_share is not None:
+            self._use_vendor_share(vendor_share)
 
         #: 부가 절차 플래그(Data/IMS/Paging)의 CALL_TYPE 조건부 비율.
         #: `d["call_type"]` 에는 주 상태 플래그(att/suc/drop/detach)만 있고
@@ -955,6 +975,29 @@ class Distributions:
 
     def vendor_model(self) -> tuple[str, str]:
         return self._pick(self.vendor_models, self.vendor_model_w)
+
+    def _use_vendor_share(self, path: Path) -> None:
+        """기종 비율을 나라 파일로 바꾼다(2026-11-16 · 사용자 "실제 단말 비율처럼, 임의로 지정하지 말고").
+
+        실측 20쌍은 한국 상용 표본이고 기종 사전(`CM_UE_MODEL`)의 이름은 그 코드에 나중에 붙인 PoC 배정이라,
+        일본에서 「Xiaomi 14 2.6%」처럼 시장과 맞지 않았다. **빈 값(Vendor·Model IE 부재)의 몫은 실측 그대로
+        둔다** — 단말 비율이 아니라 절차의 측정 속성이다. 나머지 몫을 파일의 `models.w`(합 1)로 나눈다.
+        파일을 못 읽으면 경고하고 실측 분포를 쓴다
+        """
+        try:
+            rows = json.loads(Path(path).read_text(encoding="utf-8"))["models"]
+            share = [((r["vendor"], r["model"]), float(r["w"])) for r in rows if float(r["w"]) > 0]
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            print(f"  ! 기종 비율 파일 {path} 을 못 읽었다 — 실측(한국) 기종 분포를 쓴다({e})", flush=True)
+            return
+        if not share:
+            print(f"  ! 기종 비율 파일 {path} 이 비었다 — 실측(한국) 기종 분포를 쓴다", flush=True)
+            return
+        tot = sum(self.vendor_model_w)
+        blank = sum(w for vm, w in zip(self.vendor_models, self.vendor_model_w) if vm == ("", ""))
+        rest = (tot - blank) / sum(w for _, w in share)
+        self.vendor_models = [("", "")] * bool(blank) + [vm for vm, _ in share]
+        self.vendor_model_w = [blank] * bool(blank) + [w * rest for _, w in share]
 
     def release_cause(self) -> str:
         return self._pick(self.releases, self.release_w)
@@ -1358,6 +1401,17 @@ def _pick_enbs(uniq: dict, enb_limit: int | None) -> set[str] | None:
     out = set(unmapped[:n_un])
     out.update(mapped[: max(0, enb_limit - len(out))])
     return out | band
+
+
+def _load_gu_names(conn, locale: str) -> dict[str, tuple[str, str]]:
+    """`CM_GU*.GU_ID` → (CITY_NAME, GU_NAME). 못 읽으면 경고하고 빈 표 — 지명은 진원역 이름으로 돌아간다."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT GU_ID, CITY_NAME, GU_NAME FROM {table_name('gu', locale)}")
+            return {str(g): (str(c or ""), str(n or "")) for g, c, n in cur.fetchall() if n}
+    except Exception as e:  # noqa: BLE001 — 지명은 보조 정보다. 생성을 멈추지 않는다
+        print(f"  ! 시군구 이름 표를 못 읽었다 — 좌표 지정 지진은 진원역 이름을 쓴다({e})", flush=True)
+        return {}
 
 
 def load_cells(conn, enb_limit: int | None = None,
@@ -2036,6 +2090,9 @@ class PemdbGen:
                  #: 가입자 풀을 만들 때 한 번 쓰므로 **재시작해야 바뀐다**
                  net_mode: dict | None = None):
         self.plmn = plmn or Plmn()
+        #: 시군구 코드 → (시도 이름, 시군구 이름) — 좌표로 준 27번 진앙의 지명(`scenarios.quake_place_name`).
+        #: 셀 마스터의 이름 칸은 비어 있다(`load_cells` · 한글 깨짐) — 이름은 지역 벌 표에서 읽는다
+        self.gu_names = _load_gu_names(conn, locale)
         cells = load_cells(conn, enb_limit=enb_limit, drawable=drawable,
                            ensure_coords=ensure_coords, plmn=self.plmn,
                            locale=locale, tac_only=tac_only,
@@ -2090,6 +2147,9 @@ class PemdbGen:
             # 일부러 KR 로 남아 있고(`datagen.yaml` 의 plmn 블록 주석), 그
             # 결정과 APN 을 묶으면 APN 만 바꾸려 해도 IMSI 가 함께 바뀐다.
             apn_map=apn_map(locale),
+            # 기종 비율도 같은 나라축이다 — jp 는 공개 점유 기반 파일, kr 은 실측 20쌍(`_use_vendor_share`).
+            # 파일이 없으면 경고 한 줄 남기고 실측을 쓴다
+            vendor_share=_vendor_share_path(data_dir, locale),
         )
         # 도메인 표본도 **같은 나라축**이다 — 위 `apn_map` 과 같은 `locale`
         profiles = load_profiles(data_dir / "profile.json", locale=locale)
@@ -3972,7 +4032,8 @@ class PemdbGen:
         self.gen.target_history = history
         scs, bad = resolve_active_faults(
             self.cells, self.anchor, self.seed, active, self._fault_cache, enb_rate=enb_rate,
-            routes=self.gen.routes, nr_on=self._nr_on, mesh_load=mesh_load, history=history)
+            routes=self.gen.routes, nr_on=self._nr_on, mesh_load=mesh_load, history=history,
+            place_names=getattr(self, "gu_names", None))
         self.set_faults(scs)
         return scs, bad
 
