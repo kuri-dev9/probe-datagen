@@ -116,14 +116,20 @@ def test_the_given_epicenter_is_independent_of_the_mode():
 
 # ── 3 · 정지 eNB 선택은 모드에 따라 바뀌지 않는다 ───────────────────────────────────────────────
 
-def test_down_selection_does_not_depend_on_the_mode_and_obeys_the_forty_cell_cap(monkeypatch):
+def test_down_selection_does_not_depend_on_the_mode_and_obeys_the_cap_only_when_one_is_given(monkeypatch):
     cells = _grid()
     arv = {c.enb_id: 2.5 for c in cells}                                     # 정지 후보가 생기게
     monkeypatch.setattr(S, "quake_arv", lambda *a, **k: arv)
     loc, wide = _build("LOCAL:QUAKE:B,6.0", cells=cells), _build("WIDE:QUAKE:B,6.0", cells=cells)
     dl, dw = loc.as_truth()["down_cells"], wide.as_truth()["down_cells"]
     assert dl and dl == dw, "정지 eNB 는 같은 진원이면 같아야 한다(A안 — 모드와 무관)"
-    assert len(dw) <= S.FAULT.quake_down_max_cells
+    # 11-16 가안 — 상한은 기본이 없음(None)이고, 값을 주면 그 수에서 멈춘다(그때만 상한을 따진다)
+    assert S.FAULT.quake_down_max_cells is None
+    cap = S.FAULT.quake_down_max_cells
+    assert cap is None or len(dw) <= cap
+    monkeypatch.setattr(S.FAULT, "quake_down_max_cells", 6)
+    assert len(_build("WIDE:QUAKE:B,6.0", cells=cells).as_truth()["down_cells"]) <= 6
+    monkeypatch.setattr(S.FAULT, "quake_down_max_cells", None)
     assert loc.as_truth()["down_enbs"] == wide.as_truth()["down_enbs"]
     assert set(dw) <= wide.target.cell_keys                                  # 정답 지역 = 폭주 셀 + 정지 셀
     assert len(wide.target.cell_keys) > len(loc.target.cell_keys)           # 넓은 쪽이 더 많은 폭주 셀

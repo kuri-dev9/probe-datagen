@@ -72,10 +72,10 @@ def _use(monkeypatch, **kw):
     return c
 
 
-def _row(start=T0, dur=16, mag=5.9, status="done"):
+def _row(start=T0, dur=16, mag=5.9, status="done", hypo="千葉県北西部", depth=60.6, inten=4.1):
     """구간 안이면 지진 행을 돌려주는 by_time — SQL 의 START_TIME <= at <= START_TIME+DURATION 을 흉내낸다."""
     def f(ts):
-        return (348, 35.734531, 140.543731, mag, start, status) if start <= ts <= start + timedelta(minutes=dur) else None
+        return (348, 35.734531, 140.543731, mag, start, status, hypo, depth, inten) if start <= ts <= start + timedelta(minutes=dur) else None
     return f
 
 
@@ -84,19 +84,19 @@ def _row(start=T0, dur=16, mag=5.9, status="done"):
 def test_at_given_means_window_match_only_even_when_a_quake_is_active(monkeypatch):
     """11-15 사용자 "지진 시나리오 누를 때만 나와야" — 진행 중인 27번이 있어도 고른 장애가 그 구간 밖이면 None.
     (전에는 active 를 먼저 봐서 DNS 장애를 골라도 지진이 떴다.) at 이 있으면 active 질의를 아예 하지 않는다."""
-    c = _use(monkeypatch, active=(349, 36.0, 141.0, 6.1, T0, "active"), by_time=_row())
+    c = _use(monkeypatch, active=(349, 36.0, 141.0, 6.1, T0, "active", None, None, None), by_time=_row())
     assert map_api.api_map_quake(at="2026-11-15T09:10:00")["quake"] is None
     assert not any("STATUS = 'active'" in s for s, _ in c.log) and len(c.log) == 1
 
 
 def test_at_inside_the_window_picks_that_quake_not_the_active_one(monkeypatch):
-    _use(monkeypatch, active=(349, 36.0, 141.0, 6.1, T0 + timedelta(hours=5), "active"), by_time=_row())
+    _use(monkeypatch, active=(349, 36.0, 141.0, 6.1, T0 + timedelta(hours=5), "active", None, None, None), by_time=_row())
     assert map_api.api_map_quake(at="2026-11-15T05:40:00")["quake"]["fault_id"] == 348
 
 
 def test_without_at_the_active_quake_is_still_returned_by_the_api(monkeypatch):
     """화면은 고른 장애가 없으면 묻지 않지만 API 는 at 없이 부르면 진행 중인 지진을 준다(남긴 동작)."""
-    _use(monkeypatch, active=(349, 36.0, 141.0, 6.1, T0, "active"), by_time=_row())
+    _use(monkeypatch, active=(349, 36.0, 141.0, 6.1, T0, "active", None, None, None), by_time=_row())
     q = map_api.api_map_quake()["quake"]
     assert q["fault_id"] == 349 and q["active"] is True
 
@@ -105,7 +105,8 @@ def test_at_inside_injection_window_picks_that_quake(monkeypatch):
     _use(monkeypatch, by_time=_row())
     q = map_api.api_map_quake(at="2026-11-15T05:45:00")["quake"]
     assert q == {"fault_id": 348, "lat": 35.734531, "lon": 140.543731, "magnitude": 5.9,
-                 "origin_time": "2026-11-15T05:37:00", "active": False}
+                 "origin_time": "2026-11-15T05:37:00", "active": False,
+                 "hypo_name": "千葉県北西部", "depth_km": 60.6, "intensity": 4.1}
 
 
 def test_window_edges_are_inclusive(monkeypatch):
@@ -146,7 +147,7 @@ def test_missing_quake_table_gives_none_with_note(monkeypatch):
 
 
 def test_null_magnitude_stays_none_not_zero(monkeypatch):
-    _use(monkeypatch, active=(348, 35.7, 140.5, None, T0, "active"))
+    _use(monkeypatch, active=(348, 35.7, 140.5, None, T0, "active", None, None, None))
     q = map_api.api_map_quake()["quake"]
     assert q["magnitude"] is None                      # 불변규칙 17 — 모름을 0 으로 적지 않는다
 
@@ -160,10 +161,19 @@ def test_connection_closed_and_sql_is_select_only(monkeypatch):
         assert not re.search(r"\b(INSERT|UPDATE|DELETE|ALTER|DROP)\b", sql, re.I)
 
 
-def test_response_carries_only_star_and_magnitude_fields(monkeypatch):
+def test_response_carries_the_star_the_quake_line_fields_and_no_truth(monkeypatch):
+    """11-16 통합 장애 바 「지진」 줄 — 진원 지명·깊이·진앙 진도가 함께 온다. 정지 셀·eNB 수는 정답지라 넣지 않는다."""
     _use(monkeypatch, by_time=_row())
     q = map_api.api_map_quake(at="2026-11-15T05:45:00")["quake"]
-    assert set(q) == {"fault_id", "lat", "lon", "magnitude", "origin_time", "active"}   # 지명·진도 등은 넣지 않는다
+    assert set(q) == {"fault_id", "lat", "lon", "magnitude", "origin_time", "active", "hypo_name", "depth_km", "intensity"}
+    assert not any("down" in k for k in q)
+
+
+def test_unknown_line_fields_stay_none_not_zero_or_empty(monkeypatch):
+    """불변규칙 17 — 지명이 빈 문자열이거나 깊이·진도가 NULL 이면 None 이다(0 이나 빈 칸으로 적지 않는다)."""
+    _use(monkeypatch, by_time=_row(hypo="", depth=None, inten=None))
+    q = map_api.api_map_quake(at="2026-11-15T05:45:00")["quake"]
+    assert q["hypo_name"] is None and q["depth_km"] is None and q["intensity"] is None
 
 
 def test_outline_only_when_asked(monkeypatch):
@@ -608,8 +618,8 @@ def _node(tmp_path, body):
 
 POLL = """
 const calls=[]; let FOCUS=null, H={}; const histOf=id=>H[id]||null;
-let MINI=null, MINI_Q=null, MINI_VB=null, DOWN=null, DOWN_KEY=null, DOWN_N=0, QFOR=null;   // QFOR: 11-16 — 지진이 어느 장애 것인지
-const drawMini=()=>calls.push('mini'), drawDown=()=>calls.push('down');
+let MINI=null, MINI_Q=null, MINI_VB=null, DOWN=null, DOWN_KEY=null, DOWN_N=0, QFOR=null, QKEY=null;   // QFOR: 11-16 — 지진이 어느 장애 것인지 · QKEY: 지진 줄이 바뀌었는지 비교
+const drawMini=()=>calls.push('mini'), drawDown=()=>calls.push('down'), drawFocus=()=>calls.push('focus');
 let REPLY=null, FETCHED=[]; const fetch=async u=>{FETCHED.push(u); if(REPLY==='boom') throw new Error('x'); return {json:async()=>REPLY};};
 """
 
@@ -644,7 +654,24 @@ def test_poll_with_a_focused_incident_always_sends_at_and_asks_the_outline_once(
     assert "outline=1" in out["first"] and "outline" not in out["second"]
     assert out["q"] == {"fault_id": 355} and out["d"]["enbs"] == ["1"] and out["mini"] is True
     assert out["qfor"] == "I1"                                       # 지진이 어느 장애 것인지 기억한다(다른 장애로 넘어가면 쓰지 않는다)
-    assert out["calls"] == ["mini", "down", "mini", "down"]
+    assert out["calls"] == ["mini", "down", "focus", "mini", "down"]  # 통합 장애 바는 지진이 처음 올 때만 다시 그린다(같은 답은 10초마다 와도 그리지 않는다)
+
+
+@pytest.mark.skipif(NODE is None, reason="node 없음")
+def test_poll_redraws_the_focus_bar_only_when_the_quake_or_the_incident_changed(tmp_path):
+    """11-16 「지진」 줄 — 같은 답이 반복되면 바를 다시 그리지 않고(깜빡임), 값이 바뀌거나 장애가 바뀌면 그린다."""
+    out = _node(tmp_path, POLL + _fn("pollQuake", is_async=True) + """
+(async()=>{
+  FOCUS='I1'; H.I1={incident_id:'I1',opened_ts:'2026-11-15 11:40:00'}; H.I2={incident_id:'I2',opened_ts:'2026-11-15 11:40:00'};
+  const n=()=>calls.filter(c=>c==='focus').length, r=[];
+  REPLY={quake:{fault_id:355,magnitude:6.2}}; await pollQuake(); r.push(n());   // 처음
+  await pollQuake(); r.push(n());                                                // 같은 답
+  REPLY={quake:{fault_id:355,magnitude:6.3}}; await pollQuake(); r.push(n());   // 값이 바뀜
+  FOCUS='I2'; await pollQuake(); r.push(n());                                    // 다른 장애
+  REPLY={quake:null}; await pollQuake(); r.push(n());                            // 지진이 사라짐
+  console.log(JSON.stringify(r));
+})();""")
+    assert out == [1, 1, 2, 3, 4]
 
 
 @pytest.mark.skipif(NODE is None, reason="node 없음")

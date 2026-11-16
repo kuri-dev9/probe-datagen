@@ -193,10 +193,10 @@ def test_the_down_threshold_is_exactly_4_5_and_the_probability_and_cap_apply(mon
     q = _weak()
     arv = {c.enb_id: 2.5 for c in cells}
     monkeypatch.setattr(S.FAULT, "quake_down_pct", 0.0)
-    a0 = S.quake_plan(cells, q, random.Random(0), 25, arv)
-    assert a0[1], "확률 관문은 걷었다 — pct 0 이어도 후보가 있으면 꺼진다(11-15 A안)"
+    assert S.quake_plan(cells, q, random.Random(0), 25, arv)[1] == [], "11-16 가안 — pct 0 이면 후보가 있어도 안 꺼진다"
     monkeypatch.setattr(S.FAULT, "quake_down_pct", 100.0)
-    assert S.quake_plan(cells, q, random.Random(0), 25, arv) == a0                  # pct 는 결과에 영향이 없다
+    a1 = S.quake_plan(cells, q, random.Random(0), 25, arv)
+    assert a1[1] and len(a1[2]) == 3 * len(a1[1]), "pct 100 이면 p=1 — 후보 전부(eNB 째)"
     monkeypatch.setattr(S.FAULT, "quake_down_max_cells", 7)
     _a, dead, dc = S.quake_plan(cells, q, random.Random(0), 25, arv)
     assert dead and len(dc) <= 7 and len(dc) == 3 * len(dead)                      # 최대 셀을 넘기는 eNB 는 건너뛴다(3셀씩)

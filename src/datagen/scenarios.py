@@ -137,10 +137,12 @@ class FaultCfg:
     quake_surge_intensity: float = 3.0
     #: 기지국 정지 후보 = 추정 진도 이 이상(진도 5약). 이 아래는 끄지 않는다
     quake_down_intensity: float = 4.5
-    #: 정지 후보 eNB 하나가 실제로 꺼질 확률(%). **초기값 · 근거 없음 · 결정 대기**
+    #: 진도 5약(4.5) 정지 후보 eNB 가 꺼질 기본 확률(%) — 흔들림 배율을 곱한다(`quake_plan` · 2026-11-16 가안).
+    #: **초기값 · 근거 없음 · 결정 대기**
     quake_down_pct: float = 30.0
-    #: 정지 셀 최대 수 — 옛 진도표(`QUAKE_TABLE`)의 가장 큰 값 그대로다
-    quake_down_max_cells: int = 40
+    #: 정지 셀 최대 수. None 이면 상한 없음(2026-11-16 사용자 가안 — 상한 대신 흔들림 비례 확률).
+    #: 값을 주면 전처럼 그 수에서 멈춘다
+    quake_down_max_cells: int | None = None
     #: eNB → 지반 증폭률(ARV) 표 파일(CSV `enb_id,arv`). 비우거나 없으면 모든 eNB 가 1.0 이다(거리만).
     #: J-SHIS 표층 지반(250m 메시 · V4)을 쓸 자리다 — 이용 조건 확인 전이라 받지 않았다(2026-11-14)
     quake_arv_path: str = ""
@@ -229,8 +231,12 @@ class FaultCfg:
                      "floor_moved_share", "auto_node_min_share", "auto_wide_min_share",
                      "outage_min_cells", "outage_min_rate", "quake_jitter_deg",
                      "quake_jitter_depth_km", "quake_surge_intensity", "quake_down_intensity",
-                     "quake_down_pct", "quake_down_max_cells"):
+                     "quake_down_pct"):
                 setattr(f, k, type(getattr(f, k))(v))
+                continue
+            if k == "quake_down_max_cells":
+                # 빈 값(yaml `~`)은 상한 없음이다(2026-11-16 가안) — `int(None)` 으로 죽지 않게
+                f.quake_down_max_cells = None if v is None or v == "" else int(v)
                 continue
             if k == "sa_fallback_call_boost":
                 if float(v) < 1.0:
@@ -2953,14 +2959,15 @@ def quake_plan(cells: list[Cell], q: dict, rng: random.Random, want: int = 25,
     * **폭주**: 진도 `quake_surge_intensity`(3) 이상인 셀 중 **진도가 높은 셀부터** ``want`` 개
       (`DISASTER_AREA_CELLS` 국소 25 · 넓은 80 · 지금의 상한 그대로). 진도 4 짜리 M6 이면 도쿄 전역이
       진도 3 이상이라, 상한이 없으면 전국 상한(`pemdb1.SURGE_CAP`)에 눌려 지역 폭주가 묽어진다
-    * **정지**: eNB 의 진도(셀 중 최대) `quake_down_intensity`(4.5 · 진도 5약) 이상인 eNB 만 후보다. 후보 전체를
-      **흔들림에 비례한 가중 무작위 순서**로 세우고(가중치 = 지반 속도 비 ``10^((I − 4.5)/1.72)`` · 비복원 ·
-      Efraimidis–Spirakis 열쇠 ``u^(1/w)``) 그 순서대로 `quake_down_max_cells` 가 찰 때까지 eNB 째 끈다(실제
-      정전·전송 단절은 eNB 째 꺼진다). 넣으면 상한을 넘는 eNB 는 건너뛴다. 후보가 없으면 **0곳이어도 정상이다**.
-      2026-11-15 사용자 A안 — 전에는 진도가 높은 eNB 부터 `quake_down_pct`(30%) 관문으로 끄고 40셀에서 멈춰,
-      무른 땅(ARV 2.2~2.5)인 荒川・北에만 정지가 몰리고 中央・港・品川 후보(5약 이상)에는 차례가 오지 않았다
-      (F-355). 확률 관문은 걷었다 — 개수는 상한까지 ("정했던 만큼 어느 정도 꺼지게").
-      ``rng`` 는 장애 ID 시드라 같은 장애면 같은 eNB 가 꺼진다
+    * **정지**: eNB 의 진도(셀 중 최대) `quake_down_intensity`(4.5 · 진도 5약) 이상인 eNB 만 후보다. 후보마다
+      확률 ``p = min(1, quake_down_pct/100 × 10^((I − 4.5)/1.72))`` 로 eNB 째 끈다(실제 정전·전송 단절은 eNB 째
+      꺼진다). 배율은 지반 속도 비라 진도 4.5 → 30%, 4.7 → 약 39%, 5.4 이상 → 100% 다. 2026-11-16 사용자 가안 —
+      상한 대신 흔들림 비례 확률. 전(11-15 A안)에는 같은 배율로 가중 무작위 줄을 세워 40셀에서 멈춰, 규모가
+      달라도 꺼지는 수가 같았다(F-356·F-358 모두 40). `quake_down_max_cells` 를 주면 그 수에서 멈추고 넘는 eNB 는
+      건너뛴다(None 이면 상한 없음). 후보가 없거나 다 비켜 가면 **0곳이어도 정상이다**.
+      ``rng`` 는 장애 ID 시드고 후보를 eNB ID 순으로 한 번씩 뽑아, 같은 장애면 같은 eNB 가 꺼진다.
+      상한이 없으면 ``q["max_cells"]``(CM_QUAKE_EVENT.MAX_CELLS · NOT NULL)에 후보 eNB 셀 수 — 꺼질 수 있는
+      최대 — 를 적는다
     폭주 지역 = 폭주 셀 + 정지 셀(정답 지역 · 케이 지시)
     """
     inten = quake_cell_intensity(cells, q, arv)
@@ -2976,19 +2983,23 @@ def quake_plan(cells: list[Cell], q: dict, rng: random.Random, want: int = 25,
             e = str(c.enb_id)
             by_enb[e] = max(by_enb.get(e, v), v)
     lo = FAULT.quake_down_intensity
-    # 순서를 정해 두고 난수를 뽑는다 — dict 순서에 기대면 같은 시드라도 다른 eNB 가 꺼질 수 있다
+    cap = FAULT.quake_down_max_cells
+    # 순서를 정해 두고 난수를 뽑는다 — dict 순서에 기대면 같은 시드라도 다른 eNB 가 꺼질 수 있다.
+    # 상한이 있어도 후보마다 난수를 하나씩 다 뽑는다 — 상한이 난수 흐름을 바꾸지 않게
     cand = sorted(e for e, v in by_enb.items() if v >= lo)
-    keyed = sorted(((rng.random() ** (1.0 / 10 ** ((by_enb[e] - lo) / QUAKE_I_SLOPE)), e) for e in cand),
-                   reverse=True)
+    base = FAULT.quake_down_pct / 100.0
     dead: list[str] = []
     n = 0
-    for _k, e in keyed:
-        if n >= FAULT.quake_down_max_cells:
-            break
-        if n + len(per[e]) > FAULT.quake_down_max_cells:
+    for e in cand:
+        p = min(1.0, base * 10 ** ((by_enb[e] - lo) / QUAKE_I_SLOPE))
+        if rng.random() >= p:
+            continue
+        if cap is not None and n + len(per[e]) > cap:
             continue
         dead.append(e)
         n += len(per[e])
+    if cap is None:
+        q["max_cells"] = sum(len(per[e]) for e in cand)
     dead_cells = sorted(k for e in dead for k in per[e])
     area = {k for _v, k in surge[:max(0, int(want))]} | set(dead_cells)
     return area, sorted(dead), dead_cells

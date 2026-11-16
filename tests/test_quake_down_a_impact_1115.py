@@ -1,4 +1,9 @@
-"""27번 지진 — 정지 eNB 고르기 A안과 영향 지역 API (2026-11-15 사용자 A안 · 맥스 구현 · 에스터 시험).
+"""27번 지진 — 정지 eNB 고르기(11-15 A안 → 11-16 가안으로 바뀜)와 영향 지역 API (맥스 구현 · 에스터 시험).
+
+**11-16 가안**: 정지는 후보 eNB 마다 확률 `p=min(1, pct/100×10^((I−4.5)/1.72))` 로 끈다(상한 없음이 기본). 새 규칙의 시험은
+`test_quake_down_prob_1116.py`. 이 파일의 정지 선택 시험은 그 규칙(상한은 `cap` 을 줄 때만)에 맞췄고, 영향 API 시험은 그대로다.
+
+(아래는 11-15 A안 설명 — 지금은 확률 관문이 다시 쓰인다)
 
 A안: 진도 5약(`quake_down_intensity`) 이상 후보 전체를 **흔들림에 비례한 가중 무작위 순서**(`10^((I−4.5)/1.72)` ·
 비복원)로 줄 세워 `quake_down_max_cells` 가 찰 때까지 끈다. `quake_down_pct` 관문은 걷었다(개수는 상한까지).
@@ -83,17 +88,19 @@ def test_only_candidates_at_or_above_the_down_intensity_ever_go_down(cfg):
         assert set(S.quake_plan(cells, _q(), random.Random(seed), 25, arv)[1]) <= cand
 
 
-def test_cells_never_exceed_the_cap_and_fill_it_when_candidates_suffice(cfg, monkeypatch):
+def test_cells_never_exceed_the_cap_and_fill_it_when_every_candidate_is_certain(cfg, monkeypatch):
+    """11-16 — 상한은 값을 줄 때만 있다. pct 100 이면 p=1 이라 후보 순서대로 상한까지 채운다(3 의 배수까지)."""
+    monkeypatch.setattr(S.FAULT, "quake_down_pct", 100.0)
     cells, arv = _grid(), {c.enb_id: 2.5 for c in _grid()}                          # 후보 100곳 · 300셀
     for cap in (3, 7, 40, 41, 299, 300, 500):
         monkeypatch.setattr(S.FAULT, "quake_down_max_cells", cap)
         _a, dead, dc = S.quake_plan(cells, _q(), random.Random(cap), 25, arv)
         assert len(dc) <= cap and len(dc) == 3 * len(dead)
-        assert len(dc) == min(cap // 3 * 3, 300), f"cap={cap} 에서 채우지 못했다: {len(dc)}"   # 3셀씩이라 3 의 배수까지
-
+        assert len(dc) == min(cap // 3 * 3, 300), f"cap={cap} 에서 채우지 못했다: {len(dc)}"
 
 def test_an_enb_that_would_overflow_is_skipped_and_a_smaller_one_still_fits(cfg, monkeypatch):
-    """3셀 eNB 와 1셀 eNB 가 섞여 있고 상한 4 — 어느 순서로 뽑혀도 합이 4 가 되도록 남은 작은 eNB 를 채운다."""
+    """3셀 eNB 와 1셀 eNB 가 섞여 있고 상한 4 — 넘는 eNB 는 건너뛰고 남은 작은 eNB 로 4 를 채운다(p=1 이라 결정적)."""
+    monkeypatch.setattr(S.FAULT, "quake_down_pct", 100.0)
     cells = []
     for i in range(5):
         cells += [_cell(f"{810000 + i}", n, 35.0 + i * 0.01, 139.0) for n in range(3)]
@@ -101,21 +108,18 @@ def test_an_enb_that_would_overflow_is_skipped_and_a_smaller_one_still_fits(cfg,
         cells += [_cell(f"{820000 + i}", 0, 35.0 + i * 0.01, 139.05)]
     arv = {c.enb_id: 2.5 for c in cells}
     monkeypatch.setattr(S.FAULT, "quake_down_max_cells", 4)
-    sizes = set()
-    for seed in range(60):
+    for seed in range(20):
         _a, dead, dc = S.quake_plan(cells, _q(), random.Random(seed), 25, arv)
-        sizes.add(len(dc))
-        assert len(dc) <= 4
-    assert sizes == {4}
+        assert len(dc) == 4
 
-
-def test_the_down_probability_is_not_used_any_more(cfg, monkeypatch):
+def test_the_down_probability_is_used_again_scaled_by_the_shaking(cfg, monkeypatch):
+    """11-15 A안은 pct 를 걷었지만 11-16 가안이 되살렸다 — pct 0 이면 아무도 안 꺼지고 100 이면 후보가 모두 꺼진다."""
+    monkeypatch.setattr(S.FAULT, "quake_down_max_cells", None)                         # 이 파일의 cfg 는 상한 40 을 준다 — 비운다
     cells, arv = _grid(), {c.enb_id: 2.5 for c in _grid()}
-    ref = S.quake_plan(cells, _q(), random.Random(5), 25, arv)
-    for pct in (0.0, 1.0, 100.0):
-        monkeypatch.setattr(S.FAULT, "quake_down_pct", pct)
-        assert S.quake_plan(cells, _q(), random.Random(5), 25, arv) == ref
-
+    monkeypatch.setattr(S.FAULT, "quake_down_pct", 0.0)
+    assert S.quake_plan(cells, _q(), random.Random(5), 25, arv)[1] == []
+    monkeypatch.setattr(S.FAULT, "quake_down_pct", 100.0)
+    assert len(S.quake_plan(cells, _q(), random.Random(5), 25, arv)[1]) == 100
 
 def test_no_candidates_means_zero_down_enbs_and_surge_only(cfg):
     cells = _grid()
@@ -124,32 +128,31 @@ def test_no_candidates_means_zero_down_enbs_and_surge_only(cfg):
     assert S.quake_plan(cells, _q(magnitude=2.0), random.Random(0), 25, {}) == (set(), [], [])
 
 
-def test_higher_intensity_enbs_are_picked_first_more_often(cfg, monkeypatch):
-    """가중치 10^((I−4.5)/1.72): 증폭 10 대 2.5 는 진도가 1.03 차이라 가중치 4 배 — 한 곳만 끄면 약 80% 가 센 쪽이다."""
+def test_higher_intensity_enbs_go_down_more_often(cfg, monkeypatch):
+    """확률 p ∝ 10^((I−4.5)/1.72): 증폭 10 대 2.5(진도 1.03 차 → 4배) 인 두 무리 중 센 쪽이 이론 비율대로 더 꺼진다."""
+    monkeypatch.setattr(S.FAULT, "quake_down_max_cells", None)
     cells = _grid(40)
     enbs = sorted({c.enb_id for c in cells})
     strong = set(enbs[:20])
-    arv = {e: (10.0 if e in strong else 2.5) for e in enbs}
-    monkeypatch.setattr(S.FAULT, "quake_down_max_cells", 3)                           # 한 번에 한 곳
-    n, hit = 600, 0
-    for seed in range(n):
-        dead = S.quake_plan(cells, _q(), random.Random(seed), 25, arv)[1]
-        assert len(dead) == 1
-        hit += dead[0] in strong
-    frac = hit / n
+    arv = {e: (6.0 if e in strong else 2.5) for e in enbs}
     inten = S.quake_cell_intensity(cells, _q(), arv)
     by = {}
     for k, v in inten.items():
         e = k.rsplit("-", 1)[0]
         by[e] = max(by.get(e, 0.0), v)
-    w = {e: 10 ** ((v - 4.5) / S.QUAKE_I_SLOPE) for e, v in by.items()}
-    expect = sum(w[e] for e in strong) / sum(w.values())
-    assert 0.5 < expect < 1.0 and abs(frac - expect) < 0.06, (frac, expect)           # 이론값과 맞고 센 쪽이 더 자주 뽑힌다
-    assert frac > 0.55
-
+    p = {e: min(1.0, 0.30 * 10 ** ((v - 4.5) / S.QUAKE_I_SLOPE)) for e, v in by.items() if v >= 4.5}
+    assert set(p) == set(enbs) and sum(p[e] for e in strong) > sum(p[e] for e in enbs if e not in strong)
+    n_s = n_w = 0
+    seeds = 400
+    for seed in range(seeds):
+        dead = set(S.quake_plan(cells, _q(), random.Random(seed), 25, arv)[1])
+        n_s += len(dead & strong)
+        n_w += len(dead - strong)
+    exp_s, exp_w = seeds * sum(p[e] for e in strong), seeds * sum(p[e] for e in enbs if e not in strong)
+    assert abs(n_s - exp_s) < 0.05 * exp_s and abs(n_w - exp_w) < 0.05 * exp_w and n_s > n_w
 
 def test_the_down_enbs_are_spread_not_clustered_at_the_top_intensity(cfg, monkeypatch):
-    """옛 방식은 진도가 높은 eNB 부터 채워 한 곳(무른 땅)에 몰렸다 — 이제는 약간 낮은 후보도 뽑힌다."""
+    """확률이 진도에 비례해 오르지만 1 이 아니면 약간 낮은 후보도 꺼진다(가장 센 곳에만 몰리지 않는다)."""
     cells = _grid()
     enbs = sorted({c.enb_id for c in cells})
     arv = {e: 1.0 + 0.04 * i for i, e in enumerate(enbs)}                              # 진도가 eNB 순으로 점점 높다
@@ -160,12 +163,11 @@ def test_the_down_enbs_are_spread_not_clustered_at_the_top_intensity(cfg, monkey
         by[e] = max(by.get(e, 0.0), v)
     cand = sorted((e for e, v in by.items() if v >= S.FAULT.quake_down_intensity), key=lambda e: -by[e])
     assert len(cand) > 30
-    top = set(cand[:13])                                                                # 옛 방식이면 이 13곳(40셀)만 꺼졌다
+    top = set(cand[:13])
     picked = set()
     for seed in range(40):
         picked |= set(S.quake_plan(cells, _q(), random.Random(seed), 25, arv)[1])
-    assert len(picked - top) > 10 and top <= picked | top
-
+    assert len(picked - top) > 10
 
 def test_the_slope_constant_is_the_one_the_intensity_formula_uses():
     src = (ROOT / "src" / "datagen" / "scenarios.py").read_text(encoding="utf-8")
@@ -178,12 +180,11 @@ def test_the_slope_constant_is_the_one_the_intensity_formula_uses():
     assert abs((b - a) - S.QUAKE_I_SLOPE) < 1e-9
 
 
-def test_the_config_comment_and_pct_value_are_kept_for_base_pct():
+def test_the_config_comment_and_pct_value_describe_the_probability_rule():
     text = (ROOT / "config" / "datagen.yaml").read_text(encoding="utf-8")
-    assert "quake_down_pct: 30" in text and "quake_down_max_cells: 40" in text
-    assert "사용자 A안" in text and "선택에 쓰지 않는다" in text
-    assert "A안" in S.quake_plan.__doc__ and "개수는 상한까지" in S.quake_plan.__doc__
-
+    assert "quake_down_pct: 30" in text and "quake_down_max_cells: ~" in text
+    assert "사용자 가안" in text and "상한 없음" in text
+    assert "가안" in S.quake_plan.__doc__ and "상한 대신 흔들림 비례 확률" in S.quake_plan.__doc__
 
 # ══ 2 · 영향 API ═════════════════════════════════════════════════════════════════════════════
 

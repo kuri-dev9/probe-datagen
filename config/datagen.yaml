@@ -509,12 +509,13 @@ pemdb1:
     # 폭주는 진도 3 이상 셀(graphio rca.quake.area_intensity 와 같은 값), 정지는 진도 5약(4.5) 이상 eNB 만
     quake_surge_intensity: 3.0
     quake_down_intensity: 4.5
-    # 정지 eNB 고르기(2026-11-15 사용자 A안 · 개수는 상한까지) — 진도 5약 이상 후보 전체에서 흔들림에 비례한
-    # 가중 무작위(지반 속도 비 10^((I−4.5)/1.72))로 줄 세워 quake_down_max_cells 가 찰 때까지 끈다(`quake_plan`).
-    # quake_down_pct 는 **선택에 쓰지 않는다** — 전에는 진도 순 30% 관문이라 무른 땅(荒川・北)에만 몰렸다.
-    # 값은 CM_QUAKE_EVENT.BASE_PCT(NOT NULL · 생성기 참고값)에 그대로 실린다. 최대 셀은 옛 진도표의 가장 큰 값
+    # 정지 eNB 고르기(2026-11-16 사용자 가안 — 상한 대신 흔들림 비례 확률) — 진도 5약 이상 후보 eNB 마다
+    # p = min(1, quake_down_pct/100 × 10^((I−4.5)/1.72)) 로 eNB 째 끈다(`quake_plan` · 4.5 → 30% · 5.4 이상 → 100%).
+    # 규모가 커지면 꺼지는 곳이 함께 늘어난다. 전(11-15 A안)에는 가중 무작위로 40셀까지 끄고 멈춰 규모와 상관없이 40 이었다.
+    # quake_down_pct 는 초기값(근거 없음 · 결정 대기)이고 CM_QUAKE_EVENT.BASE_PCT 에 실린다.
+    # quake_down_max_cells 는 비우면(~) 상한 없음, 값을 주면 그 셀 수에서 멈춘다
     quake_down_pct: 30
-    quake_down_max_cells: 40
+    quake_down_max_cells: ~
     # eNB 지반 증폭률 표(CSV enb_id,arv · J-SHIS 표층 지반 V4 의 ARV 를 eNB 위치로 읽은 값). 비우면 모든 eNB 1.0
     # (거리만 · 도쿄는 거의 고르게 진도 3.5~4 · 정지 0곳이 보통). J-SHIS 이용 조건 확인 전이라 아직 없다
     quake_arv_path: ""
