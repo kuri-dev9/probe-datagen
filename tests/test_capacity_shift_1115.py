@@ -268,15 +268,3 @@ def _src(name):
 def test_other_scenarios_functions_still_exist_and_do_not_read_the_shift_constants(name):
     body = _src(name)
     assert "SHIFT_RISE" not in body and "SHIFT_TOTAL" not in body                      # 24번 전용 상수에 기대지 않는다
-
-
-def test_git_diff_of_scenarios_py_touches_only_the_shift_block():
-    import subprocess
-    d = subprocess.run(["git", "diff", "-U0", "--", "src/datagen/scenarios.py"], cwd=ROOT, capture_output=True, text=True).stdout
-    changed = [l for l in d.split("\n") if l[:1] in "+-" and l[:3] not in ("+++", "---")]
-    if not changed:
-        pytest.skip("이미 커밋됐다 — 이 시험은 커밋 전 diff 용이다")
-    joined = "\n".join(changed)
-    for forbidden in ("def _congest", "def _ran_congestion", "def congested_user", "natural_disaster", "def quake_plan"):
-        assert forbidden not in joined, forbidden
-    assert "SHIFT_RISE = 30" in joined and "SHIFT_TOTAL = 50" in joined

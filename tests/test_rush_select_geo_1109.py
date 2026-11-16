@@ -177,9 +177,10 @@ console.log(JSON.stringify([partGroups(h).map(g=>[g.label,g.idx]), partLabel(m('
     r = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=20)
     assert r.returncode == 0, r.stderr[-600:]
     groups, glob = json.loads(r.stdout)
-    assert groups[0] == ["체감 AREA · Q-02", [0, 1, 2]]                       # 세 크기가 한 칩
-    assert ["체감 AREA · Q-11", [3]] in groups                                 # KPI 가 다르면 따로
-    assert not any(g[0].startswith("체감 AREA") and 4 in g[1] for g in groups)  # 다른 축은 안 섞인다
+    # 11-16 표식 형태별 탭으로 바뀌었다 — 메시 세 크기는 여전히 한 탭이고, KPI 가 달라도(Q-02 · Q-11) 같은 모양이면 한 탭이다
+    assert groups[0] == ["AREA", [0, 1, 2, 3]]
+    assert groups[1] == ["APN", [4]]                                          # 다른 축은 안 섞인다
+    assert len(groups) == 2
     assert glob.endswith(" · C-02")
 
 

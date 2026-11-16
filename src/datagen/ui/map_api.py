@@ -545,7 +545,8 @@ def api_map_event(incident_id: str, states: bool = False):
         sev, src, cell_r = _cell_severity(raw)
         for m in members:
             iid = str(m.get("incident_id"))
-            m["cell_sev"] = sev.get(iid, {})
+            m["cell_sev"] = {k: v["sev"] for k, v in sev.get(iid, {}).items()}
+            m["cell_kpi"] = {k: v["kpi"] for k, v in sev.get(iid, {}).items()}
             m["sev_src"] = src.get(iid, {})
         out["cell_r"] = cell_r
     return out
@@ -600,7 +601,12 @@ def _cell_severity(rows: list[dict]) -> tuple[dict, dict, dict]:
     KPI 를 좁히는 것은 조각이 그 KPI 로 묶였기 때문이다(graphio 불변규칙 10 의 결) — 같은 셀의 다른 KPI 이상을
     끌어오면 이 사건이 아닌 일이 칠해진다. 셀 행이 없는 셀은 **그 조각의 `severity`** 를 쓰고, 어느 쪽인지
     `src` 에 센다(`rows` · `member`). 화면이 새 기준값으로 나누지 않는다 — 등급은 탐지가 매긴 그대로다.
-    표가 없는 현장이면 전부 조각 등급이다
+    표가 없는 현장이면 전부 조각 등급이다.
+
+    셀마다 **KPI 별 등급**(`kpi`)도 준다 — 지진 화면이 탭을 증상(통화 끊김 C-01 · 통화 몰림 C-24)으로 묶을 때
+    C-01·C-24 가 섞인 조각을 셀 단위로 가른다(2026-11-15 사용자 "통화몰림 하나, 통화 끊김 하나로 묶어야지").
+    값은 셀 행에서만 온다. 셀 행이 없는 셀은 트리거 KPI 가 하나인 조각일 때만 그 KPI(조각 등급)를 주고, 둘
+    이상이면 비운다(어느 증상인지 모른다 — `src.kpi_unknown` 에 센다)
     """
     rank = {"CRITICAL": 4, "MAJOR": 3, "MINOR": 2, "WARNING": 2, "WARN": 2, "INFO": 1}
     sev: dict[str, dict[str, str]] = {}
@@ -616,28 +622,37 @@ def _cell_severity(rows: list[dict]) -> tuple[dict, dict, dict]:
             lo = str(m.get("opened_ts") or "").replace("T", " ")[:19]
             hi = str(m.get("updated_ts") or "").replace("T", " ")[:19]
             got: dict[str, str] = {}
+            per: dict[str, dict[str, str]] = {}
             if keys and kpis and lo:
                 try:
                     with conn.cursor() as cur:
-                        cur.execute("SELECT SCOPE_ID, SEVERITY FROM AI_ANOMALY_EVENT "
+                        cur.execute("SELECT SCOPE_ID, SEVERITY, KPI FROM AI_ANOMALY_EVENT "
                                     "WHERE SCOPE_TYPE = 'CELL' AND COALESCE(CANCELLED, 0) = 0 "
                                     "AND EVENT_TIME >= %s" + (" AND EVENT_TIME <= %s" if hi else "")
                                     + " AND KPI IN (" + ",".join(["%s"] * len(kpis)) + ")"
                                     + " AND SCOPE_ID IN (" + ",".join(["%s"] * len(keys)) + ")",
                                     [lo, *([hi] if hi else []), *kpis, *keys])
-                        for k, v in cur.fetchall():
-                            v = str(v or "").upper()
-                            if rank.get(v, 0) > rank.get(got.get(str(k), ""), 0):
-                                got[str(k)] = v
+                        for k, v, kp in cur.fetchall():
+                            k, v, kp = str(k), str(v or "").upper(), str(kp)
+                            if rank.get(v, 0) > rank.get(got.get(k, ""), 0):
+                                got[k] = v
+                            pk = per.setdefault(k, {})
+                            if rank.get(v, 0) > rank.get(pk.get(kp, ""), 0):
+                                pk[kp] = v
                 except pymysql.err.ProgrammingError:
-                    got = {}                   # 표가 없는 현장 — 조각 등급으로 내린다
+                    got, per = {}, {}          # 표가 없는 현장 — 조각 등급으로 내린다
             msev = str(m.get("severity") or "").upper()
             n_rows = len(got)
+            unk = 0
             for k in keys:
                 if k not in got and msev:
                     got[k] = msev
-            sev[iid] = got
-            src[iid] = {"rows": n_rows, "member": len(got) - n_rows}
+                    if len(kpis) == 1:
+                        per[k] = {kpis[0]: msev}
+                    else:
+                        unk += 1
+            sev[iid] = {k: {"sev": v, "kpi": per.get(k, {})} for k, v in got.items()}
+            src[iid] = {"rows": n_rows, "member": len(got) - n_rows, "kpi_unknown": unk}
             allk.update(got)
         cell_r = _cell_radius(conn, sorted(allk))
     except pymysql.err.OperationalError:
@@ -693,6 +708,8 @@ def _event_members(rows: list[dict], cells: list[dict]) -> list[dict]:
             "root_code", "root_label", "confidence")}
             | {"axis": axis, "axis_vals": [str(x) for x in m.get("axis_ids") or []][:GEO_LIST],
                "cells": len(m.get("cells") or []), "enbs": sorted(at), "pts": list(at.values()),
+               # 셀 키 — 지도의 「셀」 탭이 여러 조각의 셀을 겹치지 않게 센다(2026-11-16 표식 형태별 탭)
+               "keys": sorted({str(k) for k in m.get("cells") or ()}),
                "nodes": nodes, "areas": _event_areas(m.get("areas") or []),
                "detached": len(m.get("detached_cells") or []), "dpts": list(gone.values()),
                "denbs": sorted(gone), "detached_reason": m.get("detached_reason"),

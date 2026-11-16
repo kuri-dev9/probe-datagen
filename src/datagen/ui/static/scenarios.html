@@ -121,7 +121,11 @@
   .sub { margin-top:12px; }
   /* 일반인용 요약 세 칸(사용자 11-14 — "실제 결과를 다 보여 주지 말고 일반인이 봐도 알게").
      기술 상세는 그 아래 "자세히 보기" 하나로 접는다. 지우지 않는다 */
-  .plain { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+  /* 세 칸 — 어떤 장애인가 · 어떻게 만드나 · 무엇이 나타나나(사용자 11-16 "카드가 옆으로 들어오면서 그림 글자가
+     안 보인다. 설명, 간단한 생성 방식, 그 효과를 카드로 다시"). 그림은 그 위에 카드 폭 전체로 */
+  .plain { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; align-items:stretch; }
+  .plain h4 { margin:8px 0 4px; font-size:11.5px; color:var(--dim); font-weight:600; }
+  .plain .src { margin-top:6px; font-size:11px; color:var(--dim); }
   .plain>div { background:#f1f3f5; border:1px solid var(--line); border-radius:8px; padding:9px 12px; }
   .plain>div.r-ok { border-color:var(--green); } .plain>div.r-warn { border-color:var(--yellow); }
   .plain>div.r-bad { border-color:var(--red); }
@@ -307,7 +311,14 @@ function plainAuto(s){
   else if(l.cause) out.push(T('시스템이 고른 원인은 「{c}」입니다.',{c:causeName(l.cause)}));
   return out.join(LANG==='ja' ? '' : ' ');     // 일본어는 문장 사이를 띄우지 않는다
 }
-//: 펼친 카드 맨 위의 요약 세 칸 — ① 무슨 일이 생기나 ② 시스템이 무엇을 찾았나 ③ 결과
+//: 펼친 카드 맨 위 — 그림(14~27, 카드 폭 전체) 아래 세 칸(2026-11-16 사용자 "설명, 간단한 생성 방식, 그 효과를
+//: 카드로"). 「결과」 칸은 없다(맞혔는지·단계는 접힌 줄과 위 표에 있다). 문장은 **기록된 것만** 옮긴다 —
+//:  ① 어떤 장애인가 = 시나리오 설명(`how.brief`, 없으면 `what`)
+//:  ② 어떻게 만드나 = 주입 설정(`setup.target` · 주입 길이 · 초기값 표시가 없는 `params` 앞 2개 + 나머지 수).
+//:     권장 주입 길이 줄은 안내라 뺀다(이름으로)
+//:  ③ 무엇이 나타나나 = 주로 움직이는 지표(`expect.kpi` 의 용어집 이름) + 데이터에 남는 흔적의 첫 줄(`how.traces[0]`,
+//:     나머지는 「자세히 보기」) + 시스템이 찾은 것(`latest.plain`, 없으면 기록된 값으로 만든 문장)
+//: 값이 없으면 「아직 정리되지 않았습니다」 — 지어내지 않는다
 //: 한 장 그림이 있는 번호(`/api/scenario-pictures` · 14~27). 받기 전·실패면 비어 있고 그림 자리를 만들지 않는다 —
 //: 그림이 없는 번호(1~13)와 같은 모양이다. 그림은 한국어 한 벌이다(일본어 그림은 아직 없다)
 let PICS=new Set();
@@ -317,20 +328,32 @@ const picTop=s=>!PICS.has(Number(s.no)) ? ''
   : `<a class=pic href="/scenario-pictures/no${Number(s.no)}.svg" target=_blank rel=noopener `
     +`title="${esc(T('누르면 원본 크기로 새 탭에 열립니다'))}"><img src="/scenario-pictures/no${Number(s.no)}.svg" `
     +`alt="${esc(T('시나리오 {n} 그림',{n:s.no}))}" loading=lazy></a>`;
+const kpiLabel=k=>{ const t=k&&GL[k]&&(GL[k][LANG]||GL[k].ko); return t&&t.s ? `${t.s} (${k})` : k; };
 function plainTop(s){
-  const l=s.latest||{}, k=stOf(s), what=tr(HOW[String(s.no)],'brief')??s.what;
-  const auto=!l.plain, found=l.plain||plainAuto(s);
-  const rc=(STATUS.find(y=>y[0]===k)||[])[2]||'warn';
-  const box=(t,b,c='')=>`<div${c?` class=${c}`:''}><h3>${esc(T(t))}</h3>${b}</div>`;
+  const l=s.latest||{}, h=HOW[String(s.no)]||{}, u=s.setup||{}, e=s.expect||{};
+  const none=`<p class=dim>${esc(T('아직 정리되지 않았습니다'))}</p>`;
+  const box=(t,b)=>`<div><h3>${esc(T(t))}</h3>${b}</div>`;
+  const what=tr(h,'brief')??s.what;
+  // ② — 대상과 설정값. 카드는 짧게(사용자 "간단한 생성 방식") — 설정값은 「초기값」 표시가 없는 것(그 시나리오가
+  // 정한 값) 앞 2개만, 나머지 수는 적고 「자세히 보기」에 둔다(거기엔 초기값 표시와 함께 전부 있다).
+  // 권장 주입 길이 줄은 생성 방식이 아니라 안내라 뺀다(이름으로 가른다 — `initial` 은 초기값 표시다)
+  const all=(Array.isArray(u.params)?u.params:[]).filter(p=>p&&p.name&&!/^(권장 주입 길이|推奨注入長)$/.test(p.name));
+  const ps=all.filter(p=>!p.initial).slice(0,2), more=all.length-ps.length;
+  const how=[u.target?`<p>${esc(u.target)}</p>`:'',
+    (u.duration_min!=null||all.length)?`<p class=src>${[u.duration_min!=null?esc(T('주입 {n}분',{n:u.duration_min})):'',
+      ...ps.map(p=>`${esc(p.name)} ${esc(p.value??'')}`),
+      more>0?esc(T('설정 {n}개 더 — 자세히 보기',{n:more})):''].filter(Boolean).join(' · ')}</p>`:''].join('');
+  // ③ — 지표 · 데이터 흔적 · 시스템이 찾은 것
+  const tc=tr(h,'traces'), t0=Array.isArray(tc)&&tc[0];
+  const found=l.plain||plainAuto(s);
+  const eff=(e.kpi?`<p>${esc(T('주로 움직이는 지표: {k}',{k:kpiLabel(e.kpi)}))}</p>`:'')
+    +(t0?`<p class=src>${esc(t0.where?t0.where+' — ':'')}${esc(t0.what||'')}</p>`:'');
+  const fnd=found?`<h4>${esc(T('시스템이 찾은 것'))}</h4><p>${esc(found)}</p>`
+    +(!l.plain?`<p class=auto>${esc(T('기록된 값으로 자동으로 만든 문장입니다'))}</p>`:''):'';
   return picTop(s)+`<div class=plain>`
-    +box('무슨 일이 생기나',`<p>${what==null?unk():esc(what)}</p>`)
-    +box('시스템이 무엇을 찾았나',found ? `<p>${esc(found)}</p>`
-        +(auto?`<p class=auto>${esc(T('기록된 값으로 자동으로 만든 문장입니다'))}</p>`:'')
-      : `<p class=dim>${esc(T('아직 기록이 없습니다'))}</p>`)
-    +box('결과',`<div class="big s-${rc}">${esc(T(ST_PLAIN[k]||'상태 미확인'))}</div><div class=psg>`
-      +STAGES.map(([g,name])=>{ const [,lb,mark,c]=sgInfo(sgState(s,g));
-        return `<span class="sg g-${c}" data-tip="${esc(g)} · ${esc(T(name))}: ${esc(T(lb))}">${esc(T(SG_PLAIN[g]))} ${mark}</span>`; }).join('')
-      +`</div>`,'r-'+rc)
+    +box('어떤 장애인가',what==null?none:`<p>${esc(what)}</p>`)
+    +box('어떻게 만드나',how||none)
+    +box('무엇이 나타나나',(eff+fnd)||none)
     +`</div>`;
 }
 // 펼친 카드 맨 위의 단계 표

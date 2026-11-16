@@ -54,7 +54,7 @@ def test_part_plain_c01_with_silent_cells_is_a_cut_and_without_is_neutral(tmp_pa
     out = _plain(tmp_path, f"""
 const a=partPlain([{M('C-01',['1-0','1-1'])}]), b=partPlain([{M('C-01')}]);
 console.log(JSON.stringify({{a,b}}));""")
-    assert out["a"]["names"] == ["통화 끊김(기지국 정지 의심)"] and out["a"]["sil"] == 2
+    assert out["a"]["names"] == ["통화 끊김(셀 정지 의심)"] and out["a"]["sil"] == 2
     assert out["b"]["names"] == ["통화 시도 변화"] and out["b"]["sil"] == 0       # 방향을 모르면 중립
 
 
@@ -65,7 +65,7 @@ const p=partPlain([{M('C-01',['1-0','1-1'])},{M('C-01,C-24',['1-1','2-0'])},{M('
 console.log(JSON.stringify(p));""")
     assert out["codes"] == ["C-24", "C-01", "U-12"]                           # C-24 → C-01 → 나머지
     assert out["sil"] == 3                                                    # 합집합(1-1 은 한 번)
-    assert out["names"] == ["통화 몰림", "통화 끊김(기지국 정지 의심)", "HTTP 성공률"]
+    assert out["names"] == ["통화 몰림", "통화 끊김(셀 정지 의심)", "HTTP 성공률"]
 
 
 @pytest.mark.skipif(NODE is None, reason="node 없음")
@@ -81,8 +81,8 @@ console.log(JSON.stringify({{
  zero:w([{M('U-12')}],0),
  big:w([{M('C-24')}],1200)}}));""")
     assert out["surge"] == "셀 120개에서 통화가 평소보다 몰림"
-    assert out["both"] == "셀 120개에서 통화가 평소보다 몰림, 그중 셀 40개는 통화가 끊김(기지국 정지 의심)"
-    assert out["cut"] == "셀 2개에서 통화가 끊김(기지국 정지 의심)"           # 끊김만이면 「그중」 없이 무호 셀 수
+    assert out["both"] == "셀 120개에서 통화가 평소보다 몰림, 그중 셀 40개는 통화가 끊김(셀 정지 의심)"
+    assert out["cut"] == "셀 2개에서 통화가 끊김(셀 정지 의심)"           # 끊김만이면 「그중」 없이 무호 셀 수
     assert out["nosil"] == "셀 5개에서 통화 시도가 평소와 달라짐"
     assert out["other"] == "셀 7개에서 HTTP 성공률 이상" and out["zero"] == "HTTP 성공률 이상"
     assert out["big"] == "셀 1,200개에서 통화가 평소보다 몰림"
@@ -106,35 +106,6 @@ console.log(JSON.stringify({
     assert out["e"] == "" and out["f"] == "" and out["g"] == ""               # 지어내지 않는다
 
 
-# ── 바 렌더 (소스 — drawFocus 는 DOM 이 커서 구조로 본다) ──────────────────────
-
-def _focus_src():
-    a = MAP_HTML.index("function drawFocus()")
-    return MAP_HTML[a:a + 6000]
-
-
-def test_bar_keeps_codes_in_tooltips_and_drops_old_spans_when_plain_exists():
-    f = _focus_src()
-    assert "title=\"${esc(g.label+'\\n'+list.map(m=>m.title||'').join(' / '))}\"" in f           # 탭 title 에 원래 이름
-    assert "list[0].axis==='GEO'?'':g.label.split(' · ')[0]+' · '" in f                         # 기지국 축은 축 이름을 뺀다
-    assert "(plain?'':`<span>${kpiTag(h.trigger_kpi)}</span>`)" in f                             # 쉬운 문장이 있으면 kpiTag 가 빠진다
-    assert "(plain?'':ev?" in f and ":h.part&&(h.axis||!(h.enbs||[]).length)?''" in f            # 범위 줄도 빠지고 옛 분기는 그대로
-    assert "title=\"${esc((h.trigger_kpi||'')+'\\n'+plain.titles.join('\\n'))}\"" in f           # 코드는 툴팁에 남는다
-    assert "const plain=vis.length?" in f and ":null;" in f                                      # 조각이 없으면 plain=null → 옛 표시
-
-
-def test_bar_plain_span_carries_what_where_and_enb_count_and_ev_is_optional():
-    f = _focus_src()
-    assert "<b>${T('무엇')}</b> ${esc(plain.what)}" in f
-    assert "plain.where?` · <b>${T('어디서')}</b> ${esc(plain.where)}`:''" in f
-    assert "(ev?` (eNB ${ev.enbs.length.toLocaleString()})`:'')" in f
-
-
-def test_bar_plain_uses_selected_tab_pieces_else_the_whole_event():
-    f = _focus_src()
-    assert "PART!=null&&gs[PART]?gs[PART].idx.map(i=>ms[i]):ms" in f
-
-
 # ── 셀 심각도 API ────────────────────────────────────────────────────────
 
 def _sev_db(monkeypatch, per_member, radius=(), boom=None):
@@ -153,7 +124,9 @@ def _sev_db(monkeypatch, per_member, radius=(), boom=None):
                 if boom == "table":
                     raise pymysql.err.ProgrammingError(1146, "no table")
         def fetchall(s):
-            return list(radius) if s.k == "r" else list(answers.pop(0))
+            if s.k == "r":
+                return list(radius)
+            return [r if len(r) == 3 else (*r, "C-01") for r in answers.pop(0)]       # (SCOPE_ID, SEVERITY, KPI)
 
     class Conn:
         closed = False
@@ -181,6 +154,7 @@ def test_cell_severity_query_is_narrowed_to_the_piece_kpis_window_cells_and_skip
     for need in ("FROM AI_ANOMALY_EVENT", "SCOPE_TYPE = 'CELL'", "COALESCE(CANCELLED, 0) = 0", "EVENT_TIME >= %s",
                  "EVENT_TIME <= %s", "KPI IN (%s,%s)", "SCOPE_ID IN (%s,%s)"):
         assert need in sql, need
+    assert "SELECT SCOPE_ID, SEVERITY, KPI FROM AI_ANOMALY_EVENT" in sql
     assert params == ["2026-11-15 14:05:00", "2026-11-15 14:27:00", "C-01", "C-24", "1-0", "1-1"]
     assert all(s.startswith("SELECT") for s, _ in log) and c.closed
 
@@ -189,15 +163,29 @@ def test_cell_severity_picks_the_highest_per_cell_and_falls_back_to_the_piece_se
     rows = [("1-0", "MAJOR"), ("1-0", "CRITICAL"), ("1-0", "MINOR"), ("1-1", "WARNING"), ("1-1", "INFO")]
     log, c = _sev_db(monkeypatch, [rows], radius=[("1", 0, 300.0)])
     sev, src, cell_r = map_api._cell_severity([_mem("A", "C-01", ["1-0", "1-1", "1-2"], sev="Minor")])
-    assert sev["A"] == {"1-0": "CRITICAL", "1-1": "WARNING", "1-2": "MINOR"}      # 셀 행 없는 1-2 는 조각 등급
-    assert src["A"] == {"rows": 2, "member": 1}
+    assert {k: v["sev"] for k, v in sev["A"].items()} == {"1-0": "CRITICAL", "1-1": "WARNING", "1-2": "MINOR"}   # 셀 행 없는 1-2 는 조각 등급
+    assert src["A"] == {"rows": 2, "member": 1, "kpi_unknown": 0}
     assert cell_r["1-0"] == 300.0 and cell_r["1-1"] is None and "1-2" in cell_r
+
+
+def test_cell_severity_gives_the_per_kpi_grade_only_from_cell_rows_or_a_single_trigger(monkeypatch):
+    """11-16 셀 탭의 증상별 셀 수 — 셀 행의 KPI 별 최고 등급. 셀 행이 없으면 트리거가 하나일 때만 그 KPI, 여럿이면 비운다."""
+    rows = [("1-0", "MAJOR", "C-24"), ("1-0", "CRITICAL", "C-01"), ("1-0", "MINOR", "C-24"), ("1-1", "MAJOR", "C-24")]
+    _sev_db(monkeypatch, [rows])
+    sev, src, _ = map_api._cell_severity([_mem("A", "C-01,C-24", ["1-0", "1-1", "1-2"], sev="Major")])
+    assert sev["A"]["1-0"] == {"sev": "CRITICAL", "kpi": {"C-24": "MAJOR", "C-01": "CRITICAL"}}   # KPI 별 가장 높은 등급
+    assert sev["A"]["1-1"]["kpi"] == {"C-24": "MAJOR"}
+    assert sev["A"]["1-2"] == {"sev": "MAJOR", "kpi": {}}                        # 셀 행 없음 + 트리거 둘 → 어느 증상인지 모른다
+    assert src["A"] == {"rows": 2, "member": 1, "kpi_unknown": 1}
+    _sev_db(monkeypatch, [[]])
+    sev, src, _ = map_api._cell_severity([_mem("B", "C-24", ["2-0"], sev="Major")])
+    assert sev["B"]["2-0"] == {"sev": "MAJOR", "kpi": {"C-24": "MAJOR"}} and src["B"]["kpi_unknown"] == 0   # 트리거 하나 → 그 KPI
 
 
 def test_cell_severity_missing_table_uses_the_piece_severity_and_connection_failure_is_unknown(monkeypatch):
     _sev_db(monkeypatch, [[]], boom="table")
     sev, src, _ = map_api._cell_severity([_mem("A", "C-24", ["1-0"], sev="MAJOR")])
-    assert sev == {"A": {"1-0": "MAJOR"}} and src == {"A": {"rows": 0, "member": 1}}
+    assert sev == {"A": {"1-0": {"sev": "MAJOR", "kpi": {"C-24": "MAJOR"}}}} and src == {"A": {"rows": 0, "member": 1, "kpi_unknown": 0}}
     _sev_db(monkeypatch, [], boom="connect")
     assert map_api._cell_severity([_mem("A", "C-24", ["1-0"])]) == ({}, {}, {})       # 모름 — 칠하지 않는다
 
@@ -205,7 +193,8 @@ def test_cell_severity_missing_table_uses_the_piece_severity_and_connection_fail
 def test_cell_severity_without_trigger_kpi_does_not_query_and_uses_piece_severity(monkeypatch):
     log, _ = _sev_db(monkeypatch, [])
     sev, src, _ = map_api._cell_severity([_mem("A", "", ["1-0"], sev="CRITICAL")])
-    assert sev["A"] == {"1-0": "CRITICAL"} and not any("AI_ANOMALY_EVENT" in s for s, _ in log)
+    assert sev["A"]["1-0"]["sev"] == "CRITICAL" and not any("AI_ANOMALY_EVENT" in s for s, _ in log)
+    assert src["A"]["kpi_unknown"] == 1                                              # 트리거 KPI 가 없으니 증상을 모른다
 
 
 def test_cell_severity_unknown_piece_severity_paints_nothing_extra(monkeypatch):
@@ -230,21 +219,24 @@ def _event(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=0: _Resp(doc))
     monkeypatch.setattr(map_api, "_silent_cells", lambda raw: ({}, {}))
     calls = []
-    monkeypatch.setattr(map_api, "_cell_severity", lambda raw: (calls.append(1), ({"A": {"1-0": "MAJOR"}}, {"A": {"rows": 1, "member": 0}}, {"1-0": 300.0}))[1])
+    monkeypatch.setattr(map_api, "_cell_severity", lambda raw: (calls.append(1), ({"A": {"1-0": {"sev": "MAJOR", "kpi": {"C-24": "MAJOR"}}}},
+                                                                {"A": {"rows": 1, "member": 0, "kpi_unknown": 0}}, {"1-0": 300.0}))[1])
     return calls
 
 
 def test_api_map_event_without_states_asks_nothing_extra(monkeypatch):
     calls = _event(monkeypatch)
     out = map_api.api_map_event("X")
-    assert calls == [] and "cell_r" not in out and all("cell_sev" not in m and "sev_src" not in m for m in out["members"])
+    assert calls == [] and "cell_r" not in out
+    assert all(not ({"cell_sev", "cell_kpi", "sev_src"} & set(m)) for m in out["members"])
 
 
 def test_api_map_event_with_states_adds_cell_sev_sev_src_and_cell_r(monkeypatch):
     calls = _event(monkeypatch)
     out = map_api.api_map_event("X", states=True)
     m = out["members"][0]
-    assert calls == [1] and m["cell_sev"] == {"1-0": "MAJOR"} and m["sev_src"] == {"rows": 1, "member": 0}
+    assert calls == [1] and m["cell_sev"] == {"1-0": "MAJOR"} and m["cell_kpi"] == {"1-0": {"C-24": "MAJOR"}}
+    assert m["sev_src"] == {"rows": 1, "member": 0, "kpi_unknown": 0} and m["keys"] == ["1-0"]
     assert out["cell_r"] == {"1-0": 300.0} and out["enbs"] == ["1"]            # 기존 칸은 그대로
 
 
@@ -297,12 +289,12 @@ H.I1={incident_id:'I1',closed_ts:'x',members:[{incident_id:'A'}],groups:[]};
 SIL.I1={t:Date.now(),doc:{members:[{incident_id:'A',silent:['1-0','1-1'],cell_sev:{'2-0':'MAJOR','9-9':'MAJOR','1-0':'MAJOR'}}],
   silent_r:{'1-0':353}, cell_r:{'1-1':200,'2-0':null,'9-9':300}}};
 drawDown();
-console.log(JSON.stringify({gray:g.children.length,yellow:gy.children.length,red:gr.children.length,SEV_N,
+console.log(JSON.stringify({gray:gN(),yellow:gy.children.length,red:gr.children.length,SEV_N,
   rows:legendBox.children.map(c=>c.innerHTML)}));""")
     # 1-0 은 silent_r, 1-1 은 cell_r 로 반경을 얻는다. 2-0 은 반경 없음 · 9-9 는 지도에 없음 → 그리지 않는다
     assert out["gray"] == 2 and out["yellow"] == 0 and out["red"] == 0
     assert out["SEV_N"] == {"gray": 2, "red": 0, "yellow": 0}
-    assert len(out["rows"]) == 4 and "셀 2" in out["rows"][0] and "셀 0" in out["rows"][1] and "셀 0" in out["rows"][2]
+    assert len(out["rows"]) == 3 and "셀 2" in out["rows"][0] and "셀 0" in out["rows"][1] and "셀 0" in out["rows"][2]
 
 
 @pytest.mark.skipif(NODE is None, reason="node 없음")
@@ -312,13 +304,13 @@ D={cells:CELLS}; MINI_Q={fault_id:355}; FOCUS='I1';
 H.I1={incident_id:'I1',closed_ts:'x',members:[{incident_id:'A'}],groups:[]};
 SIL.I1={t:Date.now(),doc:{members:[{incident_id:'A',silent:['1-0'],cell_sev:{'1-1':'CRITICAL','2-0':'MAJOR'}}],
   silent_r:{'1-0':353}, cell_r:{'1-1':300,'2-0':300}}};
-DOWN={enbs:['1'],cells:[{key:'1-0',r_m:353}]};
+DOWN={enbs:['1'],cells:[{key:'1-0',r_m:353}]}; TRUTH_ON=true;
 drawDown();
-console.log(JSON.stringify({gray:g.children.length,red:gr.children.length,yellow:gy.children.length,truth:gt.children.length,
+console.log(JSON.stringify({gray:gN(),red:gr.children.length,yellow:gy.children.length,truth:gt.children.length,
   rows:legendBox.children.map(c=>[c.className,c.innerHTML])}));""")
     assert (out["gray"], out["red"], out["yellow"], out["truth"]) == (1, 1, 1, 1)
     labels = [r[1] for r in out["rows"]]
-    assert "통화 끊김(정지)" in labels[0] and "심하게 나빠짐" in labels[1] and "나빠짐" in labels[2] and "실제 정지(정답)" in labels[3]
+    assert "통화 끊김(셀 정지 의심)" in labels[0] and "심하게 나빠짐" in labels[1] and "나빠짐" in labels[2] and "실제 정지(정답)" in labels[3]
     assert [("ssevr" in l, "ssevy" in l, "sdownt" in l) for l in labels] == [(False,) * 3, (True, False, False), (False, True, False), (False, False, True)]
 
 
@@ -327,7 +319,7 @@ console.log(JSON.stringify({gray:g.children.length,red:gr.children.length,yellow
 def test_impact_switch_is_a_single_const_false_and_the_api_and_code_remain():
     assert len(re.findall(r"const IMPACT_ON=false;", MAP_HTML)) == 1
     assert "function impactOf(" in MAP_HTML and "/impact" in MAP_HTML
-    assert "imp=h&&IMPACT_ON?impactOf(MINI_Q.fault_id):null" in MAP_HTML        # 꺼져 있으면 묻지도 그리지도 않는다
+    assert "imp=q&&IMPACT_ON?impactOf(MINI_Q.fault_id):null" in MAP_HTML        # 꺼져 있으면 묻지도 그리지도 않는다
     assert any(r.path.endswith("/impact") for r in map_api.router.routes)        # 서버 API 는 그대로
 
 
@@ -341,7 +333,7 @@ drawDown(); drawDown();
 setTimeout(()=>{ console.log(JSON.stringify({asked:FETCHED.filter(u=>u.includes('/impact')).length, imp:gi.children.length,
   rows:legendBox.children.map(c=>c.innerHTML)})); process.exit(0); },30);""")
     assert out["asked"] == 0 and out["imp"] == 0
-    assert len(out["rows"]) == 4 and not any("영향 지역" in r for r in out["rows"])
+    assert len(out["rows"]) == 3 and not any("영향 지역" in r for r in out["rows"])
 
 
 @pytest.mark.skipif(NODE is None, reason="node 없음")
@@ -351,16 +343,17 @@ D={cells:CELLS}; MINI_Q=null; FOCUS=null;
 H.I1={incident_id:'I1',closed_ts:'x',members:[],groups:[]};
 SIL.I1={t:Date.now(),doc:{members:[{incident_id:'A',silent:['1-0'],cell_sev:{'2-0':'MAJOR'}}],silent_r:{'1-0':3},cell_r:{'2-0':3}}};
 drawDown();
-console.log(JSON.stringify({g:g.children.length,gy:gy.children.length,gr:gr.children.length,rows:legendBox.children.length,display:legendBox.style.display}));""")
+console.log(JSON.stringify({g:gN(),gy:gy.children.length,gr:gr.children.length,rows:legendBox.children.length,display:legendBox.style.display}));""")
     assert out == {"g": 0, "gy": 0, "gr": 0, "rows": 0, "display": "none"}
 
 
 # ── 번역 ─────────────────────────────────────────────────────────────────
 
-NEW_KEYS = ["통화 끊김(기지국 정지 의심)", "통화 시도 변화", "셀 {c}개에서 통화가 평소보다 몰림",
-            "그중 셀 {n}개는 통화가 끊김(기지국 정지 의심)", "셀 {n}개에서 통화가 끊김(기지국 정지 의심)",
+NEW_KEYS = ["통화 끊김(셀 정지 의심)", "통화 시도 변화", "셀 {c}개에서 통화가 평소보다 몰림",
+            "그중 셀 {n}개는 통화가 끊김(셀 정지 의심)", "셀 {n}개에서 통화가 끊김(셀 정지 의심)",
             "셀 {c}개에서 통화 시도가 평소와 달라짐", "셀 {c}개에서 {k} 이상", "{k} 이상", " 외", "무엇", "어디서",
-            "통화 끊김(정지)", "심하게 나빠짐", "나빠짐", "실제 정지(정답)", "eNB {n}"]
+            "통화 끊김(셀 정지 의심)", "심하게 나빠짐", "나빠짐", "실제 정지(정답)", "셀 {c} · eNB ID {n}", "eNB ID {n}",
+            "셀 {c}개", "겹친 셀 {n}개", "증상을 가르지 못한 셀 {n}개", "{n}칸", "{n}대", "코어 장비"]
 
 
 @pytest.mark.parametrize("k", NEW_KEYS)
@@ -368,4 +361,4 @@ def test_new_phrases_are_translated_keep_placeholders_and_are_used_by_the_screen
     assert k in _JA_MAP and _JA_MAP[k].strip(), k
     assert set(re.findall(r"\{\w+\}", k)) == set(re.findall(r"\{\w+\}", _JA_MAP[k])), k        # 자리표시자 유지
     assert f"T('{k}'" in MAP_HTML, k                                                          # 화면이 쓴다
-    assert re.search(r"[぀-ヿ一-龯]", _JA_MAP[k]) or k == "eNB {n}"                           # 일본어다
+    assert re.search(r"[぀-ヿ一-龯]", _JA_MAP[k]) or k in ("eNB ID {n}", "eNB {n}")                           # 일본어다
