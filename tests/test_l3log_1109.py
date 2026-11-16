@@ -227,10 +227,11 @@ def sandbox(monkeypatch, tmp_path):
     root = tmp_path / "l3"
     rep = _report(tmp_path, fault="F-224")
     real_add = l3log.add
-    monkeypatch.setattr(l3log, "add", lambda rec: real_add(rec, root, rep))
+    # 보관 7일 기준이 실제 오늘이면 기록 날짜(11-09)가 지나 시험이 깨진다 — 오늘을 TODAY 로 고정
+    monkeypatch.setattr(l3log, "add", lambda rec: real_add(rec, root, rep, TODAY))
     real_prune = l3log.prune
     # `prune` 는 add 도 부른다(인자 2개) — 인자 없는 CLI 호출만 임시 위치로 돌린다
-    monkeypatch.setattr(l3log, "prune", lambda r=root, t=None: real_prune(r, t))
+    monkeypatch.setattr(l3log, "prune", lambda r=root, t=TODAY: real_prune(r, t))
     return cli, root, rep
 
 

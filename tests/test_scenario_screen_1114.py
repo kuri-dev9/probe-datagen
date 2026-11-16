@@ -53,8 +53,9 @@ def test_scenarios_html_only_adds_a_picture_for_listed_numbers():
     assert "/api/scenario-pictures" in h and "/scenario-pictures/no${Number(s.no)}.svg" in h
     assert 'target=_blank' in h
     a = h.index("function plainTop")
+    body = h[a:h.index("\n}\n", a)]          # 함수가 길어져도 고정 길이 창에 기대지 않는다
     # 그림 자리는 목록 집합이 허락할 때만
-    assert re.search(r"PIC[A-Za-z_]*\.(has|includes)\(", h[a:a + 1500]) or "pic" in h[a:a + 1500].lower()
+    assert re.search(r"PIC[A-Za-z_]*\.(has|includes)\(", body) or "pic" in body.lower()
 
 
 # ── 읍면동 모양 ────────────────────────────────────────────────────────────

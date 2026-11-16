@@ -1,4 +1,4 @@
-"""gen-ui 시나리오 화면 — 일반인용 요약 3칸 (2026-11-14 사용자 결정 · 맥스 구현 고정).
+"""gen-ui 시나리오 화면 — 일반인용 요약 2칸(11-16 · 처음 3칸에서 합침) (2026-11-14 사용자 결정 · 맥스 구현 고정).
 
 카드를 펼치면 맨 위에 ① 무슨 일이 생기나 ② 시스템이 무엇을 찾았나 ③ 결과 가 오고, 기존 기술 상세는
 "자세히 보기" 하나로 접혀 그 **아래**에 있다(지우지 않는다). ② 는 `latest.plain` 이 있으면 그것, 없으면
@@ -47,15 +47,16 @@ console.log(JSON.stringify(detail(s)));
     return json.loads(out.strip().splitlines()[-1])
 
 
-def test_summary_three_boxes_come_before_the_folded_technical_detail():
-    """11-16 — 세 칸이 「어떤 장애인가 · 어떻게 만드나 · 무엇이 나타나나」로 바뀌었다(「결과」 칸은 없다)."""
+def test_summary_two_boxes_come_before_the_folded_technical_detail():
+    """11-16 — 카드가 「어떤 장애이고 어떻게 만드나」 · 「무엇이 나타나고 시스템이 무엇을 찾았나」 두 장이다(「결과」 칸은 없다)."""
     h = _body({"plain": "처음 문장", "detect_min": 6})
-    a, b, c = h.index("어떤 장애인가"), h.index("어떻게 만드나"), h.index("무엇이 나타나나")
+    a, c = h.index("어떤 장애이고 어떻게 만드나"), h.index("무엇이 나타나고 시스템이 무엇을 찾았나")
     tech = h.index("자세히 보기 (기술 상세)")
-    assert a < b < c < tech
-    assert "쉬운 설명 문장" in h[a:b]
-    assert "처음 문장" in h[c:tech]                              # 시스템이 찾은 것(latest.plain)은 ③ 안에
-    assert ">결과<" not in h[:tech] and "무슨 일이 생기나" not in h[:tech] and "시스템이 무엇을 찾았나" not in h[:tech]
+    assert a < c < tech
+    assert h[:tech].count("<h3>") == 2 and "<h3>어떻게 만드나</h3>" not in h and "<h3>어떤 장애인가</h3>" not in h
+    assert "쉬운 설명 문장" in h[a:c]
+    assert "처음 문장" in h[c:tech]                              # 시스템이 찾은 것(latest.plain)은 오른쪽 안에
+    assert ">결과<" not in h[:tech] and "무슨 일이 생기나" not in h[:tech]
     assert "<details" in h[:tech] and h.count("<details") >= 1, "기술 상세는 접힘 안에 있다(지우지 않는다)"
     assert "시나리오 설명" in h[tech:] and "만드는 법" in h[tech:], "기존 구역이 그대로 아래에 남는다"
 
@@ -82,7 +83,7 @@ def test_auto_sentence_variants():
     h1 = _body({})                                            # 기록 없음 — 지어내지 않는다
     top = h1[:h1.index("자세히 보기 (기술 상세)")]
     assert "아직 정리되지 않았습니다" in top and "자동으로 만든 문장" not in top
-    assert top.count("아직 정리되지 않았습니다") == 2           # ② 와 ③ (① 은 설명이 있다)
+    assert top.count("아직 정리되지 않았습니다") == 1           # 오른쪽 칸만 비었다(왼쪽은 장애 설명이 있다)
 
 
 def _top(s_extra: dict, how="{brief:'설명'}") -> str:
@@ -105,7 +106,7 @@ def test_how_box_uses_target_duration_and_at_most_two_params_and_counts_the_rest
                                    {"name": "폭주 정점", "value": "40배", "initial": True},
                                    {"name": "진앙 흩뜨림", "value": "±0.1도", "initial": False},
                                    {"name": "지반", "value": "1.0", "initial": False}]}})
-    b = h[h.index("어떻게 만드나"):h.index("무엇이 나타나나")]
+    b = h[h.index("어떤 장애이고 어떻게 만드나"):h.index("무엇이 나타나고")]      # 왼쪽 카드
     assert "진원역을 정한다" in b and "주입 30분" in b
     assert "규모 4.5~6.2" in b and "진앙 흩뜨림 ±0.1도" in b           # 초기값이 아닌 설정 앞 2개
     assert "지반 1.0" not in b and "폭주 정점" not in b                 # 3번째 이후와 초기값은 줄에 안 나온다
@@ -116,7 +117,7 @@ def test_how_box_uses_target_duration_and_at_most_two_params_and_counts_the_rest
 def test_effect_box_has_kpi_label_first_trace_and_found_text_and_nothing_invented():
     h = _top({"expect": {"kpi": "C-24"}, "latest": {"plain": "찾은 문장"}},
              how="{brief:'설명',traces:[{where:'XDR',what:'호가 늘어난다'},{where:'둘째',what:'안 나온다'}]}")
-    c = h[h.index("무엇이 나타나나"):]
+    c = h[h.index("무엇이 나타나고"):]                                     # 오른쪽 카드
     assert "주로 움직이는 지표: 통화 몰림 (C-24)" in c
     assert "XDR — 호가 늘어난다" in c and "둘째" not in c         # 흔적은 첫 줄만(나머지는 자세히 보기)
     assert "시스템이 찾은 것" in c and "찾은 문장" in c
@@ -134,13 +135,15 @@ def test_no_result_card_in_the_expanded_summary():
 
 
 def test_japanese_phrases_exist_for_every_new_screen_string():
-    for ko in ("어떤 장애인가", "어떻게 만드나", "무엇이 나타나나", "아직 정리되지 않았습니다", "주입 {n}분",
+    for ko in ("어떤 장애이고 어떻게 만드나", "무엇이 나타나고 시스템이 무엇을 찾았나", "아직 정리되지 않았습니다", "주입 {n}분",
                "주로 움직이는 지표: {k}", "시스템이 찾은 것", "설정 {n}개 더 — 자세히 보기", "자세히 보기 (기술 상세)",
                "기록된 값으로 자동으로 만든 문장입니다", "아직 기록이 없습니다", "일부만 맞혔습니다",
                "이상 찾기", "원인 판단", "여러 장애 묶기", "AI 설명",
                "주입하자마자 이상을 찾았습니다.", "주입하고 {n}분 뒤에 이상을 처음 찾았습니다.",
                "원인은 정하지 못했습니다(판단 보류).", "시스템이 고른 원인은 「{c}」입니다."):
         assert ko in ui._JA_SCEN or ko in ui._JA_COMMON, ko
+    for old in ("어떤 장애인가", "어떻게 만드나", "무엇이 나타나나"):                   # 쓰이지 않는 옛 제목은 번역 표에서 뺐다
+        assert old not in ui._JA_SCEN and old not in ui._JA_COMMON, old
 
 
 def test_plain_sentences_for_25_and_27_exist_in_the_50_percent_report():

@@ -123,7 +123,9 @@
      기술 상세는 그 아래 "자세히 보기" 하나로 접는다. 지우지 않는다 */
   /* 세 칸 — 어떤 장애인가 · 어떻게 만드나 · 무엇이 나타나나(사용자 11-16 "카드가 옆으로 들어오면서 그림 글자가
      안 보인다. 설명, 간단한 생성 방식, 그 효과를 카드로 다시"). 그림은 그 위에 카드 폭 전체로 */
-  .plain { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; align-items:stretch; }
+  /* 두 칸(사용자 11-16 — "카드 2개로, 그래야 크기가 맞는다") — 같은 너비, stretch 로 같은 높이 */
+  .plain { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; align-items:stretch; }
+  .plain .mk { margin-top:8px; }
   .plain h4 { margin:8px 0 4px; font-size:11.5px; color:var(--dim); font-weight:600; }
   .plain .src { margin-top:6px; font-size:11px; color:var(--dim); }
   .plain>div { background:#f1f3f5; border:1px solid var(--line); border-radius:8px; padding:9px 12px; }
@@ -350,10 +352,11 @@ function plainTop(s){
     +(t0?`<p class=src>${esc(t0.where?t0.where+' — ':'')}${esc(t0.what||'')}</p>`:'');
   const fnd=found?`<h4>${esc(T('시스템이 찾은 것'))}</h4><p>${esc(found)}</p>`
     +(!l.plain?`<p class=auto>${esc(T('기록된 값으로 자동으로 만든 문장입니다'))}</p>`:''):'';
+  // 왼쪽은 ①(무슨 장애)에 ②(생성 방식·설정 줄)를 잇고, 오른쪽은 ③(지표·흔적·시스템이 찾은 것) — 사용자 11-16
+  const left=[what==null?'':`<p>${esc(what)}</p>`, how?`<div class=mk>${how}</div>`:''].join('');
   return picTop(s)+`<div class=plain>`
-    +box('어떤 장애인가',what==null?none:`<p>${esc(what)}</p>`)
-    +box('어떻게 만드나',how||none)
-    +box('무엇이 나타나나',(eff+fnd)||none)
+    +box('어떤 장애이고 어떻게 만드나',left||none)
+    +box('무엇이 나타나고 시스템이 무엇을 찾았나',(eff+fnd)||none)
     +`</div>`;
 }
 // 펼친 카드 맨 위의 단계 표
