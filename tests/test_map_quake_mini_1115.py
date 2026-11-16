@@ -745,10 +745,13 @@ def test_layers_are_ordered_kde_then_detected_down_then_truth_then_geo_and_draw_
     assert "drawDown();" in draw and all(x not in draw for x in ("gDown", "gImpact", "gSev"))
 
 
-def test_truth_layer_is_dashed_outline_only_and_the_detected_layer_is_the_hatched_fill():
+def test_truth_layer_is_a_green_solid_ring_only_and_the_detected_layer_is_the_hatched_fill():
+    """11-16 사용자 — 흰 점선이 안 보여 녹색 실선 고리로 바꿨다. 채우지 않아야 아래 탐지 음영이 보인다."""
     css = MAP_HTML[MAP_HTML.index("#gDown{pointer-events:none}"):][:2400]
     truth = css[css.index("#gDownT ellipse{"):][:200]
-    assert "fill:none" in truth and "stroke-dasharray" in truth      # 점선 테두리만 — 비교용
+    assert "fill:none" in truth and "stroke:#22c55e" in truth and "stroke-width:2.5px" in truth
+    assert "stroke-dasharray" not in truth                           # 점선이 아니다
+    assert "body[data-theme=light] #gDownT ellipse{stroke:#15803d}" in css   # 밝은 테마는 짙은 녹색
     assert "pointer-events:none" in css.split("#gDownT")[1][:60]
 
 
