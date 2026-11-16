@@ -2968,7 +2968,8 @@ def quake_plan(cells: list[Cell], q: dict, rng: random.Random, want: int = 25,
       ``rng`` 는 장애 ID 시드고 후보를 eNB ID 순으로 한 번씩 뽑아, 같은 장애면 같은 eNB 가 꺼진다.
       상한이 없으면 ``q["max_cells"]``(CM_QUAKE_EVENT.MAX_CELLS · NOT NULL)에 후보 eNB 셀 수 — 꺼질 수 있는
       최대 — 를 적는다
-    폭주 지역 = 폭주 셀 + 정지 셀(정답 지역 · 케이 지시)
+    폭주 지역 = 폭주 셀 + 정지 셀(정답 지역 · 케이 지시). 정지 셀 둘레(`quake_ring_cells`)는 호출부(`faults._quake_step`)가
+    더한다 — 2026-11-16 사용자 "정지 eNB 둘레 과부하"
     """
     inten = quake_cell_intensity(cells, q, arv)
     thr = FAULT.quake_surge_intensity
@@ -3003,6 +3004,46 @@ def quake_plan(cells: list[Cell], q: dict, rng: random.Random, want: int = 25,
     dead_cells = sorted(k for e in dead for k in per[e])
     area = {k for _v, k in surge[:max(0, int(want))]} | set(dead_cells)
     return area, sorted(dead), dead_cells
+
+
+def quake_ring_cells(cells: list[Cell], dead_cells, box_deg: float = 0.05) -> list[str]:
+    """정지 셀마다 **가장 가까운 살아 있는 셀**(정지 eNB 가 아닌 셀 · 생성 범위 전체) — 2026-11-16 사용자
+    "정지 eNB 둘레 과부하".
+
+    전에는 지역(`quake_plan` 의 폭주 셀 + 정지 셀) 안에서만 옮겨 갈 셀을 찾아(`_disaster_relocate`), 정지 eNB 가
+    폭주 셀(진도 상위 · 北・荒川)에서 멀면 그 이용자가 몇 km 밖으로 옮겨 가고 둘레에는 혼잡(`_disaster_ring`)이
+    서지 않았다(F-358 品川・江東). 이 셀들을 지역에 더하면 재배치와 혼잡이 정지 셀 바로 옆에 걸린다.
+    **새 기준값이 아니다** — "가장 가까운 살아 있는 셀"은 재배치의 기존 규칙이다. 좌표는 MAPPED 셀만 쓰고,
+    같은 거리면 셀 키 순(같은 장애면 같은 결과). ``box_deg`` 는 계산을 줄이는 1차 상자일 뿐이라(안에 없으면
+    전체에서 찾는다) 결과를 바꾸지 않는다 — 상자 안 최근접이 상자 밖 셀보다 가깝다는 보장은 상자 반폭
+    이내 거리일 때만이라, 그 거리를 넘으면 전체에서 다시 찾는다
+    """
+    from .geo_lite import haversine_km
+
+    dead_set = set(dead_cells)
+    by_key = {c.cell_key: c for c in cells}
+    dead_enbs = {str(by_key[k].enb_id) for k in dead_set if k in by_key}
+    live = sorted((c for c in cells if c.geo_status == "MAPPED" and str(c.enb_id) not in dead_enbs),
+                  key=lambda c: c.cell_key)
+    if not live:
+        return []
+    half_km = box_deg * 111.0 * math.cos(math.radians(36.0))  # 경도 방향이 더 좁다 — 보수적으로 잡는다
+    out: set[str] = set()
+    for k in sorted(dead_set):
+        c = by_key.get(k)
+        if c is None or c.geo_status != "MAPPED":
+            continue
+        near = [x for x in live if abs(x.latitude - c.latitude) <= box_deg
+                and abs(x.longitude - c.longitude) <= box_deg]
+
+        def best(pool):
+            return min(pool, key=lambda x: (haversine_km(c.latitude, c.longitude, x.latitude, x.longitude),
+                                            x.cell_key))
+        b = best(near) if near else None
+        if b is None or haversine_km(c.latitude, c.longitude, b.latitude, b.longitude) > half_km:
+            b = best(live)
+        out.add(b.cell_key)
+    return sorted(out)
 
 
 def quake_mag_floor(cells: list[Cell], want: int, arv: dict[str, float] | None = None):
@@ -3141,8 +3182,11 @@ def _disaster_truth(sc) -> dict:
         "surge_base_per_min": (round(sc._surge_base, 2)
                                if sc.__dict__.get("_surge_base") is not None else None),
         "outage_mode": sc.target.outage_mode or "local",
+        # 폭주 셀은 정지 둘레 셀(`ring_cells`)을 뺀 지역이다 — 둘레는 정답 지역이지만 폭주 셀이 아니다(2026-11-16)
         "context": [{"code": "CALL_SURGE", "from_min": 0, "to_min": DISASTER_SURGE_END,
-                     "cells": sorted(sc.target.cell_keys)}],
+                     "cells": sorted(sc.__dict__.get("_surge_keys") or sc.target.cell_keys)}],
+        # 정지 셀마다 가장 가까운 살아 있는 셀 — 정지 셀의 이용자가 옮겨 오고 혼잡(0.6 배)이 걸린다
+        "ring_cells": sc.__dict__.get("_quake_ring"),
         "phases": {"surge": [0, DISASTER_SURGE_END],
                    "down": [DISASTER_DOWN_AT, DISASTER_DOWN_END]},
         "down_enbs": dead,

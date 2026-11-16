@@ -891,7 +891,10 @@ def _quake_step(fault: dict, cells: list[Cell], target: Target, given: dict | No
         print(f"  ! F-{fid} 27번 — 진도 {S.FAULT.quake_surge_intensity} 이상 셀이 없어 폭주 지역을 못 잡는다",
               flush=True)
         return None
-    inten = S.quake_cell_intensity([c for c in cells if c.cell_key in area], q, arv)
+    # 정지 셀 둘레(가장 가까운 살아 있는 셀) — 재배치·혼잡이 정지 셀 바로 옆에 걸리게 지역에 더한다(2026-11-16
+    # 사용자 "정지 eNB 둘레 과부하"). 폭주(호 추가)는 `area` 만이다 — 둘레는 폭주 셀이 아니다
+    ring = [k for k in S.quake_ring_cells(cells, dead_cells) if k not in area]
+    inten = S.quake_cell_intensity([c for c in cells if c.cell_key in area or c.cell_key in ring], q, arv)
     row = {"quake_id": f"Q-F{fid}", "fault_id": fid, "source": "SCENARIO",
            # 문자열로 둔다 — 정답지(JSON)에 그대로 실리고 MySQL datetime 도 이 꼴을 받는다
            "origin_time": fault["start_ts"].strftime("%Y-%m-%d %H:%M:%S"),
@@ -901,10 +904,10 @@ def _quake_step(fault: dict, cells: list[Cell], target: Target, given: dict | No
            **q, "down_enb_cnt": len(dead), "down_cell_cnt": len(dead_cells)}
     hi = max(inten.values()) if inten else None
     print(f"  · F-{fid} 27번 지진 {q['region']} M{q['magnitude']} 깊이 {q['depth_km']}km 진앙 진도 "
-          f"{q['intensity']} — 폭주 지역 셀 {len(area)} · 최대 진도 "
+          f"{q['intensity']} — 폭주 지역 셀 {len(area)} · 정지 둘레 셀 {len(ring)} · 최대 진도 "
           f"{'산출 불가' if hi is None else f'{hi:.2f}'} · 정지 eNB {len(dead)} · 셀 {len(dead_cells)}"
           f"{'' if arv else ' (지반 표 없음 · 거리만)'}", flush=True)
-    return {"row": row, "area": area, "dead": dead, "dead_cells": dead_cells,
+    return {"row": row, "area": area, "ring": ring, "dead": dead, "dead_cells": dead_cells,
             "intensity": {k: round(v, 2) for k, v in sorted(inten.items())}}
 
 
@@ -1026,7 +1029,7 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
         quake = _quake_step(fault, cells, target, quake_in, mode)
         if quake is None:
             return None
-        target = Target(cell_keys=quake["area"])
+        target = Target(cell_keys=set(quake["area"]) | set(quake["ring"]))
     # 25번 좁히기(`son_focus`)는 대상을 만들 때 이미 했다(2026-11-13 · `_son_target`·`_son_enb_target`) — 전에는
     # 노선 구간을 고른 뒤 여기서 셀 하나로 좁혔다
     if mode is not None:
@@ -1073,6 +1076,9 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
         sc._quake_dead = quake["dead"]
         sc._quake_dead_cells = quake["dead_cells"]
         sc._quake_cell_intensity = quake["intensity"]
+        # 폭주 셀(호를 더하는 셀)과 정지 둘레 셀을 가른다 — 대상(`target.cell_keys`)은 둘을 합친 정답 지역이다
+        sc._surge_keys = set(quake["area"])
+        sc._quake_ring = list(quake["ring"])
         # 정답 모양은 **꺼진 셀**로 잰다(2026-11-13 · 케이 지시) — 폭주 지역은 반경 전체라 모양이 다르다
         dead_cells = [by_key_geo[k] for k in quake["dead_cells"] if k in by_key_geo]
         dshape = S.geo_shape(dead_cells) if dead_cells else "UNKNOWN"
@@ -1084,7 +1090,7 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
         # 폭주 기준값 — 같은 조회의 분당 평균(`EnbRate.mean`)에서 셀 몫으로 나눈다
         # 합이 0 이면 **모름**이다 — 폭주는 그 분 평소 호로 후퇴하고(`pemdb1._surge_drafts` 의 같은
         # 판정), 정답지에도 0.0 이 아니라 null 을 싣는다(불변규칙 17 · 에스터 xfail 11-05)
-        base = _surge_base(cells, target.cell_keys, sc._enb_rate)
+        base = _surge_base(cells, sc.__dict__.get("_surge_keys") or target.cell_keys, sc._enb_rate)
         total = sum(base.values())
         sc._surge_cell_base = base if total > 0 else {}
         sc._surge_base = total if total > 0 else None

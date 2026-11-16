@@ -3096,7 +3096,8 @@ class PemdbGen:
             mult = _scenarios.disaster_surge_mult(sc, minute)
             if mult <= 1.0 or budget <= 0:
                 continue
-            keys = [k for k in sorted(sc.target.cell_keys) if k in by_key]
+            # 지진은 폭주 셀만(`_surge_keys`) — 정지 둘레 셀(2026-11-16)은 대상이지만 호를 더하지 않는다
+            keys = [k for k in sorted(sc.__dict__.get("_surge_keys") or sc.target.cell_keys) if k in by_key]
             cell_base = sc.__dict__.get("_surge_cell_base") or {}
             if cell_base and sum(cell_base.get(k, 0.0) for k in keys) > 0:
                 # **장애 시작 앞 60분의 셀 기대 호**(`faults._surge_base`)가 기준이다(2026-11-05 · F-112).

@@ -609,7 +609,10 @@ def test_disaster_truth_carries_the_context_phases_and_the_dead_enb_list(make):
     assert t["expect_rules"] == ["R-46"] and not t.get("rule_pending")
     assert t["expect_alternatives"] == {"R-36": "RAN_NODE_DOWN"}, "무호만 본 노드 장애는 대안으로 남는다"
     assert t["outage_mode"] == "local"
-    assert t["context"] == [{"code": "CALL_SURGE", "from_min": 0, "to_min": 13, "cells": sorted(sc.target.cell_keys)}]
+    # 11-16 — CALL_SURGE 는 폭주 셀만이다(정지 둘레 셀은 대상이지만 호를 더하지 않아 `ring_cells` 에 따로 둔다)
+    surge = sc.__dict__.get("_surge_keys") or sc.target.cell_keys
+    assert t["context"] == [{"code": "CALL_SURGE", "from_min": 0, "to_min": 13, "cells": sorted(surge)}]
+    assert sc.target.cell_keys == set(surge) | set(t["ring_cells"] or []) and not (set(surge) & set(t["ring_cells"] or []))
     assert t["phases"] == {"surge": [0, 13], "down": [3, 23]}
     assert t["down_enbs"] == sorted(S.disaster_dead_enbs(sc, sc.start_minute + 5)), "정답지의 정지 eNB 가 실제 정지 집합과 다르다"
     assert t["down_at_ts"] == S.disaster_down_at(sc) == pytest.approx((T0 + timedelta(minutes=START + 3)).timestamp())
