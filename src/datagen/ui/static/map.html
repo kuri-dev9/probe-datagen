@@ -886,7 +886,7 @@ async function pollStandby(){
 let MINI=null, MINI_Q=null, MINI_VB=null, DOWN=null, DOWN_KEY=null, DOWN_N=0;
 //: `MINI_Q` 가 **어느 장애에 대한 답인가** — 다른 장애로 넘어간 직후에는 앞 장애의 지진이 남아 있다. 지진 탭(증상
 //: 묶음)은 이 값이 지금 고른 장애일 때만 쓴다
-let QFOR=null;
+let QFOR=null, QKEY=null;
 async function pollQuake(){
   // **고른 장애가 있을 때만 묻는다**(2026-11-15 사용자 "지진 시나리오 누를 때만 나와야"). 전에는 진행 중인
   // 27번이 있으면 아무것도 안 골라도 미니 지도·음영이 늘 떴다. 고른 장애의 시작 시각(`at`)을 품은 27번이
@@ -900,10 +900,28 @@ async function pollQuake(){
   try{ doc=await (await fetch('/api/map/quake?'+q)).json(); }catch(e){ return; }
   if(doc.outline&&!doc.outline.error) MINI=doc.outline;
   if(FOCUS!==h.incident_id) return;          // 받는 사이에 다른 장애로 넘어갔다
+  // 통합 장애 바의 「지진」 줄도 이 값으로 쓴다 — 10초마다 같은 답이 오므로 바뀌었을 때만 바를 다시 그린다
+  const qk=JSON.stringify([h.incident_id, doc.quake||null]), qNew=qk!==QKEY;
+  QKEY=qk;
   MINI_Q=doc.quake||null;
   DOWN=MINI_Q&&doc.down||null;
   QFOR=MINI_Q?h.incident_id:null;
   drawMini(); drawDown();
+  if(qNew) drawFocus();
+}
+//: 통합 장애 바 「지진」 줄 (2026-11-16 사용자 "왼쪽 위 통합장애 표시에 지진 정보도 함께"). 생성기가 `CM_QUAKE_EVENT`
+//: 에 적은 진원 지명·규모·깊이·진앙 진도·발생 시각만 옮긴다 — 모르는 칸은 비운다(불변규칙 17). 꺼진 셀·eNB 수는
+//: **정답지라 넣지 않는다** — 정답은 「정답 표시」를 켰을 때만 보인다(같은 날 사용자)
+function quakeLine(){
+  const q=MINI_Q;
+  if(!q||QFOR!==FOCUS) return '';
+  const bits=[];
+  if(q.hypo_name) bits.push(esc(q.hypo_name));
+  if(q.magnitude!=null) bits.push(`M${q.magnitude.toFixed(1)}`);
+  if(q.depth_km!=null) bits.push(T('깊이 {d}km',{d:Math.round(q.depth_km)}));
+  if(q.intensity!=null) bits.push(T('진앙 진도 {i}',{i:q.intensity.toFixed(1)}));
+  if(q.origin_time) bits.push(T('{t} 발생',{t:esc(hm(q.origin_time))}));
+  return bits.length?`<span class=plain><b>${T('지진')}</b> ${bits.join(' · ')}</span>`:'';
 }
 function drawMini(){
   const box=document.getElementById('mini'), svg=document.getElementById('miniSvg');
@@ -2005,6 +2023,7 @@ function drawFocus(){
         + `<b>${T('무엇')}</b> ${esc(plain.what)}`
         + (plain.where?` · <b>${T('어디서')}</b> ${esc(plain.where)}`:'')
         + (plain.enb!=null?` (${T('eNB ID {n}',{n:plain.enb.toLocaleString()})})`:'')+`</span>`:'')
+    + quakeLine()
     // 묶음이면 조각마다 무엇(축 값)·결론을 한 줄씩 — 결론이 달라도 숨기지 않는다
     + (h.part&&h.part.group?h.part.group.map(m=>`<span>${MESH_AXES.has(m.axis)?esc(GEO_NAME[m.axis])+' ':''}${esc((m.axis_vals||[]).slice(0,3).join(', ')||m.incident_id)}`
         + ` — ${causeTag(m.root_code,m.root_label)}${m.root_code&&m.root_code!=='UNDETERMINED'&&m.confidence!=null?` ${Math.round(m.confidence*100)}%`:''}</span>`).join(''):'')

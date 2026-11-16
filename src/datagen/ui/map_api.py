@@ -1223,7 +1223,8 @@ def api_map_quake(at: str = "", outline: int = 0):
     * ``at`` 이 없으면 진행 중인 27번(`STATUS='active'`)의 지진이다 — 화면은 고른 장애가 없으면 묻지 않는다.
     * 해당이 없으면 ``quake`` 가 None 이고 화면은 미니 지도를 숨긴다.
 
-    값은 진앙·규모·발생 시각뿐이다(사용자 — "별표시랑 매그니튜드만"). 규모를 모르면 None 이고 화면은
+    미니 지도에 찍는 값은 진앙·규모뿐이다(사용자 — "별표시랑 매그니튜드만"). 지명·깊이·진앙 진도는 통합 장애 바의
+    「지진」 줄 몫이다(2026-11-16). 규모를 모르면 None 이고 화면은
     「M ?」 대신 규모를 비운다(불변규칙 17). ``outline=1`` 이면 윤곽도 함께 준다 — 정적이라 화면이 한 번만 받는다
 
     ``down`` 은 그 지진으로 **꺼진 기지국 셀**이다(같은 날 사용자 "기지국이 꺼졌으니 영향받는 지형을 음영으로")
@@ -1237,7 +1238,8 @@ def api_map_quake(at: str = "", outline: int = 0):
     except ValueError:
         raise HTTPException(400, f"at 이 시각이 아니다: {at}")
     from ..control import T_QUAKE
-    sel = (f"SELECT q.FAULT_ID, q.LAT, q.LON, q.MAGNITUDE, q.ORIGIN_TIME, f.STATUS "
+    sel = (f"SELECT q.FAULT_ID, q.LAT, q.LON, q.MAGNITUDE, q.ORIGIN_TIME, f.STATUS, "
+           f"q.HYPO_NAME, q.DEPTH_KM, q.INTENSITY "
            f"FROM {T_QUAKE} q JOIN {T_FAULT} f ON f.FAULT_ID = q.FAULT_ID ")
     conn = _connect()
     try:
@@ -1256,10 +1258,15 @@ def api_map_quake(at: str = "", outline: int = 0):
     finally:
         conn.close()
     if row:
-        fid, lat, lon, mag, t, st = row
+        fid, lat, lon, mag, t, st, hypo, depth, inten = row
+        # 진원 지명·깊이·진앙 진도는 통합 장애 바의 「지진」 줄에 쓴다(2026-11-16 사용자 "통합장애 표시에 지진 정보도").
+        # 생성기가 적은 값 그대로이고 모르면 None — 화면은 그 칸을 비운다(불변규칙 17)
         out["quake"] = {"fault_id": int(fid), "lat": float(lat), "lon": float(lon),
                         "magnitude": float(mag) if mag is not None else None,
-                        "origin_time": t.isoformat() if t else None, "active": st == "active"}
+                        "origin_time": t.isoformat() if t else None, "active": st == "active",
+                        "hypo_name": hypo or None,
+                        "depth_km": float(depth) if depth is not None else None,
+                        "intensity": float(inten) if inten is not None else None}
         out["down"] = _quake_down(int(fid))
     return out
 
