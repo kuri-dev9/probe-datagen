@@ -157,8 +157,10 @@ def test_27_no_record_of_any_kind_at_a_dead_enb_while_down_but_live_taus_remain(
     out = []
     for m in range(0, hi + 8):
         out.append(pg.records(m, T0 + timedelta(minutes=m)))
+    up = S.disaster_up_min(sc)
     for m in range(lo, hi):
-        bad_rows = _first_last_enb_rows(pg, out[m], dead_set)
+        gone = {e for e in dead_set if m - sc.start_minute < up[e]}      # eNB 마다 자기 복구 분(8~18분) 전까지만 정지(11-16)
+        bad_rows = _first_last_enb_rows(pg, out[m], gone)
         assert not bad_rows, f"{m}분: 정지 eNB 의 TAU {len(bad_rows)}건"
     live_taus = sum(len(_tau_rows(pg, out[m])) for m in range(lo, hi))
     assert live_taus > 0, "살아 있는 셀로 가는 TAU 는 남아야 한다"

@@ -356,10 +356,13 @@ def test_regression_no_unquoted_attribute_value_swallowing_the_self_close():
 
 def test_regression_rect_is_closed_before_the_star_and_text():
     fn = _draw()
-    html = fn[fn.index("svg.innerHTML="):fn.index("box.title=")]
+    html = fn[fn.index("svg.innerHTML="):fn.index("const fx=")]
     assert '<rect class="mv" id="miniView"></rect>' in html          # 명시적으로 닫는다
-    assert html.index("</rect>") < html.index("+ mark") < html.index("<text")     # ★(mark)·규모는 rect 뒤 형제다
     assert '<path class="ml"' in html and html.index('<path class="ml"') < html.index("<rect")   # 윤곽이 맨 아래
+    # 11-16 v6 — ★·물결·규모는 해안선 svg 가 아니라 별도 `#miniFx` 에 그린다(물결이 해안선을 다시 칠하지 않게)
+    assert "mark" not in html and "<text" not in html
+    fx = fn[fn.index("const fx="):fn.index("box.title=")]
+    assert "fx.innerHTML=mark.replace(" in fx and fx.index("mark.replace(") < fx.index("<text")
 
 
 @pytest.mark.skipif(NODE is None, reason="node 없음")
@@ -374,21 +377,22 @@ const els={mini:{style:{},classList:{toggle(k,v){this.live=v},remove(){this.live
 const document={getElementById:id=>els[id]||null};
 let MINI={bbox:[34.46,138.23,37.16,141.74],rings:[[[139,35],[140,35],[140,36],[139,35]]]}, MINI_Q=null, MINI_VB=null;
 function miniView(){}
+els.miniFx={attrs:{},setAttribute(k,v){this.attrs[k]=v},innerHTML:''}; els.miniSvg.getBoundingClientRect=()=>({width:182}); function fxGate(){}
 """+MAP_HTML[start:end]+"""
-MINI_Q={lat:35.7345,lon:140.5437,magnitude:5.9}; drawMini(); const inside=els.miniSvg.innerHTML;
-MINI_Q={lat:33.9,lon:142.6,magnitude:6.5}; drawMini(); const outside=els.miniSvg.innerHTML;
-console.log(JSON.stringify({inside,outside,title:els.mini.title}));
+MINI_Q={lat:35.7345,lon:140.5437,magnitude:5.9}; drawMini(); const inside=els.miniSvg.innerHTML, insideFx=els.miniFx.innerHTML;
+MINI_Q={lat:33.9,lon:142.6,magnitude:6.5}; drawMini(); const outside=els.miniSvg.innerHTML, outsideFx=els.miniFx.innerHTML;
+console.log(JSON.stringify({inside,outside,insideFx,outsideFx,title:els.mini.title}));
 """, encoding="utf-8")
     import json
     r = subprocess.run([NODE, str(js)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
-    for html in (out["inside"], out["outside"]):
+    for html, fx in ((out["inside"], out["insideFx"]), (out["outside"], out["outsideFx"])):
         assert html.count("<rect") == 1 and html.count("</rect>") == 1
         assert re.search(r"<rect[^>]*></rect>", html)               # rect 는 비어 있다(자식 없음)
-        assert html.index("</rect>") < html.index('<path class="ms"') < html.index("<text")
-        assert "M" in html and "5.9" in html or "6.5" in html
-    assert "M5.9" in out["inside"] and "M6.5" in out["outside"]
+        assert '<path class="ms"' not in html and "<text" not in html   # ★·규모는 해안선 svg 가 아니라 `#miniFx`(11-16)
+        assert fx.index('<path class="ms"') < fx.index("<text")         # 그 안에서 ★ → 규모 순
+    assert "M5.9" in out["insideFx"] and "M6.5" in out["outsideFx"]
     assert out["inside"].count("L") > 0
 
 
@@ -701,8 +705,11 @@ def test_down_shading_is_one_dark_blinking_layer_without_hatch_distinct_from_the
     """11-16 사용자 "빗금 치지 말고 어두운색으로 칠하고 그 자체가 깜박이듯이 — 구멍 난 것처럼, 뒤가 다 가려지는 건 아냐":
     같은 원을 둘레·바탕 두 겹으로 그리고 투명도는 층 하나에만 준다(겹쳐도 진해지지 않는다). 빗금 무늬는 없다."""
     css = MAP_HTML[MAP_HTML.index("#gDown{pointer-events:none}"):][:4000]
-    assert "#gDown{--dn-base:#020305;--dn-edge:#000;opacity:.8;animation:downBlink 2.4s ease-in-out infinite}" in css
-    assert "body[data-theme=light] #gDown{--dn-base:#1f2937;--dn-edge:#111827;opacity:.6;animation-name:downBlinkL}" in css
+    # 11-16 v6 — 깜박임은 `#downfx`(정지 층만 담은 별도 svg)가 맡는다. `#gDown` 은 색 변수만 갖는다
+    assert "#gDown{--dn-base:#020305;--dn-edge:#000}" in css
+    assert "body[data-theme=light] #gDown{--dn-base:#1f2937;--dn-edge:#111827}" in css
+    assert "#downfx{opacity:.8;animation:downBlink 2.4s ease-in-out infinite}" in css
+    assert "body[data-theme=light] #downfx{opacity:.6;animation-name:downBlinkL}" in css
     assert "@keyframes downBlink{0%,100%{opacity:.88}50%{opacity:.5}}" in css      # 완전 불투명(1)이 아니다 — 뒤가 비친다
     assert "@keyframes downBlinkL{0%,100%{opacity:.7}50%{opacity:.35}}" in css
     assert "#gDown .do ellipse{fill:var(--dn-base);stroke:var(--dn-edge);stroke-width:2px" in css      # 둘레
@@ -722,14 +729,18 @@ def test_wave_is_five_strong_circles_only_for_an_in_view_star():
     arrow = fn[fn.index("if(out){"):fn.index("}else{")]
     assert "mw" not in arrow
     css = MAP_HTML[MAP_HTML.index("#mini .mw circle{"):][:1100]
-    assert "stroke-width:2.6px" in css and "animation:miniWave 3s ease-out infinite" in css
+    assert "animation:miniWave 3s ease-out infinite" in css
+    # 선 굵기 2.6px 는 CSS 가 아니라 지도 단위 속성으로 준다 — `non-scaling-stroke` 는 매 프레임 칠하기를 부른다(11-16 실측)
+    assert "stroke-width=\"${(2.6*(x1-x0)/pw).toFixed(5)}\"" in fn and "vector-effect" not in css
     for d in ("-.6s", "-1.2s", "-1.8s", "-2.4s"):                              # 3 초 주기 · 시차 넷(첫째는 0)
         assert f"animation-delay:{d}" in css, d
     assert re.search(r"@keyframes miniWave\{0%\{transform:scale\(\.08\);opacity:1\}70%\{opacity:\.45\}100%\{transform:scale\(1\);opacity:0\}\}", css)
 
 
 def test_mini_border_pulses_only_while_the_quake_is_live_and_stops_otherwise():
-    assert "#mini.live{border-color:#ff4d5e;animation:miniPulse 1.6s ease-in-out infinite}" in MAP_HTML
+    # 맥박은 테두리 그림자가 아니라 의사 요소(::after)의 opacity 만 돌린다 — 합성만 하게(11-16 v6)
+    assert "#mini.live{border-color:#ff4d5e}" in MAP_HTML
+    assert "animation:miniPulse 1.6s ease-in-out infinite}" in MAP_HTML.split("#mini.live::after{")[1][:300]
     assert "@keyframes miniPulse{" in MAP_HTML
     fn = _draw()
     assert "box.classList.toggle('live', !!q.active);" in fn                    # 진행 중 여부는 API 의 quake.active
@@ -739,10 +750,10 @@ def test_mini_border_pulses_only_while_the_quake_is_live_and_stops_otherwise():
 
 
 def test_motion_stops_with_reduced_motion_and_while_dragging():
-    assert "@media (prefers-reduced-motion:reduce){#mini .mw{display:none} #mini.live{animation:none;box-shadow:0 0 0 2px #ff4d5e}}" in MAP_HTML
-    assert "@media (prefers-reduced-motion:reduce){#gDown{animation:none} #gRip{display:none}}" in MAP_HTML
-    assert "#wrap.gest #gDown,#wrap.gest #gRip>g>g{animation-play-state:paused}" in MAP_HTML      # 끌기·확대 중에는 멈춘다
-    assert "#gRip>g>g{opacity:0;animation:cellRip 2.4s linear infinite}" in MAP_HTML
+    assert "@media (prefers-reduced-motion:reduce){#mini .mw{display:none} #mini.live::after{animation:none;opacity:.8}}" in MAP_HTML
+    assert "@media (prefers-reduced-motion:reduce){#downfx{animation:none} .ripfx{display:none}}" in MAP_HTML
+    assert "#wrap.gest #downfx,#wrap.gest .ripfx{animation-play-state:paused}" in MAP_HTML      # 끌기·확대 중에는 멈춘다
+    assert ".ripfx{opacity:0;animation:cellRip 2.4s linear infinite}" in MAP_HTML
 
 
 def test_legend_swatch_for_the_silent_row_is_the_new_dark_blinking_box():
@@ -766,14 +777,15 @@ def test_drawmini_same_quake_twice_does_not_rewrite_the_svg_and_a_new_one_does(t
     out = _node(tmp_path, """
 const T=(s,o)=>s; const my=lat=>lat; let VB=null; let writes=0;
 const svg={attrs:{},dataset:{},setAttribute(k,v){this.attrs[k]=v}, set innerHTML(v){writes++; this._h=v}, get innerHTML(){return this._h}};
-const els={mini:{style:{},classList:{toggle(k,v){this.live=v},remove(){this.live=false},live:false},parentNode:{classList:{add(){},remove(){}}}},miniSvg:svg};
+svg.getBoundingClientRect=()=>({width:182}); const fx={attrs:{},setAttribute(k,v){this.attrs[k]=v},innerHTML:''};
+const els={mini:{style:{},classList:{toggle(k,v){this.live=v},remove(){this.live=false},live:false},parentNode:{classList:{add(){},remove(){}}}},miniSvg:svg,miniFx:fx};
 const document={getElementById:id=>els[id]||null};
 let MINI={bbox:[34.46,138.23,37.16,141.74],rings:[[[139,35],[140,35],[140,36],[139,35]]]}, MINI_Q=null, MINI_VB=null;
-function miniView(){}
+function miniView(){} function fxGate(){}
 """+MAP_HTML[start:end]+"""
 MINI_Q={lat:35.5,lon:140.0,magnitude:6.2}; drawMini(); drawMini(); const same=writes;
-MINI_Q={lat:35.6,lon:140.0,magnitude:6.2}; drawMini(); const waves=(svg.innerHTML.match(/<circle/g)||[]).length;
-MINI_Q={lat:33.9,lon:142.6,magnitude:6.5}; drawMini(); const arrowWaves=(svg.innerHTML.match(/<circle/g)||[]).length;
+MINI_Q={lat:35.6,lon:140.0,magnitude:6.2}; drawMini(); const waves=(fx.innerHTML.match(/<circle/g)||[]).length;
+MINI_Q={lat:33.9,lon:142.6,magnitude:6.5}; drawMini(); const arrowWaves=(fx.innerHTML.match(/<circle/g)||[]).length;
 console.log(JSON.stringify({same, after:writes, waves, arrowWaves}));""")
     assert out == {"same": 1, "after": 2 + 1, "waves": 5, "arrowWaves": 0}    # 같은 지진 둘째 호출은 쓰지 않는다 · 별 아래 물결 5(11-16 세게) · 화살표는 0
 
@@ -795,7 +807,11 @@ def test_down_phrases_are_translated_and_the_old_wording_is_gone():
 # ══ 11-15 낮 — 정지 음영 = 탐지(D4 C-01) 셀 · 정답은 점선 비교 · 첫 로드 회귀 ══════════════════════════════════
 
 def test_layers_are_ordered_kde_then_detected_down_then_truth_then_geo_and_draw_does_not_clear_them():
-    assert "<g id=gKde></g><g id=gImpact></g><g id=gSevY></g><g id=gSevR></g><g id=gRip></g><g id=gDown></g><g id=gDownT></g><g id=gGeo></g>" in MAP_HTML
+    # 11-16 v6 — 지도 svg 에는 흔들림·노랑·빨강·지리만, 정지 음영·셀 물결·정답은 합성 층(별도 svg)으로 위에 겹친다
+    assert "<g id=gKde></g><g id=gImpact></g><g id=gSevY></g><g id=gSevR></g><g id=gGeo></g>" in MAP_HTML
+    order = [MAP_HTML.index(x) for x in ("<svg id=geofx>", "<svg id=downfx class=ovl><g id=gDown></g></svg>", "<svg id=ripfx0 ",
+                                          "<svg id=ripfx2 ", "<svg id=truthfx class=ovl><g id=gDownT></g></svg>")]
+    assert order == sorted(order)                                   # 지리 효과 < 정지 < 물결 셋 < 정답
     draw = MAP_HTML[MAP_HTML.index("function draw()"):][:3500]
     assert "drawDown();" in draw and all(x not in draw for x in ("gDown", "gImpact", "gSev", "gRip"))
 
@@ -917,12 +933,14 @@ const fetch=async u=>{FETCHED.push(u); if(IMPACT_REPLY==='boom'){ await new Prom
 const box=()=>({children:[],replaceCount:0,attrs:{},replaceChildren(){this.children=[];this.replaceCount++},appendChild(c){this.children.push(c)},
   setAttribute(k,v){this.attrs[k]=v},removeAttribute(k){delete this.attrs[k]}});
 const g=box(), gt=box(), gi=box(), gy=box(), gr=box(), gp=box(), gm=box();
+const gps3=[gp,box(),box()];   // 셀 물결은 이제 SVG 세 장(#ripfx0~2)의 g — 지연 .8s 씩 어긋난 한 층씩(11-16 v6)
 const gN=()=>g.children[0]?g.children[0].children.length:0;   // 정지는 두 겹(둘레·바탕)에 같은 원 — 셀 수는 한 겹으로 센다
 const legendBox={children:[],style:{display:''},
   querySelectorAll(){return {forEach:f=>this.children.filter(c=>c.className.startsWith('lg-down')).forEach(f)}},
   appendChild(c){this.children.push(c)}};
 const mkDiv=()=>({tag:'div',className:'',innerHTML:'',title:'',remove(){legendBox.children=legendBox.children.filter(c=>c!==this)}});
 const document={getElementById:id=>id==='gDown'?g:id==='gDownT'?gt:id==='gImpact'?gi:id==='gSevY'?gy:id==='gSevR'?gr:id==='gRip'?gp:id==='downMaskG'?gm:id==='legend'?legendBox:null,createElement:mkDiv,
+  querySelector:q=>{ const m=/^#ripfx(\\d)>g$/.exec(q); return m?gps3[+m[1]]:null; },
   createDocumentFragment:()=>box()};
 const CELLS=[{key:'1-0',enb:'1',lat:35.7,lon:139.8},{key:'1-1',enb:'1',lat:35.71,lon:139.81},{key:'2-0',enb:'2',lat:35.72,lon:139.82}];
 """
@@ -1162,7 +1180,7 @@ const mk=(silent,sev)=>({t:Date.now(),doc:{members:[{incident_id:'A',silent,cell
   silent_r:{'1-0':353,'1-1':353}, cell_r:{'2-0':441,'1-1':353}}});
 const snap=()=>({maskAttr:{y:gy.attrs.mask||null, r:gr.attrs.mask||null, p:gp.attrs.mask||null, d:g.attrs.mask||null, t:gt.attrs.mask||null},
   maskCircles:gm.children.length, down:gN(), y:gy.children.length, r:gr.children.length,
-  rip:gp.children.map(b=>[b.attrs['class'], b.children.map(l=>l.children.length)])});
+  rip:gps3.map(l=>l.children.map(b=>[b.attrs['class'], b.children.length]))});
 """
 
 
@@ -1197,24 +1215,26 @@ SIL.I1=mk([], {'2-0':'MAJOR','1-1':'CRITICAL','1-0':'WARNING','9-9':'CRITICAL'})
 console.log(JSON.stringify(snap()));""")
     # 노랑: 2-0(r 441)·1-0(반경 없음 → 그리지 않는다) · 빨강: 1-1(r 353) · 9-9 는 지도에 없다
     assert out["y"] == 1 and out["r"] == 1
-    assert out["rip"] == [["ry", [1, 1, 1]], ["rr", [1, 1, 1]]]                        # 색마다 고리 세 층, 층마다 그 색 셀 수만큼
+    # 물결은 SVG 세 장(`#ripfx0~2`) — 장마다 색별 g 하나, 그 색 셀 수만큼(반지름 35·65·95% 가 장마다 하나씩)
+    assert out["rip"] == [[["ry", 1], ["rr", 1]]] * 3
 
 
 @pytest.mark.skipif(NODE is None, reason="node 없음")
 def test_cell_ripple_is_absent_without_affected_cells_and_cleared_on_redraw(tmp_path):
     out = _down2(tmp_path, _SEV_BODY + """
-SIL.I1=mk([], {}); drawDown(); const none=snap().rip;
-SIL.I1=mk([], {'2-0':'MAJOR'}); drawDown(); const some=snap().rip.length;
-SIL.I1=mk([], {}); drawDown(); const gone=snap().rip;
+const n=()=>snap().rip.reduce((a,l)=>a+l.length,0);
+SIL.I1=mk([], {}); drawDown(); const none=n();
+SIL.I1=mk([], {'2-0':'MAJOR'}); drawDown(); const some=n();
+SIL.I1=mk([], {}); drawDown(); const gone=n();
 console.log(JSON.stringify({none,some,gone}));""")
-    assert out == {"none": [], "some": 1, "gone": []}
+    assert out == {"none": 0, "some": 3, "gone": 0}                                    # 노랑 한 색 × 세 장
 
 
 @pytest.mark.skipif(NODE is None, reason="node 없음")
 def test_ripple_rings_are_scaled_inside_the_cell_circle(tmp_path):
     out = _down2(tmp_path, _SEV_BODY + """
 SIL.I1=mk([], {'2-0':'MAJOR'}); drawDown();
-const rx=l=>+l.children[0].attrs.rx; const layers=gp.children[0].children;
+const rx=l=>+l.children[0].attrs.rx; const layers=gps3.map(b=>b.children[0]);
 console.log(JSON.stringify({ratio:layers.map(l=>rx(l)/+gy.children[0].attrs.rx)}));""")
     assert [round(x, 2) for x in out["ratio"]] == [0.35, 0.65, 0.95]                    # 원 크기 안에서만 퍼진다
 
@@ -1226,10 +1246,10 @@ def test_mini_live_class_follows_quake_active(tmp_path):
     out = _node(tmp_path, """
 const T=(s,o)=>s; const my=lat=>lat; let VB=null;
 const mini={style:{},live:null,classList:{toggle(k,v){ if(k==='live') mini.live=v; },remove(k){ if(k==='live') mini.live=false; }},parentNode:{classList:{add(){},remove(){}}}};
-const svg={attrs:{},dataset:{},setAttribute(k,v){this.attrs[k]=v},innerHTML:''};
-const els={mini,miniSvg:svg}; const document={getElementById:id=>els[id]||null};
+const svg={attrs:{},dataset:{},setAttribute(k,v){this.attrs[k]=v},innerHTML:'',getBoundingClientRect:()=>({width:182})};
+const els={mini,miniSvg:svg,miniFx:{attrs:{},setAttribute(k,v){this.attrs[k]=v},innerHTML:''}}; const document={getElementById:id=>els[id]||null};
 let MINI={bbox:[34.46,138.23,37.16,141.74],rings:[[[139,35],[140,35],[140,36],[139,35]]]}, MINI_Q=null, MINI_VB=null;
-function miniView(){}
+function miniView(){} function fxGate(){}
 """+MAP_HTML[start:end]+"""
 MINI_Q={lat:35.5,lon:140.0,magnitude:6.2,active:true}; drawMini(); const on=mini.live;
 MINI_Q={lat:35.5,lon:140.0,magnitude:6.2,active:false}; drawMini(); const off=mini.live;      // 같은 위치 — 그려진 SVG 는 다시 쓰지 않아도 상태는 바뀐다
@@ -1237,3 +1257,24 @@ MINI_Q={lat:35.5,lon:140.0,magnitude:6.2,active:true}; drawMini();
 MINI_Q=null; drawMini(); const gone=mini.live;
 console.log(JSON.stringify({on,off,gone}));""")
     assert out == {"on": True, "off": False, "gone": False}
+
+
+@pytest.mark.skipif(NODE is None, reason="node 없음")
+def test_fx_gate_runs_twenty_seconds_after_picking_even_a_past_quake_then_stops(tmp_path):
+    """11-16 사용자 "내가 켠 뒤로 20초 아냐?" — 진행 중이 아닌 지난 지진도 고른 뒤 20초는 돈다(`body.fxlive`).
+    같은 장애를 다시 받아도 시각은 그대로고, 다른 장애를 고르면 처음부터 다시 센다."""
+    a = MAP_HTML.index("const FX_SEC=20;")
+    b = MAP_HTML.index("function drawMini")
+    out = _node(tmp_path, """
+let NOW=1000000; const realNow=Date.now; Date.now=()=>NOW;
+const cls={on:null}; const document={body:{classList:{toggle(k,v){ if(k==='fxlive') cls.on=v; }}}};
+let MINI_Q=null, FOCUS=null; Object.defineProperty(globalThis,'QFOR',{get:()=>FOCUS});
+const setTimeout=()=>1, clearTimeout=()=>{};
+"""+MAP_HTML[a:b]+"""
+MINI_Q={fault_id:361,active:false}; FOCUS='I1'; fxGate(); const picked=cls.on;           // 끝난 지진을 골랐다
+NOW+=10000; fxGate(); const at10=cls.on;                                                   // 10초 — 같은 장애는 시각 유지
+NOW+=11000; fxGate(); const at21=cls.on;                                                   // 21초 — 멈춘다
+MINI_Q={fault_id:362,active:false}; fxGate(); const again=cls.on;                          // 다른 장애 — 처음부터
+MINI_Q=null; fxGate(); const none=cls.on;                                                  // 지진 없음
+console.log(JSON.stringify({picked,at10,at21,again,none}));""")
+    assert out == {"picked": True, "at10": True, "at21": False, "again": True, "none": False}

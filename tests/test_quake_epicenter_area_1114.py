@@ -56,7 +56,9 @@ def test_an_explicit_epicenter_and_magnitude_are_used_as_given_with_the_nearest_
     sc = _build("QUAKE:35.6,140.0,6.0", cells)
     q = sc.as_truth()["quake"]
     assert (q["lat"], q["lon"], q["magnitude"]) == (35.6, 140.0, 6.0)
-    assert q["region"] == REGION_B[0] and q["fault_type_d"] == REGION_B[4]
+    assert q["region"] == REGION_B[0]
+    # 좌표로 진원을 주면 이름 있는 진원역이 아니라 d 는 표에 없는 값 — 11-16 `QUAKE_D_UNNAMED`(0.0)
+    assert q["fault_type_d"] == S.QUAKE_D_UNNAMED == 0.0
     assert abs(q["depth_km"] - REGION_B[3]) <= 10.0 + 0.05
     deep = _build("QUAKE:35.6,140.0,6.0,70", cells).as_truth()["quake"]
     assert deep["depth_km"] == 70.0
@@ -71,3 +73,24 @@ def test_cells_without_coordinates_are_never_in_the_area():
     cells = _grid(35.6, 140.0) + [_cell("999999", 0, 0.0, 0.0, geo="UNMAPPED")]
     sc = _build(None, cells)
     assert sc is not None and "999999-0" not in sc.target.cell_keys
+
+
+# ── 좌표로 준 진원의 지명(2026-11-16 · 27번 진원 지명 「…付近」) ─────────────────────────────
+
+def _named_cells():
+    from types import SimpleNamespace as NS
+    pts = [(35.60, 139.60), (35.60, 139.70), (35.70, 139.60), (35.70, 139.70)]
+    return [NS(geo_status="MAPPED", adm_sgg_cd="13104", latitude=la, longitude=lo) for la, lo in pts] + \
+           [NS(geo_status="MAPPED", adm_sgg_cd="13101", latitude=35.9, longitude=139.9)]
+
+
+def test_place_name_is_the_ward_with_fuzzy_suffix_when_the_point_is_inside_its_cells():
+    names = {"13104": ("東京都", "新宿区"), "13101": ("東京都", "千代田区")}
+    assert S.quake_place_name(_named_cells(), 35.65, 139.65, names) == "東京都新宿区付近"
+
+
+def test_place_name_is_none_outside_the_ward_range_or_without_names():
+    names = {"13104": ("東京都", "新宿区")}
+    assert S.quake_place_name(_named_cells(), 34.0, 139.65, names) is None     # 바다·마스터 밖 → 진원역 이름으로 대신한다
+    assert S.quake_place_name(_named_cells(), 35.65, 139.65, None) is None
+    assert S.quake_place_name(_named_cells(), 35.65, 139.65, {"13104": ("東京都", "")}) is None   # 이름 모름은 지어내지 않는다

@@ -356,7 +356,7 @@ def test_the_sms_injection_is_gone_from_the_scenario_module():
 
 
 def _dsc(dead=None):
-    sc = SimpleNamespace(kind="natural_disaster", start_minute=0)
+    sc = SimpleNamespace(kind="natural_disaster", start_minute=0, id="T-27")
     if dead is not None:
         sc.__dict__["_quake_dead"] = set(dead)
     return sc
@@ -368,6 +368,8 @@ def test_dead_enbs_use_the_quake_set_and_only_during_down_phase():
     sc = _dsc(dead=["A", "B"])
     assert S.disaster_dead_enbs(sc, 0) == set()
     assert S.disaster_dead_enbs(sc, S.DISASTER_DOWN_AT) == {"A", "B"}
+    # eNB 마다 8~18분 사이 따로 복구된다(2026-11-16) — 복구 구간 앞까지는 모두 정지, 끝(18분)에는 하나도 없다
+    assert S.disaster_dead_enbs(sc, S.DISASTER_UP_FROM - 1) == {"A", "B"}
     assert S.disaster_dead_enbs(sc, S.DISASTER_DOWN_END) == set()
 
 

@@ -1,6 +1,6 @@
 """자연재해 시나리오(27번 · `natural_disaster`) — 호 폭주 + 기지국 장애 (2026-11-04 사용자 결정).
 
-국면(장애 시작 분 기준 · 초기값): 0~13분 폭주(2분에 걸쳐 정점 6배) · 3~23분 지역 eNB 40% 정지 · 23분 정상화.
+국면(장애 시작 분 기준 · 초기값): 0~13분 폭주(2분에 걸쳐 정점 6배) · 3분 지역 eNB 40% 정지 · eNB 마다 8~18분 따로 복구 · 18분 정상화.
 상위 장비(SGW·PGW·MME)는 묶지 않는다. **eNB 가 죽으면 코어 세션은 살아 있다** — 데이터만 멈추고 이웃 셀에서
 같은 세션이 이어진다(SGW 다운과 다르다 · 세션을 끊지 않는다).
 
@@ -144,19 +144,36 @@ def test_surge_scales_with_intensity_and_other_kinds_are_untouched():
     assert S.disaster_surge_mult(eq, START + 5) == 1.0 and not S.disaster_dead_enbs(eq, START + 5)
 
 
-def test_down_phase_is_three_to_twenty_three_minutes_with_a_fixed_set_of_forty_percent():
+def test_down_phase_is_three_to_eighteen_minutes_with_a_fixed_set_of_forty_percent_that_only_shrinks():
+    """정지 집합은 3분에 고정되고(40%), eNB 마다 8~18분 사이 따로 복구돼 줄어들기만 한다(2026-11-16)"""
     sc, cells = _unit_sc(n_enbs=10)
     n = len({c.enb_id for c in cells})
     sets = {e: S.disaster_dead_enbs(sc, START + e) for e in range(-1, 26)}
     for e in (-1, 0, 1, 2):
         assert not sets[e], f"{e}분: 다운 전인데 정지 eNB 가 있다"
-    for e in (23, 24, 25):
+    for e in (18, 19, 25):
         assert not sets[e], f"{e}분: 정상화 뒤인데 정지 eNB 가 남았다"
     first = sets[3]
     assert len(first) == math.ceil(0.4 * n)
-    for e in range(3, 23):
-        assert sets[e] == first, f"{e}분: 정지 집합이 흔들렸다"
-    assert (S.DISASTER_DOWN_AT, S.DISASTER_DOWN_END) == (3, 23) and S.DISASTER_DOWN_RATIO == pytest.approx(0.4)
+    for e in range(3, 8):
+        assert sets[e] == first, f"{e}분: 복구 구간 전인데 정지 집합이 흔들렸다"
+    for e in range(4, 18):
+        assert sets[e] <= sets[e - 1], f"{e}분: 꺼졌던 eNB 가 다시 꺼졌다"
+    up = S.disaster_up_min(sc)
+    assert set(up) == first and all(S.DISASTER_UP_FROM <= u <= S.DISASTER_UP_TO for u in up.values())
+    assert max(up.values()) == S.DISASTER_UP_TO == 18, "가장 늦은 eNB 는 마지막 분에 복구된다"
+    assert sets[17] and sets[S.DISASTER_UP_TO - 0] == set()
+    assert (S.DISASTER_DOWN_AT, S.DISASTER_DOWN_END) == (3, 18) and S.DISASTER_DOWN_RATIO == pytest.approx(0.4)
+
+
+def test_recovery_minutes_are_deterministic_per_fault_id():
+    sc, _ = _unit_sc(n_enbs=10)
+    a = dict(S.disaster_up_min(sc))
+    sc.__dict__.pop("_dis_up")
+    assert S.disaster_up_min(sc) == a, "같은 장애 ID 는 같은 복구 분이다(틱·재시작마다)"
+    other, _ = _unit_sc(n_enbs=10)
+    other.id = "T-28"
+    assert S.disaster_up_min(other) != a
 
 
 def test_down_time_is_the_start_of_the_down_minute():
@@ -317,21 +334,22 @@ def test_before_the_start_nothing_is_added(make):
 # --------------------------------------------------------------------------
 
 
-def test_dead_enbs_have_no_calls_while_down_and_come_back_at_twenty_three(make):
+def test_dead_enbs_have_no_calls_while_down_and_come_back_at_their_own_minute(make):
     g = make()
-    runs, sc = _disaster_run(g, minutes=START + 26)
+    runs, sc = _disaster_run(g, minutes=START + 21)
     fi = _col(g, "lte_call", "First_eNB_ID")
     li = _col(g, "lte_call", "Last_eNB_ID")
-    dead = S.disaster_dead_enbs(sc, START + 5)
+    up = S.disaster_up_min(sc)
+    dead = set(up)
     assert dead
     before = sum(1 for m in range(START) for r in runs[m][0] if r[fi] in dead)
     assert before > 0, "정지할 eNB 에 평소 호가 있어야 한다"
-    for m in range(START + 3, START + 23):
+    for m in range(START + 3, START + S.DISASTER_UP_TO):
+        gone = {e for e in dead if m - START < up[e]}
         rows = runs[m][0]
-        assert not [r for r in rows if r[fi] in dead or r[li] in dead], f"{m}분: 정지 eNB 의 호가 남았다"
-    assert sum(1 for m in range(START + 24, START + 26) for r in runs[m][0] if r[fi] in dead) > 0, "23분 뒤 복귀하지 않았다"
-    assert not [r for r in runs[START + 2][0] if False]                # 다운 전 분은 정지가 없다(위 `before` 가 이미 본다)
-
+        assert not [r for r in rows if r[fi] in gone or r[li] in gone], f"{m}분: 정지 eNB 의 호가 남았다"
+    assert sum(1 for m in range(START + S.DISASTER_UP_TO + 1, START + 21) for r in runs[m][0] if r[fi] in dead) > 0, "18분 뒤 복귀하지 않았다"
+    
 
 def test_calls_of_dead_cells_move_to_live_neighbours_instead_of_vanishing(make):
     """다운만 남은 국면(13~23분)에도 지역 호 총량이 평소 근처다 — 정지 셀의 호가 이웃 셀로 옮겨 간다."""
@@ -460,10 +478,11 @@ def test_reconnect_ends_after_the_reconnect_time_and_inside_its_own_minute(make)
 def test_no_handover_into_a_dead_enb_while_down(make):
     g = make()
     runs, sc = _disaster_run(g, minutes=START + 14)
-    dead = S.disaster_dead_enbs(sc, START + 5)
+    up = S.disaster_up_min(sc)
     li = _col(g, "lte_call", "Last_eNB_ID")
     for m in range(START + 3, START + 14):
-        assert not [r for r in runs[m][0] if r[li] in dead], f"{m}분: 정지 eNB 로 끝나는 호"
+        gone = {e for e, u in up.items() if m - START < u}      # 자기 복구 분 전까지만 정지
+        assert not [r for r in runs[m][0] if r[li] in gone], f"{m}분: 정지 eNB 로 끝나는 호"
 
 
 # --------------------------------------------------------------------------
@@ -613,7 +632,7 @@ def test_disaster_truth_carries_the_context_phases_and_the_dead_enb_list(make):
     surge = sc.__dict__.get("_surge_keys") or sc.target.cell_keys
     assert t["context"] == [{"code": "CALL_SURGE", "from_min": 0, "to_min": 13, "cells": sorted(surge)}]
     assert sc.target.cell_keys == set(surge) | set(t["ring_cells"] or []) and not (set(surge) & set(t["ring_cells"] or []))
-    assert t["phases"] == {"surge": [0, 13], "down": [3, 23]}
+    assert t["phases"] == {"surge": [0, 13], "down": [3, S.DISASTER_UP_TO]}
     assert t["down_enbs"] == sorted(S.disaster_dead_enbs(sc, sc.start_minute + 5)), "정답지의 정지 eNB 가 실제 정지 집합과 다르다"
     assert t["down_at_ts"] == S.disaster_down_at(sc) == pytest.approx((T0 + timedelta(minutes=START + 3)).timestamp())
 
@@ -641,7 +660,7 @@ def test_disaster_truth_is_written_by_the_live_truth_path(make, tmp_path):
     P.write_truth(path, T0, 40, [sc])
     row = json.loads(path.read_text(encoding="utf-8"))["scenarios"][0]
     assert row["context"][0]["code"] == "CALL_SURGE" and row["context"][0]["to_min"] == 13
-    assert row["down_enbs"] == sc.as_truth()["down_enbs"] and row["phases"]["down"] == [3, 23]
+    assert row["down_enbs"] == sc.as_truth()["down_enbs"] and row["phases"]["down"] == [3, S.DISASTER_UP_TO]
     assert row["truth_code"] == "EARTHQUAKE_IMPACT", "채점이 읽는 주원인 키는 지진 코드다(옛 코드는 graphio 별칭)"
     assert row["truth_category"] == "EXTERNAL" and row["expect_rules"] == ["R-46"]
 
@@ -730,11 +749,12 @@ def test_down_only_phase_is_back_to_normal_without_the_floor(monkeypatch):
 
 def test_dead_enbs_stay_at_zero_in_the_down_only_phase(monkeypatch):
     g, runs, sc = _sparse(monkeypatch)
-    dead = S.disaster_dead_enbs(sc, START + 15)
-    assert dead
+    up = S.disaster_up_min(sc)
+    assert up
     i = _col(g, "lte_call", "First_eNB_ID")
-    for m in range(START + 4, START + 23):
-        assert not [r for r in runs[m][0] if r[i] in dead], f"{m}분: 정지 eNB 의 호가 있다"
+    for m in range(START + 4, START + S.DISASTER_UP_TO):
+        gone = {e for e, u in up.items() if m - START < u}      # eNB 마다 자기 복구 분 전까지 0
+        assert not [r for r in runs[m][0] if r[i] in gone], f"{m}분: 정지 eNB 의 호가 있다"
 
 
 def test_surge_composition_on_the_area_is_voice_heavy_and_mo_heavy(monkeypatch):

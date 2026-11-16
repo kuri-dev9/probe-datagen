@@ -45,7 +45,7 @@ def test_picture_list_is_14_to_27():
 def test_picture_titles_use_the_easy_names():
     """gen.py 가 이름을 바꿔 다시 만든 그림 제목 — 옛 이름이 남으면 카드 이름과 그림이 어긋난다."""
     svg = (STATIC / "scenario-pictures" / "no16.svg").read_text(encoding="utf-8")
-    assert "5G는 잡히는데 느림" in svg and "앵커 고착" not in svg
+    assert "5G 잡히는데 느림 (4G 앵커 혼잡)" in svg and "앵커 고착" not in svg
 
 
 def test_scenarios_html_only_adds_a_picture_for_listed_numbers():
@@ -116,7 +116,7 @@ def test_map_html_counts_dot_cells_and_keeps_old_key_out():
 
 def _md_names():
     out = {}
-    for m in re.finditer(r"^\|\s*(\d+)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*$", NAMES_MD.read_text(encoding="utf-8"), re.M):
+    for m in re.finditer(r"^\|\s*(\d+)\s*\|\s*([^|]+?)\s*\|.*\|\s*$", NAMES_MD.read_text(encoding="utf-8"), re.M):
         n = int(m.group(1))
         if 14 <= n <= 27:
             out[n] = m.group(2)
