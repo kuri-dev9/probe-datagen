@@ -690,13 +690,21 @@ class Scenario:
 
 def _son_truth(sc) -> dict:
     """25번 정답지 — 파라미터를 넣은 eNB 와 셀별 역할·배율(2026-11-13). 화면 셀별 표와 대조하려는 값이고 채점은
-    모르는 키를 무시한다. 출발 셀은 구조상 graphio 장애 셀이 아니다(절단은 도착 셀에 계상) — 그래서 따로 싣는다"""
+    모르는 키를 무시한다. 출발 셀은 구조상 graphio 장애 셀이 아니다(절단은 도착 셀에 계상) — 그래서 따로 싣는다.
+
+    ``as_truth`` 의 ``cells``·``cell_cnt`` 를 **덮는다**(그 사전 맨 끝에 펼쳐진다) — 기대 셀은 도착 셀이다."""
     t = sc.target
     if sc.kind != "son_param_change" or not t.son_enbs:
         return {}
     src = sorted({a for a, _ in t.cell_pairs} | {k for k in t.son_gain})
     dst = sorted({b for _, b in t.cell_pairs} - set(src))
+    # **기대 셀(`cells`)은 도착 셀만이다**(2026-11-17 사용자 결정 · 먼 역 동시 주입 ①·③). 끊김은 넘어간 쪽(Last)
+    # 셀에 계상되므로 graphio 가 찾는 장애 셀도 도착 셀이다 — 출발 셀까지 기대하면 채점마다 그 셀들이 「놓친 셀」로
+    # 셌다(F-375·376·380). 출발 셀은 `src_cells` 로 남겨 사람이 본다. 생성 대상(`Target.cell_keys`)은 그대로 —
+    # 출발 셀에서 호가 나야 도착 셀에서 끊긴다. 도착 셀이 없으면(좌표 없음) 바꾸지 않는다
+    keep = {"cells": dst, "cell_cnt": len(dst), "src_cells": src} if dst else {}
     return {
+        **keep,
         "son_enbs": list(t.son_enbs),
         "son_cells": ([{"cell": k, "role": "src", "gain": t.son_gain.get(k)} for k in src]
                       + [{"cell": k, "role": "dst", "gain": None} for k in dst]),
@@ -3366,11 +3374,11 @@ def _outage_relocate(sc, cell, intensity, pool):
 # --------------------------------------------------------------------------
 #
 # **장애 주입이 아니라 증설 재현이다**(2026-10-29 사람 결정). 스펙 §8.3 은
-# 변경 전후 4주를 비교하지만 시연은 50분(`SHIFT_TOTAL`)에 압축한다 —
+# 변경 전후 4주를 비교하지만 시연은 30분(`SHIFT_TOTAL`)에 압축한다(11-17 · 아래 50분 → 30분) —
 #
-#   0–30분   A 에 호가 10분에 걸쳐 몰리고 20분 유지한다(`congestion_load` 까지) · A 혼잡
-#   30분     B 개통 — A 로 오던 호의 60% 가 B 로 간다. A 가 서서히 회복
-#   40–50분  분석 시간. 50분에 B 가 다시 꺼진다
+#   0–20분   A 에 호가 5분에 걸쳐 몰리고 15분 유지한다(`congestion_load` 까지) · A 혼잡
+#   20분     B 개통 — A 로 오던 호의 60% 가 B 로 간다. A 가 5분에 걸쳐 회복
+#   25–30분  분석 시간. 30분에 B 가 다시 꺼진다
 #
 # 혼잡 구간이 10분이면 graphio Q-11(5분 창 3칸 연속)이 서지 못했다(F-152 · 2026-11-06 사용자 결정).
 # 임계가 아니라 시나리오 길이를 늘렸다 — 증설이 필요한 혼잡은 10분보다 오래 간다
@@ -3382,6 +3390,11 @@ def _outage_relocate(sc, cell, intensity, pool):
 # 으로 그 조각이 B 전에 선 시간이 **5분뿐**이었다. 탐지 기준이 아니라 혼잡 국면을 10분 늘려 약 15분을 둔다.
 # B 가 켜진 20분(개통 → 끝)은 그대로다
 #
+# **50분 → 30분** (2026-11-17 · 사용자 「주입 너무 길다」 · 먼 역 동시 주입 시험 4회). 판정에 쓰는 국면만 남긴다 —
+# 몰림 10분 → 5분(`SHIFT_RAMP`: 정점에 일찍 닿게 · 강도 0.2 씩), 정점 뒤 혼잡은 15분 그대로(`SHIFT_RISE` 20 = 몰림
+# 5 + 정점 15 · Q-11 은 5분 창 3칸 연속이라 정점이 15분은 있어야 칸 조각이 B 개통 전에 선다 — 위 11-15 근거와 같다),
+# B 개통 뒤 20분 → 10분(회복 `SHIFT_RECOVER` 5분 + 분석 5분). 임계는 건드리지 않았다 — 국면 길이만 줄였다
+#
 # B 는 **새로 등록하지 않는다.** 마스터에 이미 있는 eNB 를 평소 생성
 # 대상에서 빼 두고(`pemdb1.capacity_shift.standby_enbs`) 이 창에서만 호를
 # 준다. graphio 지도는 그 시간에 호가 있던 셀만 그리므로 B 는 켜질 때
@@ -3389,50 +3402,124 @@ def _outage_relocate(sc, cell, intensity, pool):
 # 미매핑으로 떨어지지 않는다(불변규칙 12).
 
 #: 국면 길이(분). **바꾸면 아래 B 순환의 안전 간격도 같이 움직인다.**
-SHIFT_RISE = 30
-SHIFT_TOTAL = 50
+SHIFT_RISE = 20
+SHIFT_TOTAL = 30
 #: 혼잡이 다 차는 데 걸리는 시간(분) — 나머지 `SHIFT_RISE − SHIFT_RAMP` 분은 정점을 유지한다. Q-11 은
 #: 5분 창 3칸 연속이라, 20분에 걸쳐 오르면 칸 비율이 문턱을 넘는 창이 2칸뿐이다(칸 안 A 몫 약 38% ·
 #: F-152 는 A 불량 28% 에 칸 비율 7~11%). 호를 더 몰지 않고 정점에 일찍 닿게 한다. **초기값**
-SHIFT_RAMP = 10
+SHIFT_RAMP = 5
 #: B 개통 뒤 A 품질이 평시로 돌아오는 데 걸리는 시간(분) — "서서히"
 SHIFT_RECOVER = 5
 #: B 개통 뒤 A 로 오던 호 중 B 가 가져가는 몫 — "A 40 · B 60"
 SHIFT_SPLIT = 0.6
 
 
+@dataclass(frozen=True)
+class ShiftSite:
+    """24번 한 자리 — 부하를 내주는 eNB(A) 하나와 그 곁의 소등 eNB(B) 후보."""
+
+    #: 자리 이름(역 이름) — 대상 `SITE:<name>` 으로 고른다. 단일 형식 설정이면 빈 값
+    name: str
+    from_enb: str
+    standby_enbs: tuple[str, ...]
+
+
 @dataclass
 class ShiftCfg:
-    """`pemdb1.capacity_shift` — 부하를 내주는 eNB 와 소등 eNB 목록.
+    """`pemdb1.capacity_shift` — 자리(A·B 쌍) 목록 (2026-11-17 여러 자리).
 
     **모듈 전역으로 둔다** — `FaultCfg` 와 같은 이유다. `faults.build` 가
     대상을 해석할 때 읽는데 그 서명에 설정을 받을 자리가 없다.
     `PemdbGen.__init__` 이 `set_shift_cfg()` 로 한 번 덮는다.
+
+    **이 전역은 설정뿐이다** — 주입 하나가 쓰는 A·B 는 그 장애의 `Target`(`enb_id`·`shift_to`)에 담긴다.
+    그래서 서로 다른 자리에 24번을 동시에 넣어도 서로 덮지 않는다(사용자 11-17 「먼 역에 동시 주입」).
+
+    두 형식을 받는다 —
+
+    * 여러 자리: ``{"sites": [{"name": "池袋", "from_enb": "…", "standby_enbs": ["…"]}, …]}``
+    * 단일(예전): ``{"from_enb": "…", "standby_enbs": [...]}`` — 이름 없는 자리 하나다
+
+    ``from_enb``·``standby_enbs`` 속성은 **첫 자리**다(예전 호출부 · 자동 대상이 쓰는 자리).
     """
 
-    #: 부하를 내주는 eNB(A). 비면 이 kind 는 해석 실패로 취소된다
-    from_enb: str = ""
-    #: 소등 eNB(B) 후보. **여럿을 돌려 쓴다** — `shift_pick` 머리말
-    standby_enbs: tuple[str, ...] = ()
+    sites: tuple[ShiftSite, ...] = ()
+
+    @property
+    def from_enb(self) -> str:
+        return self.sites[0].from_enb if self.sites else ""
+
+    @property
+    def standby_enbs(self) -> tuple[str, ...]:
+        return self.sites[0].standby_enbs if self.sites else ()
+
+    @property
+    def all_standby(self) -> tuple[str, ...]:
+        """모든 자리의 B — 평소 생성에서 뺀다(`PemdbGen.standby`)."""
+        return tuple(b for st in self.sites for b in st.standby_enbs)
+
+    def home_of(self, b: str) -> str | None:
+        """B → 그 자리의 A. 꺼진 B 에 남은 세션이 돌아갈 곳이다(`PemdbGen._relocator`)."""
+        return next((st.from_enb for st in self.sites if b in st.standby_enbs), None)
+
+    def site_for(self, raw: str | None) -> ShiftSite | None:
+        """대상 문자열 → 자리. 비면 첫 자리(예전 자동 대상), ``SITE:<이름>`` · ``ENB:<A>``.
+
+        모르는 이름·A 가 아닌 eNB 면 ``None`` — 그 eNB 에 걸린 것처럼 보이고 실제로는 다른 A 에 걸리면
+        어디에 주입했는지를 화면과 데이터가 다르게 말한다(`faults._shift_target`).
+        """
+        text = (raw or "").strip()
+        if not text:
+            return self.sites[0] if self.sites else None
+        head, _, val = text.partition(":")
+        val = val.strip()
+        if head.upper() == "SITE":
+            return next((st for st in self.sites if st.name == val), None)
+        if head.upper() == "ENB":
+            return next((st for st in self.sites if st.from_enb == val), None)
+        return None
 
     @classmethod
     def from_cfg(cls, cfg: dict | None) -> "ShiftCfg":
         """모르는 키는 멈춘다 — 오타가 "소등 목록이 비었다"로 끝나면 B 가
         평소에도 호를 받고, 30분 뒤 그것을 끄는 순간 무호로 탐지된다."""
-        f = cls()
-        for k, v in (cfg or {}).items():
-            if k.startswith("_"):
-                continue                    # 사람이 남긴 메모 — 파일의 `_note`
-            if k == "from_enb":
-                f.from_enb = str(v or "").strip()
-            elif k == "standby_enbs":
-                f.standby_enbs = tuple(str(x).strip() for x in (v or ()))
-            else:
-                raise RuntimeError(f"pemdb1.capacity_shift 의 모르는 키: {k}")
-        if f.from_enb and f.from_enb in f.standby_enbs:
-            raise RuntimeError("pemdb1.capacity_shift: from_enb 가 standby_enbs 에 "
-                               f"들어 있다 ({f.from_enb}) — A 를 끄면 내줄 부하가 없다")
-        return f
+        cfg = {k: v for k, v in (cfg or {}).items() if not k.startswith("_")}   # `_note` 는 사람 메모
+        if "sites" in cfg:
+            if set(cfg) - {"sites"}:
+                raise RuntimeError("pemdb1.capacity_shift: sites 와 단일 형식(from_enb·standby_enbs)을 "
+                                   f"함께 줄 수 없다 — {sorted(set(cfg) - {'sites'})}")
+            raw_sites = list(cfg["sites"] or ())
+        elif cfg:
+            raw_sites = [{"name": "", **cfg}]
+        else:
+            raw_sites = []
+        sites = []
+        for r in raw_sites:
+            bad = sorted(k for k in r if not k.startswith("_") and k not in ("name", "from_enb", "standby_enbs"))
+            if bad:
+                raise RuntimeError(f"pemdb1.capacity_shift 의 모르는 키: {bad}")
+            sites.append(ShiftSite(name=str(r.get("name") or "").strip(),
+                                   from_enb=str(r.get("from_enb") or "").strip(),
+                                   standby_enbs=tuple(str(x).strip() for x in (r.get("standby_enbs") or ()))))
+        # 겹침은 멈춘다 — A 를 끄면 내줄 부하가 없고, B 가 두 자리에 있으면 한 주입이 다른 자리의 B 를 켠다
+        a_set = {st.from_enb for st in sites}
+        seen: dict[str, str] = {}
+        for st in sites:
+            if not st.from_enb:
+                raise RuntimeError(f"pemdb1.capacity_shift: 자리 {st.name or '(이름 없음)'} 에 from_enb 가 없다")
+            for b in st.standby_enbs:
+                if b in a_set:
+                    raise RuntimeError(f"pemdb1.capacity_shift: {b} 가 A(from_enb)이면서 B(standby_enbs)다 "
+                                       "— A 를 끄면 내줄 부하가 없다")
+                if b in seen:
+                    raise RuntimeError(f"pemdb1.capacity_shift: B {b} 가 두 자리({seen[b]} · {st.name})에 있다")
+                seen[b] = st.name
+        names = [st.name for st in sites]
+        if len(set(names)) != len(names):
+            raise RuntimeError(f"pemdb1.capacity_shift: 자리 이름이 겹친다 — {names}")
+        if len(a_set) != len(sites):
+            raise RuntimeError("pemdb1.capacity_shift: 같은 A(from_enb)가 두 자리에 있다")
+        return cls(sites=tuple(sites))
 
 
 SHIFT = ShiftCfg()
@@ -3454,7 +3541,9 @@ def shift_pick(start_minute_epoch: int, pool: tuple[str, ...]) -> str | None:
     호가 있어 중앙값이 0 이지만, 두 번이면 40분이 되어 넘는다.
 
     칸 번호로 돌리면 같은 B 가 다시 걸리려면 시작이 `len(pool)` 칸(4개면
-    200분 이상) 떨어져야 하고, 그때 앞 회차의 켜진 구간은 이미 60분 창 밖이다.
+    120분 이상 · `SHIFT_TOTAL` 30분 기준) 떨어져야 하고, 그때 앞 회차의 켜진 구간은 이미 60분 창 밖이다.
+    **B 가 하나인 자리**(11-17 여러 자리 · 新宿 말고는 모두 하나)는 칸이 하나라 늘 같은 B 다 — 같은 역에
+    다시 넣을 때는 앞 회차 끝에서 60분이 지난 뒤에 넣는다(켜진 10분이 직전 60분 창 밖으로 나가게).
     **상태가 없다** — DB 이력을 세지 않으므로 재기동해도 같은 B 가 나온다.
     fault_id 로 돌리지 않는 이유는 그 번호를 모든 장애가 함께 쓰기 때문이다
     — 사이에 다른 장애가 끼면 같은 B 가 연달아 걸릴 수 있다.

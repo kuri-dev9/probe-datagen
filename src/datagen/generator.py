@@ -343,6 +343,77 @@ def user_values(sub: Subscriber) -> tuple[str, ...]:
             sub.exchange)
 
 
+# --------------------------------------------------------------------------
+# 셀 키로 정하는 배치 (2026-11-17)
+# --------------------------------------------------------------------------
+#
+# **왜.** 가입자의 집 셀·걷는 사람 출발 셀·숨은 SA 단말 상주 셀을 셀 목록의 **순번**(`randrange(len(cells))`·
+# 누적 가중 `_cum` 의 bisect)으로 정했다. 순번은 목록 전체에 걸린 값이라 셀이 **하나만** 빠지거나 들어와도
+# 그 뒤 모든 셀의 몫이 밀리고, 공용 난수(`self.rng`·`seed+7717`)의 소비 개수도 바뀌어 **가입자 배치가 통째로
+# 다시 뽑혔다.** 11-17 12:25(구 맞춤으로 생성 범위 셀이 바뀜)·15:10(24번 소등 eNB 추가) 재시작 뒤 주입하지 않은
+# 「5G 단말 유입 급증」(N-01)이 약 2시간 섰다 — 지역마다 5G 단말 몫이 기준선과 갈라진 것이다.
+#
+# **셀 키에 묶는다.** 가중 해시 링(가상 노드 · consistent hashing)으로 고르면 빠진 셀의 몫만 이웃 가상 노드로
+# 옮겨 가고 나머지 가입자는 그대로다. 가입자별 결정(탈지·출발 시차·걷기 한 걸음)은 **그 가입자 번호로 씨를 낸
+# 난수**를 써서 공용 난수의 소비 개수가 셀 수에 따라 흔들리지 않게 한다. 같은 시드·같은 셀 목록이면 결과가 같다.
+
+
+def _key_int(*parts) -> int:
+    """부분들 → 64비트 정수. 파이썬 `hash()` 는 프로세스마다 달라(PYTHONHASHSEED) 쓰지 않는다."""
+    import hashlib
+    return int.from_bytes(hashlib.blake2b("\x1f".join(map(str, parts)).encode(), digest_size=8).digest(), "big")
+
+
+def _keyed_rng(*parts) -> random.Random:
+    """그 키만의 난수 — 다른 가입자·다른 셀의 추첨 개수에 흔들리지 않는다."""
+    return random.Random(_key_int(*parts))
+
+
+class CellRing:
+    """셀 키 기반 가중 추첨표 — 셀 하나가 빠지면 **그 셀을 고른 키만** 다른 셀로 간다.
+
+    셀마다 가상 노드를 `가중 / 평균 × VNODES` 개(소수부는 셀 키로 정한 확률 반올림) 링 위에 셀 키 해시로 놓고,
+    키를 해시한 자리의 **다음 가상 노드**의 셀을 고른다. 가중 0 인 셀은 고르지 않는다.
+
+    대가: 링 구간 길이가 고르지 않아 셀별 몫이 가중에서 벗어난다(가상 노드 32개면 변동계수 약 18%). 출발 셀·
+    상주 셀은 어차피 셀당 수 명 수준의 추첨이고, 걷는 사람은 미리 걷기(`_warm_walkers`)로 다시 퍼진다.
+    만드는 비용은 셀 × 32 번 해시다(6,900셀 약 0.3초) — 가입자 × 셀(1억 번대)을 도는 rendezvous 를 쓰지 않은 이유.
+    """
+
+    VNODES = 32
+
+    def __init__(self, cells: list[Cell], weights: list[float], salt: str):
+        import bisect  # noqa: F401 — pick 에서 쓴다
+        tot = sum(w for w in weights if w > 0)
+        n = sum(1 for w in weights if w > 0)
+        pts: list[tuple[int, int]] = []
+        if tot > 0:
+            # 기준을 **평균을 2^(1/4) 눈금에 맞춘 값**으로 둔다 — 평균을 그대로 쓰면 셀 하나가 빠질 때 평균이
+            # 조금 움직여 다른 셀들의 가상 노드 수(반올림 경계)까지 바뀌었다(실측 6셀 빼면 이웃 아닌 키 3개가 옮겨 감)
+            mean = 2.0 ** (round(4 * math.log2(tot / n)) / 4)
+            for idx, (c, w) in enumerate(zip(cells, weights)):
+                if w <= 0:
+                    continue
+                x = w / mean * self.VNODES
+                k = int(x)
+                if _keyed_rng(salt, "frac", c.cell_key).random() < x - k:
+                    k += 1
+                pts += [(_key_int(salt, "v", c.cell_key, j), idx) for j in range(k)]
+        if not pts and cells:
+            # 가중이 모두 0 이거나 가상 노드가 하나도 안 섰다 — 셀마다 하나씩(고르게)
+            pts = [(_key_int(salt, "v", c.cell_key, 0), i) for i, c in enumerate(cells)]
+        pts.sort()
+        self.salt = salt
+        self._pos = [p for p, _ in pts]
+        self._idx = [i for _, i in pts]
+
+    def pick(self, *key) -> int:
+        """키 → 셀 순번(`cells` 기준)."""
+        import bisect
+        j = bisect.bisect_left(self._pos, _key_int(self.salt, "k", *key))
+        return self._idx[j if j < len(self._idx) else 0]
+
+
 class Generator:
     """셀 마스터 + 프로파일 + 시나리오로 1분치 XDR 레코드를 만든다."""
 
@@ -381,6 +452,8 @@ class Generator:
         # 허위 Critical 이 됐다 — 없는 장애를 만든 것이다(불변규칙 4·17).
         self.end_only = end_only
         self.rng = random.Random(seed)
+        #: 셀 키 배치(`CellRing`)·가입자별 난수의 씨 — 공용 난수 흐름과 따로 둔다
+        self.seed = seed
         #: 홈 PLMN · IMSI 접두 (`plmn.Plmn`). `None` 이면 한국 기본값이고
         #: 그것이 현 동작이다 — 구 경로(`generate_minute`)가 설정을 모른다.
         self.plmn = plmn or Plmn()
@@ -494,6 +567,9 @@ class Generator:
         self._mobile: list[int] = []
         #: 그냥 이동 가입자 인덱스(`seat_walkers`)와 셀 체류 범위(초)
         self._walkers: list[int] = []
+        #: 걷는 사람 난수의 씨와 사람별 걸음 번호(`seat_walkers` · `_advance_walkers` · 2026-11-17)
+        self._walk_base: int = 0
+        self._walk_n: dict[int, int] = {}
         self.walk_sec: tuple[int, int] = (180, 600)
         #: 걷는 사람 **미리 걷기**(분) — 첫 `advance_routes` 에서 한 번 돈다(`_warm_walkers`)
         self.walk_warmup_min: int = 0
@@ -554,18 +630,23 @@ class Generator:
         self._mobile = []
         if not routes or share <= 0.0:
             return
-        for sub in self.subs:
-            if rng.random() >= share:
+        # **가입자마다 자기 난수다**(2026-11-17 · 위 「셀 키로 정하는 배치」). 공용 `rng` 는 씨 하나만 꺼낸다 —
+        # 노선 칸 수(`randrange(len(route))`)에 따라 소비 개수가 바뀌면 뒤 가입자가 모두 다른 사람이 됐다
+        base = rng.getrandbits(64)
+        self._route_base = base
+        for i, sub in enumerate(self.subs):
+            r = _keyed_rng(base, "route", i)
+            if r.random() >= share:
                 continue
-            ri = rng.randrange(len(routes))
+            ri = r.randrange(len(routes))
             sub.route = ri
-            sub.route_pos = rng.randrange(len(routes[ri]))
-            sub.route_fwd = rng.random() < 0.5
+            sub.route_pos = r.randrange(len(routes[ri]))
+            sub.route_fwd = r.random() < 0.5
             # 체류시간 안의 임의 지점에서 시작한다 — 전진 타이밍을 흩는다
-            sub.route_t = -rng.random() * routes[ri].dwell_sec[sub.route_pos]
+            sub.route_t = -r.random() * routes[ri].dwell_sec[sub.route_pos]
         self._mobile = [i for i, s in enumerate(self.subs) if s.route >= 0]
         if self.journeys:
-            self._assign_journeys(rng)
+            self._assign_journeys(base)
 
     @staticmethod
     def _journey_pos(rt, v, where: str) -> int:
@@ -595,7 +676,7 @@ class Generator:
                 f" (아는 이름: {sorted(rt.station_pos)})")
         return pos
 
-    def _assign_journeys(self, rng) -> None:
+    def _assign_journeys(self, base) -> None:
         """가입자에게 **승차 칸 → 하차 칸**을 준다.
 
         ## 한쪽 방향만이다
@@ -648,6 +729,8 @@ class Generator:
             spec.append((float(j.get("share", 0.0)), ri, a, b))
         for i in self._mobile:
             sub = self.subs[i]
+            # 가입자마다 자기 난수(`seat_routes` 와 같은 이유). 예전 호출(공용 `rng` 를 넘김)도 받는다
+            rng = base if isinstance(base, random.Random) else _keyed_rng(base, "journey", i)
             x = rng.random()
             for share, ri, a, b in spec:
                 x -= share
@@ -822,13 +905,21 @@ class Generator:
             self.walk_sec = (int(dwell[0]), int(dwell[1]))
         a, b = self.walk_sec
         self._walkers = []
+        # 출발 셀은 **셀 키 링**(호 추첨과 같은 가중 `_base_weights`), 탈지·체류·시차는 **가입자마다 자기 난수**다
+        # (2026-11-17 · 위 「셀 키로 정하는 배치」). 예전 `_pick_cell` 은 공용 난수 × 누적 가중 순번이라 셀이
+        # 하나만 바뀌어도 걷는 사람 전원의 출발 셀이 바뀌었다
+        base = rng.getrandbits(64)
+        self._walk_base = base
+        self._walk_n = {}
+        ring = CellRing(self.cells, self._base_weights(), f"walk:{base}")
         for i, sub in enumerate(self.subs):
             sub.walk_cell = None
-            if sub.route >= 0 or share <= 0.0 or rng.random() >= share:
+            r = _keyed_rng(base, "walker", i)
+            if sub.route >= 0 or share <= 0.0 or r.random() >= share:
                 continue
-            sub.walk_cell = self._pick_cell()
-            sub.walk_dwell = float(rng.randint(a, b))
-            sub.walk_t = -rng.random() * sub.walk_dwell
+            sub.walk_cell = self.cells[ring.pick(i)]
+            sub.walk_dwell = float(r.randint(a, b))
+            sub.walk_t = -r.random() * sub.walk_dwell
             self._walkers.append(i)
         self._fixed = [i for i, s in enumerate(self.subs)
                        if s.route < 0 and s.walk_cell is None]
@@ -889,10 +980,15 @@ class Generator:
             was = sub.walk_cell
             pool = topo.inter.get(was.cell_key) or topo.intra.get(was.cell_key) or ()
             sub.walk_t = now
-            sub.walk_dwell = float(self.rng.randint(a, b))
-            if not pool or self.rng.random() >= pace:
+            # **한 걸음마다 그 사람·그 걸음 번호의 난수**(2026-11-17). 공용 난수면 어느 셀의 이웃 수가 바뀌는 것만으로
+            # 그 뒤 모든 사람의 걸음이 달라져, 미리 걷기(`_warm_walkers` 180분)가 끝나면 전원이 다른 곳에 있었다
+            step = self._walk_n.get(i, 0)
+            self._walk_n[i] = step + 1
+            r = _keyed_rng(self._walk_base, "step", i, step)
+            sub.walk_dwell = float(r.randint(a, b))
+            if not pool or r.random() >= pace:
                 continue
-            now_c = pool[self.rng.randrange(len(pool))]
+            now_c = pool[r.randrange(len(pool))]
             sub.walk_cell = now_c
             moved += 1
             if (was.ta_list and now_c.ta_list and now_c.ta_list != was.ta_list):
@@ -1017,6 +1113,9 @@ class Generator:
         rng = random.Random(self.rng.randrange(1 << 30))
         cap_rng = random.Random(0x5A_5A + n)
         subs: list[Subscriber] = []
+        # 집 셀 — 셀 키 링(고르게 · 예전 `randrange(len(cells))` 와 같은 균등 몫). 순번으로 뽑으면 셀이 하나만
+        # 바뀌어도 모두의 집이 밀리고, 이 난수의 소비 개수도 셀 수에 따라 바뀌어 나이·교환국까지 흔들렸다
+        home = CellRing(self.cells, [1.0] * len(self.cells), f"home:{self.seed}")
         for i in range(n):
             vendor = smp.categorical("Vendor", "100SS") if smp else "100SS"
             model = smp.categorical("Model", "A1DE") if smp else "A1DE"
@@ -1057,7 +1156,7 @@ class Generator:
                     # 그런 컬럼이 없다) 모든 단말을 같은 비율로 추첨한다.
                     # 난수원을 따로 둔다 — 다른 필드의 추첨 순서를 흔들지 않는다
                     dcnr="1" if cap_rng.random() < self.sa_device_share else "0",
-                    home_cell=rng.randrange(len(self.cells)),
+                    home_cell=home.pick(i),
                 )
             )
         return subs

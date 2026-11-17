@@ -911,8 +911,8 @@ function applyStandby(){
     d.classList.toggle('sb-off', s!=='on');
     d.classList.toggle('sb-on', s==='on');
     d.dataset.t=d.dataset.t0+(s==='on'
-      ? T('\n증설 eNB — 24번으로 켜짐 (eNB {f} 의 부하를 받는다)',{f:STBY.from})
-      : T('\n소등 eNB — 평소 호 없음')+(s==='next'?T(' · 24번 진행 중, 10분 시점에 켜진다'):''));
+      ? T('\n증설 eNB — 24번으로 켜짐 (eNB {f} 의 부하를 받는다)',{f:(STBY.from_of||{})[d.dataset.enb]||STBY.from})
+      : T('\n소등 eNB — 평소 호 없음')+(s==='next'?T(' · 24번 진행 중, {m}분 시점에 켜진다',{m:STBY.b_open_min??''}):''));
   }
 }
 async function pollStandby(){

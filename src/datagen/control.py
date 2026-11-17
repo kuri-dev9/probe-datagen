@@ -43,7 +43,7 @@ from .apps import T_APP  # noqa: E402
 #: 27번 국면 시각은 생성기 상수가 정본이다 — 설명이 따로 숫자를 들고 있으면 국면을 바꿀 때 DB 설명만 옛 시각으로
 #: 남는다(2026-11-16 정지를 eNB 별 복구로 줄이며 「3~23분」이 그렇게 남았다). 일본어 칸(`i18n_ja`)도 이 문장을 쓴다
 from .scenarios import (DISASTER_DOWN_AT, DISASTER_DOWN_END, DISASTER_SURGE_END,  # noqa: E402
-                        DISASTER_UP_FROM)
+                        DISASTER_UP_FROM, SHIFT_RECOVER, SHIFT_RISE, SHIFT_TOTAL)
 QUAKE_DESC = (
     "도쿄 둘레 실제 진원역(바다·땅속 깊은 곳)에서 규모 4.5~6.2 지진이 난다 — 진도 3 이상 넓은 지역에서 통화가 "
     f"몰리고(0~{DISASTER_SURGE_END}분) 진도 5약 이상인 무른 땅의 기지국만 일부 꺼진다({DISASTER_DOWN_AT}분 정지 · "
@@ -54,6 +54,18 @@ QUAKE_DESC_JA = (
     f"(0~{DISASTER_SURGE_END}分)、震度5弱以上の軟弱地盤の基地局だけが一部停止する({DISASTER_DOWN_AT}分に停止 · "
     f"eNBごとに{DISASTER_UP_FROM}~{DISASTER_DOWN_END}分の間で個別に復旧 · {DISASTER_DOWN_END}分に正常化 · "
     "0局の場合もある) · CM_QUAKE_EVENT")
+
+#: 24번 설명 — 국면 길이를 **생성기 상수에서** 만든다(2026-11-17 · 27번 `QUAKE_DESC` 와 같은 이유). 전에는
+#: 문장에 「50분 고정 · 30분간」을 적어 두고 일본어 사전 키는 옛 「30분 고정 · 10분간」이라, 길이를 바꿀 때마다
+#: 화면 설명이 실제와 갈리고 일본어 번역도 조용히 빠졌다
+SHIFT_DESC = (
+    f"{SHIFT_TOTAL}분 고정 — A eNB 에 {SHIFT_RISE}분간 호가 몰려 혼잡 → 소등 eNB(B) 개통, "
+    f"A 40 · B 60 으로 나뉘며 A 회복({SHIFT_RECOVER}분) → {SHIFT_TOTAL - SHIFT_RISE - SHIFT_RECOVER}분 분석 뒤 "
+    "B 소등. 채점 제외")
+SHIFT_DESC_JA = (
+    f"{SHIFT_TOTAL}分固定 — A eNBに{SHIFT_RISE}分間呼が集中して混雑 → 消灯eNB(B)開通、"
+    f"A 40 · B 60に分かれてA回復({SHIFT_RECOVER}分) → {SHIFT_TOTAL - SHIFT_RISE - SHIFT_RECOVER}分の分析後に"
+    "B消灯。採点対象外")
 
 #: 주입 가능한 장애 종류 — **`scenarios.KIND_SPECS` 의 키와 1:1 이어야 한다.**
 #:
@@ -159,9 +171,7 @@ SCENARIOS: tuple[tuple[int, str, str | None, int | None, tuple[str, ...], str], 
     # 판정 자리가 스펙 §8.3 투자 효과 검증이다. 그래서 채점에서 빠진다
     # (`write_truth`). 대상은 설정(`pemdb1.capacity_shift`)이 고정하므로
     # 발생 장비가 없다 — 지도에서 고른 eNB 에 걸리는 것처럼 보이면 안 된다.
-    (24, "기지국 증설 뒤 이용자 이동 (장애 아님)", "capacity_shift", None, (),
-     "50분 고정 — A eNB 에 30분간 호가 몰려 혼잡 → 소등 eNB(B) 개통, "
-     "A 40 · B 60 으로 나뉘며 A 회복 → 10분 분석 뒤 B 소등. 채점 제외"),
+    (24, "기지국 증설 뒤 이용자 이동 (장애 아님)", "capacity_shift", None, (), SHIFT_DESC),
     (25, "설정 변경 뒤 통화 끊김 계단 증가 (SON)", "son_param_change", None, ("ENB",),
      "기지국(eNB) 1~2곳의 핸드오버 설정이 바뀐 시각부터 그 기지국의 모든 셀에서 옆 셀로 넘어가는 통화가 "
      "끊기기 시작한다 — 셀마다 정도가 다르고 같은 분에 함께 나빠진다"),

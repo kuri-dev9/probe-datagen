@@ -937,26 +937,34 @@ def api_map_standby():
     from ..cli import _capacity_shift
 
     cfg = S.ShiftCfg.from_cfg(_capacity_shift(_pem_cfg()))
-    st = {e: "off" for e in cfg.standby_enbs}
+    st = {e: "off" for e in cfg.all_standby}
     if st:
         conn = _connect()
         try:
             with conn.cursor() as cur:
-                cur.execute(f"SELECT START_TIME FROM {T_FAULT} "
+                cur.execute(f"SELECT START_TIME, TARGET FROM {T_FAULT} "
                             "WHERE FAULT_KIND='capacity_shift' AND STATUS='active'")
                 rows = cur.fetchall()
         finally:
             conn.close()
         now = datetime.now()
-        for (start,) in rows:
-            b = S.shift_pick(int(start.timestamp() // 60), cfg.standby_enbs)
+        for start, target in rows:
+            # 그 장애의 자리 안에서 고른다 — 생성기 `faults._shift_target` 과 같은 함수(`site_for`·`shift_pick`)
+            site = cfg.site_for(target)
+            b = S.shift_pick(int(start.timestamp() // 60), site.standby_enbs) if site else None
             el = (now - start).total_seconds() / 60
             if b is None or not 0 <= el < S.SHIFT_TOTAL:
                 continue
             st[b] = "on" if el >= S.SHIFT_RISE else ("next" if st[b] == "off" else st[b])
-    stamp = json.dumps([cfg.from_enb, sorted(st.items())])
+    #: B → 그 자리의 A — 켜진 B 의 설명(「eNB A 의 부하를 받는다」)이 자기 자리 A 를 말하게
+    from_of = {b: s.from_enb for s in cfg.sites for b in s.standby_enbs}
+    stamp = json.dumps([cfg.from_enb, sorted(st.items()), sorted(from_of.items())])
     return {"ver": hashlib.sha1(stamp.encode()).hexdigest()[:12],
-            "from": cfg.from_enb, "enbs": st}
+            "from": cfg.from_enb, "from_of": from_of, "enbs": st,
+            #: B 가 켜지는 경과 분 — 지도 설명 「n분 시점에 켜진다」가 상수를 따르게(`scenarios.SHIFT_RISE`)
+            "b_open_min": S.SHIFT_RISE,
+            "sites": [{"name": s.name, "from_enb": s.from_enb, "standby_enbs": list(s.standby_enbs)}
+                      for s in cfg.sites]}
 
 
 @router.get("/api/map/all")

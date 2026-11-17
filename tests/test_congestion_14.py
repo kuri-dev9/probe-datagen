@@ -381,9 +381,9 @@ def _at(e):
 
 
 def test_the_ramp_is_shorter_than_the_rise_and_is_an_initial_value():
-    """혼잡이 정점에 닿는 시간(10분)이 B 개통(30분 · 11-15 F-343 으로 20→30)보다 짧다 — Q-11 의 5분 창 3칸 연속을 채우려 정점을 당겼다(F-152)."""
-    assert S.SHIFT_RAMP == 10 and S.SHIFT_RAMP < S.SHIFT_RISE == 30
-    assert S.SHIFT_RISE - S.SHIFT_RAMP >= 10, "정점 유지 구간이 5분 칸 둘 이상이다"
+    """혼잡이 정점에 닿는 시간(5분)이 B 개통(20분 · 11-17 사용자 「너무 길다」로 50분판을 30분으로 줄임)보다 짧다 — Q-11 의 5분 창 3칸 연속(정점 뒤 15분)을 채우려 정점을 당겼다(F-152)."""
+    assert S.SHIFT_RAMP == 5 and S.SHIFT_RAMP < S.SHIFT_RISE == 20
+    assert S.SHIFT_RISE - S.SHIFT_RAMP >= 15, "정점 유지 구간이 5분 칸 셋(15분)이다"
 
 
 def test_the_congestion_intensity_reaches_one_at_the_ramp_and_holds_until_the_rise():
@@ -416,7 +416,7 @@ def test_the_call_weight_reaches_the_load_at_the_ramp_and_holds_to_the_end(monke
     for e in (S.SHIFT_RAMP - 1, S.SHIFT_RAMP, S.SHIFT_RISE - 1, S.SHIFT_RISE + 5):
         monkeypatch.setattr(S, "_shift_elapsed", lambda sc, e=e: e)
         assert S._capacity_shift_load(object(), 1.0) == pytest.approx(1.8)
-    monkeypatch.setattr(S, "_shift_elapsed", lambda sc: 4)
+    monkeypatch.setattr(S, "_shift_elapsed", lambda sc: S.SHIFT_RAMP - 2)
     assert 1.0 < S._capacity_shift_load(object(), 1.0) < 1.8
 
 

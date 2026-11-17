@@ -377,7 +377,9 @@ def test_the_truth_carries_son_enbs_cells_roles_gains_and_pairs():
     dst = [c for c in tr["son_cells"] if c["role"] == "dst"]
     assert len(src) == 6 and all(0 < c["gain"] <= 1.0 for c in src) and all(c["gain"] is None for c in dst)
     assert {c["cell"] for c in src}.isdisjoint({c["cell"] for c in dst})
-    assert set(tr["cells"]) >= {c["cell"] for c in tr["son_cells"]} if "cells" in tr else True
+    # 11-17: 기대 셀(`cells`)은 끊김이 나는 도착 셀만이고 출발 셀은 `src_cells` 다
+    assert set(tr["cells"]) == {c["cell"] for c in dst} and tr["cell_cnt"] == len(dst)
+    assert set(tr["src_cells"]) == {c["cell"] for c in src}
 
 
 def test_other_kinds_carry_no_son_keys():

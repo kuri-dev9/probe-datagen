@@ -161,7 +161,7 @@ def test_fractional_minutes_round_up(tmp_path_measured):
 
 # ---------------------------------------------------------------- 최소 길이 보호
 
-@pytest.mark.parametrize("kind,floor", [("capacity_shift", 50), ("natural_disaster", 30), ("earthquake", 20),
+@pytest.mark.parametrize("kind,floor", [("capacity_shift", S.SHIFT_TOTAL), ("natural_disaster", 30), ("earthquake", 20),
                                         ("event_crowd", 25), ("enb_s1_outage", 20), ("dns_flap", 12)])
 def test_phase_step_and_flap_scenarios_are_never_cut_short(tmp_path_measured, kind, floor):
     _write(tmp_path_measured, {kind: [_run(correct=5, fault="A", to_l2_min=5), _run(correct=4, fault="B", to_l2_min=4)]})

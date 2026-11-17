@@ -624,18 +624,20 @@ def _resolve_target(raw: str | None, kind: str, cells: list[Cell],
 
 def _shift_target(raw: str | None, start_ts: datetime,
                   cells: list[Cell]) -> Target | None:
-    """`j-sc-24` 대상 — **설정이 정한다.** A 는 `from_enb`, B 는 순환.
+    """`j-sc-24` 대상 — **설정의 자리(A·B 쌍)가 정한다.** A 는 그 자리의 `from_enb`, B 는 그 자리 안에서 순환.
 
-    화면에서 다른 eNB 를 골라 왔으면 받지 않는다(취소). 그 eNB 에 걸 수
-    있는 것처럼 보이고 실제로는 A 에 걸리면, 어디에 주입했는지를 화면과
-    데이터가 다르게 말한다.
+    대상: 비면 첫 자리(예전 자동) · ``SITE:<이름>`` · ``ENB:<A>`` (2026-11-17 여러 자리). 화면에서 A 가 아닌
+    eNB 를 골라 왔거나 모르는 자리면 받지 않는다(취소). 그 eNB 에 걸 수 있는 것처럼 보이고 실제로는
+    다른 A 에 걸리면, 어디에 주입했는지를 화면과 데이터가 다르게 말한다.
+
+    고른 A·B 는 이 장애의 `Target` 에 담긴다 — 다른 자리의 24번이 동시에 돌아도 서로의 A·B 를 쓰지 않는다.
     """
-    a = S.SHIFT.from_enb
-    text = (raw or "").strip()
-    if text and text.upper() != f"ENB:{a}":
+    site = S.SHIFT.site_for(raw)
+    if site is None:
         return None
+    a = site.from_enb
     mine = {c.cell_key for c in cells if c.enb_id == a}
-    b = S.shift_pick(int(start_ts.timestamp() // 60), S.SHIFT.standby_enbs)
+    b = S.shift_pick(int(start_ts.timestamp() // 60), site.standby_enbs)
     if not mine or b is None:
         return None
     return Target(cell_keys=mine, enb_id=a, shift_to=b)

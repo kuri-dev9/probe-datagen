@@ -2199,9 +2199,11 @@ class PemdbGen:
         # 아예 없어야 그 길로 새지 않는다. 시나리오가 켰을 때만
         # `_shifter` 가 여기서 꺼내 호를 붙인다.
         shift = set_shift_cfg(capacity_shift)
-        off = set(shift.standby_enbs)
+        # **모든 자리의 B 를 뺀다**(2026-11-17 여러 자리) — 한 자리만 빼면 다른 자리의 B 가 평소 호를 받다가
+        # 그 자리의 24번이 끝나며 꺼지는 순간 무호로 잡힌다
+        off = set(shift.all_standby)
         #: 소등 eNB → 그 셀들. **생성 대상이 아니다** — `_shifter` 만 쓴다
-        self.standby: dict[str, list[Cell]] = {e: [] for e in shift.standby_enbs}
+        self.standby: dict[str, list[Cell]] = {e: [] for e in shift.all_standby}
         self.cells = []
         for c in cells:
             (self.standby[c.enb_id] if c.enb_id in off else self.cells).append(c)
@@ -2367,9 +2369,9 @@ class PemdbGen:
         * 5G 능력은 `1` 이다(SA 에 붙어 있던 단말). 난수는 따로 쓴다 — 본 생성의 난수 흐름을
           흔들지 않는다(그래야 이 기능을 넣어도 평소 레코드가 그대로다)
         """
-        import bisect
         import dataclasses
         from .cells import encrypt_id
+        from .generator import CellRing
         from .identity import synth_mdn
         gen = self.gen
         out: dict[str, list] = {}
@@ -2379,11 +2381,14 @@ class PemdbGen:
             raise RuntimeError(f"net_mode.sa_resident_share 는 0~1 이다: {share}")
         rng = random.Random(seed + 1717)
         base_n = len(gen.subs)
-        cum = gen._cum
+        # 상주 셀은 **셀 키 링**(평소 호 가중 `cell_weights` · 예전 `_cum` 의 기동 값과 같은 가중)으로 정한다
+        # (2026-11-17 · `generator` 「셀 키로 정하는 배치」). 누적 가중 순번이면 셀이 하나만 바뀌어도 숨은 SA
+        # 단말 전원의 상주 셀이 바뀌었다
+        ring = CellRing(gen.cells, gen.cell_weights, f"sa_hidden:{seed}")
         for k in range(int(share * base_n)):
             i = base_n + k
             src = gen.subs[rng.randrange(base_n)]
-            ci = bisect.bisect_left(cum, rng.random() * cum[-1])
+            ci = ring.pick(i)
             sub = dataclasses.replace(
                 src, imsi=synth_imsi(src.mcc_mnc, i), mdn=synth_mdn(i),
                 imei=synth_imei(src.vendor, src.model, i),
@@ -2537,19 +2542,31 @@ class PemdbGen:
         # **꺼진 소등 eNB 에 남은 세션도 떠난다**(`j-sc-24`). B 를 끄면 새 호는
         # 즉시 0 이지만 B 에서 열린 세션은 몇 분 더 흐른다 — 꺼진 기지국에
         # 사용자 트래픽이 남는다. 지금 켜져 있는 B 는 빼고, 나머지 소등 셀은
-        # A(`from_enb`)로 보낸다. A 가 생성 범위에 없으면 아무 데로도 보내지 않는다.
+        # **그 B 자리의 A**(`ShiftCfg.home_of`)로 보낸다 — 여러 자리면 먼 역의 A 로 가면 안 된다.
+        # A 가 생성 범위에 없으면 아무 데로도 보내지 않는다.
         lit = {sc.target.shift_to for sc in active
                if sc.kind == "capacity_shift" and shift_split(sc) > 0}
-        dark = {c.cell_key for e, v in self.standby.items() if e not in lit for c in v}
-        home = [c for c in self.cells if c.enb_id == _shift_cfg().from_enb] if dark else []
-        if not sel and not (dark and home):
+        cfg_s = _shift_cfg()
+        dark: dict[str, str] = {c.cell_key: e for e, v in self.standby.items() if e not in lit for c in v}
+        homes: dict[str, list[Cell]] = {}
+        if dark:
+            a_of = {e: cfg_s.home_of(e) for e in set(dark.values())}
+            for c in self.cells:
+                if c.enb_id in a_of.values():
+                    homes.setdefault(c.enb_id, []).append(c)
+            home_of_cell = {k: homes.get(a_of[e] or "") for k, e in dark.items()}
+            home_of_cell = {k: v for k, v in home_of_cell.items() if v}
+        else:
+            home_of_cell = {}
+        if not sel and not home_of_cell:
             return None
         by_key = self.gen.cell_by_key
         pools = {sc.id: [by_key[k] for k in sc.target.cell_keys if k in by_key]
                  for sc in sel}
 
         def relocate(cell):
-            if home and cell.cell_key in dark:
+            home = home_of_cell.get(cell.cell_key)
+            if home:
                 return home[zlib.crc32(cell.cell_key.encode()) % len(home)]
             for sc in sel:
                 if cell.cell_key not in sc.active_cells_cache:

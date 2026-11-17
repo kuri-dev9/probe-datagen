@@ -4610,8 +4610,8 @@
     "ja": "推奨注入時間"
    },
    "setup.phases.0.at": {
-    "h": "ae82325935",
-    "ja": "0~10分"
+    "h": "9a813fe034",
+    "ja": "0~5分"
    },
    "name": {
     "h": "7ac86cca7a",
@@ -4630,20 +4630,20 @@
     "ja": "A eNBに呼が集中して混雑がピークに達する"
    },
    "setup.phases.1.at": {
-    "h": "2ad27d5854",
-    "ja": "10~20分"
+    "h": "b55012e11e",
+    "ja": "5~20分"
    },
    "setup.phases.2.at": {
-    "h": "d51cced608",
-    "ja": "20~30分"
+    "h": "87473d3bd3",
+    "ja": "20~25分"
    },
    "setup.phases.2.what": {
     "h": "fb65b9d663",
     "ja": "消灯eNB(B)を点けて負荷を分ける。Aは5分かけて回復する"
    },
    "setup.phases.3.at": {
-    "h": "148617e388",
-    "ja": "30~40分"
+    "h": "cffce4e0ab",
+    "ja": "25~30分"
    },
    "setup.phases.3.what": {
     "h": "babf89af9a",
@@ -4662,16 +4662,16 @@
     "ja": "5分かけて徐々に"
    },
    "setup.params.2.value": {
-    "h": "9d9ced9c87",
-    "ja": "40分、終了後に判定確定まで約7分"
+    "h": "7645dc00bd",
+    "ja": "30分、終了後に判定確定まで約7分"
    },
    "setup.params.3.name": {
     "h": "19896d2dec",
     "ja": "混雑ピークまで"
    },
    "setup.params.3.value": {
-    "h": "9af0f557e1",
-    "ja": "10分"
+    "h": "76726b428d",
+    "ja": "5分"
    },
    "latest.summary": {
     "h": "699e086a57",

@@ -1,4 +1,4 @@
-"""24번 A안(붐빔 30분 · 총 50분) · 판정용 정답지 `write_unscored_truth` · `_live_truth` · `tools/inject.py` 가상 시각 — 2026-11-15 (F-343).
+"""24번 A안(11-17 사용자 「너무 길다」로 붐빔 20분 · 총 30분 · 11-15 판은 30/50) · 판정용 정답지 `write_unscored_truth` · `_live_truth` · `tools/inject.py` 가상 시각 — 2026-11-15 (F-343).
 
 F-343: 칸 조각(Q-11)이 00:45(정점 00:39 뒤 5분 버킷 3칸)에 서고 B 는 00:50 에 열려 붐빔을 보일 시간이 5분뿐이었다.
 그래서 `SHIFT_RISE` 20→30 · `SHIFT_TOTAL` 40→50. 14번(`_congest`)·27번(`_ran_congestion`)은 바뀌면 안 된다.
@@ -32,33 +32,33 @@ def _sc(minute: int):
 
 # ── 1 · 국면 ─────────────────────────────────────────────────────────────
 
-def test_constants_are_thirty_and_fifty_with_the_ramp_unchanged():
-    assert (S.SHIFT_RISE, S.SHIFT_TOTAL, S.SHIFT_RAMP, S.SHIFT_RECOVER) == (30, 50, 10, 5)
-    assert S.SHIFT_RISE - S.SHIFT_RAMP >= 10                                # 정점 유지가 5분 칸 둘 이상(Q-11 3칸 연속)
+def test_constants_are_twenty_and_thirty_with_the_recover_unchanged():
+    assert (S.SHIFT_RISE, S.SHIFT_TOTAL, S.SHIFT_RAMP, S.SHIFT_RECOVER) == (20, 30, 5, 5)
+    assert S.SHIFT_RISE - S.SHIFT_RAMP >= 15                                # 정점 뒤 15분 — Q-11 5분 칸 3칸 연속
     assert S.SHIFT_RISE + S.SHIFT_RECOVER < S.SHIFT_TOTAL                    # A 회복 뒤에도 B 가 켜져 있는 구간이 남는다
 
 
-def test_split_is_zero_before_thirty_minutes_and_sixty_percent_from_thirty():
-    assert [S.shift_split(_sc(m)) for m in (0, 15, 29)] == [0.0, 0.0, 0.0]
-    assert S.shift_split(_sc(30)) == S.SHIFT_SPLIT == 0.6 and S.shift_split(_sc(49)) == 0.6
+def test_split_is_zero_before_twenty_minutes_and_sixty_percent_from_twenty():
+    assert [S.shift_split(_sc(m)) for m in (0, 10, 19)] == [0.0, 0.0, 0.0]
+    assert S.shift_split(_sc(20)) == S.SHIFT_SPLIT == 0.6 and S.shift_split(_sc(29)) == 0.6
 
 
-def test_congestion_rises_for_ten_minutes_holds_until_thirty_then_falls_to_zero_by_thirty_five():
-    c = [S.shift_congestion(_sc(m)) for m in range(50)]
-    assert c[0] == pytest.approx(0.1) and c[9] == pytest.approx(1.0)
-    assert all(v == pytest.approx(1.0) for v in c[9:30])                      # 정점 20분 — 이전에는 10분이었다
-    assert c[30] == pytest.approx(0.8) and c[33] == pytest.approx(0.2)
-    assert all(v == 0.0 for v in c[34:])                                       # 35분(e=35)에는 0
-    assert c[29] > c[30] > c[31] > c[32] > c[33] >= c[34]
+def test_congestion_rises_for_five_minutes_holds_until_twenty_then_falls_to_zero_by_twenty_five():
+    c = [S.shift_congestion(_sc(m)) for m in range(30)]
+    assert c[0] == pytest.approx(0.2) and c[4] == pytest.approx(1.0)
+    assert all(v == pytest.approx(1.0) for v in c[4:20])                      # 정점 15분
+    assert c[20] == pytest.approx(0.8) and c[23] == pytest.approx(0.2)
+    assert all(v == 0.0 for v in c[24:])                                       # 25분(e=25)에는 0
+    assert c[19] > c[20] > c[21] > c[22] > c[23] >= c[24]
 
 
-def test_the_same_standby_comes_back_only_after_two_hundred_minutes():
+def test_the_same_standby_comes_back_only_after_one_hundred_twenty_minutes():
     assert len(POOL) == 4
     for s in range(0, 24 * 60, 13):
         b = S.shift_pick(s, POOL)
-        for d in (50, 100, 150):
+        for d in (30, 60, 90):
             assert S.shift_pick(s + d, POOL) != b, (s, d)
-        assert S.shift_pick(s + 200, POOL) == b
+        assert S.shift_pick(s + 120, POOL) == b                              # 4개 × 30분
 
 
 def test_no_run_reuses_a_standby_inside_the_d4_window():
@@ -73,15 +73,15 @@ def test_no_run_reuses_a_standby_inside_the_d4_window():
         last[b] = s
 
 
-def test_build_holds_fifty_minutes_and_the_recommended_length_is_fifty():
+def test_build_holds_thirty_minutes_and_the_recommended_length_is_thirty():
     S.set_shift_cfg({"from_enb": A, "standby_enbs": list(POOL)})
     try:
         sc = faults.build(_row(), [c for c in _master() if c.enb_id not in POOL], T0, random.Random(0))
-        assert sc.duration == 50
+        assert sc.duration == 30
     finally:
         S.set_shift_cfg(None)
     row = next(r for r in control.SCENARIOS if r[0] == 24)
-    assert any("50분 고정" in str(x) for x in row)                                    # 화면 설명문도 50분
+    assert any("30분 고정" in str(x) for x in row)                                    # 화면 설명문도 30분
 
 
 # ── 2 · write_unscored_truth ─────────────────────────────────────────────
@@ -92,7 +92,7 @@ class _C:
 
 def _built(fid, start):
     S.set_shift_cfg({"from_enb": A, "standby_enbs": list(POOL)})
-    row = {**_row(fid=fid), "start_ts": start, "duration_min": 50}
+    row = {**_row(fid=fid), "start_ts": start, "duration_min": 30}
     return faults.build(row, [c for c in _master() if c.enb_id not in POOL], T0, random.Random(fid))
 
 
@@ -107,9 +107,9 @@ def test_unscored_truth_holds_cells_phases_and_what_to_judge(tmp_path):
     row = doc["runs"][sc.id]
     assert row["scored"] is False and row["a_enb"] == A and row["a_cells"] == sorted(f"{A}-{n}" for n in range(3))
     assert row["b_enb"] == b and row["b_cells"] == [f"{b}-{n}" for n in range(3)]
-    assert row["phases"] == {"start": "2026-11-15 00:30:00", "peak": "2026-11-15 00:40:00", "b_open": "2026-11-15 01:00:00",
-                             "a_recovered": "2026-11-15 01:05:00", "end": "2026-11-15 01:20:00"}
-    assert row["start"] == "2026-11-15 00:30:00" and row["end"] == "2026-11-15 01:20:00"
+    assert row["phases"] == {"start": "2026-11-15 00:30:00", "peak": "2026-11-15 00:35:00", "b_open": "2026-11-15 00:50:00",
+                             "a_recovered": "2026-11-15 00:55:00", "end": "2026-11-15 01:00:00"}
+    assert row["start"] == "2026-11-15 00:30:00" and row["end"] == "2026-11-15 01:00:00"
     assert len(row["judge"]) == 4 and "원인 이름은 판정하지 않는다" in row["judge"][-1]
     assert "score" in doc["_note"] and json.loads((tmp_path / "u.json").read_text(encoding="utf-8")) == doc
 
@@ -151,7 +151,7 @@ def _gen(tmp_path):
 
 
 def _free(i="F-343"):
-    return SimpleNamespace(scored=False, id=i, start_minute=0, duration=50, kind="capacity_shift")
+    return SimpleNamespace(scored=False, id=i, start_minute=0, duration=30, kind="capacity_shift")
 
 
 def _scored(i="F-342"):
