@@ -123,6 +123,10 @@ pemdb1:
   locale_database:
     jp: pemdb6_jp
   subscriber_pool: 20000        # 가입자 풀
+  # 기동 구 검사(`pemdb1.check_geo_drift` · 2026-11-17) — 셀 마스터 구가 셀 귀속(CM_CELL_GEO_MAP ADM2)과
+  # 어긋나면 생성 범위 `scope.gu` 가 틀린 구로 셀을 고른다(11-17 12구 밖 9개 구 셀 약 560개가 생성되고 있었다).
+  # stop = 생성을 시작하지 않는다 · warn = 알리고 진행. 셀 귀속이 없으면(모름) 둘 다 경고만 한다
+  geo_drift_check: stop
   # 생성 대상 eNB 수. 마스터 전량(eNB 32,121 · 셀 571,801)에 분당 수천 호를
   # 흘리면 eNB 당 표본이 1건 미만이 되어 어떤 창에서도 판정이 서지 않는다
   # (최소 표본 20 · 불변규칙 5). 0 이면 전량. **나라별 값은 아래 `by_locale`.**

@@ -1414,6 +1414,93 @@ def _load_gu_names(conn, locale: str) -> dict[str, tuple[str, str]]:
         return {}
 
 
+#: 기동 구 검사(`geo_drift`)의 동작 — `pemdb1.geo_drift_check` 설정 값
+GEO_DRIFT_MODES = ("stop", "warn")
+
+
+def geo_drift(conn, locale: str, sample: int = 5) -> dict | None:
+    """셀 마스터의 구·시도와 `CM_CELL_GEO_MAP` ADM2·ADM1 이 다른 셀 수 — **세기만 한다** (2026-11-17).
+
+    **왜 생성기가 보나.** 생성 범위 `scope.gu` 는 셀 마스터의 `GU_ID` 로 셀을 고른다(`load_cells` 맨 끝).
+    일본 전환 때 마스터는 한국 체계·옛 구를 그대로 두고 좌표만 실제 위치로 옮겼다. 그래서 「12구」 설정을
+    지켰는데도 실제로는 12구 밖 9개 구(江東·世田谷·足立 …)의 셀 약 560개가 생성되고 있었다. 11-17 12:06 에
+    마스터를 맞추자(`tools/master_gu_align.py`) 섞여 있던 eNB 약 245개가 생성에서 빠지며 가짜 무호가 났다
+    — 사후에 맞추면 그 부작용이 남는다. **기준이 틀린 채로 생성을 시작하지 않는다**가 이 검사의 목적이다.
+
+    **짝짓기 규칙은 graphio `geo_coverage.master_drift` 와 같아야 한다** — 두 저장소가 서로 다른 답을 내면
+    한쪽은 0 인데 다른 쪽은 어긋났다고 말한다. 규칙:
+
+    * 셀 키: 마스터 `(ENB_ID, SECTOR)` = 셀 귀속 `(ENB_ID, CELLNUM)` · `AREA_LEVEL = 'ADM2'`
+    * 견주는 값: **이름 쌍** `(CM_CITY*.CITY_NAME, CM_GU*.GU_NAME)` 대
+      `(ADM2 의 부모 ADM1 AREA_NAME, ADM2 AREA_NAME)` (`CM_GEO_UNIT`). 다르면 어긋남이다.
+    * 코드로 견주지 않는다 — 체계가 다르다(마스터 東京 `11` · e-Stat 東京 `13`, e-Stat `11` 은 埼玉県).
+      구 이름만 보지도 않는다 — `中央区` 는 도쿄·치바·사가미하라에 다 있다.
+    * 셀 귀속에 ADM2 가 없는 셀은 `no_map` 으로 따로 센다(어긋남도 일치도 아니다 — 모름은 0 이 아니다).
+
+    ``None`` 은 **검사를 못 했다**는 뜻이다 — 표가 없거나 셀 귀속 ADM2 가 한 행도 없다. 0 과 다르다.
+    """
+    loc, city, gu = table_name("cell", locale), table_name("city", locale), table_name("gu", locale)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM CM_CELL_GEO_MAP WHERE AREA_LEVEL = 'ADM2'")
+            if not int(cur.fetchone()[0] or 0):
+                return None
+            cur.execute(
+                f"SELECT c.CITY_NAME, g.GU_NAME, p.AREA_NAME, u.AREA_NAME, m.AREA_CD, COUNT(*) "
+                f"FROM `{loc}` l "
+                f"LEFT JOIN `{city}` c ON c.CITY_ID = l.CITY_ID "
+                f"LEFT JOIN `{gu}` g ON g.CITY_ID = l.CITY_ID AND g.GU_ID = l.GU_ID "
+                f"LEFT JOIN CM_CELL_GEO_MAP m ON m.ENB_ID = l.ENB_ID AND m.CELLNUM = l.SECTOR "
+                f"AND m.AREA_LEVEL = 'ADM2' "
+                f"LEFT JOIN CM_GEO_UNIT u ON u.AREA_LEVEL = 'ADM2' AND u.AREA_CD = m.AREA_CD "
+                f"LEFT JOIN CM_GEO_UNIT p ON p.AREA_LEVEL = 'ADM1' AND p.AREA_CD = u.PARENT_CD "
+                f"GROUP BY c.CITY_NAME, g.GU_NAME, p.AREA_NAME, u.AREA_NAME, m.AREA_CD")
+            rows = cur.fetchall()
+    except Exception as e:  # noqa: BLE001 — 표가 없는 구성(셀 귀속을 아직 안 구운 창고)이다
+        print(f"  ! 구 검사 못 함 — {e}", flush=True)
+        return None
+    cells = no_map = differs = 0
+    pairs: collections.Counter = collections.Counter()
+    for c_nm, g_nm, p_nm, u_nm, cd, n in rows:
+        n = int(n)
+        cells += n
+        if cd is None:
+            no_map += n
+        elif (c_nm, g_nm) != (p_nm, u_nm):
+            differs += n
+            pairs[(f"{c_nm or '?'} {g_nm or '?'}", f"{p_nm or '?'} {u_nm or '?'}")] += n
+    return {"cells": cells, "differs": differs, "no_map": no_map,
+            "top": [{"master": a, "geo_map": b, "cells": n} for (a, b), n in pairs.most_common(sample)]}
+
+
+def check_geo_drift(conn, locale: str, mode: str = "stop") -> dict | None:
+    """기동 구 검사 — 어긋나면 ``stop`` 은 생성을 시작하지 않고 멈추고, ``warn`` 은 알리고 진행한다.
+
+    검사를 못 하면(``None``) 두 모드 모두 **경고만** 하고 진행한다 — 셀 귀속이 없는 창고에서 생성기가 아예
+    못 뜨면 안 되고, 그렇다고 「어긋남 0」으로 적지도 않는다.
+    """
+    if mode not in GEO_DRIFT_MODES:
+        raise RuntimeError(f"pemdb1.geo_drift_check 는 {GEO_DRIFT_MODES} 중 하나다 (받은 값 {mode!r})")
+    r = geo_drift(conn, locale)
+    if r is None:
+        print("  ! 구 검사 — CM_CELL_GEO_MAP ADM2 가 없어 셀 마스터 구를 확인하지 못했다(모름 · 진행)",
+              flush=True)
+        return None
+    if not r["differs"] and not r["no_map"]:
+        print(f"  ✓ 구 검사 — 셀 {r['cells']:,} 모두 셀 마스터 구 = 셀 귀속 ADM2", flush=True)
+        return r
+    lines = [f"구 검사 — 셀 {r['cells']:,} 중 셀 마스터 구 ≠ 셀 귀속 ADM2 {r['differs']:,} · "
+             f"셀 귀속 ADM2 없음 {r['no_map']:,}"]
+    lines += [f"    {x['master']} → {x['geo_map']}  {x['cells']:,}" for x in r["top"]]
+    lines.append("  생성 범위(scope.gu)가 틀린 구로 셀을 고른다. 고치기: "
+                 "python3 tools/master_gu_align.py --dry-run → --apply --backup")
+    if mode == "stop" and r["differs"]:
+        lines.append("  멈춘다 — 경고만 하려면 pemdb1.geo_drift_check: warn")
+        raise RuntimeError("\n".join(lines))
+    print("  ! " + "\n".join(lines), flush=True)
+    return r
+
+
 def load_cells(conn, enb_limit: int | None = None,
                drawable: set[str] | None = None,
                ensure_coords: bool = False,
@@ -2088,7 +2175,10 @@ class PemdbGen:
                  capacity_shift: dict | None = None,
                  #: 망 모드 — `sa_device_share`(5G 능력 단말 비율, 기본 0.3).
                  #: 가입자 풀을 만들 때 한 번 쓰므로 **재시작해야 바뀐다**
-                 net_mode: dict | None = None):
+                 net_mode: dict | None = None,
+                 #: 기동 구 검사(`check_geo_drift`) — ``stop``(기본) 이면 셀 마스터 구가 셀 귀속과 어긋날 때
+                 #: 생성을 시작하지 않는다. ``warn`` 은 알리고 진행
+                 geo_drift_check: str = "stop"):
         self.plmn = plmn or Plmn()
         #: 시군구 코드 → (시도 이름, 시군구 이름) — 좌표로 준 27번 진앙의 지명(`scenarios.quake_place_name`).
         #: 셀 마스터의 이름 칸은 비어 있다(`load_cells` · 한글 깨짐) — 이름은 지역 벌 표에서 읽는다
@@ -2098,6 +2188,8 @@ class PemdbGen:
                            locale=locale, tac_only=tac_only,
                            sectors_per_enb=sectors_per_enb,
                            scope=Scope.from_cfg(scope))
+        # 셀을 읽은 직후 — 생성 범위가 믿는 마스터 구가 실제 위치(셀 귀속 ADM2)와 같은지 본다
+        check_geo_drift(conn, locale, geo_drift_check)
         # ── 소등 eNB 를 **셀 목록에서 뺀다** (`j-sc-24` · 2026-10-29) ────────
         #
         # 마스터 전량을 생성하므로(`enb_limit: 0`) 그대로 두면 B 에도 평소

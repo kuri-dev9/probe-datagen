@@ -618,6 +618,7 @@ def cmd_capacity(args) -> int:
             net_mode=pem.get("net_mode"),
             locale=pem.get("locale", "kr"), tac_only=bool(pem.get("tac_only", False)),
             sectors_per_enb=pem.get("sectors_per_enb"), scope=pem.get("scope"),
+            geo_drift_check=str(pem.get("geo_drift_check", "stop")),
             baseline=pem.get("baseline"), fault=pem.get("fault"),
             capacity_shift=_capacity_shift(pem))
         # **보관 정리를 끈다**(retain 0). 측정 중에 지우면 쓴 바이트를 셀 수
@@ -777,6 +778,7 @@ def cmd_run(args) -> int:
             net_mode=pem.get("net_mode"),
             locale=pem.get("locale", "kr"), tac_only=bool(pem.get("tac_only", False)),
             sectors_per_enb=pem.get("sectors_per_enb"), scope=pem.get("scope"),
+            geo_drift_check=str(pem.get("geo_drift_check", "stop")),
             # 평시 배경(절차 플래그·절단·PathSwitch)과 TIMEOUT 대기시간.
             # 없으면 `pemdb1.Baseline`·`scenarios.FaultCfg` 기본값이다.
             baseline=pem.get("baseline"), fault=pem.get("fault"),
@@ -1178,6 +1180,7 @@ def cmd_pemfill(args) -> int:
             net_mode=pem.get("net_mode"),
             locale=pem.get("locale", "kr"), tac_only=bool(pem.get("tac_only", False)),
             sectors_per_enb=pem.get("sectors_per_enb"), scope=pem.get("scope"),
+            geo_drift_check=str(pem.get("geo_drift_check", "stop")),
             baseline=pem.get("baseline"), fault=pem.get("fault"),
             capacity_shift=_capacity_shift(pem),
         )
