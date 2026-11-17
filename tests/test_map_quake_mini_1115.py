@@ -1260,21 +1260,22 @@ console.log(JSON.stringify({on,off,gone}));""")
 
 
 @pytest.mark.skipif(NODE is None, reason="node 없음")
-def test_fx_gate_runs_twenty_seconds_after_picking_even_a_past_quake_then_stops(tmp_path):
-    """11-16 사용자 "내가 켠 뒤로 20초 아냐?" — 진행 중이 아닌 지난 지진도 고른 뒤 20초는 돈다(`body.fxlive`).
-    같은 장애를 다시 받아도 시각은 그대로고, 다른 장애를 고르면 처음부터 다시 센다."""
-    a = MAP_HTML.index("const FX_SEC=20;")
+def test_fx_gate_runs_thirty_seconds_after_picking_any_fault_then_stops(tmp_path):
+    """11-17 사용자 "다른 애들도 다 움직여야 해 · 이벤트 켜지면 30초만" — 지진이 아닌 장애도 고른 뒤 30초는
+    돈다(`body.fxlive`). 같은 장애를 다시 받아도 시각은 그대로고, 다른 장애를 고르면 처음부터 다시 센다.
+    고른 장애가 없으면 돌지 않는다. (11-16 판은 지진이 붙은 장애만 20초였다)"""
+    a = MAP_HTML.index("const FX_SEC=30;")
     b = MAP_HTML.index("function drawMini")
     out = _node(tmp_path, """
 let NOW=1000000; const realNow=Date.now; Date.now=()=>NOW;
 const cls={on:null}; const document={body:{classList:{toggle(k,v){ if(k==='fxlive') cls.on=v; }}}};
-let MINI_Q=null, FOCUS=null; Object.defineProperty(globalThis,'QFOR',{get:()=>FOCUS});
+let MINI_Q=null, FOCUS=null;
 const setTimeout=()=>1, clearTimeout=()=>{};
 """+MAP_HTML[a:b]+"""
-MINI_Q={fault_id:361,active:false}; FOCUS='I1'; fxGate(); const picked=cls.on;           // 끝난 지진을 골랐다
-NOW+=10000; fxGate(); const at10=cls.on;                                                   // 10초 — 같은 장애는 시각 유지
-NOW+=11000; fxGate(); const at21=cls.on;                                                   // 21초 — 멈춘다
-MINI_Q={fault_id:362,active:false}; fxGate(); const again=cls.on;                          // 다른 장애 — 처음부터
-MINI_Q=null; fxGate(); const none=cls.on;                                                  // 지진 없음
-console.log(JSON.stringify({picked,at10,at21,again,none}));""")
-    assert out == {"picked": True, "at10": True, "at21": False, "again": True, "none": False}
+FOCUS='I1'; fxGate(); const picked=cls.on;                                                  // 지진 아닌 장애를 골랐다
+NOW+=20000; fxGate(); const at20=cls.on;                                                    // 20초 — 같은 장애는 시각 유지
+NOW+=11000; fxGate(); const at31=cls.on;                                                    // 31초 — 멈춘다
+MINI_Q={fault_id:362,active:false}; FOCUS='I2'; fxGate(); const again=cls.on;               // 다른 장애(지진) — 처음부터
+FOCUS=null; fxGate(); const none=cls.on;                                                    // 고른 장애 없음
+console.log(JSON.stringify({picked,at20,at31,again,none}));""")
+    assert out == {"picked": True, "at20": True, "at31": False, "again": True, "none": False}
