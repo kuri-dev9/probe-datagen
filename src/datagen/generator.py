@@ -307,17 +307,28 @@ class Groups:
                         mv = pm + (nm - pm) * w
                         sw = ps + (ns - ps) * w
                         break
+        sw *= self.subway_ramp(ts)
+        return sw, mv - sw
+
+    def subway_ramp(self, ts) -> float:
+        """운행 시작·끝 섞기 계수 0~1 — 운행 밖 0, 시작부터 `blend_min` 동안 0 → 1, 끝 `blend_min` 전부터 1 → 0.
+
+        **운행 시작·끝도 `blend_min` 에 걸쳐 선형으로** (2026-11-12 · graphio 27번 F-303). 정시에 0 → 10% 로
+        켜자 06:00~06:02 노선(야마노테선) eNB 13곳의 분당 호가 1분 만에 5~24배가 되어 D5 호 폭주(C-24)가
+        매일 같은 시각에 섰고(11-11·11-12), 27번 재해 사건에 섞였다. 시간대 경계와 같은 이유다(머리말).
+        빠진 몫은 그냥 이동이 가져간다.
+
+        **호 비율(`shares`)과 노선 이동(`Generator.advance_routes`)이 같이 부른다** (2026-11-18 · F-391). 호 비율만
+        섞고 이동은 06:00 에 전원을 풀어, 밤새 서 있던 탑승자가 첫 분에 일제히 칸을 옮겼다 — 역 eNB 10곳의 TAU 가
+        분당 0 → 122 로 튀어 C-24 가 다시 섰다(오프셋 0 으로 맞는 첫 새벽에 드러남). 한쪽만 고치면 또 갈린다
+        """
         if not self.subway_running(ts):
-            sw = 0.0
-        elif self.blend_h > 0 and self.sub_h[1] - self.sub_h[0] < 24:
-            # **운행 시작·끝도 `blend_min` 에 걸쳐 선형으로** (2026-11-12 · graphio 27번 F-303). 정시에 0 → 10% 로
-            # 켜자 06:00~06:02 노선(야마노테선) eNB 13곳의 분당 호가 1분 만에 5~24배가 되어 D5 호 폭주(C-24)가
-            # 매일 같은 시각에 섰고(11-11·11-12), 27번 재해 사건에 섞였다. 시간대 경계와 같은 이유다(머리말).
-            # 시작부터 `blend_min` 동안 0 → 1, 끝 `blend_min` 전부터 1 → 0. 빠진 몫은 그냥 이동이 가져간다
+            return 0.0
+        if self.blend_h > 0 and self.sub_h[1] - self.sub_h[0] < 24:
             h = self._hour(ts)
             a, b = self.sub_h
-            sw *= max(0.0, min(1.0, (h - a) / self.blend_h, (b - h) / self.blend_h))
-        return sw, mv - sw
+            return max(0.0, min(1.0, (h - a) / self.blend_h, (b - h) / self.blend_h))
+        return 1.0
 
 #: 거주지 격자 한 칸(도). 0.05도 ≈ 5.5km — `home_radius_m`(10km)보다 작아야
 #: 고리 하나로 반경을 덮는 데 두 칸이면 충분하다.
@@ -570,6 +581,8 @@ class Generator:
         #: 걷는 사람 난수의 씨와 사람별 걸음 번호(`seat_walkers` · `_advance_walkers` · 2026-11-17)
         self._walk_base: int = 0
         self._walk_n: dict[int, int] = {}
+        #: 노선 탑승 난수의 씨(`seat_routes`) — 운행 시작·끝에 깨는 순서(`advance_routes`)도 이 씨로 정한다
+        self._route_base: int = 0
         self.walk_sec: tuple[int, int] = (180, 600)
         #: 걷는 사람 **미리 걷기**(분) — 첫 `advance_routes` 에서 한 번 돈다(`_warm_walkers`)
         self.walk_warmup_min: int = 0
@@ -826,11 +839,18 @@ class Generator:
             self._warm_walkers(now)
         moved = self._advance_walkers(now)
         # **운행 시간 밖에는 열차가 서 있다** — 새벽에 노선 탑승자가 계속
-        # 칸을 옮기면 아무도 통화하지 않는 시각에 TAU 만 쏟아진다
-        if self.groups is not None and not self.groups.subway_running(self.curve_time(now)):
+        # 칸을 옮기면 아무도 통화하지 않는 시각에 TAU 만 쏟아진다.
+        # **운행 시작·끝은 사람마다 깨고 잠든다** (2026-11-18 · F-391) — 계수(`Groups.subway_ramp`)가 호 비율과
+        # 같다. 자기 키 난수가 계수보다 작은 탑승자만 움직인다(결정론 · 먼저 깬 사람이 나중에 잠든다).
+        # 전원을 한 분에 풀면 밤새 체류 시간을 넘긴 사람이 일제히 칸을 옮겨 06:00 에 TAU 계단이 섰다
+        ramp = 1.0 if self.groups is None else self.groups.subway_ramp(self.curve_time(now))
+        if ramp <= 0.0:
             return moved
+        wake = getattr(self, "_route_base", 0)
         for i, sub in enumerate(self.subs):
             if sub.route < 0:
+                continue
+            if ramp < 1.0 and _keyed_rng(wake, "wake", i).random() >= ramp:
                 continue
             rt = self.routes[sub.route]
             if sub.route_wait < 0.0:

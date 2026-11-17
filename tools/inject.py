@@ -27,7 +27,7 @@ gen-ui(:8009)의 주입 API 를 부른다. **예약은 gen 이 한다** — `sta
 
 **랜덤에서 빼는 것:**
 - `same_as` 가 있는 번호(18·19·20·26) — 원 번호와 같은 데이터다.
-- 17번 — 판정 재료가 없다(NO_EVIDENCE).
+- 판정 재료가 없는 번호(NO_EVIDENCE) — 지금은 없다. 정본은 `control.NO_EVIDENCE` 이고 17번은 11-05 에 빠졌다.
 - `--hours` 를 켜면(기본) 그 시각이 권장 시간대(`dur.hours` · **가상 시각** — `offset`) 밖인 번호. 새벽에는 판정 표본이
   모자라 미탐이 났다(11-12 23·24번).
 
@@ -47,8 +47,10 @@ import urllib.request
 from datetime import datetime, timedelta
 
 URL = os.environ.get("GP_GENUI_URL", "http://localhost:8009").rstrip("/")
-#: 랜덤 기본 제외 — 판정 재료가 없다(NO_EVIDENCE · scenario-card 스킬 "제외")
-NO_EVIDENCE = {17}
+#: 랜덤 기본 제외 — 판정 재료가 없다(NO_EVIDENCE). **정본은 `control.NO_EVIDENCE` 다** — 이 도구는 HTTP 로만
+#: gen-ui 를 부르고 datagen 패키지를 들이지 않아 값을 옮겨 적는다. 11-12 에 옛 `{17}` 을 옮겨 와 17번 주입마다
+#: 사실과 다른 경고가 났다(11-18 F-389) — 17번은 11-05 에 대체 표현(숨은 5G 단말)으로 재료가 생겨 빠졌다.
+NO_EVIDENCE: set[int] = set()
 DEFAULT_GAP = 15
 
 
