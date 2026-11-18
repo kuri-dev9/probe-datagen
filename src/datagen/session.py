@@ -507,6 +507,15 @@ class Session:
     #: **이번 전환을 이 시각에 한다**(epoch · `-1` 은 없음) — eNB 다운 뒤 이웃 셀 재연결
     #: (`pemdb1._enb_down_hold`). 추첨 시각(분 안 5~54초)으로 두면 죽은 셀에 데이터가 더 남는다
     ho_at_t: float = -1.0
+    #: **분 강도로 걷히는 망가짐**(`Plan.fade` · 2026-11-19). 시나리오와 열 때 강도, 망가지기 전
+    #: 총량(`traffic`·`plain` 과 같은 순서)이다. `None` 이면 옛 동작 — 열 때 정한 총량을 선형으로 낸다
+    fade_sc: object = None
+    fade_i0: float = 0.0
+    norm_traffic: tuple = ()
+    norm_plain: tuple = ()
+    #: 지난 분들의 `(누적 비율 시작, 끝, 가중)` — 가중 = 그 분 강도 / 열 때 강도(1 상한).
+    #: 누적은 `평소×f + (망가짐−평소)×Σ가중×구간` 이라 분마다 늘기만 한다(`_fade_g`)
+    fade_seg: list = field(default_factory=list)
 
 
 #: 정체 구간에 **멈추는** 누적 필드 — down payload 만이다. 재전송·패킷 수는
@@ -593,6 +602,9 @@ class SessionEngine:
         #: 다운 장비 집합(`scenarios.node_down_set`) — `pemdb1` 이 분마다 넣는다. 그 장비로
         #: 가는 핸드오버를 막는다(2026-11-04). `None` 이면 다운이 없다
         self.down = None
+        #: 이번 분의 시나리오 분 번호 — `pemdb1` 이 분마다 넣는다. 걷히는 망가짐(`Session.fade_sc`)이
+        #: 그 분의 강도를 묻는 데 쓴다. `None` 이면 걷지 않는다(옛 동작)
+        self.fade_minute = None
 
         #: Call Type 가중 — 설정이 있으면 기본표 위에 덮는다(키만 바꿀 수 있게).
         self._ctw = dict(CT_SESSION_W)
@@ -982,6 +994,9 @@ class SessionEngine:
         ho_stall_s = 0.0
         reset = syn_fail = False
         retries = 0
+        fade_sc, fade_i0 = None, 0.0
+        norm_traffic: list[float] = []
+        norm_plain: tuple = ()
 
         # ── 장애 훅 (V3 규칙 U-1) ─────────────────────────────────────
         #
@@ -1004,6 +1019,10 @@ class SessionEngine:
             plan_mutate(call.cell, pl)
             traffic = [totals[f"Traffic_Total_{n}"] for n in TRAFFIC_PAIRS]
             plain = tuple(totals[n] for n in CUM_PLAIN)
+            if pl.fade is not None:
+                fade_sc, fade_i0, base = pl.fade
+                norm_traffic = [base[f"Traffic_Total_{n}"] for n in TRAFFIC_PAIRS]
+                norm_plain = tuple(base[n] for n in CUM_PLAIN)
             # **C-Plane 정상 정체**(G-3) — 장애가 명시로 요청했을 때만이다.
             # `classify()` 의 `drop_flag → OUT_STALL` 은 손대지 않는다. 처음·
             # 마지막 분은 비우지 않는다 — 열린 적 없는 세션처럼 보인다
@@ -1022,6 +1041,9 @@ class SessionEngine:
             _ir = TRAFFIC_PAIRS.index(f"{_d}_RetransPacketCount")
             _ip = TRAFFIC_PAIRS.index(f"{_d}_PayloadPacketCount")
             traffic[_ir] = max(0.0, min(traffic[_ir], traffic[_ip]))
+            if norm_traffic:
+                # 평소 총량도 같은 규칙 — 두 총량 사이를 잇는 값이 규칙 안에 있으려면 양 끝이 안이어야 한다
+                norm_traffic[_ir] = max(0.0, min(norm_traffic[_ir], norm_traffic[_ip]))
 
         if call.outcome == OUT_RST:
             const[_C["RstCount"]] = "1"
@@ -1048,6 +1070,7 @@ class SessionEngine:
             plain = tuple(0.0 for _ in plain)
             span = 1
             freeze, ho_stall_s = None, 0.0
+            fade_sc = None                  # 흐른 양이 없다 — 걷을 것도 없다
         elif tcp and reset:
             # 도중에 끊겼다 — 정상 종료(FIN) 대신 RST
             const[_C["RstCount"]] = "1"
@@ -1103,6 +1126,9 @@ class SessionEngine:
                     else smp.domain() if smp is not None else ""),
             freeze=freeze, ho_stall_s=ho_stall_s, app=app, app_ip=app_ip,
             retries=retries,
+            fade_sc=fade_sc, fade_i0=fade_i0,
+            norm_traffic=tuple(norm_traffic) if fade_sc is not None else (),
+            norm_plain=norm_plain if fade_sc is not None else (),
         )
 
     # -- 레코드 ----------------------------------------------------------
@@ -1187,6 +1213,12 @@ class SessionEngine:
             t = max(min(s.cut_t, s.t_end), max(s.t0, slot) + 0.1)
             frac = min(1.0, max(0.0, (t - max(s.t0, slot)) / 60.0))
             now = min(1.0, prev + frac / s.span)
+        if s.fade_sc is not None:
+            # 이 분의 망가짐 가중 — 그 장애의 이 분 강도 / 열 때 강도. 장애 창 밖이면 0 이라 평소 양이 흐른다
+            w = 1.0
+            if self.fade_minute is not None:
+                w = s.fade_sc.intensity_for("transport", self.fade_minute) / s.fade_i0
+            s.fade_seg.append((prev, now, min(1.0, max(0.0, w))))
         # **매 분 초기화한다.** 남겨 두면 다음 분의 HTTP 가 이미 떠난 셀로
         # 들어가고, 그것은 에러가 아니라 틀린 셀 귀속으로만 나타난다.
         s.ho_t = -1.0
@@ -1421,6 +1453,14 @@ class SessionEngine:
         vals = self._slice(s, flag, t, cell)
         # **누적은 `base` 부터다** — 현재 장비가 보기 시작한 지점. Delta 는
         # 구간 증분이라 `base` 와 무관하다(앞뒤 차이로 구한다)
+        if s.fade_sc is not None:
+            self._put_faded(vals, s, f_prev, f_now)
+        else:
+            self._put_linear(vals, s, f_prev, f_now)
+        self._put_tail(out, mutate, s, vals, t, cell, over)
+
+    def _put_linear(self, vals: list[str], s: Session, f_prev: float, f_now: float) -> None:
+        """열 때 정한 총량을 누적 비율대로 — 옛 동작."""
         b = s.base
         fz = s.freeze
         for n, (i_tot, i_del), v in zip(TRAFFIC_PAIRS, self._i_traffic, s.traffic):
@@ -1437,6 +1477,51 @@ class SessionEngine:
             vals[i_del] = str(cum - int(v * fp))
         for j, v in zip(self._i_plain, s.plain):
             vals[j] = str(int(v * f_now) - int(v * b))
+
+    @staticmethod
+    def _fade_g(s: Session, x: float) -> float:
+        """누적 비율 ``x`` 까지의 망가짐 몫 — `Σ 가중 × 구간 길이`. 아직 안 낸 구간은 마지막 가중이다."""
+        g = 0.0
+        last_w = 1.0
+        for lo, hi, w in s.fade_seg:
+            if x <= lo:
+                return g
+            g += w * (min(x, hi) - lo)
+            last_w = w
+            if x <= hi:
+                return g
+        hi_all = s.fade_seg[-1][1] if s.fade_seg else 0.0
+        return g + last_w * max(0.0, x - hi_all)
+
+    def _put_faded(self, vals: list[str], s: Session, f_prev: float, f_now: float) -> None:
+        """평소 총량과 망가진 총량 사이를 **분 강도로** 잇는다(`Session.fade_sc` · 2026-11-19).
+
+        누적 `C(f) = 평소×f + (망가짐−평소)×g(f)` · `g` 의 기울기는 그 분 가중(0~1)이라 `C` 의 기울기는
+        두 총량의 기울기 사이 — 둘 다 0 이상이므로 **누적이 줄지 않는다**(V3 규칙 U-1·U-3). 같은 절단
+        급수의 차이로 Total·Delta 를 내는 것은 `_put_linear` 와 같다(`Σ Delta == Total`). 정체 구간
+        (`freeze`)이 겹친 세션의 정체 필드는 옛 방식이다 — 정체가 비우는 비율 좌표와 섞지 않는다.
+        """
+        b = s.base
+        fz = s.freeze
+        gp, gn, gb = (self._fade_g(s, x) for x in (f_prev, f_now, b))
+        for n, (i_tot, i_del), v, nv in zip(TRAFFIC_PAIRS, self._i_traffic, s.traffic,
+                                            s.norm_traffic):
+            if fz is not None and n in STALL_FROZEN:
+                fp, fn_, fb = (_freeze_frac(x, *fz) for x in (f_prev, f_now, b))
+                cum, c_b, c_p = int(v * fn_), int(v * fb), int(v * fp)
+            else:
+                d = v - nv
+                cum = int(nv * f_now + d * gn)
+                c_b = int(nv * b + d * gb)
+                c_p = int(nv * f_prev + d * gp)
+            vals[i_tot] = str(cum - c_b)
+            vals[i_del] = str(cum - c_p)
+        for j, v, nv in zip(self._i_plain, s.plain, s.norm_plain):
+            d = v - nv
+            vals[j] = str(int(nv * f_now + d * gn) - int(nv * b + d * gb))
+
+    def _put_tail(self, out: dict, mutate, s: Session, vals: list[str], t: float,
+                  cell: Cell, over: dict[int, str] | None) -> None:
         # 첫·마지막 패킷 시각. 첫 시각은 **방향별 레코드 시작**이다 —
         # Total·Delta 가 같다. `_i_times` 는 (Total,Up)(Total,Dn)(Delta,Up)
         # (Delta,Dn) 순이다(`__init__` 의 생성식)

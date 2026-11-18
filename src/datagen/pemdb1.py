@@ -3607,6 +3607,8 @@ class PemdbGen:
              book.boosted(lambda a, sc=sc, i=sc.intensity(minute):
                           APP_BOOSTERS[sc.kind](sc, i, a)))
             for sc in active if sc.kind in APP_BOOSTERS] if book else []
+        # 걷히는 망가짐(`Session.fade_sc`)이 이 분의 장애 강도를 묻는다(2026-11-19 · 22번 꼬리)
+        self.sessions.fade_minute = minute
         got = self.sessions.minute(ts, self._calls,
                                    self._mutator(minute, active),
                                    self._plan_mutator(minute, active))

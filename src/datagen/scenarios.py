@@ -335,7 +335,7 @@ class Plan:
     """
 
     __slots__ = ("totals", "const", "outcome", "span", "stall", "ho_stall",
-                 "reset", "syn_fail", "retries", "net_mode", "imsi")
+                 "reset", "syn_fail", "retries", "net_mode", "imsi", "fade")
 
     def __init__(self, totals: dict[str, float], const: dict[str, str],
                  outcome: str, span: int):
@@ -368,6 +368,10 @@ class Plan:
         self.net_mode = "LTE"
         #: 이 세션의 가입자. 읽기 전용이다 — 장애가 "같은 사람"을 고르는 데 쓴다(`j-sc-14`)
         self.imsi = ""
+        #: **분마다 장애 강도를 따라 걷히는 망가짐** `(시나리오, 열 때 강도, 망가지기 전 총량)` ·
+        #: `None` 은 없음(2026-11-19 · `_app_session_broken`). `session._put` 이 이 분의 강도로 두 총량
+        #: 사이를 잇는다 — 장애 창이 끝나면 이월 세션도 평소 양으로 흐른다
+        self.fade = None
 
     def get(self, name: str, default: float = 0.0) -> float:
         return self.totals.get(name, default)
@@ -3654,8 +3658,16 @@ def host_site(domain: str) -> str:
 # --------------------------------------------------------------------------
 
 
-def _app_session_broken(plan, rng, intensity: float) -> None:
+def _app_session_broken(plan, rng, intensity: float, sc=None) -> None:
     """앱 장애 세션 공통 — **느리고, 끊기고, 다시 시도한다**(사람 요청 2026-10-28).
+
+    **양(재전송·RTT·처리율)은 세션을 연 분에 고정하지 않는다**(2026-11-19 · 22번 꼬리). ``sc`` 를 주면
+    망가지기 전 총량을 `Plan.fade` 에 남기고, `session._put` 이 레코드를 내는 분의 강도
+    (`sc.intensity_for("transport", 분) / 열 때 강도`, 1 이 상한)로 두 총량 사이를 잇는다. 전에는 장애 중에
+    연 세션이 수명(최대 10분) 내내 망가진 양을 내서, DNS 가 평소로 돌아온 뒤에도 셀 하나가 같은 재전송을
+    매 분 냈다(F-416 `135530-1` 05:11~05:16). DNS 가 느린 것으로 이미 맺은 연결이 계속 재전송할 이유는
+    없다. RAMP 의 `ramp_out` 감쇠도 그대로 따라간다. 연결 결말(끊김·안 섬)과 재시도는 세션을 열 때의
+    사건이라 그대로다.
 
     - RTT: down ×(1+6I) · up ×(1+4I) — 응답이 눈에 띄게 늦다
     - 처리율: payload 축소 + down 재전송
@@ -3663,6 +3675,8 @@ def _app_session_broken(plan, rng, intensity: float) -> None:
     - 재시도: 60%·I 의 세션이 1~(1+3I)개의 세션을 더 연다 — 장애가
       나면 세션 수가 **오히려 는다**. 사용자가 새로고침하고 앱이 재연결한다
     """
+    if sc is not None and intensity > 0 and plan.fade is None:
+        plan.fade = (sc, intensity, dict(plan.totals))
     _congested_rtt(plan, rng, intensity)
     _congested_rtt(plan, rng, intensity, "Uplink")
     plan.scale("Traffic_Total_Dnlink_PayloadSize", max(0.2, 1.0 - 0.6 * intensity))
@@ -3724,7 +3738,7 @@ def _cdn_degradation_plan(plan, sc, intensity, rng, cell) -> bool:
         return False
     if rng.random() >= intensity * 0.85:
         return False
-    _app_session_broken(plan, rng, intensity)
+    _app_session_broken(plan, rng, intensity, sc)
     return True
 
 
@@ -3794,7 +3808,7 @@ def _pay_session(plan, sc, intensity, rng, cell) -> bool:
         return False
     if rng.random() >= intensity * 0.85:
         return False
-    _app_session_broken(plan, rng, intensity)
+    _app_session_broken(plan, rng, intensity, sc)
     return True
 
 
