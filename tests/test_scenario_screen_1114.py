@@ -21,41 +21,82 @@ NAMES_MD = GRAPHIO / "docs" / "jp" / "원인-쉬운이름-1114.md"
 STATIC = ROOT / "src" / "datagen" / "ui" / "static"
 
 
-# ── 그림 경로 ──────────────────────────────────────────────────────────────
+# ── 시나리오 설명(2026-11-19 · 사용자 확정본 scenarios-14-27.html 을 섹션별로 옮김) ──────────
+# 옛 한 장 그림(`/api/scenario-pictures` · `scenario-pictures/*.svg`)은 지웠다. 문구는 원본 그대로여야 한다.
 
-@pytest.mark.parametrize("no", range(14, 28))
-def test_picture_served_for_14_to_27(no):
-    r = pages.scenario_picture(f"no{no}.svg")
-    assert r.media_type == "image/svg+xml" and r.body.lstrip().startswith(b"<svg")
-
-
-@pytest.mark.parametrize("name", [
-    "../main.html", "..%2fmain.html", "no13.svg", "no28.svg", "no1.svg", "no014.svg",
-    "NO14.svg", "no14.SVG", "no14.svg/", "no14.svg ", "gen.py", "no14", "%2e%2e", ""])
-def test_picture_rejects_everything_but_the_pattern(name):
-    with pytest.raises(HTTPException) as e:
-        pages.scenario_picture(name)
-    assert e.value.status_code == 404
+ORIGINAL = GRAPHIO / "docs" / "jp" / "ui" / "scenarios-14-27.html"
+NOS = list(range(14, 28))
+_TOTOP = re.compile(r'<p class="totop">.*?</p>', re.S)
 
 
-def test_picture_list_is_14_to_27():
-    assert pages.scenario_picture_list() == {"nos": list(range(14, 28))}
+def _html():
+    return (STATIC / "scenarios.html").read_text(encoding="utf-8")
 
 
-def test_picture_titles_use_the_easy_names():
-    """gen.py 가 이름을 바꿔 다시 만든 그림 제목 — 옛 이름이 남으면 카드 이름과 그림이 어긋난다."""
-    svg = (STATIC / "scenario-pictures" / "no16.svg").read_text(encoding="utf-8")
-    assert "5G 잡히는데 느림 (4G 앵커 혼잡)" in svg and "앵커 고착" not in svg
+def _template(no):
+    h = _html()
+    m = re.search(rf"<template id=scx-{no}>(.*?)</template>", h, re.S)
+    assert m, f"scx-{no} 템플릿이 없다"
+    return m.group(1)
 
 
-def test_scenarios_html_only_adds_a_picture_for_listed_numbers():
-    h = (STATIC / "scenarios.html").read_text(encoding="utf-8")
-    assert "/api/scenario-pictures" in h and "/scenario-pictures/no${Number(s.no)}.svg" in h
-    assert 'target=_blank' in h
-    a = h.index("function plainTop")
-    body = h[a:h.index("\n}\n", a)]          # 함수가 길어져도 고정 길이 창에 기대지 않는다
-    # 그림 자리는 목록 집합이 허락할 때만
-    assert re.search(r"PIC[A-Za-z_]*\.(has|includes)\(", body) or "pic" in body.lower()
+def _norm(t):
+    return re.sub(r"\s+", "", _TOTOP.sub("", t))
+
+
+def test_scenarios_html_has_one_template_per_scenario_14_to_27():
+    ids = re.findall(r"<template id=scx-(\d+)>", _html())
+    assert [int(x) for x in ids] == NOS
+
+
+def test_no_template_for_1_to_13():
+    """설명이 없는 번호는 자리를 만들지 않는다."""
+    ids = {int(x) for x in re.findall(r"<template id=scx-(\d+)>", _html())}
+    assert not ids & set(range(1, 14))
+
+
+@pytest.mark.parametrize("no", NOS)
+def test_each_template_holds_its_own_section(no):
+    t = _template(no)
+    assert t.lstrip().startswith(f'<section id="s{no}"')
+    assert t.count(f'id="s{no}"') == 1
+    assert re.search(rf"<h1>{no}\. ", t)
+
+
+@pytest.mark.skipif(not ORIGINAL.exists(), reason="graphio 원본이 없다")
+@pytest.mark.parametrize("no", NOS)
+def test_template_text_equals_the_original_section(no):
+    """문구는 한 글자도 바꾸지 않는다 — 원본에서 「↑ 목차」 줄만 뺀 것과 같다."""
+    src = ORIGINAL.read_text(encoding="utf-8")
+    a = src.index(f'<section id="s{no}"')
+    nxt = src.find(f'<section id="s{no + 1}"', a)
+    chunk = src[a:nxt if nxt > 0 else len(src)]
+    tpl = _norm(_template(no))
+    assert _norm(chunk).startswith(tpl), f"{no}번 설명이 원본과 다르다"
+
+
+def test_shared_templates_exist_and_no_toc_link_leaked():
+    h = _html()
+    assert "<template id=scx-css>" in h and "<template id=scx-defs>" in h
+    for no in NOS:
+        assert "↑ 목차" not in _template(no)
+
+
+def test_old_picture_routes_and_files_are_gone():
+    assert not hasattr(pages, "scenario_picture") and not hasattr(pages, "scenario_picture_list")
+    assert not (STATIC / "scenario-pictures").exists()
+    paths = {getattr(r, "path", "") for r in pages.router.routes} if hasattr(pages, "router") else set()
+    assert not any("scenario-pictures" in x for x in paths)
+
+
+def test_scenarios_html_no_longer_loads_the_old_pictures():
+    h = _html()
+    assert "/api/scenario-pictures" not in h and "/scenario-pictures/" not in h
+    assert "<scn-explain" in h and "attachShadow" in h
+
+
+def test_package_data_does_not_list_the_removed_pictures():
+    assert "scenario-pictures" not in (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
 
 # ── 읍면동 모양 ────────────────────────────────────────────────────────────
