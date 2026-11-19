@@ -335,7 +335,8 @@ class Plan:
     """
 
     __slots__ = ("totals", "const", "outcome", "span", "stall", "ho_stall",
-                 "reset", "syn_fail", "retries", "net_mode", "imsi", "fade")
+                 "reset", "syn_fail", "retries", "net_mode", "imsi", "fade",
+                 "tls_fail", "v4_retry")
 
     def __init__(self, totals: dict[str, float], const: dict[str, str],
                  outcome: str, span: int):
@@ -363,6 +364,11 @@ class Plan:
         #: 앱이 **다시 시도하는 세션 수** — 사용자가 재시도·새로고침한다.
         #: 같은 호·같은 앱으로 새 세션이 열린다(`SessionEngine._open`)
         self.retries = 0
+        #: **보안 연결이 서지 않는다**(33번 ② · 2026-11-19) — TCP 는 서고 TLS 악수 뒤 단말이 곧바로
+        #: RST 로 끊는다. 흐른 양은 악수뿐이고 HTTP 요청이 없다. TCP 만(`session._plan`)
+        self.tls_fail = False
+        #: 재시도 세션을 **IPv4 로** 연다(34번 · Happy Eyeballs 로 v4 로 다시 붙는다)
+        self.v4_retry = False
         #: 이 세션의 **망 모드** `LTE`·`SA`(`session.net_mode_of`). 읽기
         #: 전용이다 — 장애가 "SA 세션만" 고르는 데 쓴다(`j-sc-16`)
         self.net_mode = "LTE"
@@ -1092,6 +1098,49 @@ KIND_SPECS: dict[str, dict] = {
         shape="STEPS", steps=((15, 1.00), (17, 0.40)),
         onset="instant", offset="instant",
         scope_kind="CELL", expect_kpi="C-01",
+    ),
+    # ── HTTP·DNS 신규(2026-11-19 · graphio `docs/jp/신규-시나리오-정의-1119.md`) ──────────────────
+    # 대상 서비스는 **결제(22번)·스트리밍(21번) 밖의 앱 하나**다(`generator._SERVICE_KINDS`). 정답 코드·룰은
+    # graphio 쪽이 아직 없어 `rule_pending` 이다 — 28 ②·33 은 기존 코드의 갈래, 34 는 새 코드 후보(결정 대기)
+    # 28번 ② — 한 서비스 도메인의 레코드가 사라졌다. 응답은 빠르고 재시도가 없다(무응답·재시도가 붙는 ①과 갈린다)
+    "dns_nxdomain": dict(
+        title="한 서비스 「없는 주소」 (DNS)",
+        truth_code="DNS_DEGRADATION", truth_category="EXTERNAL",
+        expect_rules=(), rule_pending=True, expect_geo="WIDE",
+        shape="STEP", onset="instant", offset="instant", series=("dns",),
+        scope_kind="SERVICE", expect_kpi="U-29",
+    ),
+    # 33번 ① — 한 서비스 서버가 인증·정책으로 요청을 거절한다(401·403·429). 망·DNS·5xx·응답시간은 그대로
+    "service_4xx": dict(
+        title="특정 서비스 접속 거절 (HTTP 4xx)",
+        truth_code="EXTERNAL_SERVER", truth_category="EXTERNAL",
+        expect_rules=(), rule_pending=True, expect_geo="WIDE",
+        shape="STEP", onset="instant", offset="instant", series=("http",),
+        scope_kind="SERVICE", expect_kpi="U-24",
+    ),
+    # 33번 ② — 그 서비스의 인증서가 만료됐다. TCP 는 서고 단말이 악수 뒤 곧바로 RST 로 끊는다
+    "service_tls_fail": dict(
+        title="특정 서비스 보안 연결 실패 (TLS)",
+        truth_code="EXTERNAL_SERVER", truth_category="EXTERNAL",
+        expect_rules=(), rule_pending=True, expect_geo="WIDE",
+        shape="STEP", onset="instant", offset="instant", series=("transport",),
+        scope_kind="SERVICE", expect_kpi="U-04",
+    ),
+    # 34번 — PGW 하나의 IPv6 경로만 끊긴다. v6 세션이 서지 않고 단말이 몇 초 뒤 v4 로 다시 붙는다
+    "ipv6_path_fail": dict(
+        title="IPv6 경로만 실패",
+        truth_code="IPV6_PATH_FAILURE", truth_category="CORE_UP",
+        expect_rules=(), rule_pending=True, expect_geo="SCATTER",
+        shape="STEP", onset="instant", offset="instant", series=("dns", "transport"),
+        scope_kind="CELL", expect_kpi="U-01",
+    ),
+    # 35번 — 업데이트 배포 서비스 하나로 대용량 내려받기가 전국에서 몰린다. 지역 편중이 없다
+    "update_surge": dict(
+        title="앱·OS 업데이트 배포 폭주",
+        truth_code="RAN_CAPACITY_CONGESTION", truth_category="RAN",
+        expect_rules=(), rule_pending=True, expect_geo="WIDE",
+        shape="RAMP", series=("transport", "http"),
+        scope_kind="SERVICE",
     ),
     "partial_recovery": dict(
         title="부분 장애 뒤 단계적 회복",
@@ -4089,6 +4138,139 @@ def _transport_cut_load(sc, intensity) -> float:
     배율을 걸지 않는다
     """
     return 1.0 if intensity >= OUTAGE_GATE else 1.0 + 2.0 * intensity
+
+
+# --------------------------------------------------------------------------
+# HTTP·DNS 신규 — 28 ② dns_nxdomain · 33 service_4xx·service_tls_fail · 34 ipv6_path_fail · 35 update_surge
+# --------------------------------------------------------------------------
+#
+# 대상 앱은 `Target.app_id` 하나다(`generator._bind_scenario_targets`). DNS·transport·HTTP 레코드가 모두
+# 세션의 앱 ID 를 싣는다(`session._open` · DNS 는 질의 도메인으로 붙인다) — 21번과 같은 고르기다.
+
+
+def _app_of(sc, app_id: str) -> bool:
+    return bool(sc.target.app_id) and app_id == sc.target.app_id
+
+
+@mutator("dns_nxdomain")
+def _dns_nxdomain(rec, sc, intensity, rng, cell) -> bool:
+    """그 앱 도메인 질의가 **없는 주소(NXDOMAIN · ReplyCode 3)** 로 빨리 끝난다 — 재시도 없음.
+
+    권한 서버가 「그런 이름은 없다」고 **답했으므로** 응답 시각은 평소대로이고(무응답 `900` 과 다르다)
+    단말은 다시 묻지 않는다. 답이 없으니 세션이 열리지 않는다(`session._dns_failed`) — 뒤이은 TCP·HTTP 가
+    저절로 사라진다. 레코드가 지워진 것이라 그 앱 질의는 **전부** 실패한다(강도가 곧 몫이다). 캐시에 남은
+    단말(질의 없이 연 세션 · `p_dns`)은 연결된다 — TTL 동안은 실제로도 그렇다
+    """
+    if rec.series != "dns" or not _app_of(sc, rec.get("App_ID")):
+        return False
+    if rng.random() >= intensity:
+        return False
+    rec.set("ReplyCode", 3)
+    rec.set("AnswerCount", 0)
+    rec.set("QueryRetryCount", 0)
+    rec.set("dns_retry_sequence", 0)
+    rec.set("dns_retry_interval", "0.0")
+    return True
+
+
+#: 33번 ① 거절 코드와 몫 — 인증 실패 401 · 권한 없음 403 · 요청 제한 429(일부). **초기값**(실측 없음)
+SERVICE_4XX_CODES = ((401, 0.45), (403, 0.45), (429, 0.10))
+
+
+@mutator("service_4xx")
+def _service_4xx(rec, sc, intensity, rng, cell) -> bool:
+    """그 앱 HTTP 요청이 4xx 로 **곧바로** 거절된다 — 응답 시각은 건드리지 않는다(서버가 바로 답한다).
+
+    몫은 6번 외부 서버 5xx 와 같은 강도 × 0.85 다. 21번(느림·재전송)과 가르는 것이 「빠른 거절」이라
+    지연·재전송·5xx 는 그대로 둔다
+    """
+    if rec.series != "http" or not _app_of(sc, rec.get("App_ID")):
+        return False
+    if rng.random() >= intensity * 0.85:
+        return False
+    codes, w = zip(*SERVICE_4XX_CODES)
+    rec.set("StatusCode", rng.choices(codes, weights=w)[0])
+    return True
+
+
+@plan_mutator("service_tls_fail")
+def _service_tls_fail(plan, sc, intensity, rng, cell) -> bool:
+    """그 앱 TCP 세션이 TLS 악수 뒤 단말 RST 로 끝난다(`Plan.tls_fail` · `session._plan`).
+
+    몫은 강도 × 0.85(6번과 같다). 연결 단계(SYN·ACK)는 그대로라 `U-01` 은 정상이고 `U-04`(RST 종료율)가
+    오른다. UDP(QUIC) 앱은 TLS 를 TCP 위에서 하지 않으므로 고르지 않는다 — 대상 앱도 TCP 에서 고른다
+    """
+    if not _app_of(sc, plan.text("App_ID")) or plan.text("Protocol") == "17":
+        return False
+    if rng.random() >= intensity * 0.85:
+        return False
+    plan.tls_fail = True
+    return True
+
+
+#: 34번 — v6 세션이 끝나는 모양의 몫. SYN 이 답을 못 받는 쪽(경로 끊김)이 다수이고 일부는 서버 쪽
+#: RST 로 끊긴다. **초기값**(실측 없음)
+IPV6_SYN_FAIL_SHARE = 0.70
+
+
+@plan_mutator("ipv6_path_fail")
+def _ipv6_path_fail(plan, sc, intensity, rng, cell) -> bool:
+    """대상 PGW 셀의 **IPv6 세션만** 서지 않고, 단말이 몇 초 뒤 **IPv4 로 다시 붙는다**(재시도 1회).
+
+    경로가 끊겼으므로 v6 세션은 강도만큼 모두 실패한다. 재시도는 같은 앱·같은 호로 v4 세션을 연다
+    (`session._open` 의 `ipv="1"`) — 그래서 사용자에게는 「끊김」이 아니라 「접속이 늦다」로 보인다.
+    v4 세션과 DNS 는 건드리지 않는다(DNS 서버 경로는 산다 — AAAA 답은 온다)
+    """
+    if cell.cell_key not in sc.active_cells_cache or plan.text("IP_Version") != "2":
+        return False
+    if rng.random() >= intensity:
+        return False
+    if plan.text("Protocol") != "17" and rng.random() < IPV6_SYN_FAIL_SHARE:
+        plan.syn_fail = True
+    else:
+        plan.reset = True
+    plan.retries = max(plan.retries, 1)
+    plan.v4_retry = True
+    return True
+
+
+@app_booster("update_surge")
+def _update_surge_load(sc, intensity, app) -> float:
+    """배포 서비스 세션을 최대 3배로 — 23번 행사장·21번 CDN 과 같은 식(`1 + 2 × 강도`)."""
+    return 1.0 + 2.0 * intensity if app.idx == sc.target.app_id else 1.0
+
+
+#: 35번 — 업데이트 세션의 내려받기 양 배율 `1 + k × 강도`. 정점에서 10배. **초기값**(실측 없음)
+UPDATE_SIZE_K = 9.0
+
+
+@plan_mutator("update_surge")
+def _update_surge_plan(plan, sc, intensity, rng, cell) -> bool:
+    """배포 서비스 세션이 **크게** 내려받는다 — down 바이트·패킷을 늘리고 처리시간도 같은 비로 늘린다.
+
+    처리율은 그대로다(시간도 같이 늘므로) — 셀 혼잡은 양이 몰린 결과로 graphio 가 읽는다. 처리시간은
+    세션 길이를 넘지 않게 자른다(`session._plan` 의 `cap_us` 와 같은 규칙)
+    """
+    if not _app_of(sc, plan.text("App_ID")):
+        return False
+    f = 1.0 + UPDATE_SIZE_K * intensity
+    for n in ("PacketCount", "PayloadPacketCount", "PayloadSize"):
+        plan.scale(f"Traffic_Total_Dnlink_{n}", f)
+    cap = plan.span * 60e6
+    plan.set("Traffic_Total_Dnlink_ThroughputTime",
+             min(cap, plan.get("Traffic_Total_Dnlink_ThroughputTime") * f))
+    return True
+
+
+@mutator("update_surge")
+def _update_surge_http(rec, sc, intensity, rng, cell) -> bool:
+    """HTTP 응답 본문 크기(`ContentLength` · 이제 Parquet 에 실린다)를 같은 배율로."""
+    if rec.series != "http" or not _app_of(sc, rec.get("App_ID")):
+        return False
+    f = 1.0 + UPDATE_SIZE_K * intensity
+    for n in ("HTTP_Total_Response_ContentLength", "HTTP_Total_Response_PayloadSize"):
+        rec.set(n, int(rec.num(n) * f))
+    return True
 
 
 # --------------------------------------------------------------------------

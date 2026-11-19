@@ -98,6 +98,8 @@ KINDS = (
     "capacity_shift",
     # 31·32번 (2026-11-19 · 처음 33·34 로 넣었다가 당겼다)
     "ran_drop_surge", "transport_cut",
+    # 28 ②·33·34·35번 (2026-11-19 · HTTP·DNS 신규)
+    "dns_nxdomain", "service_4xx", "service_tls_fail", "ipv6_path_fail", "update_surge",
 )
 
 #: **장애 시나리오 고정 목록** — `CM_ERROR_SCENARIO` 의 정본 (2026-10-28).
@@ -180,12 +182,14 @@ SCENARIOS: tuple[tuple[int, str, str | None, int | None, tuple[str, ...], str], 
     (26, "SW 업데이트한 기종만 접속 실패", "ue_model", 8,
      ("SGW",), "8번과 같은 데이터 — SW 버전 필드가 XDR 에 없다"),
     (27, "지진 — 통화 몰림·기지국 정지", "natural_disaster", None, ("ENB",), QUAKE_DESC),
-    # ── 28~33 신규 (2026-11-19 사용자 결정 · 14~27 은 그대로 두고 덧붙인다) ──────────────────
+    # ── 28~35 신규 (2026-11-19 사용자 결정 · 14~27 은 그대로 두고 덧붙인다) ──────────────────
     # 28~30 은 11-13 보류안(stash · V3 SC-20·19·21)의 생성기를 그대로 쓴다. 3·4번과 같은 데이터인 SGW 무응답·
     # 인증 거절은 넣지 않았다(사용자 11-19 「기존과 같으면 가져갈 필요 없다」 — 1~13 을 빼면 함께 뺀다).
     # 자동 대상은 28·29 전국(`faults._auto_target` 끝 — APN 은 `generator._bind_scenario_targets`), 30·31 한
     # 시군구 전 셀(`_AUTO_SGG`), 32 한 지역 셀 25개가 걸친 eNB 전부(`_AREA_KINDS`)다. 28 의 DNS 계층 구분은
-    # 다음 단계다. 33 은 준비 중 자리다
+    # 다음 단계다. 33~35 는 HTTP·DNS 신규다(대상 앱은 `generator._SERVICE_KINDS`·`_UPDATE_KINDS` · 34 는 PGW)
+    # 28 은 두 갈래다 — ① 전국 간헐(`dns_flap` · 이 행) ② 결제 외 한 서비스 「없는 주소」(`dns_nxdomain`).
+    # 한 행에 kind 가 하나라 ② 는 주입 API 에 kind 를 직접 주고 시나리오 번호 28 을 함께 넘긴다(33 ② 도 같다)
     (28, "DNS 접속 실패", "dns_flap", None, ("SGW",),
      "DNS 가 3분 나빠지고 3분 회복하기를 되풀이한다 — 같은 장애가 한두 건으로 묶이는지 본다"),
     (29, "특정 APN 접속 실패", "apn_pdn_failure", None, ("SGW",),
@@ -196,8 +200,13 @@ SCENARIOS: tuple[tuple[int, str, str | None, int | None, tuple[str, ...], str], 
      "한 시군구 셀에서 연결된 호가 무선 사유(121)로 끊긴다 — 접속(C-02)·지연은 평소대로, 절단률(C-04)만 오른다"),
     (32, "전송 구간 절단", "transport_cut", None, ("ENB",),
      "한 지역 기지국 묶음이 같은 분에 모두 멈췄다가(15분) 같은 분에 함께 돌아오고, 복구 직후 재접속이 몰린다 — 호 폭주 없음"),
-    (33, "작업·변경 뒤 장애", None, None, (),
-     "작업 시각 직후 작업 대상 장비 범위에서 열화가 시작된다(R-26) — 작업 이력 입력 경로가 먼저다(준비 중)"),
+    (33, "특정 서비스 접속 거절", "service_4xx", None, ("SGW",),
+     "결제 외 한 서비스가 HTTP 401·403(일부 429)으로 곧바로 거절한다 — 망·DNS·5xx·응답시간은 정상 "
+     "(② 보안 연결 실패는 `service_tls_fail`)"),
+    (34, "IPv6 경로만 실패", "ipv6_path_fail", None, ("PGW",),
+     "PGW 하나의 IPv6 세션만 서지 않고 단말이 몇 초 뒤 IPv4 로 다시 붙는다 — 끊김이 아니라 접속 지연"),
+    (35, "앱·OS 업데이트 배포 폭주", "update_surge", None, ("SGW",),
+     "업데이트 배포 서비스 하나의 세션이 3배·내려받기 양이 10배로 전국에서 몰린다 — 지역 편중 없음"),
 )
 
 #: **증거 없음** — 데이터에 그 장애를 판정할 근거 필드가 없어 만들지 않는 번호.

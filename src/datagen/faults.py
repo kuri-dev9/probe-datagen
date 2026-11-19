@@ -67,6 +67,7 @@ _AUTO_NODE = {
     "ims_pdn": "sgw_id",            # PGW 번호 = SGW 번호(구 SPGW)
     "cdn_degradation": "sgw_id",    # 6번과 같은 자리
     "pay_dns_delay": "sgw_id",      # 5번과 같은 자리
+    "ipv6_path_fail": "pgw_id",     # 34번 — IPv6 경로는 PGW(사용자 평면 출구) 하나에서 끊긴다
 }
 
 #: **자동 선택이면 장비 없이 그 기종의 호 전체에 거는 시나리오 번호**(2026-11-16 사용자 결정 A · 26번).

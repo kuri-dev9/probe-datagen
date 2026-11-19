@@ -184,6 +184,8 @@ TRANSPORT_CONST = (
     "ICMP_Delta_Uplink_IcmpPacketCount", "ICMP_Delta_Dnlink_IcmpPacketCount",
     "ClientHelloDomain", "LastDnsQueryName", "LastDnsRequestTime",
     "SynFirstTime", "SynAckFirstTime", "AckTime",
+    # 2026-11-19 — 세션마다 정하는 IP 버전(`_ip_version`)과 첫 RST 방향(규격 0 없음·1 단말 쪽·2 서버 쪽)
+    "IP_Version", "RstDirection",
 )
 
 #: `Traffic_Total_*` / `Traffic_Delta_*` 가 **짝으로** 있는 측정값. 누적은
@@ -203,6 +205,33 @@ CUM_PLAIN = ("UplinkRTTCount", "UplinkRTTTime",
 #: `TRANSPORT_CONST` 안의 자리. 절단 case 가 몇 개를 덮어쓰는데 `.index()` 를
 #: 그때마다 부르면 세션마다 선형 탐색이 된다(설계 §5.1 — 필드 인덱스 캐시).
 _C = {f: i for i, f in enumerate(TRANSPORT_CONST)}
+
+#: TLS 악수만 흐른 세션의 양 — `(up 패킷, up 바이트, down 패킷, down 바이트)` 범위. ClientHello 한두
+#: 패킷, ServerHello·인증서 몇 패킷이다. **초기값**(실측 없음 · 일반적인 TLS 악수 크기)
+TLS_HANDSHAKE = ((1, 3), (300, 900), (2, 5), (3000, 6000))
+
+
+def _tls_handshake_only(traffic: list[float], rng) -> list[float]:
+    """세션 총량을 TLS 악수만 남긴 값으로 — 재전송 0 · 처리시간은 1초 안(33번 ②)."""
+    (pu, bu, pd, bd) = TLS_HANDSHAKE
+    out = []
+    for n, v in zip(TRAFFIC_PAIRS, traffic):
+        up = n.startswith("Uplink")
+        if n.endswith("RetransPacketCount"):
+            out.append(0.0)
+        elif n.endswith("PayloadSize"):
+            out.append(float(rng.randint(*(bu if up else bd))))
+        elif n.endswith("PacketCount"):
+            out.append(float(rng.randint(*(pu if up else pd))))
+        elif n.endswith("ThroughputTime"):
+            out.append(rng.uniform(0.05e6, 0.5e6))
+        else:
+            out.append(v)
+    # 페이로드 패킷은 전체 패킷을 넘지 않는다 — 따로 뽑았으므로 맞춘다
+    for d in ("Uplink", "Dnlink"):
+        i_all, i_pay = TRAFFIC_PAIRS.index(f"{d}_PacketCount"), TRAFFIC_PAIRS.index(f"{d}_PayloadPacketCount")
+        out[i_pay] = min(out[i_pay], out[i_all])
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -497,6 +526,8 @@ class Session:
     app_ip: str = ""
     #: 장애가 요청한 재시도 세션 수(`Plan.retries`) — `_open` 이 읽는다
     retries: int = 0
+    #: 재시도를 **IPv4 로** 연다(`Plan.v4_retry` · 34번 IPv6 경로 실패 · 2026-11-19)
+    v4_retry: bool = False
     #: 핸드오버 직후 정체 **길이(초)**. `0` 은 없음. 첫 전환에서 `freeze` 로
     #: 바뀌고 0 이 된다 — 한 세션에 한 번이다.
     ho_stall_s: float = 0.0
@@ -806,7 +837,8 @@ class SessionEngine:
         s.const = tuple(const)
 
     def _open(self, ts: datetime, slot: float, tf: float, call: Call,
-              out: dict, mutate, plan_mutate=None, retry_of=None) -> None:
+              out: dict, mutate, plan_mutate=None, retry_of=None,
+              ipv: str | None = None) -> None:
         """세션 하나를 열고 그 분의 레코드를 낸다.
 
         순서는 실제 call flow 다 — 도메인을 풀고(DNS), 연결하고(TCP), 요청한다
@@ -847,11 +879,17 @@ class SessionEngine:
         #: 서버 주소는 **세션 하나에 하나**다 — CIDR 이 넓으면 레코드마다
         #: 다시 뽑지 않게 여기서 정한다
         app_ip = app.ip_out(rng) if app is not None else ""
+        # IP 버전도 **세션 하나에 하나**다 — DNS 질의 종류·TCP·HTTP 가 같은 값을 갖는다
+        # 34번 IPv4 재시도는 **이미 받아 둔 A 로** 다시 붙는다(Happy Eyeballs) — 분포에서 다시 뽑지 않는다
+        v4_fallback = retry_of is not None and ipv == "1"
+        ipv = ipv or self._ip_version()
 
         # ① DNS — 선행. 확률 p_dns 로만 일어난다(나머지는 캐시 히트)
         if rng.random() < self.p_dns:
             rec = gen.uplane_rec("dns", ts, tf, call.cell, t0 - 0.02,
                                  call.user, call.apn, F_SINGLE, sid)
+            rec.set("IP_Version", ipv)
+            rec.set("QueryType", "1" if v4_fallback else self._query_type(ipv))
             if host is not None:
                 rec.set("QueryName", "." + host)
                 # **앱 식별은 질의 도메인으로 붙인다**(2026-10-28 사용자 결정).
@@ -875,7 +913,7 @@ class SessionEngine:
             # 즉시 끊김 — 무선이 끊어졌으므로 길게 못 간다
             span = 1 if rng.random() < 0.7 else 2
         sess = self._plan(ts, tf, call, t0, span, sid, plan_mutate, app, host,
-                          app_ip)
+                          app_ip, ipv)
         # **다운 장비를 코어로 열린 세션** — 다운 시각 전에 붙은 호에서 열렸다(시작 분 안).
         # 그 시각에 끊는다 — 안 끊으면 다음 분까지 죽은 SGW 로 데이터가 흐른다(2026-11-04).
         # 다운 시각 **뒤**에 시작하는 세션은 위(`_open` 머리)에서 이미 열지 않았다
@@ -893,7 +931,71 @@ class SessionEngine:
         if retry_of is None and app is not None:
             for _ in range(sess.retries):
                 self._open(ts, slot, tf, call, out, mutate, plan_mutate,
-                           retry_of=(app, host))
+                           retry_of=(app, host), ipv="1" if sess.v4_retry else None)
+
+    def _ip_version(self) -> str:
+        """세션의 IP 버전 — transport 실측 분포(`IP_Version` · jp 프로파일 v6 80.7%)에서 뽑는다.
+
+        전에는 칸이 템플릿 기본값(빈 값)이었다(2026-11-19 · 신규 34번 IPv6 경로 실패의 전제). 분포가
+        없으면 비운다 — 지어 넣지 않는다(불변규칙 17)
+        """
+        smp = self.gen.samplers.get("transport")
+        v = smp.categorical("IP_Version", "") if smp is not None else ""
+        return v if v in ("1", "2") else ""
+
+    def _observed_handshake(self, const: list) -> None:
+        """악수를 못 본 세션 상수를 **관측된 악수**로 채운다 — 33번 ② 보안 연결 실패 전용.
+
+        새 값을 두지 않는다. 시각은 평소 레코드가 악수를 채우는 식(`generator.uplane_rec` 의
+        `SynFirstTime` +0.06 · +0.10초)이고, 횟수는 1(관측된 악수의 최빈값), MSS 는 실측 분포를
+        0(미관측) 밖에서 다시 뽑는다(`_query_type` 과 같은 조건부 추첨)
+        """
+        try:
+            ack = float(const[_C["AckTime"]] or 0)
+        except ValueError:
+            ack = 0.0
+        if const[_C["SynCount"]] not in ("0", "") and ack > 0:
+            return
+        const[_C["SynCount"]] = "1"
+        const[_C["SynAckCount"]] = "1"
+        try:
+            t = float(const[_C["SynFirstTime"]])
+        except ValueError:
+            return                          # 기준 시각을 모르면 지어 넣지 않는다(불변규칙 17)
+        const[_C["SynAckFirstTime"]] = f"{t + 0.06:.6f}"
+        const[_C["AckTime"]] = f"{t + 0.10:.6f}"
+        smp = self.gen.samplers.get("transport")
+        for f in ("SynMssSize", "SynAckMssSize"):
+            if const[_C[f]] not in ("0", "") or smp is None:
+                continue
+            for _ in range(8):
+                v = smp.categorical(f, "0")
+                if v != "0":
+                    const[_C[f]] = v
+                    break
+
+    #: IP 버전과 맞는 DNS 질의 종류 — v4 는 A(1), v6 는 AAAA(28). HTTPS(65)는 둘 다 묻는다
+    QTYPE_OK = {"1": frozenset({"1", "65"}), "2": frozenset({"28", "65"})}
+
+    def _query_type(self, ipv: str) -> str:
+        """DNS `QueryType` — 실측 분포를 **그 IP 버전에 맞는 값으로만** 다시 뽑는다(조건부 추첨).
+
+        새 비율을 두지 않는다 — 허용 집합 밖이 나오면 다시 뽑아 실측의 상대 비율을 지킨다. 한계: 세션
+        하나에 질의 하나라 실측의 A·AAAA 동시 질의(Happy Eyeballs)는 없다 — v6 세션이 80% 라 A 비중이
+        실측(46%)보다 낮게 나온다
+        """
+        smp = self.gen.samplers.get("dns")
+        ok = self.QTYPE_OK.get(ipv)
+        if smp is None:
+            return ""
+        v = smp.categorical("QueryType", "")
+        if ok is None:
+            return v
+        for _ in range(8):
+            if v in ok:
+                return v
+            v = smp.categorical("QueryType", "")
+        return "28" if ipv == "2" else "1"
 
     @staticmethod
     def _dns_failed(rec: Rec) -> bool:
@@ -930,7 +1032,8 @@ class SessionEngine:
 
     def _plan(self, ts: datetime, tf: float, call: Call, t0: float,
               span: int, sid: str, plan_mutate=None,
-              app=None, host: str | None = None, app_ip: str = "") -> Session:
+              app=None, host: str | None = None, app_ip: str = "",
+              ipv: str = "") -> Session:
         """세션 하나의 수명치를 **한 번에** 정한다.
 
         짧은 단위로 레코드 하나씩 만들지 않는 이유는 성능이다(설계 §5.1) —
@@ -990,9 +1093,12 @@ class SessionEngine:
                          ("ClientHelloDomain", "." + host),
                          ("LastDnsQueryName", "." + host)):
                 const[_C[f]] = v
+        const[_C["IP_Version"]] = ipv
+        # 첫 RST 방향 — 프로파일 RST 는 방향을 모른다(빈 값 · 불변규칙 17). RST 가 없으면 0(none)
+        const[_C["RstDirection"]] = "0" if const[_C["RstCount"]] in ("0", "") else ""
         freeze: tuple[float, float] | None = None
         ho_stall_s = 0.0
-        reset = syn_fail = False
+        reset = syn_fail = tls_fail = v4_retry = False
         retries = 0
         fade_sc, fade_i0 = None, 0.0
         norm_traffic: list[float] = []
@@ -1032,6 +1138,7 @@ class SessionEngine:
             if pl.ho_stall and call.outcome != OUT_STALL:
                 ho_stall_s = rng.uniform(3.0, 8.0)
             reset, syn_fail, retries = pl.reset, pl.syn_fail, pl.retries
+            tls_fail, v4_retry = pl.tls_fail, pl.v4_retry
 
         # 규칙 U-4 — **재전송은 페이로드 패킷을 넘지 않는다.** 배율이 겹치면
         # (`OUT_STALL` 의 8~20배 × 장애 훅) 넘을 수 있다. 장애가 없는 분에도
@@ -1048,6 +1155,7 @@ class SessionEngine:
         if call.outcome == OUT_RST:
             const[_C["RstCount"]] = "1"
             const[_C["FinCount"]] = "0"
+            const[_C["RstDirection"]] = ""     # 무선 유실 뒤 누가 먼저 RST 를 보냈는지 모른다
         elif call.outcome == OUT_STALL:
             # ACK 이 안 왔다 → `TCP_OK` 가 세어지지 않아 `U-01` 이 내려간다
             const[_C["AckTime"]] = "0.0"
@@ -1071,10 +1179,27 @@ class SessionEngine:
             span = 1
             freeze, ho_stall_s = None, 0.0
             fade_sc = None                  # 흐른 양이 없다 — 걷을 것도 없다
-        elif tcp and reset:
-            # 도중에 끊겼다 — 정상 종료(FIN) 대신 RST
+        elif tcp and tls_fail:
+            # **보안 연결이 서지 않았다**(33번 ② · 2026-11-19) — TCP 는 섰고(악수 그대로 · `U-01` 성공)
+            # 인증서 검증에 실패한 단말이 **곧바로 RST** 로 끊는다. 흐른 것은 TLS 악수 몇 패킷뿐이고
+            # 1분 안에 끝난다. 평문 요청이 없으니 HTTP 기록도 없다
             const[_C["RstCount"]] = "1"
             const[_C["FinCount"]] = "0"
+            const[_C["RstDirection"]] = "1"
+            # 막 연 세션이라 TCP 악수가 **관측된다** — 실측 레코드의 절반(`SynCount` 0)은 프로브가
+            # 악수를 못 본 장수 세션인데, 곧바로 끊기는 세션은 그럴 수 없다(에스터 11-19 · 54% 가 ACK 없음)
+            self._observed_handshake(const)
+            traffic = _tls_handshake_only(traffic, rng)
+            plain = tuple(min(v, 2.0) if n.endswith("Count") else min(v, 2.0e4)
+                          for n, v in zip(CUM_PLAIN, plain))
+            span = 1
+            freeze, ho_stall_s = None, 0.0
+            fade_sc = None
+        elif tcp and reset:
+            # 도중에 끊겼다 — 정상 종료(FIN) 대신 RST. 끊은 쪽은 서버·망이다
+            const[_C["RstCount"]] = "1"
+            const[_C["FinCount"]] = "0"
+            const[_C["RstDirection"]] = "2"
         elif reset:
             # **UDP 에는 RST 가 없다** — 끊김은 흐름이 일찍 멎는 것으로만
             # 보인다(QUIC 이 타임아웃으로 닫힌다). 수명을 1~2분으로 자른다
@@ -1089,7 +1214,7 @@ class SessionEngine:
                          ("AckTime", "0.0"), ("SynFirstTime", ""),
                          ("SynAckFirstTime", ""), ("FinCount", "0"),
                          ("RstCount", "0"), ("UplinkWindowCloseCount", "0"),
-                         ("DnlinkWindowCloseCount", "0")):
+                         ("DnlinkWindowCloseCount", "0"), ("RstDirection", "0")):
                 const[_C[f]] = v
 
         # 핸드오버는 **수명 3분 이상**에서만 관측된다. 1~2분 세션에 끼우면
@@ -1100,8 +1225,8 @@ class SessionEngine:
             ho = rng.randint(1, span - 2)
 
         m = 0
-        # 연결이 안 섰으면 요청도 없다
-        if not (tcp and syn_fail) and rng.random() < self.p_http:
+        # 연결이 안 섰으면 요청도 없다 — 보안 연결이 안 선 세션도 요청이 없다
+        if not (tcp and (syn_fail or tls_fail)) and rng.random() < self.p_http:
             # 긴 세션이 더 많이 요청한다(§1.3). 평균은 `http_tx_mean` 이고
             # 그것이 `p_http` 와 짝이라 분당 HTTP 레코드 수가 설정을 재현한다.
             scale = span / max(1.0, self.shape.span_mean)
@@ -1125,7 +1250,7 @@ class SessionEngine:
             domain=(host if host is not None
                     else smp.domain() if smp is not None else ""),
             freeze=freeze, ho_stall_s=ho_stall_s, app=app, app_ip=app_ip,
-            retries=retries,
+            retries=retries, v4_retry=v4_retry,
             fade_sc=fade_sc, fade_i0=fade_i0,
             norm_traffic=tuple(norm_traffic) if fade_sc is not None else (),
             norm_plain=norm_plain if fade_sc is not None else (),
@@ -1370,6 +1495,7 @@ class SessionEngine:
                     for f, v in (("App_ID", a.idx), ("App_Group_Code", a.group),
                                  ("App_IPv4", s.app_ip), ("App_Port", a.port_out)):
                         h.set(f, v)
+                h.set("IP_Version", s.const[_C["IP_Version"]])
                 if s.outcome == OUT_ABORT:
                     # U 에 의한 종료 — 요청은 갔는데 응답이 없다(§3).
                     # `U-26`(HTTP 무응답률)이 이것을 집는다. `U-23` 의 분모는
@@ -1407,7 +1533,7 @@ class SessionEngine:
         때만 남긴다.
         """
         idx = self.gen.index["transport"]
-        over = {idx["FinCount"]: "0", idx["RstCount"]: "0"}
+        over = {idx["FinCount"]: "0", idx["RstCount"]: "0", idx["RstDirection"]: "0"}
         if not self._stalled(s, s.base, mid):
             for f in self.WINDOW_CLOSE:
                 over[idx[f]] = "0"

@@ -57,6 +57,12 @@ KIND_LABELS = {
     # 31·32번 (2026-11-19)
     "ran_drop_surge": "절단 급증",
     "transport_cut": "전송 구간 절단",
+    # 28 ②·33·34·35번 (2026-11-19)
+    "dns_nxdomain": "한 서비스 「없는 주소」 (DNS)",
+    "service_4xx": "특정 서비스 접속 거절 (HTTP 4xx)",
+    "service_tls_fail": "특정 서비스 보안 연결 실패 (TLS)",
+    "ipv6_path_fail": "IPv6 경로만 실패",
+    "update_surge": "앱·OS 업데이트 배포 폭주",
 }
 
 #: **주입 메뉴는 `CM_ERROR_SCENARIO` 를 읽는다** (2026-10-28). 전에는 여기

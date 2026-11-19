@@ -1187,6 +1187,16 @@ class Generator:
     _SITE_KINDS = ("cdn_degradation",)
     #: 결제 그룹 앱으로 거는 kind (`j-sc-22`)
     _PAY_KINDS = ("pay_dns_delay",)
+    #: **결제·스트리밍 밖의 서비스 앱 하나**로 거는 kind(2026-11-19 · 28 ②·33). 22번(결제)·21번(스트리밍)과
+    #: 대상이 겹치지 않게 그 두 그룹을 뺀다. 33 ② 는 TLS 를 TCP 위에서 보므로 TCP 앱만 고른다
+    _SERVICE_KINDS = ("dns_nxdomain", "service_4xx", "service_tls_fail")
+    _SERVICE_SKIP_GROUPS = frozenset({"PAY", "STREAMING"})
+    #: 서비스 후보 수 — 비중 상위 몇 앱 안에서 회차마다 돌린다. 표본이 서는 큰 앱이어야 한다. **초기값**
+    SERVICE_POOL = 4
+    #: 업데이트 배포 서비스 kind(35번) — 앱 이름에 이 낱말이 든 앱 중 비중 상위에서 돌린다. OS·게임 패치
+    #: 배포처다. **초기값**(사전에 「업데이트」 표시가 없어 이름으로 고른다)
+    _UPDATE_KINDS = ("update_surge",)
+    UPDATE_NAMES = ("apple", "microsoft", "nintendo", "playstation", "steam", "android")
 
     def _top_video_site(self) -> str:
         """http·transport **양쪽**에 나오는 동영상 등급 사이트 중 트래픽 상위.
@@ -1268,10 +1278,48 @@ class Generator:
                     pool = ranked[2:2 + self.UE_MODEL_POOL] or ranked[-1:]
                     sc.target.vendor_model = self._rotate_pick(
                         sc, "ue_model", pool, lambda vm: f"UE:{vm[0]}/{vm[1]}") or pool[0]
+            if sc.kind in self._SERVICE_KINDS and not sc.target.app_id and self.app_book:
+                tcp = sc.kind == "service_tls_fail"
+                pool = self._service_pool(tcp)
+                a = (self._rotate_pick(sc, "service", pool, lambda x: f"APP:{x.idx}")
+                     if pool else None) or (pool[0] if pool else None)
+                if a is not None:
+                    sc.target.app_id, sc.target.app_group = a.idx, a.group
+            if sc.kind in self._UPDATE_KINDS and not sc.target.app_id and self.app_book:
+                pool = self._update_pool()
+                a = (self._rotate_pick(sc, "update", pool, lambda x: f"APP:{x.idx}")
+                     if pool else None) or (pool[0] if pool else None)
+                if a is not None:
+                    sc.target.app_id, sc.target.app_group = a.idx, a.group
             if sc.kind in self._APN_KINDS and sc.target.apn is None:
                 pool = self._apn_pool_top()
+                if sc.kind == "apn_pdn_failure":
+                    # **29번은 데이터 APN 만**(2026-11-19 사용자 결정) — IMS(음성) APN 은 20번의 자리다
+                    pool = [a for a in pool if "ims" not in a.lower()]
                 sc.target.apn = (self._rotate_pick(sc, "apn", pool, lambda a: f"APN:{a}")
-                                 if pool else None) or self._top_apn()
+                                 if pool else None) or (pool[0] if pool and sc.kind == "apn_pdn_failure"
+                                                        else self._top_apn())
+
+    def _service_pool(self, tcp_only: bool = False) -> list:
+        """28 ②·33 의 후보 — 결제·스트리밍 밖에서 **비중 상위 앱**(`SERVICE_POOL` 개)."""
+        apps = [a for a in self.app_book.apps
+                if a.group not in self._SERVICE_SKIP_GROUPS and (not tcp_only or a.protocol != "17")]
+        agg: dict[str, tuple[float, object]] = {}
+        for a in apps:                      # 엔드포인트 여러 행 = 앱 하나 — 비중을 더한다
+            w, first = agg.get(a.idx, (0.0, a))
+            agg[a.idx] = (w + a.weight, first)
+        ranked = sorted(agg.values(), key=lambda t: (-t[0], t[1].idx))
+        return [a for _w, a in ranked[:self.SERVICE_POOL]]
+
+    def _update_pool(self) -> list:
+        """35번 후보 — 이름에 `UPDATE_NAMES` 낱말이 든 TCP 앱, 비중 순."""
+        hit = [a for a in self.app_book.apps if a.protocol != "17"
+               and any(k in a.name.lower() for k in self.UPDATE_NAMES)]
+        agg: dict[str, tuple[float, object]] = {}
+        for a in hit:
+            w, first = agg.get(a.idx, (0.0, a))
+            agg[a.idx] = (w + a.weight, first)
+        return [a for _w, a in sorted(agg.values(), key=lambda t: (-t[0], t[1].idx))[:self.SERVICE_POOL]]
 
     def _top_traffic_domain(self) -> str | None:
         """사전에서 **기대 트래픽이 가장 큰 대표 도메인**.

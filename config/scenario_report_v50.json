@@ -5302,7 +5302,7 @@
    "name": "DNS 접속 실패",
    "kind": "dns_flap",
    "source": "V3 SC-20 (신규 후보 11-19)",
-   "what": "전국 DNS 질의가 3분 나빠지고 3분 회복하기를 되풀이한다. 나쁜 3분에는 질의의 70%가 실패한다. 원인을 맞히는지와 함께, 켜졌다 꺼지는 같은 장애를 한두 사건으로 묶는지가 검증 대상이다.",
+   "what": "전국 DNS 질의가 3분 나빠지고 3분 회복하기를 되풀이한다. 나쁜 3분에는 질의의 70%가 실패한다. 원인을 맞히는지와 함께, 켜졌다 꺼지는 같은 장애를 한두 사건으로 묶는지가 검증 대상이다. ② 결제·스트리밍 밖 한 서비스의 도메인만 「없는 주소」(NXDOMAIN)로 빠르게 실패하는 갈래도 있다.",
    "setup": {
     "target": "전국 DNS 질의 전체다. 장비와 도메인을 고르지 않는다.",
     "duration_min": 18,
@@ -5336,6 +5336,11 @@
       "name": "주기",
       "value": "3분 나빠짐 · 3분 회복",
       "initial": true
+     },
+     {
+      "name": "② 없는 주소",
+      "value": "결제·스트리밍 밖 상위 앱 하나의 DNS 질의 전부가 ReplyCode 3 · 재시도 0 (dns_nxdomain)",
+      "initial": false
      },
      {
       "name": "권장 주입 길이",
@@ -5385,7 +5390,7 @@
    "source": "V3 SC-19 (신규 후보 11-19)",
    "what": "상위 APN 하나만 전국에서 데이터 연결(PDN)이 거절된다. 그 APN 으로 연결을 시도한 호의 75%가 실패하고, 같은 MME·SGW 를 쓰는 다른 APN 은 정상이다.",
    "setup": {
-    "target": "트래픽 상위 APN 가운데 하나를 회차마다 돌려 가며 고른다. 장비는 고르지 않는다(전국).",
+    "target": "트래픽 상위 APN 가운데 IMS(음성) APN 을 빼고 하나를 회차마다 돌려 가며 고른다. 장비는 고르지 않는다(전국).",
     "duration_min": 8,
     "intensity": 1.0,
     "phases": [
@@ -5695,30 +5700,215 @@
   },
   {
    "no": 33,
-   "name": "작업·변경 뒤 장애",
-   "kind": null,
-   "source": "신규 후보 11-19",
-   "what": "작업·설정 변경 시각 직후 작업 대상 장비 범위에서 열화가 시작된다. 작업 이력과 맞춰 계획 작업(R-26)으로 판정한다.",
+   "name": "특정 서비스 접속 거절",
+   "kind": "service_4xx",
+   "source": "신규 후보 11-19 (HTTP·TLS)",
+   "what": "결제·스트리밍이 아닌 한 서비스의 서버가 접속을 거절한다. ① HTTP 요청이 401·403(일부 429)으로 곧바로 거절되거나 ② 보안 연결(TLS)이 서지 않아 단말이 바로 끊는다. 망·DNS·5xx·응답시간은 정상이다.",
    "setup": {
-    "target": "준비 중",
-    "duration_min": null,
-    "intensity": null,
-    "phases": [],
-    "params": []
+    "target": "결제·스트리밍 밖에서 비중 상위 앱 4개 가운데 하나를 회차마다 돌려 가며 고른다. 전국이다.",
+    "duration_min": 8,
+    "intensity": 1.0,
+    "phases": [
+     {
+      "at": "0분",
+      "what": "곧바로 시작한다"
+     },
+     {
+      "at": "0~8분",
+      "what": "정점을 유지한다"
+     },
+     {
+      "at": "8분",
+      "what": "곧바로 끝난다"
+     }
+    ],
+    "params": [
+     {
+      "name": "거절 비율",
+      "value": "대상 앱 HTTP 요청 가운데 강도 1.0 에서 85%",
+      "initial": false
+     },
+     {
+      "name": "거절 코드",
+      "value": "401 45% · 403 45% · 429 10%",
+      "initial": true
+     },
+     {
+      "name": "② 보안 연결 실패",
+      "value": "대상 앱 TCP 세션의 85% 가 TLS 악수 뒤 단말 RST 로 끝난다(service_tls_fail)",
+      "initial": false
+     },
+     {
+      "name": "권장 주입 길이",
+      "value": "8분, 끝난 뒤 판정 확정까지 약 7분",
+      "initial": true
+     }
+    ]
    },
    "expect": {
-    "cause": "PLANNED_MAINTENANCE",
-    "rules": [
-     "R-26"
-    ],
+    "cause": "EXTERNAL_SERVER",
+    "rules": [],
     "alternatives": [],
-    "kpi": null,
-    "geo": null
+    "kpi": "U-24",
+    "geo": "WIDE"
    },
+   "next": "첫 주입으로 D·L1·L2 와 21번(CDN 느림)과 갈리는지를 본다. 거절 판정 룰은 graphio 쪽이 아직 없다.",
    "status": "not_run",
    "latest": null,
    "history": [],
-   "next": "작업 이력을 넣을 경로가 먼저다 — gen 은 XDR 만 만든다(준비 중).",
+   "evidence": [],
+   "stages": {
+    "D": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L1": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L2": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L3": {
+     "state": "unknown",
+     "detail": "미실행"
+    }
+   },
+   "reached": null
+  },
+  {
+   "no": 34,
+   "name": "IPv6 경로만 실패",
+   "kind": "ipv6_path_fail",
+   "source": "신규 후보 11-19 (DNS·Transport)",
+   "what": "PGW 하나의 IPv6 경로만 끊긴다. 그 PGW 를 지나는 IPv6 세션이 서지 않고, 단말이 몇 초 뒤 IPv4 로 다시 붙는다. 그래서 사용자에게는 끊김이 아니라 접속이 늦은 것으로 보인다.",
+   "setup": {
+    "target": "셀이 가장 많이 물린 PGW 하나를 자동으로 고른다. 지도에서 PGW 를 지정할 수도 있다.",
+    "duration_min": 8,
+    "intensity": 1.0,
+    "phases": [
+     {
+      "at": "0분",
+      "what": "곧바로 시작한다"
+     },
+     {
+      "at": "0~8분",
+      "what": "정점을 유지한다"
+     },
+     {
+      "at": "8분",
+      "what": "곧바로 끝난다"
+     }
+    ],
+    "params": [
+     {
+      "name": "IPv6 실패",
+      "value": "대상 PGW 셀의 IPv6 세션 전부(강도 1.0)",
+      "initial": false
+     },
+     {
+      "name": "실패 모양",
+      "value": "SYN 무응답 70% · RST 30% (UDP 는 짧게 끊긴다)",
+      "initial": true
+     },
+     {
+      "name": "IPv4 재시도",
+      "value": "실패한 세션마다 1~8초 뒤 IPv4 로 한 번 다시 연다",
+      "initial": false
+     },
+     {
+      "name": "권장 주입 길이",
+      "value": "8분, 끝난 뒤 판정 확정까지 약 7분",
+      "initial": true
+     }
+    ]
+   },
+   "expect": {
+    "cause": "IPV6_PATH_FAILURE",
+    "rules": [],
+    "alternatives": [],
+    "kpi": "U-01",
+    "geo": "SCATTER"
+   },
+   "next": "첫 주입으로 D·L1·L2 를 본다. IP 버전 축 집계·룰·원인 코드가 graphio 에 먼저 필요하다.",
+   "status": "not_run",
+   "latest": null,
+   "history": [],
+   "evidence": [],
+   "stages": {
+    "D": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L1": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L2": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L3": {
+     "state": "unknown",
+     "detail": "미실행"
+    }
+   },
+   "reached": null
+  },
+  {
+   "no": 35,
+   "name": "앱·OS 업데이트 배포 폭주",
+   "kind": "update_surge",
+   "source": "신규 후보 11-19 (HTTP·Transport)",
+   "what": "OS·게임 패치 배포일에 업데이트 배포 서비스 하나로 대용량 내려받기가 전국에서 몰린다. 지역 편중이 없고 원인 서비스가 하나다.",
+   "setup": {
+    "target": "업데이트 배포 서비스(앱 이름에 apple·microsoft·nintendo·playstation·steam·android) 가운데 비중 상위 앱을 돌려 가며 고른다. 전국이다.",
+    "duration_min": 11,
+    "intensity": 1.0,
+    "phases": [
+     {
+      "at": "0~3분",
+      "what": "서서히 오른다"
+     },
+     {
+      "at": "3~8분",
+      "what": "정점을 유지한다"
+     },
+     {
+      "at": "8~11분",
+      "what": "서서히 내려온다"
+     }
+    ],
+    "params": [
+     {
+      "name": "세션 배율",
+      "value": "대상 앱 세션이 강도 1.0 에서 3배 (23번 행사장과 같은 식)",
+      "initial": false
+     },
+     {
+      "name": "내려받기 양",
+      "value": "대상 앱 세션의 down 바이트·패킷·HTTP 본문 크기 10배",
+      "initial": true
+     },
+     {
+      "name": "권장 주입 길이",
+      "value": "11분, 끝난 뒤 판정 확정까지 약 7분",
+      "initial": true
+     }
+    ]
+   },
+   "expect": {
+    "cause": "RAN_CAPACITY_CONGESTION",
+    "rules": [],
+    "alternatives": [],
+    "kpi": null,
+    "geo": "WIDE"
+   },
+   "next": "첫 주입으로 D·L1·L2 를 본다. 단말 OS 편중은 넣지 못했다(기종 코드가 OS 를 말하지 않는다).",
+   "status": "not_run",
+   "latest": null,
+   "history": [],
    "evidence": [],
    "stages": {
     "D": {

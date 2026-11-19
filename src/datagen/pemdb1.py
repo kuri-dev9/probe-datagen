@@ -258,6 +258,9 @@ UPLANE_FIELDS: dict[str, tuple[tuple[str, str, str, int | None], ...]] = {
         ("APP_GROUP_CODE", "App_Group_Code", "str", 50),
         ("APP_IP", "App_IPv4", "str", 45),
         ("APP_PORT", "App_Port", "i32", None),
+        # 2026-11-19 (신규 33 ②) — 보안 연결 상대 이름(SNI)과 첫 RST 방향(0 없음·1 단말·2 서버 · 빈 값 = 모름)
+        ("CLIENT_HELLO_DOMAIN", "ClientHelloDomain", "str", 255),
+        ("RST_DIRECTION", "RstDirection", "i8", None),
     ),
     "dns": (
         ("ENB_ID", "eNB_ID", "str", 30),
@@ -279,6 +282,8 @@ UPLANE_FIELDS: dict[str, tuple[tuple[str, str, str, int | None], ...]] = {
         ("PAYLOAD_SIZE_UP", "Traffic_Total_Uplink_PayloadSize", "i64", None),
         ("PAYLOAD_SIZE_DN", "Traffic_Total_Dnlink_PayloadSize", "i64", None),
         ("TETHERING", "Tethering", "i8", None),
+        # 2026-11-19 (신규 34) — 질의 종류(1 A·28 AAAA·65 HTTPS). 세션 IP 버전과 맞춘다(`session._query_type`)
+        ("QUERY_TYPE", "QueryType", "i32", None),
         # 앱 축 — transport·http 와 같은 이름(2026-10-28). DNS 는 앱 사전을
         # 타지 않아 `App_ID` 가 비고 `App_IPv4` 가 `0` 이다 — 생성기 값 그대로다
         ("APP_ID", "App_ID", "str", 20),
@@ -309,6 +314,8 @@ UPLANE_FIELDS: dict[str, tuple[tuple[str, str, str, int | None], ...]] = {
         ("PAYLOAD_SIZE_DN", "Traffic_Total_Dnlink_PayloadSize", "i64", None),
         ("THROUGHPUT_TIME_DN", "Traffic_Total_Dnlink_ThroughputTime", "f64", None),
         ("TETHERING", "Tethering", "i8", None),
+        # 2026-11-19 (신규 35) — 응답 본문 크기(헤더 `Content-Length`)
+        ("RESP_CONTENT_LENGTH", "HTTP_Total_Response_ContentLength", "i64", None),
         # 앱 축 (2026-10-28 · `CM_APP_CODE`). **이름은 규격 그대로** —
         # 운영 프로브가 Protocol·IP·Port 로 매핑해 붙이는 값이다
         ("APP_ID", "App_ID", "str", 20),

@@ -5066,8 +5066,8 @@
     "ja": "DNS接続失敗"
    },
    "what": {
-    "h": "c93ea5363d",
-    "ja": "全国の DNS 問い合わせが3分悪化し3分回復するのを繰り返す。悪化の3分間は問い合わせの70%が失敗する。原因を当てるかとともに、点いたり消えたりする同じ障害を1~2件の事象にまとめるかが検証対象である。"
+    "h": "0a2c32b91d",
+    "ja": "全国の DNS 問い合わせが3分悪化し3分回復するのを繰り返す。悪化の3分間は問い合わせの70%が失敗する。原因を当てるかとともに、点いたり消えたりする同じ障害を1~2件の事象にまとめるかが検証対象である。② 決済・ストリーミング以外の1サービスのドメインだけが「存在しないアドレス」(NXDOMAIN)ですぐに失敗する分岐もある。"
    },
    "setup.target": {
     "h": "d492e96913",
@@ -5146,10 +5146,18 @@
     "ja": "3分悪化 · 3分回復"
    },
    "setup.params.3.name": {
+    "h": "a5c69af11c",
+    "ja": "② 存在しないアドレス"
+   },
+   "setup.params.3.value": {
+    "h": "60ea87370a",
+    "ja": "決済・ストリーミング以外の上位アプリ1つの DNS 問い合わせすべてが ReplyCode 3 · 再試行0 (dns_nxdomain)"
+   },
+   "setup.params.4.name": {
     "h": "c1566aaa47",
     "ja": "推奨注入長"
    },
-   "setup.params.3.value": {
+   "setup.params.4.value": {
     "h": "e6eddf747d",
     "ja": "18分、終了後の判定確定まで約7分"
    }
@@ -5164,8 +5172,8 @@
     "ja": "上位 APN 1つだけが全国でデータ接続(PDN)を拒否される。その APN で接続を試みた呼の75%が失敗し、同じ MME・SGW を使うほかの APN は正常である。"
    },
    "setup.target": {
-    "h": "611abac941",
-    "ja": "トラフィック上位 APN のうち1つを回ごとに順番に選ぶ。装置は選ばない(全国)。"
+    "h": "ad37e9ac85",
+    "ja": "トラフィック上位 APN のうち IMS(音声) APN を除いて1つを回ごとに順番に選ぶ。装置は選ばない(全国)。"
    },
    "setup.phases.0.at": {
     "h": "c614604d4d",
@@ -5512,24 +5520,256 @@
   },
   "33": {
    "name": {
-    "h": "fcfe07518c",
-    "ja": "作業・変更後の障害"
+    "h": "ac5d9c3344",
+    "ja": "特定サービスの接続拒否"
    },
    "source": {
-    "h": "5ea828fa98",
-    "ja": "新規候補 11-19"
+    "h": "a786aaf863",
+    "ja": "新規候補 11-19 (HTTP·TLS)"
    },
    "what": {
-    "h": "091ee03451",
-    "ja": "作業・設定変更の時刻の直後から、作業対象装置の範囲で劣化が始まる。作業履歴と照合して計画作業(R-26)と判定する。"
+    "h": "782d8f0aa3",
+    "ja": "決済・ストリーミングではない1サービスのサーバーが接続を拒否する。① HTTP 要求が 401・403(一部429)ですぐに拒否されるか、② セキュア接続(TLS)が立たず端末がすぐに切る。網・DNS・5xx・応答時間は正常である。"
    },
    "setup.target": {
-    "h": "e86e2d3dcc",
-    "ja": "準備中"
+    "h": "9038c47dd8",
+    "ja": "決済・ストリーミング以外で比重上位のアプリ4つのうち1つを回ごとに順番に選ぶ。全国である。"
+   },
+   "setup.phases.0.at": {
+    "h": "c614604d4d",
+    "ja": "0分"
+   },
+   "setup.phases.0.what": {
+    "h": "d904755bfe",
+    "ja": "すぐに始まる"
+   },
+   "setup.phases.1.at": {
+    "h": "83c03bc47d",
+    "ja": "0~8分"
+   },
+   "setup.phases.1.what": {
+    "h": "b313227341",
+    "ja": "ピークを維持する"
+   },
+   "setup.phases.2.at": {
+    "h": "4232bda503",
+    "ja": "8分"
+   },
+   "setup.phases.2.what": {
+    "h": "929d58622e",
+    "ja": "すぐに終わる"
+   },
+   "setup.params.0.name": {
+    "h": "4e78cefc9a",
+    "ja": "拒否の割合"
+   },
+   "setup.params.0.value": {
+    "h": "973b762372",
+    "ja": "対象アプリの HTTP 要求のうち強度1.0で85%"
+   },
+   "setup.params.1.name": {
+    "h": "718d8005db",
+    "ja": "拒否コード"
+   },
+   "setup.params.2.name": {
+    "h": "84ad394762",
+    "ja": "② セキュア接続失敗"
+   },
+   "setup.params.2.value": {
+    "h": "2627ae975f",
+    "ja": "対象アプリの TCP セッションの85%が TLS ハンドシェイク後に端末 RST で終わる(service_tls_fail)"
+   },
+   "setup.params.3.name": {
+    "h": "c1566aaa47",
+    "ja": "推奨注入長"
+   },
+   "setup.params.3.value": {
+    "h": "ca527db53e",
+    "ja": "8分、終了後に判定確定まで約7分"
    },
    "next": {
-    "h": "2a0b4052be",
-    "ja": "作業履歴を入れる経路が先である — gen は XDR だけを作る(準備中)。"
+    "h": "a7dae075a2",
+    "ja": "初回の注入で D・L1・L2 と21番(CDN 遅延)と分かれるかを見る。拒否を判定するルールは graphio 側にまだない。"
+   },
+   "stages.D.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L1.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L2.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L3.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   }
+  },
+  "34": {
+   "name": {
+    "h": "c7cbca572a",
+    "ja": "IPv6 経路だけ失敗"
+   },
+   "source": {
+    "h": "c5e3c6a52b",
+    "ja": "新規候補 11-19 (DNS·Transport)"
+   },
+   "what": {
+    "h": "a180c026da",
+    "ja": "1つの PGW の IPv6 経路だけが切れる。その PGW を通る IPv6 セッションが立たず、端末が数秒後に IPv4 でつなぎ直す。そのため利用者には切断ではなく接続が遅いように見える。"
+   },
+   "setup.target": {
+    "h": "966ea13a06",
+    "ja": "セルが最も多くつながる PGW 1つを自動で選ぶ。地図で PGW を指定することもできる。"
+   },
+   "setup.phases.0.at": {
+    "h": "c614604d4d",
+    "ja": "0分"
+   },
+   "setup.phases.0.what": {
+    "h": "d904755bfe",
+    "ja": "すぐに始まる"
+   },
+   "setup.phases.1.at": {
+    "h": "83c03bc47d",
+    "ja": "0~8分"
+   },
+   "setup.phases.1.what": {
+    "h": "b313227341",
+    "ja": "ピークを維持する"
+   },
+   "setup.phases.2.at": {
+    "h": "4232bda503",
+    "ja": "8分"
+   },
+   "setup.phases.2.what": {
+    "h": "929d58622e",
+    "ja": "すぐに終わる"
+   },
+   "setup.params.0.name": {
+    "h": "fcf43b7a3b",
+    "ja": "IPv6 失敗"
+   },
+   "setup.params.0.value": {
+    "h": "d12aad3052",
+    "ja": "対象 PGW のセルの IPv6 セッションすべて(強度1.0)"
+   },
+   "setup.params.1.name": {
+    "h": "fe38e6bcc1",
+    "ja": "失敗の形"
+   },
+   "setup.params.1.value": {
+    "h": "179c527b92",
+    "ja": "SYN 無応答70% · RST 30% (UDP は短く切れる)"
+   },
+   "setup.params.2.name": {
+    "h": "82e9ef42d2",
+    "ja": "IPv4 再試行"
+   },
+   "setup.params.2.value": {
+    "h": "d18acd6234",
+    "ja": "失敗したセッションごとに1~8秒後に IPv4 で1回開き直す"
+   },
+   "setup.params.3.name": {
+    "h": "c1566aaa47",
+    "ja": "推奨注入長"
+   },
+   "setup.params.3.value": {
+    "h": "ca527db53e",
+    "ja": "8分、終了後に判定確定まで約7分"
+   },
+   "next": {
+    "h": "be75357825",
+    "ja": "初回の注入で D・L1・L2 を見る。IP バージョン軸の集計・ルール・原因コードが先に graphio に必要である。"
+   },
+   "stages.D.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L1.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L2.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L3.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   }
+  },
+  "35": {
+   "name": {
+    "h": "648d4c1489",
+    "ja": "アプリ・OS アップデート配信の集中"
+   },
+   "source": {
+    "h": "791e960f59",
+    "ja": "新規候補 11-19 (HTTP·Transport)"
+   },
+   "what": {
+    "h": "111e87568b",
+    "ja": "OS・ゲームのパッチ配信日に、アップデート配信サービス1つに大容量ダウンロードが全国から集中する。地域の偏りがなく原因サービスが1つである。"
+   },
+   "setup.target": {
+    "h": "f77f2089ef",
+    "ja": "アップデート配信サービス(アプリ名に apple・microsoft・nintendo・playstation・steam・android)のうち比重上位のアプリを順番に選ぶ。全国である。"
+   },
+   "setup.phases.0.at": {
+    "h": "174a2afbf3",
+    "ja": "0~3分"
+   },
+   "setup.phases.0.what": {
+    "h": "b2a56e27fc",
+    "ja": "徐々に上がる"
+   },
+   "setup.phases.1.at": {
+    "h": "b716803dbf",
+    "ja": "3~8分"
+   },
+   "setup.phases.1.what": {
+    "h": "b313227341",
+    "ja": "ピークを維持する"
+   },
+   "setup.phases.2.at": {
+    "h": "e3fa6f8c0a",
+    "ja": "8~11分"
+   },
+   "setup.phases.2.what": {
+    "h": "7dba40724a",
+    "ja": "徐々に下がる"
+   },
+   "setup.params.0.name": {
+    "h": "7e8fd584c9",
+    "ja": "セッション倍率"
+   },
+   "setup.params.0.value": {
+    "h": "7a9256627d",
+    "ja": "対象アプリのセッションが強度1.0で3倍 (23番のイベント会場と同じ式)"
+   },
+   "setup.params.1.name": {
+    "h": "07a90c4ae9",
+    "ja": "ダウンロード量"
+   },
+   "setup.params.1.value": {
+    "h": "e7d3df62ab",
+    "ja": "対象アプリのセッションの down バイト・パケット・HTTP 本文サイズ10倍"
+   },
+   "setup.params.2.name": {
+    "h": "c1566aaa47",
+    "ja": "推奨注入長"
+   },
+   "setup.params.2.value": {
+    "h": "1dc68a2974",
+    "ja": "11分、終了後に判定が確定するまで約7分"
+   },
+   "next": {
+    "h": "adf062465b",
+    "ja": "初回の注入で D・L1・L2 を見る。端末 OS の偏りは入れられなかった(機種コードが OS を示さない)。"
    },
    "stages.D.detail": {
     "h": "6358d7db5e",
