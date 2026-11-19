@@ -231,7 +231,7 @@ def test_glossary_cause_ja_equals_graphio_cause_labels_ja():
 def test_kind_specs_title_equals_kind_labels_for_every_kind():
     from datagen import scenarios as S
     from datagen.ui import common
-    assert set(S.KIND_SPECS) == set(common.KIND_LABELS) and len(S.KIND_SPECS) == 36
+    assert set(S.KIND_SPECS) == set(common.KIND_LABELS) and len(S.KIND_SPECS) == 38      # 33·34번 신규 종류(ran_drop_surge · transport_cut)가 더해졌다(2026-11-19)
     assert {k: v["title"] for k, v in S.KIND_SPECS.items()} == dict(common.KIND_LABELS)
 
 
@@ -244,7 +244,7 @@ def test_kind_labels_of_scenarios_14_to_27_equal_the_scenario_names():
         use[r[2]].append(r)
     checked = 0
     for kind, rows in use.items():
-        if len(rows) == 1 and rows[0][0] >= 14:
+        if kind is not None and len(rows) == 1 and rows[0][0] >= 14:        # 33번처럼 종류가 없는(준비 중) 번호는 뺀다
             assert common.KIND_LABELS[kind] == rows[0][1], (kind, rows[0][0])
             checked += 1
     assert checked >= 10

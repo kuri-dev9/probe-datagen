@@ -5663,6 +5663,494 @@
     "h": "a89b309312",
     "ja": "統合障害EVT-7414d2ca64に用意済み質問3つ(原因・根拠 / 影響範囲 / 運用者の対応)。検証で捨てられた文0件、答えはすべて「自然災害の発生と推定」(地震と断定せず)、3つの兆候(通話殺到361.8→14638件・Emergency 0→381・eNB無呼)と影響の中央区23・千代田区15・文京区1・台東区1=セル40・加入者730が証拠パックと一致。"
    }
+  },
+  "28": {
+   "name": {
+    "h": "8069e571b0",
+    "ja": "DNS接続失敗"
+   },
+   "what": {
+    "h": "c93ea5363d",
+    "ja": "全国の DNS 問い合わせが3分悪化し3分回復するのを繰り返す。悪化の3分間は問い合わせの70%が失敗する。原因を当てるかとともに、点いたり消えたりする同じ障害を1~2件の事象にまとめるかが検証対象である。"
+   },
+   "setup.target": {
+    "h": "d492e96913",
+    "ja": "全国の DNS 問い合わせ全体である。装置とドメインを選ばない。"
+   },
+   "setup.phases.0.at": {
+    "h": "174a2afbf3",
+    "ja": "0~3分"
+   },
+   "setup.phases.0.what": {
+    "h": "cfcca1826b",
+    "ja": "悪化する(強度1.0)"
+   },
+   "setup.params.0.name": {
+    "h": "2c8bea3599",
+    "ja": "失敗比率"
+   },
+   "setup.params.0.value": {
+    "h": "ace4843029",
+    "ja": "悪化区間の DNS 問い合わせの70%"
+   },
+   "next": {
+    "h": "6fed0c506e",
+    "ja": "初回の注入で事象数(1~2件であるべき)と D・L1・L2 を見る。"
+   },
+   "stages.D.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L1.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L2.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L3.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "setup.params.1.name": {
+    "h": "fe38e6bcc1",
+    "ja": "失敗の形"
+   },
+   "setup.params.1.value": {
+    "h": "20d4ec9895",
+    "ja": "サーバーエラー(ReplyCode 2) 55% · 無応答(ReplyCode 900) 45%"
+   },
+   "source": {
+    "h": "ef7cfcc7e9",
+    "ja": "V3 SC-20 (新規候補 11-19)"
+   },
+   "setup.phases.1.at": {
+    "h": "bc2d17f3f8",
+    "ja": "3~6分"
+   },
+   "setup.phases.1.what": {
+    "h": "3b7c26eade",
+    "ja": "回復する(強度0)"
+   },
+   "setup.phases.2.at": {
+    "h": "6b9c6562f4",
+    "ja": "6~18分"
+   },
+   "setup.phases.2.what": {
+    "h": "63a8e2220f",
+    "ja": "同じ周期をさらに2回繰り返す"
+   },
+   "setup.params.2.name": {
+    "h": "1cd385d7e0",
+    "ja": "周期"
+   },
+   "setup.params.2.value": {
+    "h": "9033278461",
+    "ja": "3分悪化 · 3分回復"
+   },
+   "setup.params.3.name": {
+    "h": "c1566aaa47",
+    "ja": "推奨注入長"
+   },
+   "setup.params.3.value": {
+    "h": "e6eddf747d",
+    "ja": "18分、終了後の判定確定まで約7分"
+   }
+  },
+  "29": {
+   "name": {
+    "h": "5637e8c40e",
+    "ja": "特定APNの接続失敗"
+   },
+   "what": {
+    "h": "6f5fe6ab6e",
+    "ja": "上位 APN 1つだけが全国でデータ接続(PDN)を拒否される。その APN で接続を試みた呼の75%が失敗し、同じ MME・SGW を使うほかの APN は正常である。"
+   },
+   "setup.target": {
+    "h": "611abac941",
+    "ja": "トラフィック上位 APN のうち1つを回ごとに順番に選ぶ。装置は選ばない(全国)。"
+   },
+   "setup.phases.0.at": {
+    "h": "c614604d4d",
+    "ja": "0分"
+   },
+   "setup.phases.0.what": {
+    "h": "d904755bfe",
+    "ja": "すぐに始まる"
+   },
+   "setup.phases.1.at": {
+    "h": "83c03bc47d",
+    "ja": "0~8分"
+   },
+   "setup.phases.1.what": {
+    "h": "b313227341",
+    "ja": "ピークを維持する"
+   },
+   "setup.params.0.name": {
+    "h": "4e78cefc9a",
+    "ja": "拒否の割合"
+   },
+   "next": {
+    "h": "1315207849",
+    "ja": "初回の注入で D・L1・L2 と APN 軸で分かれるかを見る。"
+   },
+   "stages.D.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L1.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L2.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L3.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "setup.params.1.name": {
+    "h": "2f25a7fa4d",
+    "ja": "拒否原因"
+   },
+   "source": {
+    "h": "4db7aac9f2",
+    "ja": "V3 SC-19 (新規候補 11-19)"
+   },
+   "setup.phases.2.at": {
+    "h": "4232bda503",
+    "ja": "8分"
+   },
+   "setup.phases.2.what": {
+    "h": "929d58622e",
+    "ja": "すぐに終わる"
+   },
+   "setup.params.0.value": {
+    "h": "09646c236e",
+    "ja": "対象 APN のデータ接続試行のうち強度1.0で75%"
+   },
+   "setup.params.2.name": {
+    "h": "c1566aaa47",
+    "ja": "推奨注入長"
+   },
+   "setup.params.2.value": {
+    "h": "ca527db53e",
+    "ja": "8分、終了後に判定確定まで約7分"
+   }
+  },
+  "30": {
+   "name": {
+    "h": "e60659f5fd",
+    "ja": "複合障害 (伝送 → DNS → HTTP)"
+   },
+   "what": {
+    "h": "fd53580395",
+    "ja": "1市区町村で伝送区間が先に悪化し(0分)、2分後にその地域の DNS が失敗し、その結果 Web 要求が減る。症状が三つあっても一次原因の伝送損失を選ぶかが検証対象である。"
+   },
+   "setup.target": {
+    "h": "e2413836c0",
+    "ja": "1市区町村のセルすべてを自動で選ぶ。"
+   },
+   "setup.phases.0.at": {
+    "h": "174a2afbf3",
+    "ja": "0~3分"
+   },
+   "setup.phases.0.what": {
+    "h": "b81b4860bf",
+    "ja": "伝送損失が徐々に上がる"
+   },
+   "setup.phases.1.at": {
+    "h": "402a062535",
+    "ja": "2分から"
+   },
+   "setup.phases.1.what": {
+    "h": "d9a21822c3",
+    "ja": "DNS 失敗が2分遅れて続く"
+   },
+   "setup.phases.2.at": {
+    "h": "55baeb93c2",
+    "ja": "3~10分"
+   },
+   "setup.phases.2.what": {
+    "h": "b313227341",
+    "ja": "ピークを維持する"
+   },
+   "setup.phases.3.at": {
+    "h": "9419becf81",
+    "ja": "10~13分"
+   },
+   "setup.phases.3.what": {
+    "h": "7dba40724a",
+    "ja": "徐々に下がる"
+   },
+   "setup.params.0.name": {
+    "h": "c8db94a50e",
+    "ja": "伝送損失"
+   },
+   "setup.params.0.value": {
+    "h": "3df467a582",
+    "ja": "対象セルのセッションの 80%×強度 — down 再送率 3%+12%×強度 · RTT 混雑 · 処理時間 1+1.9×強度倍"
+   },
+   "next": {
+    "h": "0a08a2bcc3",
+    "ja": "初回の注入で D・L1・L2 と結論が一次原因(伝送)になるかを見る。"
+   },
+   "stages.D.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L1.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L2.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L3.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "setup.params.1.name": {
+    "h": "5eedaca1d2",
+    "ja": "DNS 失敗"
+   },
+   "setup.params.1.value": {
+    "h": "ee4d04ecfa",
+    "ja": "対象セルの DNS 問い合わせの 70%×強度 — 無応答60% · サーバーエラー40%"
+   },
+   "source": {
+    "h": "f91695800f",
+    "ja": "V3 SC-21 (新規候補 11-19)"
+   },
+   "setup.params.2.name": {
+    "h": "897f96bfbf",
+    "ja": "DNS 開始の遅れ"
+   },
+   "setup.params.2.value": {
+    "h": "2eccda828e",
+    "ja": "2分"
+   },
+   "setup.params.3.name": {
+    "h": "c1566aaa47",
+    "ja": "推奨注入長"
+   },
+   "setup.params.3.value": {
+    "h": "d826c4c71c",
+    "ja": "13分、終了後の判定確定まで約7分"
+   }
+  },
+  "31": {
+   "name": {
+    "h": "24f4dccf61",
+    "ja": "切断急増"
+   },
+   "source": {
+    "h": "b0698cfab3",
+    "ja": "新規候補 11-19 (FM_ALARM CD)"
+   },
+   "what": {
+    "h": "86c6b6fe08",
+    "ja": "1市区町村のセルで、接続済みの呼の一部が無線理由(121 Radio Connection With UE Lost)で切れる。接続失敗と遅延は増やさないので、疎通率(C-02)はそのままで切断率(C-04)だけが上がる。"
+   },
+   "setup.target": {
+    "h": "e2413836c0",
+    "ja": "1市区町村のセルすべてを自動で選ぶ。"
+   },
+   "next": {
+    "h": "ff753de38c",
+    "ja": "初回の注入で D・L1・L2 と疎通率がそのままかを見る。"
+   },
+   "stages.D.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L1.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L2.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L3.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "setup.phases.0.at": {
+    "h": "174a2afbf3",
+    "ja": "0~3分"
+   },
+   "setup.phases.0.what": {
+    "h": "b2a56e27fc",
+    "ja": "徐々に上がる"
+   },
+   "setup.phases.1.at": {
+    "h": "b716803dbf",
+    "ja": "3~8分"
+   },
+   "setup.phases.1.what": {
+    "h": "b313227341",
+    "ja": "ピークを維持する"
+   },
+   "setup.phases.2.at": {
+    "h": "e3fa6f8c0a",
+    "ja": "8~11分"
+   },
+   "setup.phases.2.what": {
+    "h": "7dba40724a",
+    "ja": "徐々に下がる"
+   },
+   "setup.params.0.name": {
+    "h": "ddbc9dd1fc",
+    "ja": "切断の割合"
+   },
+   "setup.params.0.value": {
+    "h": "01600ec955",
+    "ja": "接続済みの呼のうち強度1.0で18% (2番の無線劣化の切断分と同じ)"
+   },
+   "setup.params.1.name": {
+    "h": "0202532e2e",
+    "ja": "切断原因"
+   },
+   "setup.params.1.value": {
+    "h": "241b882f89",
+    "ja": "S1AP 121 Radio Connection With UE Lost (eNB要求の解放)"
+   },
+   "setup.params.2.name": {
+    "h": "c1566aaa47",
+    "ja": "推奨注入長"
+   },
+   "setup.params.2.value": {
+    "h": "1dc68a2974",
+    "ja": "11分、終了後に判定が確定するまで約7分"
+   }
+  },
+  "32": {
+   "name": {
+    "h": "9f84741a75",
+    "ja": "伝送区間の切断"
+   },
+   "source": {
+    "h": "226a34b2ef",
+    "ja": "新規候補 11-19 (FM_ALARM)"
+   },
+   "what": {
+    "h": "178632ec65",
+    "ja": "1地域(セル25個)にまたがる基地局すべての伝送路が切れ、同じ分に一斉に停止する。15分後に同じ分に一斉に戻り、復旧直後の2分間に再接続が集中する。27番の地震と違い呼の輻輳はない。"
+   },
+   "setup.target": {
+    "h": "a05b44366f",
+    "ja": "1地域のセル25個を自動で選び、そのセルがまたがる基地局のセルすべてを対象にする。"
+   },
+   "next": {
+    "h": "acde0b84a7",
+    "ja": "初回の注入で D・L1・L2 と複数の基地局が一つの事象にまとまるかを見る(R-36 は「隣接 eNB 正常」を条件とする)。"
+   },
+   "stages.D.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L1.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L2.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L3.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "setup.phases.0.at": {
+    "h": "4a2afe9022",
+    "ja": "0~15分"
+   },
+   "setup.phases.0.what": {
+    "h": "9094be216c",
+    "ja": "すべての基地局が停止する — 呼がなく、開いていたセッションは地域外の近いセルに引き継がれる"
+   },
+   "setup.phases.1.at": {
+    "h": "3c0f096be9",
+    "ja": "15~17分"
+   },
+   "setup.phases.1.what": {
+    "h": "350c48a7ca",
+    "ja": "一斉に戻り、再接続が集中する"
+   },
+   "setup.params.0.name": {
+    "h": "ae9929da83",
+    "ja": "停止する基地局"
+   },
+   "setup.params.0.value": {
+    "h": "150859f4e4",
+    "ja": "対象地域にまたがる eNB すべて — 同じ分に止まり同じ分に戻る"
+   },
+   "setup.params.1.name": {
+    "h": "d76d988c12",
+    "ja": "再接続の集中"
+   },
+   "setup.params.1.value": {
+    "h": "0604f5d286",
+    "ja": "復旧2分間、対象セルの呼の割り当て1.8倍"
+   },
+   "setup.phases.2.at": {
+    "h": "317ab403d5",
+    "ja": "17分"
+   },
+   "setup.phases.2.what": {
+    "h": "f7c49238d3",
+    "ja": "通常に戻る"
+   },
+   "setup.params.2.name": {
+    "h": "c1566aaa47",
+    "ja": "推奨注入長"
+   },
+   "setup.params.2.value": {
+    "h": "535e080bdb",
+    "ja": "17分、終了後の判定確定まで約7分"
+   }
+  },
+  "33": {
+   "name": {
+    "h": "fcfe07518c",
+    "ja": "作業・変更後の障害"
+   },
+   "source": {
+    "h": "5ea828fa98",
+    "ja": "新規候補 11-19"
+   },
+   "what": {
+    "h": "091ee03451",
+    "ja": "作業・設定変更の時刻の直後から、作業対象装置の範囲で劣化が始まる。作業履歴と照合して計画作業(R-26)と判定する。"
+   },
+   "setup.target": {
+    "h": "e86e2d3dcc",
+    "ja": "準備中"
+   },
+   "next": {
+    "h": "2a0b4052be",
+    "ja": "作業履歴を入れる経路が先である — gen は XDR だけを作る(準備中)。"
+   },
+   "stages.D.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L1.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L2.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   },
+   "stages.L3.detail": {
+    "h": "6358d7db5e",
+    "ja": "未実行"
+   }
   }
  }
 }

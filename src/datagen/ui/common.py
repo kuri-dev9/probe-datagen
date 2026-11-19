@@ -51,9 +51,12 @@ KIND_LABELS = {
     "pgw_uplane_degradation": "데이터 관문 품질 저하 (PGW)",
     "enb_s1_outage": "기지국 멈춤 (전송 단절)",
     "partial_recovery": "부분 장애 뒤 단계적 회복",
-    "apn_pdn_failure": "접속 주소별 연결 실패 (APN)",
-    "dns_flap": "주소 찾기 간헐 실패 (DNS)",
-    "compound_causal_failure": "복합 장애 (전송망 → 주소 찾기 → 웹)",
+    "apn_pdn_failure": "특정 APN 접속 실패",
+    "dns_flap": "DNS 접속 실패",
+    "compound_causal_failure": "복합 장애 (전송 → DNS → HTTP)",
+    # 31·32번 (2026-11-19)
+    "ran_drop_surge": "절단 급증",
+    "transport_cut": "전송 구간 절단",
 }
 
 #: **주입 메뉴는 `CM_ERROR_SCENARIO` 를 읽는다** (2026-10-28). 전에는 여기

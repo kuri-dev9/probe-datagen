@@ -99,13 +99,17 @@ _CROWD_KINDS = ("ran_congestion",)
 #: 나머지가 그 가입자를 받는다. eNB 하나로는 "받을 이웃"이 없다.
 _AREA_KINDS = ("earthquake", "natural_disaster",
                # 17번 SA 폴백 — 한 지역(셀 25개)의 5G 측 장애. 정지는 없고 범위만 같은 모양이다
-               "sa_fallback")
+               "sa_fallback",
+               # 32번 전송 구간 절단 — 한 지역(셀 25개)이 걸친 eNB 전부가 함께 멈춘다(`whole_enbs`)
+               "transport_cut")
 
 #: 행사장 kind — **eNB 하나**(2026-11-07 사용자 결정 · `_venue_target`). 군중은 한 기지국에 몰린다.
 _VENUE_KINDS = ("event_crowd",)
 
 _AUTO_SGG = ("ran_radio", "transport_loss", "nsa_nr_leg",
-             "compound_causal_failure")
+             "compound_causal_failure",
+             # 31번 절단 급증 — 2번과 같은 자리(한 시군구 전 셀)
+             "ran_drop_surge")
 
 #: MME 집합을 범위로 잡는 kind → 상위 몇 대인가 `(건너뛸 수, 가져갈 수)`.
 #:
@@ -1121,8 +1125,8 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
         total = sum(base.values())
         sc._surge_cell_base = base if total > 0 else {}
         sc._surge_base = total if total > 0 else None
-    if fault["kind"] == "enb_s1_outage":
-        # 세션을 이웃 eNB 셀로 잇는다(`scenarios._outage_relocate`) — 이웃은 대상 밖이다
+    if fault["kind"] in ("enb_s1_outage", "transport_cut"):
+        # 세션을 이웃 eNB 셀로 잇는다(`scenarios._outage_relocate` · `_transport_cut_relocate`) — 이웃은 대상 밖이다
         sc._pool_all = cells
     return sc
 

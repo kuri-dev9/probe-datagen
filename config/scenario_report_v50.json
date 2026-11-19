@@ -5296,6 +5296,449 @@
     }
    },
    "reached": "L3"
+  },
+  {
+   "no": 28,
+   "name": "DNS 접속 실패",
+   "kind": "dns_flap",
+   "source": "V3 SC-20 (신규 후보 11-19)",
+   "what": "전국 DNS 질의가 3분 나빠지고 3분 회복하기를 되풀이한다. 나쁜 3분에는 질의의 70%가 실패한다. 원인을 맞히는지와 함께, 켜졌다 꺼지는 같은 장애를 한두 사건으로 묶는지가 검증 대상이다.",
+   "setup": {
+    "target": "전국 DNS 질의 전체다. 장비와 도메인을 고르지 않는다.",
+    "duration_min": 18,
+    "intensity": 1.0,
+    "phases": [
+     {
+      "at": "0~3분",
+      "what": "나빠진다(강도 1.0)"
+     },
+     {
+      "at": "3~6분",
+      "what": "회복한다(강도 0)"
+     },
+     {
+      "at": "6~18분",
+      "what": "같은 주기를 두 번 더 되풀이한다"
+     }
+    ],
+    "params": [
+     {
+      "name": "실패 비율",
+      "value": "나쁜 구간 DNS 질의의 70%",
+      "initial": false
+     },
+     {
+      "name": "실패 모양",
+      "value": "서버 오류(ReplyCode 2) 55% · 무응답(ReplyCode 900) 45%",
+      "initial": false
+     },
+     {
+      "name": "주기",
+      "value": "3분 나빠짐 · 3분 회복",
+      "initial": true
+     },
+     {
+      "name": "권장 주입 길이",
+      "value": "18분, 끝난 뒤 판정 확정까지 약 7분",
+      "initial": true
+     }
+    ]
+   },
+   "expect": {
+    "cause": "DNS_DEGRADATION",
+    "rules": [
+     "R-14"
+    ],
+    "alternatives": [],
+    "kpi": "U-29",
+    "geo": "WIDE"
+   },
+   "status": "not_run",
+   "latest": null,
+   "history": [],
+   "next": "첫 주입으로 사건 수(한두 건이어야 한다)와 D·L1·L2 를 본다.",
+   "evidence": [],
+   "stages": {
+    "D": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L1": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L2": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L3": {
+     "state": "unknown",
+     "detail": "미실행"
+    }
+   },
+   "reached": null
+  },
+  {
+   "no": 29,
+   "name": "특정 APN 접속 실패",
+   "kind": "apn_pdn_failure",
+   "source": "V3 SC-19 (신규 후보 11-19)",
+   "what": "상위 APN 하나만 전국에서 데이터 연결(PDN)이 거절된다. 그 APN 으로 연결을 시도한 호의 75%가 실패하고, 같은 MME·SGW 를 쓰는 다른 APN 은 정상이다.",
+   "setup": {
+    "target": "트래픽 상위 APN 가운데 하나를 회차마다 돌려 가며 고른다. 장비는 고르지 않는다(전국).",
+    "duration_min": 8,
+    "intensity": 1.0,
+    "phases": [
+     {
+      "at": "0분",
+      "what": "곧바로 시작한다"
+     },
+     {
+      "at": "0~8분",
+      "what": "정점을 유지한다"
+     },
+     {
+      "at": "8분",
+      "what": "곧바로 끝난다"
+     }
+    ],
+    "params": [
+     {
+      "name": "거절 비율",
+      "value": "대상 APN 의 데이터 연결 시도 가운데 강도 1.0 에서 75%",
+      "initial": false
+     },
+     {
+      "name": "거절 원인",
+      "value": "S11 78 → ESM 27 60% · S11 93 → ESM 33 40%",
+      "initial": true
+     },
+     {
+      "name": "권장 주입 길이",
+      "value": "8분, 끝난 뒤 판정 확정까지 약 7분",
+      "initial": true
+     }
+    ]
+   },
+   "expect": {
+    "cause": "APN_CONFIG_ERROR",
+    "rules": [
+     "R-07"
+    ],
+    "alternatives": [],
+    "kpi": "C-02",
+    "geo": "WIDE"
+   },
+   "status": "not_run",
+   "latest": null,
+   "history": [],
+   "next": "첫 주입으로 D·L1·L2 와 APN 축에서 갈라지는지를 본다.",
+   "evidence": [],
+   "stages": {
+    "D": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L1": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L2": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L3": {
+     "state": "unknown",
+     "detail": "미실행"
+    }
+   },
+   "reached": null
+  },
+  {
+   "no": 30,
+   "name": "복합 장애 (전송 → DNS → HTTP)",
+   "kind": "compound_causal_failure",
+   "source": "V3 SC-21 (신규 후보 11-19)",
+   "what": "한 시군구에서 전송 구간이 먼저 나빠지고(0분), 2분 뒤 그 지역 DNS 가 실패하고, 그 결과 웹 요청이 줄어든다. 증상이 셋이어도 1차 원인인 전송 손실을 고르는지가 검증 대상이다.",
+   "setup": {
+    "target": "한 시군구의 셀 전부를 자동으로 고른다.",
+    "duration_min": 13,
+    "intensity": 1.0,
+    "phases": [
+     {
+      "at": "0~3분",
+      "what": "전송 손실이 서서히 오른다"
+     },
+     {
+      "at": "2분부터",
+      "what": "DNS 실패가 2분 늦게 따라온다"
+     },
+     {
+      "at": "3~10분",
+      "what": "정점을 유지한다"
+     },
+     {
+      "at": "10~13분",
+      "what": "서서히 내려온다"
+     }
+    ],
+    "params": [
+     {
+      "name": "전송 손실",
+      "value": "대상 셀 세션의 80%×강도 — down 재전송률 3%+12%×강도 · RTT 혼잡 · 처리 시간 1+1.9×강도 배",
+      "initial": false
+     },
+     {
+      "name": "DNS 실패",
+      "value": "대상 셀 DNS 질의의 70%×강도 — 무응답 60% · 서버 오류 40%",
+      "initial": false
+     },
+     {
+      "name": "DNS 시작 지연",
+      "value": "2분",
+      "initial": true
+     },
+     {
+      "name": "권장 주입 길이",
+      "value": "13분, 끝난 뒤 판정 확정까지 약 7분",
+      "initial": true
+     }
+    ]
+   },
+   "expect": {
+    "cause": "TRANSPORT_LOSS",
+    "rules": [
+     "R-09",
+     "R-16",
+     "R-14"
+    ],
+    "alternatives": [],
+    "kpi": "U-12",
+    "geo": "CLUSTER"
+   },
+   "status": "not_run",
+   "latest": null,
+   "history": [],
+   "next": "첫 주입으로 D·L1·L2 와 결론이 1차 원인(전송)으로 나오는지를 본다.",
+   "evidence": [],
+   "stages": {
+    "D": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L1": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L2": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L3": {
+     "state": "unknown",
+     "detail": "미실행"
+    }
+   },
+   "reached": null
+  },
+  {
+   "no": 31,
+   "name": "절단 급증",
+   "kind": "ran_drop_surge",
+   "source": "신규 후보 11-19 (FM_ALARM CD)",
+   "what": "한 시군구 셀에서 연결된 호의 일부가 무선 사유(121 Radio Connection With UE Lost)로 끊긴다. 접속 실패와 지연은 늘리지 않아 소통률(C-02)은 그대로이고 절단률(C-04)만 오른다.",
+   "setup": {
+    "target": "한 시군구의 셀 전부를 자동으로 고른다.",
+    "duration_min": 11,
+    "intensity": 1.0,
+    "phases": [
+     {
+      "at": "0~3분",
+      "what": "서서히 오른다"
+     },
+     {
+      "at": "3~8분",
+      "what": "정점을 유지한다"
+     },
+     {
+      "at": "8~11분",
+      "what": "서서히 내려온다"
+     }
+    ],
+    "params": [
+     {
+      "name": "절단 비율",
+      "value": "연결된 호 가운데 강도 1.0 에서 18% (2번 무선 열화의 절단 몫과 같다)",
+      "initial": true
+     },
+     {
+      "name": "절단 원인",
+      "value": "S1AP 121 Radio Connection With UE Lost (eNB 요청 해제)",
+      "initial": false
+     },
+     {
+      "name": "권장 주입 길이",
+      "value": "11분, 끝난 뒤 판정 확정까지 약 7분",
+      "initial": true
+     }
+    ]
+   },
+   "expect": {
+    "cause": "RAN_RADIO_QUALITY",
+    "rules": [
+     "R-20"
+    ],
+    "alternatives": [],
+    "kpi": "C-04",
+    "geo": "CLUSTER"
+   },
+   "status": "not_run",
+   "latest": null,
+   "history": [],
+   "next": "첫 주입으로 D·L1·L2 와 소통률이 그대로인지를 본다.",
+   "evidence": [],
+   "stages": {
+    "D": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L1": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L2": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L3": {
+     "state": "unknown",
+     "detail": "미실행"
+    }
+   },
+   "reached": null
+  },
+  {
+   "no": 32,
+   "name": "전송 구간 절단",
+   "kind": "transport_cut",
+   "source": "신규 후보 11-19 (FM_ALARM)",
+   "what": "한 지역(셀 25개)이 걸친 기지국 전부의 전송로가 끊겨 같은 분에 모두 멈춘다. 15분 뒤 같은 분에 함께 돌아오고, 복구 직후 2분 동안 재접속이 몰린다. 27번 지진과 달리 호 폭주가 없다.",
+   "setup": {
+    "target": "한 지역 셀 25개를 자동으로 고르고 그 셀이 걸친 기지국의 셀 전부를 잡는다.",
+    "duration_min": 17,
+    "intensity": 1.0,
+    "phases": [
+     {
+      "at": "0~15분",
+      "what": "모든 기지국이 멈춘다 — 호가 없고 열린 세션은 지역 밖 가까운 셀로 이어진다"
+     },
+     {
+      "at": "15~17분",
+      "what": "함께 돌아오고 재접속이 몰린다"
+     },
+     {
+      "at": "17분",
+      "what": "평소로 돌아온다"
+     }
+    ],
+    "params": [
+     {
+      "name": "정지 기지국",
+      "value": "대상 지역이 걸친 eNB 전부 — 같은 분에 멈추고 같은 분에 돌아온다",
+      "initial": false
+     },
+     {
+      "name": "재접속 몰림",
+      "value": "복구 2분 동안 대상 셀 호 배정 1.8배",
+      "initial": true
+     },
+     {
+      "name": "권장 주입 길이",
+      "value": "17분, 끝난 뒤 판정 확정까지 약 7분",
+      "initial": true
+     }
+    ]
+   },
+   "expect": {
+    "cause": "RAN_NODE_DOWN",
+    "rules": [
+     "R-36"
+    ],
+    "alternatives": [],
+    "kpi": "C-01",
+    "geo": "CLUSTER"
+   },
+   "status": "not_run",
+   "latest": null,
+   "history": [],
+   "next": "첫 주입으로 D·L1·L2 와 여러 기지국이 한 사건으로 묶이는지를 본다(R-36 은 「인접 eNB 정상」을 조건으로 한다).",
+   "evidence": [],
+   "stages": {
+    "D": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L1": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L2": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L3": {
+     "state": "unknown",
+     "detail": "미실행"
+    }
+   },
+   "reached": null
+  },
+  {
+   "no": 33,
+   "name": "작업·변경 뒤 장애",
+   "kind": null,
+   "source": "신규 후보 11-19",
+   "what": "작업·설정 변경 시각 직후 작업 대상 장비 범위에서 열화가 시작된다. 작업 이력과 맞춰 계획 작업(R-26)으로 판정한다.",
+   "setup": {
+    "target": "준비 중",
+    "duration_min": null,
+    "intensity": null,
+    "phases": [],
+    "params": []
+   },
+   "expect": {
+    "cause": "PLANNED_MAINTENANCE",
+    "rules": [
+     "R-26"
+    ],
+    "alternatives": [],
+    "kpi": null,
+    "geo": null
+   },
+   "status": "not_run",
+   "latest": null,
+   "history": [],
+   "next": "작업 이력을 넣을 경로가 먼저다 — gen 은 XDR 만 만든다(준비 중).",
+   "evidence": [],
+   "stages": {
+    "D": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L1": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L2": {
+     "state": "unknown",
+     "detail": "미실행"
+    },
+    "L3": {
+     "state": "unknown",
+     "detail": "미실행"
+    }
+   },
+   "reached": null
   }
  ]
 }

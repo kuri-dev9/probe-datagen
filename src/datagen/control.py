@@ -96,6 +96,8 @@ KINDS = (
     "apn_pdn_failure", "dns_flap", "compound_causal_failure",
     # 장애가 아닌 재현 — 증설 후 부하 이동(`j-sc-24`)
     "capacity_shift",
+    # 31·32번 (2026-11-19 · 처음 33·34 로 넣었다가 당겼다)
+    "ran_drop_surge", "transport_cut",
 )
 
 #: **장애 시나리오 고정 목록** — `CM_ERROR_SCENARIO` 의 정본 (2026-10-28).
@@ -178,6 +180,24 @@ SCENARIOS: tuple[tuple[int, str, str | None, int | None, tuple[str, ...], str], 
     (26, "SW 업데이트한 기종만 접속 실패", "ue_model", 8,
      ("SGW",), "8번과 같은 데이터 — SW 버전 필드가 XDR 에 없다"),
     (27, "지진 — 통화 몰림·기지국 정지", "natural_disaster", None, ("ENB",), QUAKE_DESC),
+    # ── 28~33 신규 (2026-11-19 사용자 결정 · 14~27 은 그대로 두고 덧붙인다) ──────────────────
+    # 28~30 은 11-13 보류안(stash · V3 SC-20·19·21)의 생성기를 그대로 쓴다. 3·4번과 같은 데이터인 SGW 무응답·
+    # 인증 거절은 넣지 않았다(사용자 11-19 「기존과 같으면 가져갈 필요 없다」 — 1~13 을 빼면 함께 뺀다).
+    # 자동 대상은 28·29 전국(`faults._auto_target` 끝 — APN 은 `generator._bind_scenario_targets`), 30·31 한
+    # 시군구 전 셀(`_AUTO_SGG`), 32 한 지역 셀 25개가 걸친 eNB 전부(`_AREA_KINDS`)다. 28 의 DNS 계층 구분은
+    # 다음 단계다. 33 은 준비 중 자리다
+    (28, "DNS 접속 실패", "dns_flap", None, ("SGW",),
+     "DNS 가 3분 나빠지고 3분 회복하기를 되풀이한다 — 같은 장애가 한두 건으로 묶이는지 본다"),
+    (29, "특정 APN 접속 실패", "apn_pdn_failure", None, ("SGW",),
+     "상위 APN 하나만 전국에서 PDN 접속 실패(S11 78→ESM 27 · S11 93→ESM 33) — 같은 MME·SGW 의 다른 APN 은 정상"),
+    (30, "복합 장애 (전송 → DNS → HTTP)", "compound_causal_failure", None, ("ENB",),
+     "한 시군구 전송 손실(0분) → DNS 실패(2분) → HTTP 감소(4분) — 1차 원인 전송을 고르는지 본다"),
+    (31, "절단 급증", "ran_drop_surge", None, ("ENB",),
+     "한 시군구 셀에서 연결된 호가 무선 사유(121)로 끊긴다 — 접속(C-02)·지연은 평소대로, 절단률(C-04)만 오른다"),
+    (32, "전송 구간 절단", "transport_cut", None, ("ENB",),
+     "한 지역 기지국 묶음이 같은 분에 모두 멈췄다가(15분) 같은 분에 함께 돌아오고, 복구 직후 재접속이 몰린다 — 호 폭주 없음"),
+    (33, "작업·변경 뒤 장애", None, None, (),
+     "작업 시각 직후 작업 대상 장비 범위에서 열화가 시작된다(R-26) — 작업 이력 입력 경로가 먼저다(준비 중)"),
 )
 
 #: **증거 없음** — 데이터에 그 장애를 판정할 근거 필드가 없어 만들지 않는 번호.

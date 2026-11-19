@@ -1071,6 +1071,28 @@ KIND_SPECS: dict[str, dict] = {
         onset="instant", offset="instant",
         scope_kind="CELL", expect_kpi="C-01",
     ),
+    # **31번 절단 급증**(2026-11-19 사용자 결정). 2번 무선 열화(`ran_radio`)의 「연결 뒤 절단」 갈래만
+    # 떼어 낸 장면이다 — 접속 실패·지연 갈래가 없어 소통률(C-02)은 그대로이고 절단률(C-04)만 오른다.
+    # graphio `R-20`(소통률 정상 + 절단율만 급증 · RAN_RADIO_QUALITY)이 바로 이 장면용이다
+    "ran_drop_surge": dict(
+        title="절단 급증",
+        truth_code="RAN_RADIO_QUALITY", truth_category="RAN",
+        expect_rules=("R-20",), expect_geo="CLUSTER",
+        shape="STEP", scope_kind="CELL", expect_kpi="C-04",
+    ),
+    # **32번 전송 구간 절단**(2026-11-19 사용자 결정). 한 지역 기지국 묶음의 전송로가 끊겨 그 eNB 들이
+    # **같은 분에 모두 멈추고 같은 분에 함께 돌아온다**. 27번(지진)과 달리 호 폭주가 없고, SC-17
+    # (`enb_s1_outage` · eNB 하나)과 달리 전조(S1AP 200)가 없다 — 전송로 절단은 예고 없이 온다.
+    # 계단 마지막 2분(0.40 · `OUTAGE_GATE` 아래)이 복구 국면이다 — 호가 돌아오고 재접속이 몰린다
+    # (`_transport_cut_load`). 정지 국면 15분은 SC-17 의 정지 국면(2~17분)과 같은 길이다
+    "transport_cut": dict(
+        title="전송 구간 절단",
+        truth_code="RAN_NODE_DOWN", truth_category="RAN",
+        expect_rules=("R-36",), expect_geo="CLUSTER",
+        shape="STEPS", steps=((15, 1.00), (17, 0.40)),
+        onset="instant", offset="instant",
+        scope_kind="CELL", expect_kpi="C-01",
+    ),
     "partial_recovery": dict(
         title="부분 장애 뒤 단계적 회복",
         truth_code="GW_NODE_DOWN", truth_category="CORE_UP",
@@ -1079,7 +1101,7 @@ KIND_SPECS: dict[str, dict] = {
         scope_kind="CELL", expect_kpi="C-02",
     ),
     "apn_pdn_failure": dict(
-        title="접속 주소별 연결 실패 (APN)",
+        title="특정 APN 접속 실패",
         # 2026-11-04 사용자 결정 — graphio 가 `SUBSCRIPTION_ERROR`(HSS 가입자 조회 실패 · R-01b)와
         # `APN_CONFIG_ERROR`(한 APN 의 정의·프로파일 오류 · R-07)를 나눴다. 이 장애는 후자다
         truth_code="APN_CONFIG_ERROR", truth_category="CORE_CP",
@@ -1088,14 +1110,14 @@ KIND_SPECS: dict[str, dict] = {
         onset="instant", offset="instant",
     ),
     "dns_flap": dict(
-        title="주소 찾기 간헐 실패 (DNS)",
+        title="DNS 접속 실패",
         truth_code="DNS_DEGRADATION", truth_category="EXTERNAL",
         expect_rules=("R-14",), expect_geo="WIDE",
         shape="FLAP", flap_period=3, flap_low=0.0, series=("dns",),
         scope_kind="SERVICE", expect_kpi="U-29",
     ),
     "compound_causal_failure": dict(
-        title="복합 장애 (전송망 → 주소 찾기 → 웹)",
+        title="복합 장애 (전송 → DNS → HTTP)",
         truth_code="TRANSPORT_LOSS", truth_category="TRANSPORT",
         expect_rules=("R-09", "R-16", "R-14"), expect_geo="CLUSTER",
         shape="RAMP", series=("transport", "dns"),
@@ -1712,6 +1734,15 @@ def node_down_set(active, minute: int) -> dict[str, dict[str, int]]:
         if at is not None:
             prev = out["AT"].get((kind, key))
             out["AT"][(kind, key)] = at if prev is None else min(prev, at)
+    for sc in active:
+        # 32번 전송 구간 절단 — 대상 지역 eNB 가 정지 국면(`OUTAGE_GATE` 이상) 동안 모두 다운이다.
+        # 정지는 장애 시작 분부터라 다운 시각은 장애 기록의 시작이다(SGW 다운과 같다)
+        if sc.kind != "transport_cut" or sc.intensity(minute) < OUTAGE_GATE:
+            continue
+        for e in transport_cut_enbs(sc):
+            out["ENB"][e] = min(out["ENB"].get(e, sc.start_minute), sc.start_minute)
+            if sc.__dict__.get("start_ts") is not None:
+                out.setdefault("AT", {})[("ENB", e)] = sc.start_ts
     for sc in active:
         if sc.kind != "natural_disaster":
             continue
@@ -3980,6 +4011,84 @@ def _enb_s1_outage(rec, sc, intensity, rng, cell) -> bool:
     # 전 구현처럼 Context Setup(msg 9) 실패로 나온 호는 없다.
     from . import callflow
     return callflow.drop(rec, 200, rng)
+
+
+# --------------------------------------------------------------------------
+# 31번 · ran_drop_surge — 절단 급증 (접속은 정상)
+# --------------------------------------------------------------------------
+
+
+@mutator("ran_drop_surge")
+def _ran_drop_surge(rec, sc, intensity, rng, cell) -> bool:
+    """연결된 호를 무선 사유(`121` Radio Connection With UE Lost)로 끊는다 — 그것만 한다.
+
+    몫은 2번(`_ran_radio`)의 절단 갈래와 같다 — 강도 × 0.60 으로 고른 호의 30%(0.50 − 0.20)다.
+    2번과 다른 점은 **나머지 두 갈래가 없다**는 것뿐이다: 접속 실패(`ctxsetup_failure`)를 내지 않고
+    접속 지연도 늘리지 않는다. 그래서 소통률(C-02)은 평소대로이고 절단률(C-04)만 오른다.
+    `121` 은 정상 종료 14개(불변규칙 6 · graphio `codes.is_normal_release`)에 들지 않고 이동 절차
+    실패(106)도 아니다 — R-20 이 비키지 않는다. 연결되지 않은 호는 건드리지 않는다(`_connected`)
+    """
+    if cell.cell_key not in sc.active_cells_cache:
+        return False
+    if not _connected(rec) or rng.random() >= intensity * 0.60 * 0.30:
+        return False
+    from . import callflow
+    return callflow.drop(rec, 121, rng)
+
+
+# --------------------------------------------------------------------------
+# 32번 · transport_cut — 전송 구간 절단 (여러 eNB 동시 정지 · 동시 복구)
+# --------------------------------------------------------------------------
+
+
+def transport_cut_enbs(sc) -> set[str]:
+    """대상 지역의 eNB — 셀 키(`<eNB>-<셀>` · `pemdb1` 마스터 규칙)에서 읽는다. `sc` 에 한 번만 만든다."""
+    got = sc.__dict__.get("_cut_enbs")
+    if got is None:
+        got = {k.rsplit("-", 1)[0] for k in sc.target.cell_keys}
+        sc.__dict__["_cut_enbs"] = got
+    return got
+
+
+@suppressor("transport_cut")
+def _transport_cut_suppress(sc, cell, intensity, rng) -> bool:
+    """정지 국면이면 대상 지역 셀의 호를 **아예 만들지 않는다**(SC-17 의 「무호」와 같다)."""
+    return intensity >= OUTAGE_GATE and cell.cell_key in sc.target.cell_keys
+
+
+@relocator("transport_cut")
+def _transport_cut_relocate(sc, cell, intensity, pool):
+    """정지 셀의 열린 세션 → **지역 밖** 가장 가까운 셀(SC-17 `_outage_relocate` 와 같은 원칙).
+
+    지역 안은 모두 멈췄으므로 지진(27번)처럼 지역 안 살아 있는 셀로 옮길 수 없다. 이웃은 대상 밖
+    전국 셀에서 셀마다 한 번만 찾는다(`faults.build` 가 `_pool_all` 을 싣는다)
+    """
+    if intensity < OUTAGE_GATE or cell.cell_key not in sc.target.cell_keys:
+        return None
+    memo = sc.__dict__.setdefault("_near", {})
+    if cell.cell_key in memo:
+        return memo[cell.cell_key]
+    from .geo_lite import haversine_km
+
+    keys = sc.target.cell_keys
+    cand = [c for c in (sc.__dict__.get("_pool_all") or [])
+            if c.cell_key not in keys and c.geo_status == "MAPPED"]
+    dst = (min(cand, key=lambda c: haversine_km(cell.latitude, cell.longitude,
+                                                c.latitude, c.longitude))
+           if cand and cell.geo_status == "MAPPED" else None)
+    memo[cell.cell_key] = dst
+    return dst
+
+
+@booster("transport_cut")
+def _transport_cut_load(sc, intensity) -> float:
+    """복구 국면(`OUTAGE_GATE` 아래)의 **재접속 몰림** — 대상 지역에 호를 더 배정한다.
+
+    배율은 23번 행사장(`_event_crowd_load`)과 같은 식 `1 + 2 × 강도`다 — 복구 계단 0.40 에서 1.8배로,
+    14번 러시(1.8배)와 같은 크기다. **초기값**(재접속 실측 없음). 정지 국면에는 억제기가 호를 막으므로
+    배율을 걸지 않는다
+    """
+    return 1.0 if intensity >= OUTAGE_GATE else 1.0 + 2.0 * intensity
 
 
 # --------------------------------------------------------------------------
