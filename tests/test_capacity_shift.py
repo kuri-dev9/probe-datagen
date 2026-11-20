@@ -438,9 +438,12 @@ INSTANT_KINDS = {
     "apn_pdn_failure",
     "natural_disaster",          # 11-04 자연재해(27번) — 국면은 kind 가 만들고 시작·끝은 즉시다
     "sa_fallback",               # 11-05 SA→LTE 폴백(17번) — 숨은 단말이 시작 분부터 들어오고(도착 램프는 단말마다) 끝나면 돌아간다
+    # 11-19 신규 — 전송선 절단은 한순간(노드 다운·eNB 정지와 같은 이유)이고, 28-②·33·34 는 대상 서비스·PGW 의 모든 세션이
+    # 시작 분부터 영향을 받는다(강도 곡선 없음). `update_surge` 는 새 업데이트가 퍼지는 것이라 ramp 다
+    "transport_cut", "dns_nxdomain", "service_4xx", "service_tls_fail", "ipv6_path_fail",
 }
 FIXED_KINDS = {"event_crowd", "capacity_shift", "partial_recovery", "dns_flap",
-               "natural_disaster", "sa_fallback"}
+               "natural_disaster", "sa_fallback", "transport_cut"}
 
 
 def test_instant_kinds_table():

@@ -31,14 +31,14 @@ def test_no_volume_is_the_same_as_15_and_is_the_base_file():
     a, b = ui.api_scenario_report(), ui.api_scenario_report(15)
     assert a["ok"] and a == b
     assert a["report"] == load("scenario_report.json")
-    assert len(a["report"]["scenarios"]) == 27
+    assert len(a["report"]["scenarios"]) == 35
 
 
 def test_50_has_27_scenarios_and_judged_ones_carry_50_runs():
     d = ui.api_scenario_report(50)
     assert d["ok"] and d["report"] == load("scenario_report_v50.json")
     sc = d["report"]["scenarios"]
-    assert len(sc) == 27 and sorted(s["no"] for s in sc) == list(range(1, 28))
+    assert len(sc) == 35 and sorted(s["no"] for s in sc) == list(range(1, 36))   # 28~35 신규(2026-11-19)
     judged = [s for s in sc if s.get("latest") or s.get("history")]
     assert judged, "50% 재주행 결과가 하나도 없다"
     # 50% 회차는 `noN-` 으로 시작하는 이름이고(15번 러시 재주행은 `no15-r50-rush2` — runs.md 행 이름과 같다) 통과 기준(네 단계 모두 정상)은 15% 탭과 같다 — 통과가 있어도 되고 단계 상태가 뒷받침해야 한다
@@ -105,14 +105,14 @@ def test_broken_50_file_does_not_break_the_15_tab(monkeypatch, tmp_path):
 def test_missing_50_translation_only_drops_the_japanese(monkeypatch, tmp_path):
     monkeypatch.setitem(ui.SCENARIO_VOLUMES, 50, (CONF / "scenario_report_v50.json", tmp_path / "no_ja.json"))
     d = ui.api_scenario_report(50)
-    assert d["ok"] and "report_ja" not in d and len(d["report"]["scenarios"]) == 27
+    assert d["ok"] and "report_ja" not in d and len(d["report"]["scenarios"]) == 35   # 28~35 신규(2026-11-19)
 
 
 # ── 화면 ────────────────────────────────────────────────────────────────────
 
-def test_page_has_tabs_and_both_definition_lines_with_japanese():
+def test_page_has_the_volume_note_and_both_definition_lines_with_japanese():
     h = ui._HTML_SCEN
-    assert 'id=vol' in h.replace('"', "") and "volnote" in h
+    assert "volnote" in h
     assert "분당 XDR 약 3천 건" in h and "분당 XDR 약 1만 건 · 15%의 약 3.3배" in h
 
 
@@ -123,7 +123,7 @@ def _script() -> str:
 
 def _run_with(tmp_path, search, hash_, body):
     code = _script()
-    tab = code[code.index("const VOLS="):code.index("function render(")]
+    tab = code[code.index("function mergeVols("):code.index("function render(")]       # 탭이 없다 — 두 생성량을 합치는 함수(2026-11-20)
     ld = code[code.index("async function load()"):code.index("// 주입 칸")]
     go = code[code.index("function goHash()"):code.index("addEventListener('hashchange'")]
     pre = f"""
@@ -155,53 +155,47 @@ def test_script_passes_node_check(tmp_path):
     assert r.returncode == 0, r.stderr[:400]
 
 
+def _doc(*nos, tag="x", at=None):
+    return {"ok": True, "report": {"scenarios": [{"no": n, "tag": tag, **({"latest": {"at": at}} if at else {})} for n in nos]},
+            "how": {}, "timing": {}, "l3": [], "l3_broken": 0}
+
+
 @pytest.mark.skipif(NODE is None, reason="node 가 없다")
-def test_a_late_response_of_the_old_tab_is_not_drawn(tmp_path):
+def test_the_two_volumes_are_merged_by_number_and_the_later_judgement_leads_the_list(tmp_path):
+    out = _run_with(tmp_path, "", "", f"""
+const m=mergeVols({{'15':{{scenarios:[{{no:1,latest:{{at:'2026-11-19 10:00'}}}},{{no:2,latest:{{at:'2026-11-20 03:00'}}}},{{no:3}}]}},
+                    '50':{{scenarios:[{{no:1,latest:{{at:'2026-11-20 01:00'}}}},{{no:2,latest:{{at:'2026-11-19 12:00'}}}},{{no:4}}]}}}});
+console.log(JSON.stringify(m.scenarios.map(s=>[s.no,s._vol,Object.keys(s._by).sort()])));""")
+    got = {str(n): [v, by] for n, v, by in out}
+    assert got["1"] == ["50", ["15", "50"]] and got["2"] == ["15", ["15", "50"]]       # 늦은 판정이 목록 줄
+    assert got["3"] == ["15", ["15"]] and got["4"] == ["50", ["50"]]                    # 한쪽만 있으면 그쪽
+
+
+@pytest.mark.skipif(NODE is None, reason="node 가 없다")
+def test_load_reads_both_volumes_once_and_ignores_the_old_vol_query(tmp_path):
+    out = _run_with(tmp_path, "?vol=50", "", """
+const urls=[];
+globalThis.fetch=async u=>{ urls.push(u); return {json:async()=>({ok:true,report:{scenarios:[{no:1,tag:u}]},how:{},timing:{},l3:[],l3_broken:0})}; };
+(async()=>{ await load(); console.log(JSON.stringify({urls:urls.sort(),drawn,warns:warns.filter(Boolean)})); })();""")
+    assert out["urls"] == ["/api/scenario-report", "/api/scenario-report?volume=50"]
+    assert len(out["drawn"]) == 1 and out["warns"] == [], "탭이 없으므로 한 번만 그리고 ?vol= 은 받기만 한다"
+
+
+@pytest.mark.skipif(NODE is None, reason="node 가 없다")
+def test_one_volume_failing_draws_the_other_and_says_so(tmp_path):
     out = _run_with(tmp_path, "", "", """
-const pend={};
-globalThis.fetch=u=>new Promise(res=>{ pend[u]=()=>res({json:async()=>({ok:true,
-  report:{scenarios:[{no:1,tag:u}]},how:{},timing:{},l3:[],l3_broken:0})}); });
-(async()=>{
-  const p15=load();                                   // 15% 요청이 늦게 온다
-  el('vol').listeners.click({target:{closest:()=>({dataset:{vol:'50'}})}});   // 그 사이 50% 탭
-  await new Promise(r=>setTimeout(r,0));
-  pend['/api/scenario-report?volume=50']();
-  await new Promise(r=>setTimeout(r,0));
-  pend['/api/scenario-report']();                     // 이제 15% 응답이 도착
-  await p15; await new Promise(r=>setTimeout(r,0));
-  console.log(JSON.stringify({drawn,VOL,urls:Object.keys(pend),lastUrl}));
-})();""")
-    assert out["VOL"] == "50" and out["lastUrl"] == "/scenarios?vol=50"
-    assert out["drawn"] == [["/api/scenario-report?volume=50"]], "옛 15% 응답이 그려지면 안 된다"
+globalThis.fetch=async u=>u.includes('volume')?{json:async()=>({ok:true,report:{scenarios:[{no:1,tag:'v50'}]},how:{},timing:{},l3:[],l3_broken:0})}
+  :{json:async()=>{throw new Error('x');}};
+(async()=>{ await load(); console.log(JSON.stringify({drawn,warns:warns.filter(Boolean)})); })();""")
+    assert out["drawn"] == [["v50"]] and len(out["warns"]) == 1
 
 
 @pytest.mark.skipif(NODE is None, reason="node 가 없다")
-def test_late_failure_of_the_old_tab_does_not_warn(tmp_path):
-    out = _run_with(tmp_path, "", "", """
-globalThis.fetch=u=>u.includes('volume')?Promise.resolve({json:async()=>({ok:true,report:{scenarios:[{no:1,tag:'v50'}]},how:{},timing:{},l3:[],l3_broken:0})})
-  :new Promise((_,rej)=>setTimeout(()=>rej(new Error('x')),5));
-(async()=>{
-  const p=load(); el('vol').listeners.click({target:{closest:()=>({dataset:{vol:'50'}})}});
-  await p; await new Promise(r=>setTimeout(r,20));
-  console.log(JSON.stringify({warns:warns.filter(Boolean),drawn}));
-})();""")
-    assert out["warns"] == [] and out["drawn"] == [["v50"]]
-
-
-@pytest.mark.skipif(NODE is None, reason="node 가 없다")
-def test_vol_50_with_hash_opens_the_11_card_on_the_50_tab(tmp_path):
+def test_hash_opens_the_card_of_the_merged_list(tmp_path):
     out = _run_with(tmp_path, "?vol=50", "#no=11", """
 globalThis.fetch=async u=>({json:async()=>({ok:true,report:{scenarios:[{no:11,tag:u}]},how:{},timing:{},l3:[],l3_broken:0})});
-(async()=>{ await load(); console.log(JSON.stringify({VOL,open:[...OPEN],drawn,pick:PICK})); })();""")
-    assert out["VOL"] == "50" and out["open"] == ["11"]
-    assert out["drawn"][0] == ["/api/scenario-report?volume=50"]
-
-
-@pytest.mark.skipif(NODE is None, reason="node 가 없다")
-@pytest.mark.parametrize("search,want", [("", "15"), ("?vol=15", "15"), ("?vol=30", "15"), ("?vol=abc", "15"), ("?vol=50", "50")])
-def test_initial_tab_from_url(tmp_path, search, want):
-    out = _run_with(tmp_path, search, "", "console.log(JSON.stringify({VOL}));")
-    assert out["VOL"] == want
+(async()=>{ await load(); console.log(JSON.stringify({open:[...OPEN],drawn:drawn.length,pick:PICK})); })();""")
+    assert out["open"] == ["11"] and out["pick"] == "all" and out["drawn"] >= 1
 
 
 @pytest.mark.skipif(NODE is None, reason="node 가 없다")
@@ -210,6 +204,11 @@ def test_server_reason_volume_is_shown_on_screen(tmp_path):
 globalThis.fetch=async u=>({json:async()=>({ok:false,reason:'volume',volume:30})});
 (async()=>{ await load(); console.log(JSON.stringify({warns,drawn})); })();""")
     assert out["drawn"] == [] and any("30" in w or "생성량" in w for w in out["warns"])
+
+
+def test_page_has_no_volume_tab_but_the_detail_boxes():
+    h = ui._HTML_SCEN
+    assert "id=vol>" not in h.replace('"', "") and "VOL_KEYS" in h and "function volBoxes(" in h and "function mergeVols(" in h
 
 
 def test_japanese_texts_of_the_tab_exist_in_the_page_dictionary():

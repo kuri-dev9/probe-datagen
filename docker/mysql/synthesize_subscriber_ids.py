@@ -245,13 +245,7 @@ def main() -> int:
                              JOIN _svc_map v ON v.OLD_SVC = x.SERVICECODE
                               SET x.SERVICECODE = v.NEW_SVC""")
             n_svc = cur.rowcount
-
-            cur.execute("SELECT COUNT(*) AS c FROM PM_ENB_ROOT_CAUSE_1M")
-            if cur.fetchone()["c"]:
-                cur.execute("""UPDATE PM_ENB_ROOT_CAUSE_1M p
-                                 JOIN _sub_map m ON m.OLD_IMSI = p.IMSI
-                                  SET p.IMSI = m.NEW_IMSI""")
-                print(f"  PM_ENB_ROOT_CAUSE_1M {cur.rowcount:,}행")
+            # `PM_ENB_ROOT_CAUSE_1M`(IMSI 를 가진 유일한 1분 표)은 2026-11-20 에 DROP 했다 — 0행·미사용
         con.commit()
         print(f"XDR UPDATE — 가입자 {n_sub:,}행 · 단말 {n_dev:,}행 · "
               f"서비스코드 {n_svc:,}행")

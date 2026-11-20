@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HTML = (ROOT / "src" / "datagen" / "ui" / "static" / "scenarios.html").read_text(encoding="utf-8")
 FILES = ["scenario_report.json", "scenario_report_v50.json", "scenario_report_ja.json", "scenario_report_v50_ja.json"]
 # 29(특정 APN 접속 실패)가 신규 번호로 더해졌다(2026-11-19) — 31·32(절단 급증·전송 구간 절단)는 장비 종류가 아니다
-EQUIP_NOS = [1, 3, 4, 10, 18, 19, 29]
+EQUIP_NOS = [1, 3, 4, 10, 18, 19, 29, 34]   # 34 = IPv6 경로(PGW 장비형 · 2026-11-19)
 
 
 def _rows(fn):

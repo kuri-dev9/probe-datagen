@@ -177,14 +177,36 @@
     "l": "分類 EXTERNAL"
    }
   },
-  "EXTERNAL_SERVER": {
+  "DNS_RECORD_MISSING": {
    "kind": "cause",
    "ko": {
-    "s": "외부 서버 느림 (CDN 등)",
+    "s": "상대 서비스 주소 기록 오류 (DNS)",
     "l": "분류 EXTERNAL"
    },
    "ja": {
-    "s": "外部サーバの遅れ (CDN など)",
+    "s": "相手サービスのアドレス登録の誤り (DNS)",
+    "l": "分類 EXTERNAL"
+   }
+  },
+  "EXTERNAL_SERVER": {
+   "kind": "cause",
+   "ko": {
+    "s": "외부 서버 문제 (느림·거절)",
+    "l": "분류 EXTERNAL"
+   },
+   "ja": {
+    "s": "外部サーバの問題 (遅延・拒否)",
+    "l": "分類 EXTERNAL"
+   }
+  },
+  "SERVICE_TRAFFIC_SURGE": {
+   "kind": "cause",
+   "ko": {
+    "s": "한 서비스 트래픽 몰림",
+    "l": "분류 EXTERNAL"
+   },
+   "ja": {
+    "s": "特定サービスへのトラフィック集中",
     "l": "分類 EXTERNAL"
    }
   },

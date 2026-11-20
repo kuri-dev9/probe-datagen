@@ -3127,7 +3127,8 @@ LAREA_EXTRA_JP: dict[str, str] = {"수도권": "関東"}
 #: **건드리지 않는 자리.** 적어 두지 않으면 다음 사람이 "한국어가 남았다"고
 #: 고친다.
 #:
-#:   `CL_MME.NET_NAME`    56행 전부 `SKTelecom` — graphio 소비처 **0건**
+#:   `CL_MME.NET_NAME`    6행 전부 `NTT docomo`(제조사 `CB_VENDOR` 25 `SS(LTE)`)
+#:                        — 이미 일본 이름이다. graphio 소비처 **0건**
 #:                        (`CL_SGW`·`CL_PGW` 에는 컬럼 자체가 없다)
 #:   `CM_EMS.EMS_NAME`    181행 18종(`DUNSAN`·`SUNGSU` 등) — graphio 는
 #:                        `CL_ENB_ORG.EMS_ID`(숫자)만 쓰고 이름을 조인하지 않는다

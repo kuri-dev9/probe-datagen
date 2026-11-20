@@ -62,7 +62,7 @@ KIND_LABELS = {
     "service_4xx": "특정 서비스 접속 거절 (HTTP 4xx)",
     "service_tls_fail": "특정 서비스 보안 연결 실패 (TLS)",
     "ipv6_path_fail": "IPv6 경로만 실패",
-    "update_surge": "앱·OS 업데이트 배포 폭주",
+    "update_surge": "앱 업데이트 배포 폭주",
 }
 
 #: **주입 메뉴는 `CM_ERROR_SCENARIO` 를 읽는다** (2026-10-28). 전에는 여기

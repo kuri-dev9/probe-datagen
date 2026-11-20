@@ -14,6 +14,7 @@ from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
 from .common import KIND_LABELS
+from . import scx_ja
 from .i18n_ja import _JA_COMMON, _JA_MAIN, _JA_MAP, _JA_SCEN, _JA_SHELL
 
 
@@ -195,7 +196,7 @@ def _with_base(html: str) -> str:
 _HTML = _page(_with_base(_HTML), "main", {**_JA_MAP, **_JA_MAIN})
 _HTML_MAP = _page(_HTML_MAP, "map", _JA_MAP)
 _HTML_TOPO = _page(_with_base(_HTML_TOPO), "topo", {})
-_HTML_SCEN = _page(_HTML_SCEN, "scen", _JA_SCEN)
+_HTML_SCEN = _page(scx_ja.with_ja(_HTML_SCEN), "scen", _JA_SCEN)
 
 
 @router.get("/map", response_class=HTMLResponse)

@@ -60,7 +60,7 @@ from .faults import resolve_active as resolve_active_faults
 from .faults import TargetHistory
 from .fields import SERIES_FIELDS
 from .generator import Generator, Groups, USER_FIELDS
-from .identity import synth_imei, synth_imsi
+from .identity import synth_imei, synth_imsi, synth_mdn
 from .plmn import Plmn
 from .region import apn_map
 from .profile import load as load_profiles
@@ -2379,7 +2379,6 @@ class PemdbGen:
         import dataclasses
         from .cells import encrypt_id
         from .generator import CellRing
-        from .identity import synth_mdn
         gen = self.gen
         out: dict[str, list] = {}
         if share <= 0.0 or not gen.subs:
@@ -2397,7 +2396,7 @@ class PemdbGen:
             src = gen.subs[rng.randrange(base_n)]
             ci = ring.pick(i)
             sub = dataclasses.replace(
-                src, imsi=synth_imsi(src.mcc_mnc, i), mdn=synth_mdn(i),
+                src, imsi=synth_imsi(src.mcc_mnc, i), mdn=synth_mdn(i, src.mcc_mnc),
                 imei=synth_imei(src.vendor, src.model, i),
                 service_code=encrypt_id(f"svc:{i % 40}", "sub"),
                 dcnr="1", home_cell=ci, route=-1)
@@ -2423,8 +2422,11 @@ class PemdbGen:
             # `_make_subscribers` 가 만든 IMSI·IMEI 는 이미 어긋났다. IMSI 는
             # 규격상 `imsi_mcc_mnc_info` 로 시작해야 하고(앞 7자), IMEI 의 TAC 는
             # 기종과 묶여야 한다(R-10). 다시 만들지 않으면 둘 다 조용히 깨진다.
-            # MDN 은 두 값에 의존하지 않으므로 그대로 둔다.
+            # **MDN 도 다시 만든다**(2026-11-20) — 번호의 나라가 IMSI 의 MCC 를 따르게 된 뒤로는
+            # `mcc_mnc` 에 의존한다. 그대로 두면 `_make_subscribers` 때의 MCC(프로파일 추첨)로 만든
+            # 번호가 남아 일본 가입자 95% 가 `010`, 여기서 로머가 된 가입자가 `090` 으로 나왔다(10:42 실측)
             sub.imsi = synth_imsi(sub.mcc_mnc, i)
+            sub.mdn = synth_mdn(i, sub.mcc_mnc)
             sub.imei = synth_imei(sub.vendor, sub.model, i)
         # **IMSI 역색인을 다시 만든다**(2026-10-29). `Generator.__init__` 이
         # 바꾸기 전 IMSI 로 만들어 두었고, 위에서 IMSI 를 전부 새로 썼다.
@@ -4224,8 +4226,10 @@ def mesh_people(conn, end: datetime, minutes: int = 60) -> dict[str, tuple[float
             f"FLOOR(UNIX_TIMESTAMP(k.EVENT_TIME) / 900) AS b, k.IMSI "
             f"FROM PM_COR_XP_SUB_1M k JOIN {primary} AS g "
             f"ON g.ENB_ID = k.ENB_ID AND g.CELLNUM = k.CELLNUM "
-            f"WHERE k.EVENT_TIME >= %s AND k.EVENT_TIME < %s AND k.JUDGED = 1 "
-            f"AND k.APP_CLASS = 'VIDEO' GROUP BY 1, 2, 3) AS t GROUP BY 1", (lo, end))
+            # 사용자 행(2026-11-20 graphio `xp_agg.SUB_COLS`) — 동영상 판정은 `CLS_JUDGED` 의 비트 4
+            # (`xp_agg.CLS_BIT["VIDEO"]`). 셀은 그 분 끝 셀이라 탐지 표결과 같은 귀속이다
+            f"WHERE k.EVENT_TIME >= %s AND k.EVENT_TIME < %s AND (k.CLS_JUDGED & 4) > 0 "
+            f"GROUP BY 1, 2, 3) AS t GROUP BY 1", (lo, end))
         rows = cur.fetchall()
     per = max(1.0, minutes / 15.0)
     return {str(m): (float(n) / per, cells.get(str(m), [])) for m, n in rows}

@@ -53,7 +53,8 @@ def test_summary_two_boxes_come_before_the_folded_technical_detail():
     a, c = h.index("어떤 장애이고 어떻게 만드나"), h.index("무엇이 나타나고 시스템이 무엇을 찾았나")
     tech = h.index("자세히 보기 (기술 상세)")
     assert a < c < tech
-    assert h[:tech].count("<h3>") == 2 and "<h3>어떻게 만드나</h3>" not in h and "<h3>어떤 장애인가</h3>" not in h
+    # 11-20 — 생성량·실행 상태 머리(<h3><span>…)는 요약 박스가 아니다. 제목 글자만 있는 <h3> 이 두 장이다.
+    assert h[:tech].count("<h3>") - h[:tech].count("<h3><span") == 2 and "<h3>어떻게 만드나</h3>" not in h and "<h3>어떤 장애인가</h3>" not in h
     assert "쉬운 설명 문장" in h[a:c]
     assert "처음 문장" in h[c:tech]                              # 시스템이 찾은 것(latest.plain)은 오른쪽 안에
     assert ">결과<" not in h[:tech] and "무슨 일이 생기나" not in h[:tech]

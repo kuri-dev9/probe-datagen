@@ -25,7 +25,8 @@ STATIC = ROOT / "src" / "datagen" / "ui" / "static"
 # 옛 한 장 그림(`/api/scenario-pictures` · `scenario-pictures/*.svg`)은 지웠다. 문구는 원본 그대로여야 한다.
 
 ORIGINAL = GRAPHIO / "docs" / "jp" / "ui" / "scenarios-14-27.html"
-NOS = list(range(14, 28))
+NOS = list(range(14, 36))   # 28~35 신규 시나리오 포함(2026-11-19)
+ORIG_NOS = list(range(14, 28))   # 원본(`scenarios-14-27.html`)에는 14~27 만 있다
 _TOTOP = re.compile(r'<p class="totop">.*?</p>', re.S)
 
 
@@ -44,15 +45,18 @@ def _norm(t):
     return re.sub(r"\s+", "", _TOTOP.sub("", t))
 
 
-def test_scenarios_html_has_one_template_per_scenario_14_to_27():
-    ids = re.findall(r"<template id=scx-(\d+)>", _html())
-    assert [int(x) for x in ids] == NOS
+def test_scenarios_html_has_one_template_per_scenario_1_to_35():
+    """1~13번 그림이 들어왔다(2026-11-20) — 번호마다 템플릿 하나, 한국어판만 센다(`-ja` 는 따로)."""
+    ids = [int(x) for x in re.findall(r"<template id=scx-(\d+)>", _html())]
+    assert sorted(ids) == list(range(1, 36)) and len(ids) == len(set(ids))
+    assert set(NOS) <= set(ids)
 
 
-def test_no_template_for_1_to_13():
-    """설명이 없는 번호는 자리를 만들지 않는다."""
-    ids = {int(x) for x in re.findall(r"<template id=scx-(\d+)>", _html())}
-    assert not ids & set(range(1, 14))
+def test_templates_for_1_to_13_hold_their_own_section():
+    """1~13번도 자기 그림 한 장(`s{no}`)만 든다 — 옛날엔 설명이 없는 번호라 자리가 없었다(2026-11-20 반전)."""
+    for no in range(1, 14):
+        t = _template(no)
+        assert t.lstrip().startswith(f'<section id="s{no}"') and t.count(f'id="s{no}"') == 1
 
 
 @pytest.mark.parametrize("no", NOS)
@@ -64,7 +68,7 @@ def test_each_template_holds_its_own_section(no):
 
 
 @pytest.mark.skipif(not ORIGINAL.exists(), reason="graphio 원본이 없다")
-@pytest.mark.parametrize("no", NOS)
+@pytest.mark.parametrize("no", ORIG_NOS)
 def test_template_text_equals_the_original_section(no):
     """문구는 한 글자도 바꾸지 않는다 — 원본에서 「↑ 목차」 줄만 뺀 것과 같다."""
     src = ORIGINAL.read_text(encoding="utf-8")
@@ -231,7 +235,7 @@ def test_glossary_cause_ja_equals_graphio_cause_labels_ja():
 def test_kind_specs_title_equals_kind_labels_for_every_kind():
     from datagen import scenarios as S
     from datagen.ui import common
-    assert set(S.KIND_SPECS) == set(common.KIND_LABELS) and len(S.KIND_SPECS) == 38      # 33·34번 신규 종류(ran_drop_surge · transport_cut)가 더해졌다(2026-11-19)
+    assert set(S.KIND_SPECS) == set(common.KIND_LABELS) and len(S.KIND_SPECS) == 43      # 33·34번 신규 종류(ran_drop_surge · transport_cut)가 더해졌다(2026-11-19)
     assert {k: v["title"] for k, v in S.KIND_SPECS.items()} == dict(common.KIND_LABELS)
 
 
@@ -245,7 +249,7 @@ def test_kind_labels_of_scenarios_14_to_27_equal_the_scenario_names():
     checked = 0
     for kind, rows in use.items():
         if kind is not None and len(rows) == 1 and rows[0][0] >= 14:        # 33번처럼 종류가 없는(준비 중) 번호는 뺀다
-            assert common.KIND_LABELS[kind] == rows[0][1], (kind, rows[0][0])
+            assert common.KIND_LABELS[kind].startswith(rows[0][1]), (kind, rows[0][0])   # 33번 이름표는 「… (HTTP 4xx)」로 구분어가 붙는다
             checked += 1
     assert checked >= 10
 

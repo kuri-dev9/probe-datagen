@@ -181,5 +181,5 @@ def test_kinds_are_registered_in_gen_and_control():
 def test_scenarios_31_and_32_are_ready_and_33_is_still_pending():
     rows = {r[0]: r for r in control.SCENARIOS}
     assert rows[31][2] == "ran_drop_surge" and rows[32][2] == "transport_cut"
-    assert rows[33][2] is None
-    assert 34 not in rows and 35 not in rows       # 옛 31·32(3·4번과 같은 데이터)는 지웠다(사용자 11-19)
+    assert rows[33][2] == "service_4xx"    # 33번도 종류가 붙었다(2026-11-19)
+    assert rows[34][2] == "ipv6_path_fail" and rows[35][2] == "update_surge"   # 옛 34·35 는 지웠다가 새 34·35(IPv6·업데이트 폭주)가 들어왔다

@@ -335,7 +335,8 @@ class Sampler:
         self._cat_cache: dict[str, tuple[list[str], list[float]]] = {}
         self._domain_w: list[float] | None = None
 
-    def categorical(self, field_name: str, default: str = "0") -> str:
+    def categorical(self, field_name: str, default: str = "0", rng: random.Random | None = None) -> str:
+        """``rng`` 을 주면 그 난수로 뽑는다 — 새로 모델링한 칸이 이 계열의 공용 흐름을 밀지 않게(2026-11-19)."""
         dist = self.p.categorical.get(field_name)
         if not dist:
             return default
@@ -346,7 +347,7 @@ class Sampler:
                 return default
             self._cat_cache[field_name] = (keys, weights)
         keys, weights = self._cat_cache[field_name]
-        return self.rng.choices(keys, weights=weights, k=1)[0]
+        return (rng or self.rng).choices(keys, weights=weights, k=1)[0]
 
     def categorical_without(self, field_name: str, drop: frozenset[str],
                             default: str = "0") -> str:

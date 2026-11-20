@@ -940,7 +940,7 @@ class SessionEngine:
         없으면 비운다 — 지어 넣지 않는다(불변규칙 17)
         """
         smp = self.gen.samplers.get("transport")
-        v = smp.categorical("IP_Version", "") if smp is not None else ""
+        v = smp.categorical("IP_Version", "", rng=getattr(self.gen, "aux_rng", None)) if smp is not None else ""
         return v if v in ("1", "2") else ""
 
     def _observed_handshake(self, const: list) -> None:
@@ -969,7 +969,7 @@ class SessionEngine:
             if const[_C[f]] not in ("0", "") or smp is None:
                 continue
             for _ in range(8):
-                v = smp.categorical(f, "0")
+                v = smp.categorical(f, "0", rng=getattr(self.gen, "aux_rng", None))
                 if v != "0":
                     const[_C[f]] = v
                     break
@@ -988,13 +988,13 @@ class SessionEngine:
         ok = self.QTYPE_OK.get(ipv)
         if smp is None:
             return ""
-        v = smp.categorical("QueryType", "")
+        v = smp.categorical("QueryType", "", rng=getattr(self.gen, "aux_rng", None))
         if ok is None:
             return v
         for _ in range(8):
             if v in ok:
                 return v
-            v = smp.categorical("QueryType", "")
+            v = smp.categorical("QueryType", "", rng=getattr(self.gen, "aux_rng", None))
         return "28" if ipv == "2" else "1"
 
     @staticmethod

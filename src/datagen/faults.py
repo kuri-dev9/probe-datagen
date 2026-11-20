@@ -242,6 +242,25 @@ def _rotating(cands: list, keyf, used: dict[str, int] | None, rng: random.Random
     return min(cands, key=lambda c: used[keyf(c)])
 
 
+#: 자동 대상이 피할 셀 — 지금 걸려 있는 **다른 장애**의 셀(2026-11-20 사용자 결정 "자동도 어느 정도는 겹치지
+#: 않게"). 27번 자동 지진이 30번 荒川区 셀 19개 위에 서서 두 시나리오가 한 사건으로 묶였다(F-461·F-460).
+#: `build` 가 자동 대상일 때만 채우고 끝나면 비운다. 노드·시군구처럼 **단위 전체**를 거는 고르기는 셀을
+#: 덜어내면 단위가 잘리므로 여기서 후보 단위를 거른다(`_free_units`). 나머지는 `build` 가 후보 셀을 eNB 째 덜어낸다
+_AVOID: set[str] = set()
+
+#: 단위 전체(노드·MME 묶음·시군구 전 셀)를 거는 자동 대상 — 후보 셀을 덜지 않고 단위를 거른다
+_UNIT_KINDS = frozenset(set(_AUTO_NODE) | set(_AUTO_SGG) | set(_AUTO_MME_GROUP))
+
+
+def _free_units(cand: list, cells_of) -> list:
+    """후보 단위 중 피할 셀(`_AVOID`)에 닿지 않는 것. 하나도 없으면 후보 그대로 — 「완전히 피함, 안 되면 허용」
+    두 단계뿐이다(새 기준값 없음). 겹침 허용은 `build` 가 로그에 남긴다."""
+    if not _AVOID:
+        return cand
+    free = [k for k in cand if not (cells_of(k) & _AVOID)]
+    return free or cand
+
+
 def _pick_node(cells: list[Cell], attr: str, rng: random.Random, share: float,
                used: dict[str, int] | None = None):
     """가장 큰 노드 대비 셀 수 몫이 `share` 이상인 노드 중 하나 — 자동 대상(2026-11-07 사용자 결정).
@@ -256,6 +275,7 @@ def _pick_node(cells: list[Cell], attr: str, rng: random.Random, share: float,
         cnt[k] = cnt.get(k, 0) + 1
     top = max(cnt.values())
     cand = sorted(k for k, n in cnt.items() if n >= top * share)
+    cand = _free_units(cand, lambda n: {c.cell_key for c in cells if getattr(c, attr) == n})
     if not used:
         return cand[rng.randrange(len(cand))]
     return _rotating(cand, lambda n: target_key(c.cell_key for c in cells if getattr(c, attr) == n),
@@ -289,6 +309,7 @@ def _sgg_of_shape(kind: str, cells: list[Cell], rng: random.Random,
     if not ok:
         print(f"  ! {kind} — 모양이 {want} 인 시군구가 없다 · 모양을 보지 않고 고른다", flush=True)
         return None
+    ok = _free_units(ok, lambda k: _sgg_all(cells, k))
     # 앞선 회차가 쓴 시군구는 뒤로 — 후보가 5곳뿐이라 2·7번이 연달아 `11110` 을 골랐다(F-187·F-190)
     return _rotating(ok, lambda k: target_key(_sgg_all(cells, k)), used, rng)
 
@@ -871,7 +892,8 @@ def _is_num(text: str) -> bool:
 
 
 def _quake_step(fault: dict, cells: list[Cell], target: Target, given: dict | None,
-                mode: str | None = None, place_names: dict | None = None) -> dict | None:
+                mode: str | None = None, place_names: dict | None = None,
+                avoid: set[str] | None = None) -> dict | None:
     """27번 지진 한 건과 폭주 지역·정지 eNB(2026-11-14 사용자 결정 B).
 
     진앙은 **실제 진원역**(`S.FAULT.quake_regions` · 도쿄 한가운데가 아니다)에서 정한다 —
@@ -911,6 +933,23 @@ def _quake_step(fault: dict, cells: list[Cell], target: Target, given: dict | No
               f"{want}개 서지 않는다 · 걸지 않는다", flush=True)
         return None
     area, dead, dead_cells = S.quake_plan(cells, q, qrng, want, arv)
+    if avoid and region is None and not g and set(area) & avoid:
+        # **자동 진원역이 다른 장애 위면 다른 진원역**(2026-11-20 사용자 결정 · F-461 이 30번 荒川区 셀 19개 위에 섰다).
+        # 진원역 목록 순서로 보고 폭주 지역이 활성 장애 셀에 닿지 않는 첫 곳을 쓴다. 그 진원역의 난수는 장애 ID 와
+        # 진원역 이름으로 시드한다 — 틱마다·gen 재시작마다 같은 지진이다. 모두 닿으면 처음 지진 그대로(`build` 가 남긴다)
+        for reg in S.FAULT.quake_regions:
+            if reg[0] == q["region"]:
+                continue
+            r2 = random.Random(f"quake:{fid}:{reg[0]}")
+            q2 = S.quake_new(r2, reg[0], None, None, None, None,
+                             mag_floor=S.quake_mag_floor(cells, want, arv))
+            if q2 is None:
+                continue
+            a2, d2, dc2 = S.quake_plan(cells, q2, r2, want, arv)
+            if a2 and not set(a2) & avoid:
+                q, area, dead, dead_cells, hypo = q2, a2, d2, dc2, q2["region"]
+                print(f"  · F-{fid} 27번 — 자동 진원역을 활성 장애 셀을 피해 {reg[0]} 로 옮겼다", flush=True)
+                break
     if not area:
         print(f"  ! F-{fid} 27번 — 진도 {S.FAULT.quake_surge_intensity} 이상 셀이 없어 폭주 지역을 못 잡는다",
               flush=True)
@@ -939,8 +978,11 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
           rng: random.Random, seed: int | None = None,
           enb_rate=None, routes=None, nr_on=None, mesh_load=None,
           history: TargetHistory | None = None,
-          place_names: dict | None = None) -> Scenario | None:
+          place_names: dict | None = None,
+          busy: set[str] | None = None) -> Scenario | None:
     """CM_DATAGEN_FAULT 한 행을 Scenario 로 바꾼다.
+
+    ``busy`` 는 지금 걸린 **다른** 장애의 셀이다(`resolve_active`) — 자동 대상만 이것을 피한다(`_AVOID`).
 
     시간창은 anchor(분 인덱스 0의 시각) 기준 분 좌표로 옮긴다 — Scenario 가
     intensity() 로 스스로 창을 자르므로, 창 밖 분에 걸려 있어도 무해하다.
@@ -998,52 +1040,78 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
         fid = int(fault["fault_id"])
         own = history.used(_own_group(fault), fid) or history.used(f"kind:{fault['kind']}", fid)
         used = {**used, **{k: OWN_ROTATE_OFFSET + f for k, f in own.items()}}
-    if fault["kind"] == "capacity_shift":
-        target = _shift_target(fault.get("target"), fault["start_ts"], cells)
-    elif quake_in is not None:
-        # 지역은 아래 지진 단계가 진앙으로 정한다 — 여기서는 비워 둔다
-        target = Target(cell_keys=set())
-    elif fault["kind"] == "natural_disaster" and not (raw_target or "").strip() and like is None:
-        # 자동 — 지역은 아래 지진 단계가 진원역에서 정한다(2026-11-14 · 폭주 = 진도 3 이상 셀). 전에는 정지 eNB
-        # 호율이 가장 높은 지역(`_busy_disaster_area`)을 먼저 고르고 그 중심을 진앙으로 썼다 — 진앙이 도심이 됐다
-        target = Target(cell_keys=set())
-    elif like is not None:
-        # 원본 fault 의 rng 는 **대상 해석에만** 쓴다(조이 결정). 나머지 난수
-        # (`place` 의 파형·셀 순서 등)는 이 fault 의 rng 다 — 회차가 독립이다
-        if seed is None:
-            return None
-        lrng = target_rng(seed, like)
-        if fault["kind"] in ROUTE_RANGE_KINDS:
-            # **원본이 고른 길을 그대로 탄다**(2026-11-09 · 에스터 발견). 원본은 자동 대상이라 순환 기록
-            # (`used`)을 보고 골랐다 — 같은 rng 라도 `used` 가 다르면 다른 구간이 된다. 원본 번호의 기록을 쓴다.
-            # 범위가 있으면 범위 배치, 없으면 **범위 도입 전 원본**(연속 구간 · `_route_target`)이다
-            lused = history.used(group, like) if history is not None and group else None
-            target = (_route_spread_target(routes, lrng, fault["kind"], rng_pct, lused)
-                      if rng_pct is not None
-                      else _resolve_target(None, fault["kind"], pick, lrng, routes, lused))
+    def _resolve_with(pick: list[Cell]) -> Target | None:
+        if fault["kind"] == "capacity_shift":
+            target = _shift_target(fault.get("target"), fault["start_ts"], cells)
+        elif quake_in is not None:
+            # 지역은 아래 지진 단계가 진앙으로 정한다 — 여기서는 비워 둔다
+            target = Target(cell_keys=set())
+        elif fault["kind"] == "natural_disaster" and not (raw_target or "").strip() and like is None:
+            # 자동 — 지역은 아래 지진 단계가 진원역에서 정한다(2026-11-14 · 폭주 = 진도 3 이상 셀). 전에는 정지 eNB
+            # 호율이 가장 높은 지역(`_busy_disaster_area`)을 먼저 고르고 그 중심을 진앙으로 썼다 — 진앙이 도심이 됐다
+            target = Target(cell_keys=set())
+        elif like is not None:
+            # 원본 fault 의 rng 는 **대상 해석에만** 쓴다(조이 결정). 나머지 난수
+            # (`place` 의 파형·셀 순서 등)는 이 fault 의 rng 다 — 회차가 독립이다
+            if seed is None:
+                return None
+            lrng = target_rng(seed, like)
+            if fault["kind"] in ROUTE_RANGE_KINDS:
+                # **원본이 고른 길을 그대로 탄다**(2026-11-09 · 에스터 발견). 원본은 자동 대상이라 순환 기록
+                # (`used`)을 보고 골랐다 — 같은 rng 라도 `used` 가 다르면 다른 구간이 된다. 원본 번호의 기록을 쓴다.
+                # 범위가 있으면 범위 배치, 없으면 **범위 도입 전 원본**(연속 구간 · `_route_target`)이다
+                lused = history.used(group, like) if history is not None and group else None
+                target = (_route_spread_target(routes, lrng, fault["kind"], rng_pct, lused)
+                          if rng_pct is not None
+                          else _resolve_target(None, fault["kind"], pick, lrng, routes, lused))
+            else:
+                target = _resolve_target(None, fault["kind"], pick, lrng, routes)
         else:
-            target = _resolve_target(None, fault["kind"], pick, lrng, routes)
-    else:
-        target = None
-        if not (raw_target or "").strip():
-            if fault["kind"] == "anchor_saturation":
-                target = _anchor_target(pick, rng, fault, mesh_load, used)
-            elif fault["kind"] in _VENUE_KINDS:
-                target = _venue_target(pick, rng, fault, mesh_load, used)
-            elif fault["kind"] == "enb_s1_outage":
-                target = _outage_target(pick, rng, _rate_at(enb_rate, fault), used)
-            elif fault["kind"] in _CROWD_KINDS or fault["kind"] == "sa_fallback":
-                target = _congestion_target(pick, rng, fault, mesh_load, used)
-            elif fault["kind"] in ROUTE_RANGE_KINDS:
-                target = _route_spread_target(routes, rng, fault["kind"], rng_pct, used)
-            elif fault["kind"] == "ue_model" and scenario_no(fault) in _MODEL_WIDE_SCENARIOS:
-                # 기종만 — 셀·장비 없이 전국(`_MODEL_WIDE_SCENARIOS`). 기종은 생성기가 고른다(`vendor_model`)
-                target = Target()
-        if target is None:
-            target = _resolve_target(raw_target, fault["kind"], pick, rng, routes,
-                                     None if (raw_target or "").strip() else used)
+            target = None
+            if not (raw_target or "").strip():
+                if fault["kind"] == "anchor_saturation":
+                    target = _anchor_target(pick, rng, fault, mesh_load, used)
+                elif fault["kind"] in _VENUE_KINDS:
+                    target = _venue_target(pick, rng, fault, mesh_load, used)
+                elif fault["kind"] == "enb_s1_outage":
+                    target = _outage_target(pick, rng, _rate_at(enb_rate, fault), used)
+                elif fault["kind"] in _CROWD_KINDS or fault["kind"] == "sa_fallback":
+                    target = _congestion_target(pick, rng, fault, mesh_load, used)
+                elif fault["kind"] in ROUTE_RANGE_KINDS:
+                    target = _route_spread_target(routes, rng, fault["kind"], rng_pct, used)
+                elif fault["kind"] == "ue_model" and scenario_no(fault) in _MODEL_WIDE_SCENARIOS:
+                    # 기종만 — 셀·장비 없이 전국(`_MODEL_WIDE_SCENARIOS`). 기종은 생성기가 고른다(`vendor_model`)
+                    target = Target()
+            if target is None:
+                target = _resolve_target(raw_target, fault["kind"], pick, rng, routes,
+                                         None if (raw_target or "").strip() else used)
+        return target
+
+    # **자동 대상은 지금 걸린 다른 장애의 셀을 피한다**(2026-11-20 사용자 결정 · `_AVOID`). 두 단계뿐이다 — 먼저
+    # 지금처럼 고르고, **겹칠 때만** 피한 후보로 다시 고른다. 다시 고른 것도 겹치거나 못 고르면 처음 것을 쓰고 겹침을
+    # 로그에 남긴다. 겹치지 않던 장애는 대상이 바뀌지 않는다(같은 fault 는 전과 같은 셀). 지정 대상·`LIKE:`(원본
+    # 대상을 다시 쓴다)는 보지 않는다. 단위 전체를 거는 고르기(노드·시군구 · `_UNIT_KINDS`)는 셀을 덜면 단위가
+    # 잘리므로 후보 단위를 거르고(`_free_units`), 나머지는 피할 셀이 걸친 eNB 를 후보 셀에서 eNB 째 덜어낸다
+    global _AVOID
+    avoid = set(busy or ()) if auto else set()
+    pick_all = pick
+    target = _resolve_with(pick)
+    if avoid and target is not None and target.cell_keys & avoid:
+        again = pick
+        if fault["kind"] not in _UNIT_KINDS:
+            hot = {c.enb_id for c in cells if c.cell_key in avoid}
+            again = [c for c in pick if c.enb_id not in hot] or pick
+        _AVOID = avoid
+        try:
+            other = _resolve_with(again)
+        finally:
+            _AVOID = set()
+        if other is not None and not (other.cell_keys & avoid):
+            print(f"  · F-{fault['fault_id']} 자동 대상 — 활성 장애 셀 {len(target.cell_keys & avoid)}개와 겹쳐 "
+                  "다른 대상으로 골랐다", flush=True)
+            target = other
     if target is None:
-        if len(pick) < len(cells):
+        if len(pick_all) < len(cells):
             print(f"  ! 16번 대상 {raw_target or '자동'} — NR 가능 eNB 셀이 없어 걸지 않는다", flush=True)
         return None
     if history is not None and group and auto and target.cell_keys:
@@ -1054,10 +1122,14 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
     if fault["kind"] == "natural_disaster":
         # **지진 한 건 → 폭주 지역·정지 eNB**(2026-11-13 · 11-14 진원역·셀별 진도). 순환 기록 **뒤**다 — 셀 대상
         # (`ENB:` 등)은 진앙을 정하는 데만 쓰고(가까운 진원역) 지역은 지진이 다시 정한다
-        quake = _quake_step(fault, cells, target, quake_in, mode, place_names)
+        quake = _quake_step(fault, cells, target, quake_in, mode, place_names, avoid)
         if quake is None:
             return None
         target = Target(cell_keys=set(quake["area"]) | set(quake["ring"]))
+    if avoid and target.cell_keys & avoid:
+        # 피할 후보가 없었다 — 지금처럼 걸고 겹침을 남긴다(정답지 기록·판정이 이 줄로 겹침을 안다)
+        print(f"  ! F-{fault['fault_id']} 자동 대상이 활성 장애 셀 {len(target.cell_keys & avoid)}개와 겹친다"
+              " — 피할 후보가 없어 겹침을 허용한다", flush=True)
     # 25번 좁히기(`son_focus`)는 대상을 만들 때 이미 했다(2026-11-13 · `_son_target`·`_son_enb_target`) — 전에는
     # 노선 구간을 고른 뒤 여기서 셀 하나로 좁혔다
     if mode is not None:
@@ -1214,6 +1286,7 @@ def resolve_active(cells: list[Cell], anchor: datetime, seed: int,
     """
     scs: list[Scenario] = []
     bad: list[int] = []
+    live = {int(f["fault_id"]) for f in active}
     for f in active:
         fid = int(f["fault_id"])
         # UI 가 fault 를 수정하면(시간·강도·대상) 키가 바뀌어 재해석된다
@@ -1224,8 +1297,14 @@ def resolve_active(cells: list[Cell], anchor: datetime, seed: int,
             scs.append(cached[1])
             continue
         frng = target_rng(seed, fid)
+        # 지금 걸린 **다른** 장애의 셀 — 자동 대상이 피한다(`build` · 2026-11-20). 활성 목록은 FAULT_ID 순이고 장애는
+        # 시작 틱에 해석되어 `cache` 에 남으므로, 먼저 걸린 장애의 대상은 이미 여기 있다. 해석은 한 번뿐이라(캐시)
+        # 뒤에 다른 장애가 끝나거나 시작해도 대상이 바뀌지 않는다
+        busy = {k for ofid, (_key, osc) in cache.items() if ofid != fid and ofid in live
+                for k in (osc.target.cell_keys or ())}
         sc = build(f, cells, anchor, frng, seed=seed, enb_rate=enb_rate, routes=routes,
-                   nr_on=nr_on, mesh_load=mesh_load, history=history, place_names=place_names)
+                   nr_on=nr_on, mesh_load=mesh_load, history=history, place_names=place_names,
+                   busy=busy)
         if sc is None:
             bad.append(fid)
         else:

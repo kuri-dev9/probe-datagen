@@ -178,6 +178,11 @@ def test_kind_specs_declare_scoring_meta():
             assert series in SERIES_FIELDS, f"{kind}: 모르는 계열 {series}"
 
 
+# 28~35번 신규 종류(2026-11-19) — gen-ui 주입으로만 들어오고 배치(`build_scenarios`)에는 없다
+NEW_INJECT_ONLY = ("dns_nxdomain", "ipv6_path_fail", "ran_drop_surge", "service_4xx", "service_tls_fail",
+                   "transport_cut", "update_surge")
+
+
 def test_supported_ids_cover_every_kind():
     """`SUPPORTED` 와 `build_scenarios` 가 같은 집합을 만든다."""
     rng = random.Random(1)
@@ -190,7 +195,7 @@ def test_supported_ids_cover_every_kind():
     # (과거 정답지·카드를 같은 동작으로 다시 읽으려는 것). 새 종류는 gen-ui 주입으로만 들어온다.
     # `sa_fallback`(17번 · 11-05)도 같다 — 새 종류라 배치에 없다
     assert {sc.kind for sc in scs} == {
-        k for k, s in SC.KIND_SPECS.items() if s.get("scored", True) and k not in ("natural_disaster", "sa_fallback")}
+        k for k, s in SC.KIND_SPECS.items() if s.get("scored", True) and k not in ("natural_disaster", "sa_fallback", *NEW_INJECT_ONLY)}
 
 
 # --------------------------------------------------------------------------
@@ -835,15 +840,16 @@ def test_plan_mutator_keeps_quantity_invariants(gen, kind):
         before = dict(totals)
         # `App_Group_Code` — 앱으로 고르는 장애(22번 결제)가 발동할 자리
         const = {"ClientHelloDomain": ".example.com", "APN": "apn",
-                 "App_Group_Code": "PAY"}
+                 "App_Group_Code": "PAY", "App_ID": "3002", "Protocol": "6", "IP_Version": "2"}
         plan = SC.Plan(totals, const, "normal", 3)
         # SA 세션으로 준다 — `anchor_saturation` 은 SA 만 고른다(2026-11-02).
         # 다른 kind 는 망 모드를 보지 않는다
         plan.net_mode = "SA"
         # 14번은 세션이 아니라 **가입자**로 고른다(11-05) — 가입자가 달라야 일부가 뽑힌다
         plan.imsi = f"4400{hit + _:011d}"
+        # 28~35 신규 — 앱으로 고르는 장애(`_app_of`)는 대상 앱 ID 가 있어야 발동한다(2026-11-19)
         sc = _sc(kind, target=SC.Target(cell_keys=set(keys),
-                                        pgw_id=cell.pgw_id, domain=""))
+                                        pgw_id=cell.pgw_id, domain="", app_id="3002"))
         sc.active_cells_cache = {cell.cell_key}
         # `capacity_shift` 는 강도를 인자가 아니라 **국면**에서 읽는다 — 시작
         # 분(강도 0.1)이면 거의 발동하지 않으니 혼잡이 최고인 분을 준다

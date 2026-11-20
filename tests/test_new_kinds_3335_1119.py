@@ -323,7 +323,9 @@ def test_33b_connection_success_stays_normal():
     def ack_share(c):
         x = t.filter(c)
         return (x["ACK_TIME"] > 0).sum() / x.height
-    assert ack_share(WIN) == pytest.approx(ack_share(PRE), abs=0.08)
+    # 연결이 관측된 세션(ACK)의 몫은 내려가지 않는다 — 이제 「연결 후 단말 끊김」 세션은 항상 ACK 가 있어(TLS_UE_RST 정의)
+    # 오히려 올라간다. 평소 약 절반이 핸드셰이크 미관측(ACK=0)이라 같은 값이 아니다
+    assert ack_share(WIN) >= ack_share(PRE) - 0.08
     rst = lambda c: t.filter(c & (pl.col("RST_COUNT") > 0)).height / t.filter(c).height      # noqa: E731
     assert rst(WIN) > rst(PRE) + 0.4
 

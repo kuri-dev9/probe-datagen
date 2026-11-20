@@ -43,7 +43,7 @@ FROM ${PYTHON_IMAGE} AS runtime
 
 # 생성 시각이 창고의 slot_ts 가 된다. UTC 로 돌면 graphio 가 읽는 모든
 # 시간창이 9시간 밀린다 (graphio 불변규칙 9 — 시간창은 관측 사실이다).
-ENV TZ=Asia/Seoul \
+ENV TZ=Asia/Tokyo \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app/src \

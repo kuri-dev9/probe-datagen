@@ -1105,10 +1105,11 @@ KIND_SPECS: dict[str, dict] = {
     # 28번 ② — 한 서비스 도메인의 레코드가 사라졌다. 응답은 빠르고 재시도가 없다(무응답·재시도가 붙는 ①과 갈린다)
     "dns_nxdomain": dict(
         title="한 서비스 「없는 주소」 (DNS)",
-        truth_code="DNS_DEGRADATION", truth_category="EXTERNAL",
+        # 정답 코드 2026-11-20 사용자 결정 — DNS_DEGRADATION 에서 뗀 「상대 서비스 주소 기록 오류」(graphio R-14e)
+        truth_code="DNS_RECORD_MISSING", truth_category="EXTERNAL",
         expect_rules=(), rule_pending=True, expect_geo="WIDE",
         shape="STEP", onset="instant", offset="instant", series=("dns",),
-        scope_kind="SERVICE", expect_kpi="U-29",
+        scope_kind="SERVICE", expect_kpi="U-45",   # graphio 도메인 축 NXDOMAIN 율(11-19 동구) — 전국 U-29 는 덤
     ),
     # 33번 ① — 한 서비스 서버가 인증·정책으로 요청을 거절한다(401·403·429). 망·DNS·5xx·응답시간은 그대로
     "service_4xx": dict(
@@ -1124,7 +1125,7 @@ KIND_SPECS: dict[str, dict] = {
         truth_code="EXTERNAL_SERVER", truth_category="EXTERNAL",
         expect_rules=(), rule_pending=True, expect_geo="WIDE",
         shape="STEP", onset="instant", offset="instant", series=("transport",),
-        scope_kind="SERVICE", expect_kpi="U-04",
+        scope_kind="SERVICE", expect_kpi="U-50",   # graphio 도메인 축 보안 연결 단말 끊김률(SNI)
     ),
     # 34번 — PGW 하나의 IPv6 경로만 끊긴다. v6 세션이 서지 않고 단말이 몇 초 뒤 v4 로 다시 붙는다
     "ipv6_path_fail": dict(
@@ -1132,15 +1133,19 @@ KIND_SPECS: dict[str, dict] = {
         truth_code="IPV6_PATH_FAILURE", truth_category="CORE_UP",
         expect_rules=(), rule_pending=True, expect_geo="SCATTER",
         shape="STEP", onset="instant", offset="instant", series=("dns", "transport"),
-        scope_kind="CELL", expect_kpi="U-01",
+        scope_kind="CELL", expect_kpi="U-43",   # graphio 전국 IPv6 TCP 연결 성공률
     ),
     # 35번 — 업데이트 배포 서비스 하나로 대용량 내려받기가 전국에서 몰린다. 지역 편중이 없다
     "update_surge": dict(
-        title="앱·OS 업데이트 배포 폭주",
-        truth_code="RAN_CAPACITY_CONGESTION", truth_category="RAN",
+        title="앱 업데이트 배포 폭주",
+        # 정답 코드 2026-11-20 — 「다른 앱은 정상」(사용자)이라 기지국 혼잡이 아니다. 「한 서비스 트래픽 몰림」(graphio
+        # taxonomy 에 코드·KB 만 있다 · 룰·탐지 스펙은 아직 없다)
+        truth_code="SERVICE_TRAFFIC_SURGE", truth_category="EXTERNAL",
         expect_rules=(), rule_pending=True, expect_geo="WIDE",
         shape="RAMP", series=("transport", "http"),
-        scope_kind="SERVICE",
+        # 생성기가 움직이는 것은 대상 앱의 세션 수·응답 크기다 — graphio 도메인 축 HTTP 평균 응답 크기(U-51).
+        # **탐지 스펙은 아직 없다**(새 기준값 필요 · 사용자 결정 대기 11-19) — 정답 원인(혼잡 여부)도 그 결정에 걸려 있다
+        scope_kind="SERVICE", expect_kpi="U-51",
     ),
     "partial_recovery": dict(
         title="부분 장애 뒤 단계적 회복",

@@ -471,6 +471,9 @@ class Generator:
         self.samplers = {
             s: Sampler(p, random.Random(seed + i)) for i, (s, p) in enumerate(profiles.items())
         }
+        #: 11-19 에 새로 모델링한 칸(IP 버전·DNS 질의 종류·관측 악수 MSS)의 난수 — 공용·계열 흐름과 따로 둔다.
+        #: 같은 흐름에서 뽑으면 그 뒤 모든 추첨이 한 칸씩 밀려, 장애와 무관한 기존 시험의 통계가 흔들렸다
+        self.aux_rng = random.Random(seed + 1_000_003)
         self.templates = {s: _template(s) for s in SERIES_FIELDS}
         self.index = {s: _index(s) for s in SERIES_FIELDS}
 
@@ -1156,7 +1159,7 @@ class Generator:
                     # 합성 평문이다 — 암호문을 만들지 않는다(`identity` 머리말).
                     # 인덱스 `i` 로 만들어 같은 seed 면 같은 식별자가 나온다.
                     imsi=synth_imsi(mcc_mnc, i),
-                    mdn=synth_mdn(i),
+                    mdn=synth_mdn(i, mcc_mnc),
                     imei=synth_imei(vendor, model, i),
                     # **ServiceCode 는 손대지 않는다.** 40종 암호문인데 대응하는
                     # 코드 테이블이 없어 체계를 알 수 없다 — 모르는 것을

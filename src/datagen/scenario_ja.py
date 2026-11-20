@@ -164,8 +164,11 @@ def scan() -> dict:
     gloss = sum(1 for t in terms.values() for _ in _walk(t.get("ja") or {}, ()))
     from .scenarios import KIND_SPECS, recommended_duration
     why = sum(1 for k in KIND_SPECS if HANGUL.search(why_ja((recommended_duration(k) or {}).get("why") or "")))
+    # 시나리오 설명 그림(`scx-NN`)의 사전에 없는 번역 단위 — 일본어 화면에 한국어로 남는다(2026-11-19)
+    from .ui import scx_ja
+    scx = len(scx_ja.missing((HERE / "src" / "datagen" / "ui" / "static" / "scenarios.html").read_text(encoding="utf-8")))
     return {"report": left, "missing": len(info["missing"]), "stale": len(info["stale"]),
-            "how": how, "glossary": gloss, "why": why}
+            "how": how, "glossary": gloss, "why": why, "scx": scx}
 
 
 def main(argv: list[str]) -> int:

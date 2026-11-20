@@ -62,11 +62,12 @@ TABLES = [
     "XDR_LTE_CALL_KPI",
     # 1분 집계 — 생성기가 XDR 에서 집계해 채운다
     "PM_ENB_KPI_1M", "PM_EPC_KPI_1M_ORG", "PM_ENB_CAUSE_1M", "PM_EPC_CAUSE_1M",
-    "PM_ENB_ROOT_CAUSE_1M", "PM_LINK_ENB_KPI_1M", "PM_LINK_EPC_KPI_1M",
+    "PM_LINK_EPC_KPI_1M",
     # `PM_DNS_TOT_1M`·`PM_APP_TCP/HTTP/THR_TOT_1M` 은 뺐다(2026-10-28) — 0행·
     # 미사용이었고 graphio 의 앱 축 `PM_COR_APP_1M`·`PM_COR_APP_GRP_1M` 로
-    # 통폐합해 pemdb6 에서 DROP 했다. 여기 남기면 다음 생성에서 되살아난다
-    "PM_ENB_TOTAL_KPI_1M",
+    # 통폐합해 pemdb6 에서 DROP 했다. 여기 남기면 다음 생성에서 되살아난다.
+    # `PM_ENB_ROOT_CAUSE_1M`·`PM_LINK_ENB_KPI_1M`·`PM_ENB_TOTAL_KPI_1M` 도 같은 이유로 뺐다
+    # (2026-11-20) — 0행·읽는 코드 없음. graphio `docs/ddl/2026-11-20-xp-sub-user.sql` ④ 가 DROP 한다
     # 마스터 — 상용에서 받아 적재한다
     "CL_CELL_MAP", "CM_CELL_REP_RU_LOC", "CM_CITY", "CM_GU", "CM_DONG",
     "CM_EPC_INFO", "CL_MME", "CL_PGW",

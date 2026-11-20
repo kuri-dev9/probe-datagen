@@ -205,7 +205,7 @@ SCENARIOS: tuple[tuple[int, str, str | None, int | None, tuple[str, ...], str], 
      "(② 보안 연결 실패는 `service_tls_fail`)"),
     (34, "IPv6 경로만 실패", "ipv6_path_fail", None, ("PGW",),
      "PGW 하나의 IPv6 세션만 서지 않고 단말이 몇 초 뒤 IPv4 로 다시 붙는다 — 끊김이 아니라 접속 지연"),
-    (35, "앱·OS 업데이트 배포 폭주", "update_surge", None, ("SGW",),
+    (35, "앱 업데이트 배포 폭주", "update_surge", None, ("SGW",),
      "업데이트 배포 서비스 하나의 세션이 3배·내려받기 양이 10배로 전국에서 몰린다 — 지역 편중 없음"),
 )
 
