@@ -35,97 +35,82 @@ def _node(test: str) -> str:
     return r.stdout
 
 
-def _body(latest: dict) -> str:
+def _body(latest: dict, how="{brief:'쉬운 설명 문장'}", extra: dict | None = None) -> str:
     """`detail(s)` 가 그린 HTML 을 한 줄로 받는다."""
-    s = {"no": 25, "name": "x", "status": "partial", "latest": latest, "setup": {}, "expect": {}}
+    s = {"no": 25, "name": "x", "status": "partial", "latest": latest, "setup": {}, "expect": {}} | (extra or {})
     out = _node("""
-HOW={'25':{brief:'쉬운 설명 문장'}};
-GL={CHANGE_SUSPECTED:{ko:{s:'구성·설정 변화 의심'}}};
+HOW={'25':%s};
+GL={CHANGE_SUSPECTED:{ko:{s:'구성·설정 변화 의심'}},'C-24':{ko:{s:'통화 몰림'}}};
 const s=%s;
 console.log(JSON.stringify(detail(s)));
-""" % json.dumps(s, ensure_ascii=False))
+""" % (how, json.dumps(s, ensure_ascii=False)))
     return json.loads(out.strip().splitlines()[-1])
 
 
+FLOW = "card_what:'카드 설명',card_flow:['어디에 — 서울','순서 — 0~3분 오름','평소 대비 — 2배','끝나면 — 돌아옵니다']"
+
+
+def _top(h: str) -> str:
+    return h[:h.index("자세히 보기 (기술 상세)")]
+
+
 def test_summary_two_boxes_come_before_the_folded_technical_detail():
-    """11-16 — 카드가 「어떤 장애이고 어떻게 만드나」 · 「무엇이 나타나고 시스템이 무엇을 찾았나」 두 장이다(「결과」 칸은 없다)."""
-    h = _body({"plain": "처음 문장", "detect_min": 6})
-    a, c = h.index("어떤 장애이고 어떻게 만드나"), h.index("무엇이 나타나고 시스템이 무엇을 찾았나")
-    tech = h.index("자세히 보기 (기술 상세)")
+    """11-22 — 카드가 「어떤 장애인가요」 · 「이렇게 만들고 이렇게 움직입니다」 두 장이다(「시스템이 찾은 것」은 빠졌다)."""
+    h = _body({"plain": "회차 문장", "detect_min": 6}, how="{" + FLOW + "}")
+    a, c, tech = h.index("어떤 장애인가요"), h.index("이렇게 만들고 이렇게 움직입니다"), h.index("자세히 보기 (기술 상세)")
     assert a < c < tech
-    # 11-20 — 생성량·실행 상태 머리(<h3><span>…)는 요약 박스가 아니다. 제목 글자만 있는 <h3> 이 두 장이다.
-    assert h[:tech].count("<h3>") - h[:tech].count("<h3><span") == 2 and "<h3>어떻게 만드나</h3>" not in h and "<h3>어떤 장애인가</h3>" not in h
-    assert "쉬운 설명 문장" in h[a:c]
-    assert "처음 문장" in h[c:tech]                              # 시스템이 찾은 것(latest.plain)은 오른쪽 안에
-    assert ">결과<" not in h[:tech] and "무슨 일이 생기나" not in h[:tech]
+    # 생성량·실행 상태 머리(<h3><span>…)는 요약 박스가 아니다. 제목 글자만 있는 <h3> 이 두 장이다.
+    assert h[:tech].count("<h3>") - h[:tech].count("<h3><span") == 2
+    assert "카드 설명" in h[a:c]
+    for part in ("어디에", "서울", "순서", "0~3분 오름", "평소 대비", "2배", "끝나면", "돌아옵니다"):
+        assert part in h[c:tech], part
     assert "<details" in h[:tech] and h.count("<details") >= 1, "기술 상세는 접힘 안에 있다(지우지 않는다)"
     assert "시나리오 설명" in h[tech:] and "만드는 법" in h[tech:], "기존 구역이 그대로 아래에 남는다"
 
 
-def test_latest_plain_wins_and_has_no_auto_marker():
-    h = _body({"plain": "사람이 쓴 문장", "detect_min": 6, "cause": "CHANGE_SUSPECTED"})
-    assert "사람이 쓴 문장" in h
-    assert "자동으로 만든 문장" not in h
-    assert "6분 뒤" not in h, "plain 이 있으면 자동 문장을 만들지 않는다"
+def test_old_titles_and_the_system_found_text_are_not_in_the_summary():
+    h = _body({"plain": "회차 문장", "detect_min": 6, "cause": "CHANGE_SUSPECTED"}, how="{" + FLOW + "}")
+    top = _top(h)
+    for old in ("무엇이 나타나고 시스템이 무엇을 찾았나", "시스템이 찾은 것", "회차 문장", "주로 움직이는 지표",
+                "자동으로 만든 문장", "6분 뒤", "신뢰도", "어떻게 만드나</h3>", "무슨 일이 생기나", ">결과<"):
+        assert old not in top, old
 
 
-def test_empty_plain_falls_back_to_an_auto_sentence_with_marker_using_only_recorded_values():
-    h = _body({"detect_min": 6, "cause": "CHANGE_SUSPECTED"})
-    assert "주입하고 6분 뒤에 이상을 처음 찾았습니다." in h
-    assert "「구성·설정 변화 의심」" in h                      # 용어집 이름 — 코드가 아니다
-    assert "기록된 값으로 자동으로 만든 문장입니다" in h
-    top = h[:h.index("자세히 보기 (기술 상세)")]               # 요약 세 칸만 — 상세 구역에는 "신뢰도" 칸이 있다
-    assert "신뢰도" not in top and "0.6" not in top, "기록에 없는 말을 지어내지 않는다"
+def test_flow_lines_split_at_the_first_dash_into_a_bold_head():
+    top = _top(_body({}, how="{card_flow:['어디에 — 서울 — 新宿','끝에 줄표 없음']}"))
+    assert "<li><b>어디에</b> — 서울 — 新宿</li>" in top
+    assert "<li>끝에 줄표 없음</li>" in top                    # 줄표가 없으면 머리를 만들지 않는다
 
 
-def test_auto_sentence_variants():
-    h0 = _body({"detect_min": 0, "cause": "UNDETERMINED"})
-    assert "주입하자마자 이상을 찾았습니다." in h0 and "원인은 정하지 못했습니다(판단 보류)." in h0
-    h1 = _body({})                                            # 기록 없음 — 지어내지 않는다
-    top = h1[:h1.index("자세히 보기 (기술 상세)")]
-    assert "아직 정리되지 않았습니다" in top and "자동으로 만든 문장" not in top
-    assert top.count("아직 정리되지 않았습니다") == 1           # 오른쪽 칸만 비었다(왼쪽은 장애 설명이 있다)
+def test_left_box_falls_back_card_what_then_brief_then_what():
+    assert "카드 설명" in _top(_body({}, how="{card_what:'카드 설명',brief:'짧은 설명'}"))
+    top = _top(_body({}, how="{brief:'짧은 설명'}", extra={"what": "보고서 설명"}))
+    assert "짧은 설명" in top and "보고서 설명" not in top
+    assert "보고서 설명" in _top(_body({}, how="{}", extra={"what": "보고서 설명"}))
 
 
-def _top(s_extra: dict, how="{brief:'설명'}") -> str:
-    s = {"no": 25, "name": "x", "status": "partial", "latest": {}, "setup": {}, "expect": {}} | s_extra
-    out = _node("""
-HOW={'25':%s};
-GL={C-24:{ko:{s:'통화 몰림'}}};
-const s=%s;
-console.log(JSON.stringify(detail(s)));
-""".replace("C-24:", "'C-24':") % (how, json.dumps(s, ensure_ascii=False)))
-    h = json.loads(out.strip().splitlines()[-1])
-    return h[:h.index("자세히 보기 (기술 상세)")]
+def test_right_box_falls_back_to_the_recorded_phases_and_never_invents():
+    top = _top(_body({}, how="{brief:'설명'}", extra={"setup": {"phases": [{"at": "0~3분", "what": "강도 0.5"}]}}))
+    assert "<li><b>0~3분</b> — 강도 0.5</li>" in top
+    nothing = _top(_body({}, how="{brief:'설명'}"))
+    assert nothing.count("아직 정리되지 않았습니다") == 1       # 오른쪽만 비었다(왼쪽은 설명이 있다)
 
 
-def test_how_box_uses_target_duration_and_at_most_two_params_and_counts_the_rest():
-    """② 어떻게 만드나 — 대상 · 주입 길이 · 초기값이 아닌 설정 최대 2개, 나머지는 「설정 n개 더 — 자세히 보기」."""
-    h = _top({"setup": {"target": "진원역을 정한다", "duration_min": 30,
-                        "params": [{"name": "규모", "value": "4.5~6.2", "initial": False},
-                                   {"name": "권장 주입 길이", "value": "20분", "initial": True},
-                                   {"name": "폭주 정점", "value": "40배", "initial": True},
-                                   {"name": "진앙 흩뜨림", "value": "±0.1도", "initial": False},
-                                   {"name": "지반", "value": "1.0", "initial": False}]}})
-    b = h[h.index("어떤 장애이고 어떻게 만드나"):h.index("무엇이 나타나고")]      # 왼쪽 카드
-    assert "진원역을 정한다" in b and "주입 30분" in b
-    assert "규모 4.5~6.2" in b and "진앙 흩뜨림 ±0.1도" in b           # 초기값이 아닌 설정 앞 2개
-    assert "지반 1.0" not in b and "폭주 정점" not in b                 # 3번째 이후와 초기값은 줄에 안 나온다
-    assert "권장 주입 길이" not in b                                     # 안내 줄은 이름으로 완전히 뺀다
-    assert "설정 2개 더 — 자세히 보기" in b                               # 뺀 것(폭주 정점 · 지반)은 숨기지 않고 개수로 알린다
-
-
-def test_effect_box_has_kpi_label_first_trace_and_found_text_and_nothing_invented():
-    h = _top({"expect": {"kpi": "C-24"}, "latest": {"plain": "찾은 문장"}},
-             how="{brief:'설명',traces:[{where:'XDR',what:'호가 늘어난다'},{where:'둘째',what:'안 나온다'}]}")
-    c = h[h.index("무엇이 나타나고"):]                                     # 오른쪽 카드
-    assert "주로 움직이는 지표: 통화 몰림 (C-24)" in c
-    assert "XDR — 호가 늘어난다" in c and "둘째" not in c         # 흔적은 첫 줄만(나머지는 자세히 보기)
-    assert "시스템이 찾은 것" in c and "찾은 문장" in c
+def test_target_duration_params_and_kpi_live_in_the_folded_detail_not_the_summary():
+    """11-22 — 대상·길이·설정값·KPI·흔적은 위 요약에서 빠지고 접힌 상세에만 있다."""
+    h = _body({"plain": "찾은 문장"}, how="{brief:'설명',traces:[{where:'XDR',what:'호가가 늘어난다'}]}",
+              extra={"expect": {"kpi": "C-24"},
+                     "setup": {"target": "진원역을 정한다", "duration_min": 30,
+                               "params": [{"name": "규모", "value": "4.5~6.2", "initial": False}]}})
+    top, rest = _top(h), h[h.index("자세히 보기 (기술 상세)"):]
+    for gone in ("진원역을 정한다", "30분", "규모", "C-24", "호가가 늘어난다"):
+        assert gone not in top, gone
+    for there in ("진원역을 정한다", "30분", "규모", "4.5~6.2", "C-24", "XDR", "호가가 늘어난다"):
+        assert there in rest, there
 
 
 def test_boxes_are_all_unknown_when_nothing_is_recorded_and_not_a_result_card():
-    h = _top({}, how="{}")
+    h = _top(_body({}, how="{}"))
     assert h.count("아직 정리되지 않았습니다") >= 2 and "맞혔습니다" not in h and "psg" not in h
 
 

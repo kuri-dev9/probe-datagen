@@ -239,7 +239,7 @@ def cmd_backfill(args) -> int:  # noqa: ARG001
 # 안 잡히고 **실제로 틱을 돌려야** `NameError: _floor_minute` 가 난다.
 # 지울 때는 지운 이름이 어디서 쓰이는지 세는 것이 순서다.
 
-_CANCEL_NOTE = "대상 해석 실패 — 일치 셀 0개 또는 형식 오류"
+_CANCEL_NOTE = "대상을 해석하지 못했습니다 — 일치하는 셀이 0개이거나 형식이 틀렸습니다"
 
 
 def _floor_minute(dt: datetime) -> datetime:
@@ -479,6 +479,133 @@ def _live_truth(P, gen, scs: list) -> None:
     print(f"  정답 기록 — {len(scs)}건 → {path}", flush=True)
 
 
+def _history_request(pem: dict, gen, scs: list, now: datetime | None = None) -> None:
+    """장애 지역 **과거 데이터 요청** — graphio `POST /api/history/copy` 를 장애마다 한 번 부른다(2026-11-21).
+
+    사용자 결정: 장애 셀의 전일·전주 같은 시각 1분 통계를 graphio 가 만든다(같은 셀 · 장애 없던 유사 셀에서 복사).
+    **gen 은 XDR 만 만든다** — 과거 표에 직접 쓰지 않고 요청만 보낸다. 쓰는 주체는 graphio 하나다.
+    날짜·시점은 설정 한 곳(`pemdb1.history`)이 정한다 — 시나리오별로 적지 않는다(2026-11-21 밤 케이).
+
+    두 갈래다.
+
+    - **normal** — 셀·지역 대상 채점 문항(`_history_cell_target`). 활성 목록에 처음 든 틱에 보낸다(정답 기록
+      `_live_truth` 와 같은 자리 · 자동 대상은 `set_fault_rows` 가 이미 정했다). 날짜는 `Scenario.history_offsets`
+      가 있으면 그것, 없으면 `history.default_offsets`. 장비·전국 대상은 보내지 않는다(과거 표가 셀·지역 단위뿐이다).
+    - **repeat** — 24번 매일 부하(`capacity_shift` 중 B 가 없는 것 = `faults` 의 `DAILY` 대상 · `scored=False` 여도).
+      graphio 가 **오늘 장애 구간의 실시간 행**을 원본으로 쓰므로 끝난 뒤에 보낸다 — 활성 목록에서 빠진 뒤
+      `history.repeat_after_min` 분. 구간은 관측 구간(시작 분 ~ 마지막으로 활성이던 분 + 1)이다 — 취소로 일찍
+      끝나도 실제로 만든 구간만 보낸다. **gen 이 그 사이 다시 뜨면 기억이 사라져 보내지 못한다**(로그도 없다).
+
+    **실패해도 주입은 계속한다** — 과거 데이터는 부가 기능이다. 장애마다 따로 보내고(한 건 실패가 뒤를 막지 않는다)
+    실패는 다음 틱에 다시 보내되 `history.max_tries` 번에서 멈춘다. 성공한 장애만 `gen._history_done` 에 넣는다.
+    graphio 가 같은 장애를 덮어쓰므로 다시 보내도 멱등이다.
+    """
+    import urllib.error
+    import urllib.request
+
+    if gen.anchor is None:
+        return
+    hcfg = pem.get("history") or {}
+    default = tuple(int(d) for d in hcfg.get("default_offsets") or ())
+    repeat_offsets = [int(d) for d in hcfg.get("repeat_offsets") or ()]
+    after = int(hcfg.get("repeat_after_min", 0) or 0)
+    max_tries = int(hcfg.get("max_tries", 0) or 0)
+    done: set = gen.__dict__.setdefault("_history_done", set())
+    tries: dict = gen.__dict__.setdefault("_history_tries", {})
+    # 매일 부하 — fault_id → [시작 분, 마지막으로 활성이던 분]. 끝난 뒤 보내려고 활성 동안 적어 둔다
+    waiting: dict = gen.__dict__.setdefault("_history_repeat_wait", {})
+    fmt = "%Y-%m-%d %H:%M:%S"
+
+    def fid_of(sc) -> int | None:
+        return int(sc.id[2:]) if sc.id.startswith("F-") and sc.id[2:].isdigit() else None
+
+    def at(minute: int) -> str:
+        return (gen.anchor + timedelta(minutes=minute)).strftime(fmt)
+
+    todo: list[tuple[int, dict]] = []
+    live: set[int] = set()
+    for sc in scs:
+        fid = fid_of(sc)
+        if fid is None or fid in done or not sc.target.cell_keys:
+            continue
+        if _history_daily(sc):
+            live.add(fid)
+            last = sc.start_minute + sc.duration - 1
+            if now is not None:
+                last = min(last, int((now - gen.anchor).total_seconds() // 60))
+            span = waiting.setdefault(fid, [sc.start_minute, last, sorted(sc.target.cell_keys)])
+            span[1] = max(span[1], last)
+            continue
+        offsets = tuple(getattr(sc, "history_offsets", ()) or ()) or default
+        if offsets and getattr(sc, "scored", True) and _history_cell_target(sc.target):
+            todo.append((fid, {"fault_id": fid, "cells": sorted(sc.target.cell_keys),
+                               "start": at(sc.start_minute), "end": at(sc.start_minute + sc.duration),
+                               "offsets": [int(d) for d in offsets]}))
+    if repeat_offsets:
+        cur = int((now - gen.anchor).total_seconds() // 60) if now is not None else None
+        for fid, (start, last, cells) in list(waiting.items()):
+            if fid in live or fid in done:
+                continue
+            # 끝난 분 + `after` 가 지나야 보낸다. 지금 분을 모르면(호출부가 안 줌) 바로 보낸다
+            if cur is not None and cur < last + 1 + after:
+                continue
+            todo.append((fid, {"fault_id": fid, "cells": cells, "start": at(start), "end": at(last + 1),
+                               "offsets": repeat_offsets, "mode": "repeat"}))
+    if not todo:
+        return
+    base = str(pem.get("graphio_api") or "").rstrip("/")
+    if not base:
+        raise RuntimeError("`pemdb1.graphio_api` 가 비어 있다 — 과거 데이터를 요청하지 못한다")
+    errors = []
+    for fid, body in todo:
+        if max_tries and tries.get(fid, 0) >= max_tries:
+            continue
+        req = urllib.request.Request(f"{base}/api/history/copy", data=json.dumps(body).encode("utf-8"),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            try:
+                with urllib.request.urlopen(req, timeout=10) as res:    # 2xx 가 아니면 HTTPError 로 올라간다
+                    res.read()
+            except urllib.error.URLError as exc:
+                # 연결 단계의 시간 초과는 `URLError(reason=timeout)` 로 싸여 온다 — 아래 시간 초과와 같게 다룬다
+                if isinstance(exc.reason, TimeoutError):
+                    raise exc.reason from exc
+                raise
+        except TimeoutError:
+            # **응답 시간 초과는 다시 보내지 않는다.** graphio 는 요청을 받은 뒤 동기로 복사하므로 시간이 넘어도
+            # 그쪽 복사는 계속된다 — 다시 보내면 같은 복사가 web 에서 겹쳐 돈다(시군구 대상은 셀 600~1,200개).
+            # 결과는 원장 `CM_HIST_COPY` 에서 본다
+            done.add(fid)
+            waiting.pop(fid, None)
+            print(f"  ! 과거 데이터 요청 F-{fid} — 응답 시간 초과 · graphio 쪽 복사는 이어질 수 있어 다시 보내지 않는다"
+                  f"(원장 CM_HIST_COPY 확인)", flush=True)
+            continue
+        except Exception as exc:                                    # noqa: BLE001 — 한 건 실패가 뒤를 막지 않는다
+            tries[fid] = tries.get(fid, 0) + 1
+            if max_tries and tries[fid] >= max_tries:
+                print(f"  ! 과거 데이터 요청 F-{fid} — {tries[fid]}번 실패 · 더 보내지 않는다", flush=True)
+            errors.append(f"F-{fid}: {type(exc).__name__}: {exc}")
+            continue
+        done.add(fid)
+        waiting.pop(fid, None)
+        print(f"  과거 데이터 요청 — F-{fid} · {body.get('mode', 'normal')} · 셀 {len(body['cells'])} · "
+              f"{body['start']}~{body['end']} · 오프셋 {body['offsets']}일", flush=True)
+    if errors:
+        # `_aside` 가 사유를 한 번만 찍는다 — 같은 사유가 이어지면 조용하다
+        raise RuntimeError("; ".join(errors))
+
+
+def _history_daily(sc) -> bool:
+    """24번 매일 부하 — `capacity_shift` 중 B(`shift_to`)가 없는 것. `faults` 의 `DAILY` 대상만 B 를 고르지 않는다."""
+    return sc.kind == "capacity_shift" and not getattr(sc.target, "shift_to", None)
+
+
+def _history_cell_target(t) -> bool:
+    """셀·지역 대상인가 — 장비(SGW·PGW·MME·MME 묶음) 대상은 셀 목록이 그 장비 아래 셀 전부라 과거 표(셀·지역)로
+    비교할 자리가 아니다. 셀 목록이 없는 전국 대상(기종·앱·APN·도메인)은 호출부가 이미 걸렀다."""
+    return bool(t.cell_keys) and not (t.sgw_id or t.pgw_id or t.mme_id or t.mme_group)
+
+
 def _uplane_store(cfg: dict, pem: dict) -> tuple[Path, int]:
     """U-Plane Parquet 루트와 보존 분 수 — `(root, retain_minutes)`.
 
@@ -697,6 +824,75 @@ def cmd_capacity(args) -> int:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+#: 매일 부하의 대상 표식 — `faults._shift_target` 가 이 머리를 보면 증설 기지국(B)을 고르지 않는다
+DAILY_PREFIX = "DAILY"
+
+
+#: 못 읽은 매핑 표 — 틱마다 다시 시도해 로그를 채우지 않는다
+_TABLE_WARNED: set[str] = set()
+
+
+def _daily_load(conn, ts: datetime, vo_sec: float) -> int | None:
+    """매일 같은 시각 부하 — 옛 24번(증설)을 시나리오 대신 **망 조작**으로 건다(2026-11-21).
+
+    사용자 11-21: 「망 조작의 장비 재배정 아래 · 역 단위로 등록 · 시간을 여러 개 골라 그 시간에 그 역에 묶어서 ·
+    부하 단위는 1시간」. 새 생성 경로를 만들지 않고 24번 kind(`capacity_shift`)를 **B 없이** 건다 — 몰림
+    (`SHIFT_RAMP`) → 정점 → 회복(`SHIFT_RECOVER`) 모양은 그대로이고 정점 길이만 부하 길이를 따른다.
+
+    * 묶음 — `CM_DATAGEN_CONFIG.daily_load.<n>`(`control.parse_daily_line` · 켜기|시 목록|역들). 켜진 묶음의 시가
+      가상 시각의 정시이면 **역마다 하나씩** 건다(대상 `DAILY:<토큰>` · 역 셋이면 장애 셋).
+    * 길이는 `DAILY_HOUR_MIN` × 그 시부터 이어진 시간 수(`control.daily_run`) — 18·19시면 18시에 2시간 하나를
+      건다. 정시마다 따로 걸면 경계에서 회복 → 몰림 골이 생기고, 앞 부하가 아직 진행 중이라 뒤 시간이 빠진다.
+    * 같은 대상이 이미 걸려 있으면(대기·진행) 건너뛴다 — 이어진 시간의 다음 정시 · 같은 분의 다음 틱 · 재기동 ·
+      두 묶음이 같은 역을 고른 경우에 두 번 걸지 않는다. 이어진 구간 중간(재기동으로 앞 정시를 놓침)이면 남은
+      시간만큼 건다.
+    * **옛 스위치(`daily_load`·`daily_load_at`)는 읽지 않는다** — 케이 11-21 13:45 「묶음으로 옮기지 말고 끄기만」.
+    돌려준 값은 마지막으로 건 장애 번호(없으면 None)
+    """
+    from . import faults as F
+    virt = ts + timedelta(seconds=vo_sec or 0)
+    # 역 → 셀 표는 시각·묶음과 무관하게 먼저 채운다 — 재기동 뒤 이미 걸린 `DAILY:ST:` 장애를 해석(`set_fault_rows`)할
+    # 때도, 23번 자동 대상(역 근처 eNB · `faults._station_venue`)도 쓴다. 표가 없으면 빈 채로 둔다(23번은 eNB 하나로)
+    # 읍면동 → 셀 표(`ADM3:` 대상 · 2026-11-22 단위 표)도 같이 — 없으면 그 대상은 셀 0개로 취소된다
+    for have, load, what in ((F.STATION_CELLS, F.load_stations, "역 표(CM_CELL_STATION_MAP) — 23번은 eNB 하나로 고른다"),
+                             (F.ADM3_CELLS, F.load_adm3, "읍면동 표(CM_CELL_GEO_MAP) — ADM3: 대상은 걸리지 않는다")):
+        if have or what in _TABLE_WARNED:
+            continue
+        try:
+            load(conn)
+        except Exception as e:      # 매핑 전 — 생성을 멈추지 않는다. 한 번만 알리고 다시 읽지 않는다
+            print(f"  ! {what}({e})", flush=True)
+            _TABLE_WARNED.add(what)
+            getattr(conn, "rollback", lambda: None)()
+    lines = control.daily_lines(conn)
+    # 켜진 묶음의 역 — 23번 자동 대상이 피한다(시각과 무관하게 켜져 있으면 피한다)
+    F.DAILY_TOKENS[:] = [t for _n, d in lines for t in d["targets"] if d["on"]]
+    if not lines:
+        return None
+    if virt.minute:
+        return None
+    h = virt.hour
+    due = [(n, d) for n, d in lines if d["on"] and h in d["hours"]]
+    fid = None
+    for n, d in due:
+        run = control.daily_run(d["hours"], h)
+        ln = control.DAILY_HOUR_MIN * run
+        end = (h + run) % 24
+        for tok in d["targets"]:
+            target = f"{DAILY_PREFIX}:{tok}"
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT COUNT(*) FROM {control.T_FAULT} WHERE FAULT_KIND='capacity_shift' "
+                            "AND TARGET=%s AND STATUS IN ('pending','active')", [target])
+                if cur.fetchone()[0]:
+                    continue
+            where = (F.STATION_NAMES.get(F.station_key(tok[3:]), tok) if tok.upper().startswith("ST:") else tok)
+            fid = control.add_fault(conn, "capacity_shift", target, datetime.now(),
+                                    duration_min=ln, mode="daily",
+                                    note=f"매일 같은 시각 부하 · {where} (묶음 {n} · 가상 {virt:%m-%d} {h:02d}시~{end:02d}시)")
+            print(f"[{ts:%H:%M}] 매일 부하 — F-{fid} 묶음 {n} · {where} · {h:02d}시~{end:02d}시", flush=True)
+    return fid
+
+
 def cmd_run(args) -> int:
     """상주 데몬 — **실시간 틱만.** 백필하지 않는다.
 
@@ -783,6 +979,8 @@ def cmd_run(args) -> int:
             # 없으면 `pemdb1.Baseline`·`scenarios.FaultCfg` 기본값이다.
             baseline=pem.get("baseline"), fault=pem.get("fault"),
             capacity_shift=_capacity_shift(pem),
+            # 추가 가입자(lte_call 만) 상한 — 미리 만들어 두고 UI 막대 값만큼 쓴다(`set_extra_subs`)
+            extra_lte_max=int(pem.get("extra_lte_max", 100_000)),
         )
         # 실시간 주입도 정답을 남긴다 — `_live_truth` 가 활성 집합이 바뀔 때 쓴다
         gen.truth_path = _truth_path(pem, data_dir)
@@ -798,6 +996,11 @@ def cmd_run(args) -> int:
         pct_default = float((pem.get("rates") or {}).get("volume_pct", 100))
         pct_now = float(control.get_config(conn, "volume_pct", str(pct_default)))
         gen.set_volume_pct(pct_now)
+        # 추가 가입자 — `volume_pct` 와 같은 길이다. DB(`CM_DATAGEN_CONFIG.extra_lte_subs`)가 이기고, 없으면
+        # 설정의 `pemdb1.extra_lte_subs`(기본 1만)다. 매 분 다시 읽는다(아래 틱)
+        extra_default = str(int(pem.get("extra_lte_subs", 10_000)))
+        extra_now = gen.set_extra_subs(int(float(control.get_config(conn, "extra_lte_subs", extra_default))))
+        print(f"  추가 가입자 {extra_now:,}명 (lte_call 만 · 상한 {len(gen.extra_subs):,})", flush=True)
 
         # ── 장비 재배정 (2026-10-15) ──────────────────────────────────
         # 호 수는 그대로 두고 **셀이 어느 노드를 거쳤다고 기록하는지**만 바꾼다
@@ -922,6 +1125,10 @@ def cmd_run(args) -> int:
                 pct_now = gen.set_volume_pct(pct_want)
                 print(f"[{ts:%H:%M}] 생성량 {pct_now:g}% "
                       f"(분당 {gen.gen.rates['lte_call']:,}호)", flush=True)
+            extra_want = int(float(control.get_config(conn, "extra_lte_subs", extra_default)))
+            if extra_want != extra_now:
+                extra_now = gen.set_extra_subs(extra_want)
+                print(f"[{ts:%H:%M}] 추가 가입자 {extra_now:,}명 (lte_call 만)", flush=True)
 
             # 계열 차단·시간대 곡선도 매 분 다시 읽는다 — 같은 경로다.
             bl_want = control.get_config(conn, "blocked", "") or ""
@@ -949,6 +1156,9 @@ def cmd_run(args) -> int:
                 vo_now = vo_want
                 print(f"[{ts:%H:%M}] 가상 시각 "
                       + (f"{vo_now / 60:+.0f}분" if vo_now else "해제 — 지금 시각"), flush=True)
+
+            # 매일 같은 시각 부하(옛 24번 · 2026-11-21 망 조작 묶음 「시간들 × 역들」) — `_daily_load`
+            _aside("매일 부하", _daily_load, conn, ts, vo_now)
 
             # ── 보존 정리 (2026-10-15) ────────────────────────────────
             # **생성 정지보다 앞이다.** 전에는 틱 맨 끝, `enabled=false` 의
@@ -1007,7 +1217,14 @@ def cmd_run(args) -> int:
                 active, enb_rate=lambda t: P.enb_call_rate(conn, t),
                 mesh_load=lambda t: P.mesh_people(conn, t))
             if bad:
-                _cancel_faults(conn, bad, _CANCEL_NOTE)
+                # 매일 부하의 역 대상은 사유를 정확히 적는다(생성 범위 밖 역 · `faults.daily_cancel_note`) — 나머지는 일반 사유
+                from .faults import daily_cancel_note
+                tgt = {int(f["fault_id"]): f.get("target") for f in active}
+                notes: dict[str, list[int]] = {}
+                for fid in bad:
+                    notes.setdefault(daily_cancel_note(tgt.get(int(fid))) or _CANCEL_NOTE, []).append(fid)
+                for note, fids in notes.items():
+                    _cancel_faults(conn, fids, note)
             # 실제 대상 — 해석·기종/APN 바인딩(`set_faults`) 뒤라 정답지 `scope` 와 같은 글이다. 적은 것은 다시 묻지 않는다
             todo = {int(sc.id[2:]): sc.target.label() for sc in scs
                     if sc.id.startswith("F-") and sc.id[2:].isdigit() and int(sc.id[2:]) not in resolved_done}
@@ -1019,6 +1236,7 @@ def cmd_run(args) -> int:
             if quakes:
                 quake_done.update(_aside("지진 기록", control.record_quakes, conn, quakes) or ())
             _aside("정답 기록", _live_truth, P, gen, scs)
+            _aside("과거 데이터 요청", _history_request, pem, gen, scs, now=ts)
 
             t0 = time.time()
             # **적재보다 먼저 파티션을 보장한다.** 생성기가 꺼져 있는 동안은
@@ -1303,7 +1521,7 @@ def cmd_pemfill(args) -> int:
             _pem_follow(conn, P, gen, w, start + timedelta(minutes=minutes),
                         umaps=umaps, cplane_root=cp_root,
                         retention_hours=_retention_default(cfg["generate"]),
-                        no_agg=args.no_agg, once=args.once)
+                        no_agg=args.no_agg, once=args.once, pem=pem)
     finally:
         conn.close()
     return 0
@@ -1311,7 +1529,7 @@ def cmd_pemfill(args) -> int:
 
 def _pem_follow(conn, P, gen, w, last_done, *, umaps: dict,
                 cplane_root: Path | None,
-                retention_hours: float, no_agg: bool, once: bool) -> None:
+                retention_hours: float, no_agg: bool, once: bool, pem: dict | None = None) -> None:
     """상용 스키마 실시간 틱 — 분이 닫히면 그 분을 생성·적재한다.
 
     **`pemfill` 의 준비 코드를 그대로 쓴다.** 셀 선택·가입자 풀·컬럼 매핑이
@@ -1353,6 +1571,7 @@ def _pem_follow(conn, P, gen, w, last_done, *, umaps: dict,
             for fid in bad:
                 print(f"  ! fault {fid} 해석 실패 — 건너뛴다", flush=True)
             _aside("정답 기록", _live_truth, P, gen, scs)
+            _aside("과거 데이터 요청", _history_request, pem or {}, gen, scs, now=pending)
 
             t0 = time.time()
             minute_idx = int((pending - gen.anchor).total_seconds() // 60)
@@ -2600,7 +2819,7 @@ def main(argv=None) -> int:
     ms.add_argument("--incident", type=float, help="T0 → 사건 열림(분)")
     ms.add_argument("--correct", type=float, help="T0 → 정답 판정(분)")
     ms.add_argument("--settle", type=float, help="주입 끝 → 최종 판정(분)")
-    ms.add_argument("--l2", type=float, help="T0 → L2 사건의 정답(분). L2 가 안 섰으면 빼면 된다")
+    ms.add_argument("--l2", type=float, help="T0 → 통합장애의 정답(분). 통합장애가 안 섰으면 빼면 된다")
     ms.add_argument("--start", help="주입 시작 시각 ISO (기본: `F-n` 이면 장애 표에서 읽는다)")
     ms.set_defaults(fn=cmd_measure)
 

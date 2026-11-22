@@ -20,10 +20,10 @@ SRC = ui_source()
 PAGES = {"main": "_HTML", "map": "_HTML_MAP", "scen": "_HTML_SCEN", "topo": "_HTML_TOPO"}
 NODE = shutil.which("node")
 
-HQ_TITLE = ("NTT docomo 본사 (千代田区永田町2-11-1)\nPGW 16대를 한 점으로 — 실제 PGW 위치가 아니다\n"
-            "누르면 SGW 에서 모이는 선이 나온다")
+HQ_TITLE = ("NTT docomo 본사 (千代田区永田町2-11-1)\nPGW 16대를 한 점으로 — 실제 PGW 위치가 아닙니다\n"
+            "누르면 SGW 에서 모이는 선이 나옵니다")
 KEYS = {
-    HQ_TITLE: "NTT docomo 本社 (千代田区永田町2-11-1)\nPGW 16台を1点に集約 — 実際のPGW位置ではない\nクリックするとSGWから集まる線が出る",
+    HQ_TITLE: "NTT docomo 本社 (千代田区永田町2-11-1)\nPGW 16台を1点に集約 — 実際のPGW位置ではありません\nクリックするとSGWから集まる線が出ます",
     "본사": "本社",
     "읍면동": "町丁目",
     "APN · docomo 본사": "APN · docomo 本社",

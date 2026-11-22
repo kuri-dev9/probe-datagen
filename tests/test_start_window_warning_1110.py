@@ -110,8 +110,8 @@ def test_ja_texts():
 
 
 def test_ko_and_ja_keys_exist_in_dictionary():
-    for k in ("지금 가상 시각 {t} — 시작 시간대({h}) 밖이라 탐지되지 않을 수 있다 · 주입은 된다",
-              "가상 시각 {n}분 적용 중 — 끝나면 「지금으로」로 되돌린다"):
+    for k in ("지금 가상 시각 {t} — 시작 시간대({h}) 밖이라 탐지되지 않을 수 있습니다 · 주입은 됩니다",
+              "가상 시각 {n}분 적용 중 — 끝나면 「지금으로」로 되돌립니다"):
         assert ui._JA_MAIN.get(k)
 
 

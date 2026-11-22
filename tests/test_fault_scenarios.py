@@ -180,7 +180,7 @@ def test_kind_specs_declare_scoring_meta():
 
 # 28~35번 신규 종류(2026-11-19) — gen-ui 주입으로만 들어오고 배치(`build_scenarios`)에는 없다
 NEW_INJECT_ONLY = ("dns_nxdomain", "ipv6_path_fail", "ran_drop_surge", "service_4xx", "service_tls_fail",
-                   "transport_cut", "update_surge")
+                   "transport_cut", "update_surge", "signaling_storm")
 
 
 def test_supported_ids_cover_every_kind():
@@ -188,7 +188,8 @@ def test_supported_ids_cover_every_kind():
     rng = random.Random(1)
     cells = load_cells(DATA / "cells.json")
     scs = SC.build_scenarios(cells, 2000, rng, selected="all")
-    assert {sc.id for sc in scs} == set(SUPPORTED)
+    # J-SC-25(SON)는 11-21 에 배치에서 삭제됐다. `SUPPORTED` 에 id 만 남은 것은 아래 xfail 시험이 지킨다(코드 쪽 정리 대기)
+    assert {sc.id for sc in scs} == set(SUPPORTED) - {"J-SC-25"}
     # 채점 문항이 아닌 재현(`j-sc-24`)은 배치에 없다 — 소등 eNB 설정이
     # 있어야 성립하고, 정답 파일에 들어가지 않는다
     # `natural_disaster`(27번 새 종류 · 11-04)도 배치에 없다 — 배치 `J-SC-27` 은 옛 `earthquake` 를 그대로 쓴다
@@ -341,8 +342,8 @@ def _fit_target(kind: str, rec: SC.Rec, cell) -> SC.Target:
         t.pgw_id = rec.get("ims_PGW_ID") or cell.ims_pgw_id
     else:
         t.pgw_id = rec.get("PGW_ID") or cell.pgw_id
-    if kind in ("mobility", "son_param_change"):
-        # 25번은 2026-11-09 부터 쌍의 출발 셀에서 시작한 호만 끊는다(`focus_pairs`) — 이 셀이 출발 셀이다
+    if kind == "mobility":
+        # (25번 SON 은 11-21 에 삭제됐다)
         t.cell_pairs = [(cell.cell_key, cell.cell_key)]
     return t
 
@@ -849,7 +850,8 @@ def test_plan_mutator_keeps_quantity_invariants(gen, kind):
         plan.imsi = f"4400{hit + _:011d}"
         # 28~35 신규 — 앱으로 고르는 장애(`_app_of`)는 대상 앱 ID 가 있어야 발동한다(2026-11-19)
         sc = _sc(kind, target=SC.Target(cell_keys=set(keys),
-                                        pgw_id=cell.pgw_id, domain="", app_id="3002"))
+                                        pgw_id=cell.pgw_id, domain="", app_id="3002"),
+                 duration=SC.SHIFT_TOTAL if kind == "capacity_shift" else 20)  # 매일 부하는 창 끝에서 회복이 시작된다
         sc.active_cells_cache = {cell.cell_key}
         # `capacity_shift` 는 강도를 인자가 아니라 **국면**에서 읽는다 — 시작
         # 분(강도 0.1)이면 거의 발동하지 않으니 혼잡이 최고인 분을 준다
@@ -1519,3 +1521,8 @@ def test_handover_kind_is_drawn_not_fixed_to_x2():
     for kind, want in HO.KIND_W.items():
         share = got[kind] / sum(got.values())
         assert abs(share - want) < 0.05, f"{kind} {share:.3f} vs 선언 {want}"
+
+
+@pytest.mark.xfail(strict=True, reason="11-21 맥스가 J-SC-25(SON)를 배치에서 지웠으나 pemdb1.SUPPORTED 에 id 가 남았다 — 코드 정리 대기(에스터 보고)")
+def test_supported_has_no_deleted_son_id():
+    assert "J-SC-25" not in SUPPORTED

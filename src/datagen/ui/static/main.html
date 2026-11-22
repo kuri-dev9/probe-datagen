@@ -69,6 +69,32 @@
   #fm { position:fixed; inset:0; z-index:50; display:flex; align-items:flex-start; justify-content:center;
         padding:6vh 16px; background:#0009; }
   #fm[hidden] { display:none; }
+  /* 시나리오 옵션·매일 부하 줄(2026-11-21) — 전역 `label {display:flex}` 가 `hidden` 을 덮고, 전역 `input {width:100%}`
+     가 체크박스를 한 줄 전체로 늘려 글자가 떨어져 나갔다(사용자 화면 11:21) */
+  #f-wide[hidden] { display:none; }
+  #f-wide { white-space:nowrap; }
+  #f-wide input[type=checkbox] { width:auto; padding:0; margin:0; flex:none; accent-color:var(--accent); }
+  /* 매일 같은 시각 부하(망 조작 · 2026-11-21 묶음판) — 묶음 = 「시간 칩들 × 역 칩들」. 시간 칩은 눌러서 켜고 끈다 */
+  #dl-list .dl-b { border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin-bottom:8px; }
+  #dl-list .dl-b.off { opacity:.55; }
+  #dl-list .dl-hd { display:flex; gap:8px; align-items:center; margin-bottom:6px; }
+  #dl-list .dl-r { display:flex; gap:6px; align-items:flex-start; margin-top:4px; }
+  #dl-list .dl-r > b { flex:none; width:2.6em; font-size:12px; color:var(--dim); padding-top:3px; }
+  #dl-list .dl-hours { display:grid; grid-template-columns:repeat(12, 1fr); gap:3px; flex:1; }
+  #dl-list .dl-h { padding:2px 0; font-size:11px; border-radius:4px; border:1px solid var(--line);
+                   background:transparent; color:var(--dim); cursor:pointer; font-variant-numeric:tabular-nums; }
+  #dl-list .dl-h.on { background:#1d4e7f; border-color:var(--accent); color:#fff; }
+  #dl-list .dl-sts { display:flex; flex-wrap:wrap; gap:4px; align-items:center; flex:1; }
+  #dl-list .dl-sts input { width:12em; padding:2px 6px; font-size:12px; }
+  /* 삭제 — 글자 링크(「삭제」·「✕」)가 안 보였다(2026-11-21 사람 지시). 테두리 있는 붉은 버튼으로
+     「추가」·「저장」(파랑 채움)과 갈라 둔다 */
+  #dl-list button.del { background:transparent; color:var(--red); border:1px solid var(--red);
+                        font-weight:normal; border-radius:5px; }
+  #dl-list button.del:hover { background:rgba(229,83,75,.15); filter:none; }
+  #dl-list .dl-hd button.del { margin-left:auto; padding:2px 10px; font-size:12px; }
+  #dl-list .chip button.del { margin-left:6px; padding:0 5px; font-size:11px; line-height:16px; }
+  /* 생성 범위 밖 역 — 걸어도 셀이 0개라 취소된다(2026-11-21). 지우지 않고 흐리게 — 지우는 것은 사람이 한다 */
+  #dl-list .chip.out { opacity:.45; text-decoration:line-through; }
   #fm .box { width:min(820px,100%); max-height:88vh; display:flex; flex-direction:column; background:var(--panel);
              border:1px solid var(--line); border-radius:10px; box-shadow:0 12px 40px #0008; }
   #fm .hd { display:flex; gap:12px; align-items:flex-start; padding:14px 18px; border-bottom:1px solid var(--line); }
@@ -79,11 +105,20 @@
   #fm .bd table { width:100%; border-collapse:collapse; } #fm .bd td { padding:3px 8px 3px 0; vertical-align:top;
              border-bottom:1px solid var(--line); white-space:normal; }
   #fm .ft { display:flex; gap:12px; align-items:center; padding:12px 18px; border-top:1px solid var(--line); }
-  #fm .ft .msg { color:var(--dim); font-size:12px; } #fm .ft button.cancel { padding:7px 12px; } #fm .ft a { margin-left:auto; color:var(--acc,#4e9af1); font-size:12px; }
+  #fm .ft .msg { color:var(--dim); font-size:12px; } #fm .ft button.cancel { padding:7px 12px; } #fm .ft button.sec { background:transparent; color:var(--acc,#4e9af1); border:1px solid var(--acc,#4e9af1); }
+  #fm .ft #fm-ok { margin-left:auto; }
+  .dl-hd .dl-dirty { color:var(--yellow); font-size:11px; }
+  .dl-hd button.dl-save { padding:2px 10px; font-size:12px; } .dl-hd button.dl-save:disabled { opacity:.4; cursor:default; }
+  button.dl-scn { background:transparent; color:var(--acc,#4e9af1); border:1px solid var(--acc,#4e9af1); padding:2px 8px; font-size:12px; vertical-align:middle; }
   /* 지역 — 콤보와 저장을 한 줄로. 전역 select{width:100%} 가 줄을 넘겼다 */
   #region-sel { width:auto; flex:1; min-width:0; }
   #region-row { flex-wrap:nowrap; }
-  .pager { display:flex; flex-wrap:wrap; gap:4px; margin-top:10px; }
+  /* 장애 목록 카드는 왼쪽 열 높이까지 늘어나고(.col 마지막 카드) **표가 남는 높이를 나눠 갖는다** —
+     쪽 번호는 카드 맨 아래 가운데에 고정(2026-11-21 사람 지시) */
+  #flist { display:flex; flex-direction:column; }
+  #flist #ftab { flex:1; }
+  .pager { display:flex; flex-wrap:nowrap; justify-content:center; gap:4px; margin-top:auto; padding-top:10px; }
+  .pager button:disabled { opacity:.35; cursor:default; filter:none; }
   /* 전역 button 이 파랑으로 채워져 있어 지금 쪽이 안 보였다 — 나머지는 비운다 */
   .pager button { min-width:30px; padding:3px 8px; font-size:12px; background:transparent;
                   color:var(--fg); border:1px solid var(--line); }
@@ -239,7 +274,7 @@
 </style>
 </head>
 <body>
-<h1>probe-datagen 장애 주입 제어<small>생성 데몬이 1분 틱으로 반영한다</small></h1>
+<h1>probe-datagen 장애 주입 제어<small>생성 데몬이 1분 틱으로 반영합니다</small></h1>
 
 <!-- 상태바 — **오늘만 본다. 항상 실시간이다** (2026-10-15 사람 지시).
      날짜 이동과 실시간 토글을 뺐다: 과거를 볼 일이 없고, 끌 이유도 없다.
@@ -307,7 +342,7 @@
         <input type="checkbox" id="gen-on" onchange="toggleGen(this)"><i></i>
       </label>
       <b id="gen-on-label" style="min-width:52px">—</b>
-      <span class="dim" style="font-size:12px">끄면 그 분은 비어 있다 — 0 으로 채우지 않는다</span>
+      <span class="dim" style="font-size:12px">끄면 그 분은 비어 있습니다 — 0 으로 채우지 않습니다</span>
     </div>
     <div style="margin-top:14px">
       <!-- "생성량 50 %" 한 줄 — label 기본이 세로 flex 라 세 줄로 갈렸다 -->
@@ -323,6 +358,18 @@
                       renderApplied(Number(this.value))"
              onchange="savePct(Number(this.value))">
       <div class="rates" id="rates"></div>
+    </div>
+    <!-- 추가 가입자 — **통화 기록(lte_call)만** 만드는 사람(2026-11-20 사용자 결정 · 최소 1만). 생성량 막대와
+         별개다. U-Plane 은 기존 가입자에게서만 나온다(성능). 범위는 서버가 준다(`extra_lte_range`) -->
+    <div style="margin-top:14px">
+      <label class="dim" style="font-size:12px; flex-direction:row; align-items:baseline; gap:4px; flex-wrap:wrap">추가 가입자(통화 기록만)
+        <b id="extra-label" style="color:var(--fg)">—</b> 명
+        <span id="extra-msg" class="dim" style="margin-left:8px"></span>
+      </label>
+      <input id="extra" type="range" min="10000" max="100000" step="5000" value="10000"
+             style="width:100%; margin:6px 0"
+             oninput="document.getElementById('extra-label').textContent=Number(this.value).toLocaleString()"
+             onchange="saveExtra(Number(this.value))">
     </div>
     <!-- ── 시간대 곡선 ─────────────────────────────────────────────────
          **원래부터 켜져 있었다.** 빠진 기능이 아니고, 스위치가 없어서 켜고
@@ -355,7 +402,7 @@
         <button type="button" id="vclock-now" class="ghost" onclick="resetVClock()">지금으로</button>
         <b id="vclock-label" style="font-size:12px">—</b>
       </div>
-      <div class="dim" style="margin-top:4px; font-size:11px">곡선·지하철·이동 비율만 그 시각 기준이다 — 레코드 시각은 실제 시각 그대로</div>
+      <div class="dim" style="margin-top:4px; font-size:11px">곡선·지하철·이동 비율만 그 시각 기준입니다 — 레코드 시각은 실제 시각 그대로</div>
       <div class="dim" id="diurnal-note" style="margin-top:8px; font-size:12px;
            line-height:1.6"></div>
       <!-- **viewBox 를 박지 않는다**(2026-10-16). 320 폭 좌표계를
@@ -372,7 +419,7 @@
          "1일"을 보면서 왜 원시가 따로 도는지 알 길이 없었다. 지금은 한 값이
          두 입도를 함께 자른다(`cli._purge_pemdb1`). -->
     <div class="sect">
-      <h3>데이터 보존 <small>— 지난 파티션을 떨어뜨린다</small></h3>
+      <h3>데이터 보존 <small>— 지난 파티션을 떨어뜨립니다</small></h3>
       <div class="row">
         <label class="tg" title="보존 정리 on/off">
           <input type="checkbox" id="ret-on" onchange="renderRetNote()"><i></i>
@@ -396,13 +443,13 @@
          차단은 미연동이다. 전에는 장애 주입과 한 카드였는데(2026-10-15) 오른쪽을
          장애 주입·목록만 두려고 왼쪽으로 뗐다(2026-11-03 사람 지시). 섞어 읽으면
          "쏠림을 넣었는데 왜 장애 목록에 없나"가 된다 -->
-    <h2>망 조작 <small class="dim">재배정·차단은 장애가 아니다 — 장애 목록에 남지 않는다</small></h2>
+    <h2>망 조작 <small class="dim">재배정·차단은 장애가 아닙니다 — 장애 목록에 남지 않습니다</small></h2>
 
     <!-- 장비 재배정 — 호 수는 그대로 두고 셀이 어느 노드를 거쳤다고
          기록하는지만 바꾼다. 비운 쪽이 0 이 되고 받은 쪽으로 몰린다.
          마스터(CL_CELL_MAP)는 건드리지 않는다. -->
     <div class="sect">
-      <h3>장비 재배정 <small>— 한쪽으로 몰아 본다. 총량은 그대로</small></h3>
+      <h3>장비 재배정 <small>— 한쪽으로 몰아 봅니다. 총량은 그대로</small></h3>
       <div style="display:flex; gap:8px; align-items:center">
         <select id="ra-kind" style="width:76px">
           <option>SGW</option><option>MME</option><option>PGW</option>
@@ -415,7 +462,24 @@
       <div id="ra-list" class="dim" style="margin-top:8px; font-size:12px"></div>
       <div class="row" style="margin-top:8px">
         <button type="button" onclick="saveReassign()">재배정 저장</button>
-        <span class="dim" id="ra-msg" style="font-size:12px">다음 틱부터 반영된다</span>
+        <span class="dim" id="ra-msg" style="font-size:12px">다음 틱부터 반영됩니다</span>
+      </div>
+    </div>
+
+    <!-- 매일 같은 시각 부하 — 옛 24번(증설)을 시나리오에서 빼서 **망 조작**의 장비 재배정 바로 아래에 둔다(2026-11-21 사용자
+         「장비 재배정 아래 · on/off 는 스위치 · 역 단위로 등록하고 보고 빼고 넣기 쉽게 · 시간 여러 개 · 부하 단위 1시간」).
+         한 묶음 = 「이 시간들 × 이 역들」. gen 이 그 가상 정시에 역마다 24번 모양(몰림 → 정점 → 회복 · 증설 기지국 없음)으로
+         1시간 건다 — 이어진 시간은 한 부하로 잇는다(`cli._daily_load`). 장애 목록에는 「매일 같은 시각 부하 · 역 이름」으로
+         남는다 — 생성기가 건 부하라는 사실을 숨기지 않는다 -->
+    <div class="sect">
+      <h3>매일 같은 시각 부하 <button type="button" class="sec dl-scn" onclick="location.href=scnHref(24, curVol())">시나리오 설명 보기</button> <small>— 1시간 단위 · 가상 시각 · 고른 시간마다 고른 역에 사람이 몰립니다 · 증설 기지국 없음</small></h3>
+      <datalist id="dl-names"></datalist>
+      <!-- 저장은 묶음마다(2026-11-22 사용자 — 아래 공통 저장 버튼이 헷갈린다) · 바꾼 묶음만 [저장]이 켜진다 -->
+      <p class="dim" style="font-size:12px; margin:2px 0 6px">켜진 묶음만 고른 시간의 정시에 걸립니다</p>
+      <div id="dl-list" style="font-size:12px"></div>
+      <div class="row" style="margin-top:4px">
+        <button type="button" class="ghost" onclick="addDaily()">+ 묶음 추가</button>
+        <span class="dim" id="dl-msg" style="font-size:12px"></span>
       </div>
     </div>
 
@@ -428,7 +492,7 @@
          요율 0 으로 눌러도 비슷해 보이지만 **다른 상태다** — 그쪽은 "이 환경은
          원래 안 만든다"이고, 비율을 바꾸면 되살아난다. -->
     <div class="sect">
-      <h3>생성할 xDR <small>— 누르면 켜고 끈다 · 즉시 반영</small></h3>
+      <h3>생성할 xDR <small>— 누르면 켜고 끕니다 · 즉시 반영</small></h3>
       <div class="xdrs" id="blk"></div>
       <div class="dim" id="blk-note" style="margin-top:8px; font-size:12px;
            line-height:1.6"></div>
@@ -454,7 +518,13 @@
         <select id="kind" onchange="renderTargets(); applyDur(); applyRange()"></select>
       </label>
       <label class="f-tgt">대상
-        <select id="target"><option value="">자동 선택</option></select>
+        <select id="target" onchange="renderUnitWarn()"><option value="">자동 선택</option></select>
+        <span id="tgt-warn" hidden style="color:var(--yellow); font-size:11px"></span>
+      </label>
+      <!-- 시나리오 옵션 — 폐기한 번호의 장면을 그 번호로 보낸다(`SCN_OPTION`). 8번 「기종 전국」(옛 26 · 2026-11-20),
+           5번 「간헐·없는 주소」(옛 28)·6번 「4xx 거절」(옛 33, 2026-11-21). 대상은 자동 선택뿐이다 -->
+      <label class="f-wide" id="f-wide" hidden style="flex-direction:row; align-items:center; gap:4px">
+        <input id="model-wide" type="checkbox" onchange="applyWide()"><span id="f-wide-t">기종 전국</span>
       </label>
       <label class="f-dur">지속시간(분)
         <input id="dur" type="number" min="1" value="10" oninput="renderDurHint()">
@@ -483,11 +553,14 @@
     <div class="hd"><div><h3 id="fm-t"></h3><p id="fm-m"></p><p id="fm-c"></p></div>
       <button class="x" type="button" onclick="closeFault()" aria-label="닫기">✕</button></div>
     <div class="bd" id="fm-b"></div>
-    <div class="ft"><button id="fm-go" type="button" disabled>지도로 이동</button><span class="msg" id="fm-msg"></span>
-      <button id="fm-cancel" class="cancel" type="button" hidden>취소</button>
-      <a id="fm-s" href="/scenarios">시나리오 화면에서 보기</a></div>
+    <!-- 아래 버튼 줄(2026-11-22 사용자) — 왼쪽 [지도로 이동][시나리오 화면에서 보기] · 오른쪽 [확인][취소].
+         「탐지 이력 N건」은 뺐다. 취소는 진행 중·시작 전 장애에만 보인다 -->
+    <div class="ft"><button id="fm-go" type="button" disabled>지도로 이동</button>
+      <button id="fm-s" class="sec" type="button">시나리오 화면에서 보기</button><span class="msg" id="fm-msg"></span>
+      <button id="fm-ok" type="button" onclick="closeFault()">확인</button>
+      <button id="fm-cancel" class="cancel" type="button" hidden>취소</button></div>
   </div></div>
-  <div class="panel">
+  <div class="panel" id="flist">
     <h2>장애 목록 <small class="dim" id="f-range"></small></h2>
     <table id="ftab">
       <colgroup><col style="width:46px"><col><col style="width:92px">
@@ -545,14 +618,19 @@ async function loadKinds() {
   const [st, sc] = await Promise.all([getJson("/api/status"), getJson("/api/scenarios")]);
   const ok = new Set(st.kinds);
   SCN = sc;
-  $("kind").innerHTML = SCN.map(s => {
+  // **폐기(RETIRED)는 메뉴에서 뺀다**(2026-11-20 시나리오 정리). `SCN` 에는 남긴다 — 과거 장애(F-xxx)의
+  // 번호·이름은 이 목록으로 붙인다. 「준비 중」으로 보이면 아직 만들 것으로 읽힌다
+  // **화면 순서**(`rank` · 2026-11-21 사용자 확정 — 일본 우선순위)로 늘어놓고 그 번호를 보인다. 값(`value`)은
+  // 지금 번호 그대로다 — 내부 키다(`control.SCENARIO_ORDER`). 순서가 없는 번호는 뒤로
+  const byRank = (a, b) => (a.rank ?? 1e9) - (b.rank ?? 1e9) || a.no - b.no;
+  $("kind").innerHTML = SCN.filter(s => s.status !== "RETIRED").sort(byRank).map(s => {
     const live = s.kind && ok.has(s.kind);
     const eq = ["mme","sgw","pgw","enb"].filter(k => s[k] === "Y")
                  .map(k => k.toUpperCase()).join("·");
     // 증거 없음(NO_EVIDENCE)은 준비 중과 다르다 — 만들 근거가 데이터에 없다
     const off = s.status === "NO_EVIDENCE" ? T(" — 증거 없음") : T(" — 준비 중");
     return `<option value="${s.no}"${live ? "" : " disabled"} title="${esc(T(s.description || ""))}">`
-         + `${s.no}. ${esc(T(s.name))}${live ? (eq ? ` [${eq}]` : "") : off}</option>`;
+         + `${s.rank ?? s.no}. ${esc(T(s.name))}${live ? (eq ? ` [${eq}]` : "") : off}</option>`;
   }).join("");
   renderTargets();
   applyDur();
@@ -566,7 +644,7 @@ async function loadTargets() {
 
 //: eNB 를 앵커로 **주변 셀까지** 묶어 거는 kind — `faults._PAIR_KINDS`·
 //: `_CROWD_KINDS`·`_AREA_KINDS`·`anchor_saturation` 과 같은 목록
-const CELL_KINDS = new Set(["mobility", "son_param_change", "ho_interruption",
+const CELL_KINDS = new Set(["mobility", "ho_interruption",
   "ran_congestion", "earthquake", "natural_disaster", "sa_fallback", "anchor_saturation"]);
 
 //: 대상을 비우면 **전국**에 걸리는 kind — `faults._AUTO_NODE` 에서 뺀 것(2026-11-05)
@@ -615,9 +693,9 @@ function renderRush(h) {
   const on = $("diurnal").checked, vh = vNow().getHours();
   const inside = (h.rush || []).some(([a, b]) => a <= b ? (a <= vh && vh < b) : (vh >= a || vh < b));
   const now = String(vh).padStart(2, "0") + ":" + String(vNow().getMinutes()).padStart(2, "0");
-  const state = !on ? `<span style="color:var(--yellow)">${esc(T("곡선이 꺼져 있다 — 시간대를 안 보므로 출퇴근 모양이 서지 않는다"))}</span>`
+  const state = !on ? `<span style="color:var(--yellow)">${esc(T("곡선이 꺼져 있습니다 — 시간대를 안 보므로 출퇴근 모양이 서지 않습니다"))}</span>`
     : inside ? `<span style="color:var(--green)">${esc(T("지금 가상 시각 {t} — 출퇴근 시간대 안", {t: now}))}</span>`
-    : `<span style="color:var(--yellow)">${esc(T("지금 가상 시각 {t} — 출퇴근 시간대 밖이라 탐지되지 않을 수 있다", {t: now}))}</span>`;
+    : `<span style="color:var(--yellow)">${esc(T("지금 가상 시각 {t} — 출퇴근 시간대 밖이라 탐지되지 않을 수 있습니다", {t: now}))}</span>`;
   el.innerHTML = `<b>${esc(T("출퇴근 시간대 권장"))}</b> ` + clock.map(v =>
       `<button type="button" class="ghost" onclick="rushClock('${v}')">${esc(T("가상 {t}", {t: v}))}</button>`).join(" ")
     + " " + state;
@@ -635,13 +713,13 @@ function renderWindow(h) {
     const inside = a <= b ? (a <= vh && vh < b) : (vh >= a || vh < b);
     if (!inside) {
       const now = String(vh).padStart(2, "0") + ":" + String(vNow().getMinutes()).padStart(2, "0");
-      parts.push(`<span style="color:var(--yellow)">${esc(T("지금 가상 시각 {t} — 시작 시간대({h}) 밖이라 탐지되지 않을 수 있다 · 주입은 된다",
+      parts.push(`<span style="color:var(--yellow)">${esc(T("지금 가상 시각 {t} — 시작 시간대({h}) 밖이라 탐지되지 않을 수 있습니다 · 주입은 됩니다",
         {t: now, h: LANG === "ja" && h.text_ja || h.text || ""}))}</span>`);
     }
   }
   const m = Math.round(VO / 60);
   if (on && $("kind").value && m)
-    parts.push(`<span style="color:var(--yellow)">${esc(T("가상 시각 {n}분 적용 중 — 끝나면 「지금으로」로 되돌린다",
+    parts.push(`<span style="color:var(--yellow)">${esc(T("가상 시각 {n}분 적용 중 — 끝나면 「지금으로」로 되돌립니다",
       {n: (m > 0 ? "+" : "") + m}))}</span>`);
   el.hidden = !parts.length;
   el.innerHTML = parts.join("<br>");
@@ -665,11 +743,39 @@ function renderTargets() {
   const cellish = s && CELL_KINDS.has(s.kind);
   const enbLab = x => (x.name || `eNB ${x.id}`)
     + (cellish ? T(" · 셀 {c} + 주변 셀", {c: x.cells}) : "");
-  if (on("sgw")) h += og("SGW", TGT.sgw.map(x => ({v:`SGW-${x.id}`, t:node("SGW", x)})));
-  if (on("mme")) h += og("MME", TGT.mme.map(x => ({v:`MME-${x.id}`, t:node("MME", x)})));
-  if (on("pgw")) h += og("PGW", TGT.pgw.map(x => ({v:`PGW-${x.id}`, t:node("PGW", x)})));
-  if (on("enb")) h += og("eNB", (TGT.enb || []).map(x => ({v:`ENB:${x.id}`, t:enbLab(x)})));
+  const units = (s && s.units) || [];
+  if (units.length) {
+    // **거는 단위 표**(2026-11-22 사용자 「표대로」 · `faults.TARGET_UNITS`) — 이 장애가 허용하는 단위만 보인다.
+    // 장비 칸(`*_YN`)은 보지 않는다. 역 근처는 그 역에서 가까운 eNB 5~6개의 셀 전부(23번 자동과 같은 정의)다
+    const nm = x => LANG === "ja" ? x.name : (x.name_ko || x.name);
+    const U = {
+      CELL: () => og(T("셀 하나"), (TGT.cell || []).map(x => ({v:`CELL:${x.key}`, t:`${x.name || "eNB " + x.enb} · ${T("셀")} ${x.key}`}))),
+      ENB: () => og(T("기지국(eNB)"), (TGT.enb || []).map(x => ({v:`ENB:${x.id}`, t:enbLab(x)}))),
+      ST: () => og(T("역 근처 (eNB 5~6국)"), (TGT.st || []).map(x => ({v:`ST:${x.id}`, t:nm(x)}))),
+      ADM3: () => og(T("읍면동"), (TGT.adm3 || []).map(x => ({v:`ADM3:${x.code}`, t:T("{n} (셀 {c})", {n: x.name || x.code, c: x.cells})}))),
+      SGG: () => og(T("시군구"), (TGT.sgg || []).map(x => ({v:`SGG:${x.code}`, t:T("{n} (셀 {c})", {n: x.name || x.code, c: x.cells})}))),
+    };
+    for (const u of units) if (U[u]) h += U[u]();
+  } else {
+    if (on("sgw")) h += og("SGW", TGT.sgw.map(x => ({v:`SGW-${x.id}`, t:node("SGW", x)})));
+    if (on("mme")) h += og("MME", TGT.mme.map(x => ({v:`MME-${x.id}`, t:node("MME", x)})));
+    if (on("pgw")) h += og("PGW", TGT.pgw.map(x => ({v:`PGW-${x.id}`, t:node("PGW", x)})));
+    if (on("enb")) h += og("eNB", (TGT.enb || []).map(x => ({v:`ENB:${x.id}`, t:enbLab(x)})));
+  }
   $("target").innerHTML = h;
+  renderUnitWarn();
+}
+
+// 셀 하나·기지국 하나를 고르면 경고만 한다 — 막지 않는다(2026-11-22 · `unit_warn`). 표본이 적어 정체·끊김 인원이
+// 판정 하한에 닿지 못할 수 있다(23번 F-499·F-508 이 eNB 하나였다)
+function renderUnitWarn() {
+  const el = $("tgt-warn");
+  if (!el) return;
+  const s = SCN.find(x => String(x.no) === $("kind").value);
+  const v = $("target").value || "", u = v.split(":")[0].toUpperCase();
+  const warn = !!s && (s.unit_warn || []).includes(u);
+  el.hidden = !warn;
+  el.textContent = warn ? T("셀·기지국 하나는 표본이 적어 탐지되지 않을 수 있습니다 · 주입은 됩니다") : "";
 }
 
 // ── 상태바 ──────────────────────────────────────────────────────────────
@@ -781,6 +887,11 @@ function faultScn(f) {
   return s;
 }
 function faultName(f) {
+  // 매일 같은 시각 부하(망 조작 · `DAILY` 대상) — 시나리오가 아니다. 메모의 「· 자리」를 이름에 붙인다
+  if (f.kind === "capacity_shift" && /^DAILY/i.test(f.target || "")) {
+    const m = /매일 같은 시각 부하 · ([^(]+?)\s*\(/.exec(f.note || "");
+    return T("매일 같은 시각 부하") + (m ? " · " + m[1] : "");
+  }
   const s = faultScn(f);
   // 번호를 `[25]` 로 감싼다 — 바로 앞 칸이 장애 ID 라 `25.` 로 두면 둘이 섞여 읽혔다
   return s ? `[${s.no}] ${T(s.name)}` : T(LABELS[f.kind] || f.kind);
@@ -789,7 +900,7 @@ function faultName(f) {
 // 사람이 적은 메모만 — 주입 경로가 붙인 시나리오 번호(`#25`)는 이름 칸이 이미 말한다
 function memoOf(f) {
   const n = String(f.note || "").replace(/^#\d+\s*/, "").trim();
-  return /^지도 · 시나리오 \d+$/.test(n) ? T("지도에서 주입") : n;
+  return /^지도 · 시나리오 \d+$/.test(n) ? T("지도에서 주입") : T(n);     // 취소 사유(서버가 적는 고정 문구)는 일본어 짝이 있다
 }
 
 function goPage(i) { FPAGE = i; renderFaults(); }
@@ -810,7 +921,7 @@ async function howOf(no) {
 }
 const howTr = (h, k) => LANG === "ja" && h.ja && h.ja[k] != null ? h.ja[k] : h[k];
 function howHtml(h) {
-  if (!h) return `<p class="dim">${esc(T("이 장애의 시나리오 설명이 없다"))}</p>`;
+  if (!h) return `<p class="dim">${esc(T("이 장애의 시나리오 설명이 없습니다"))}</p>`;
   const lines = howTr(h, "detail"), steps = howTr(h, "steps"), traces = howTr(h, "traces"),
         same = howTr(h, "unchanged"), lim = howTr(h, "limits");
   const sec = (t, b) => `<h4>${esc(T(t))}</h4>${b}`;
@@ -900,25 +1011,26 @@ async function openFault(id) {
     // **판정 기록이 있는 생성량 탭으로**(2026-11-11 사용자 지적 — 50% 회차가 15% 탭으로 열려 옛 회차가 보였다).
     // 장애 행에는 생성량이 없어 판정 기록에서 찾는다. 판정 전이면 지금 생성량이고 그 사실을 설명에 적는다
     const link = $("fm-s");
-    link.href = scnHref(s.no, curVol(), "F-" + id);
-    link.title = T("판정 기록을 찾는 중 — 지금 생성량 탭으로 연다");
+    link.onclick = () => { location.href = link.dataset.href; };
+    link.dataset.href = scnHref(s.no, curVol(), "F-" + id);
+    link.title = T("판정 기록을 찾는 중 — 지금 생성량 탭으로 엽니다");
     // 주입 때 생성량이 기록돼 있고 그 탭이 있으면 먼저 그것으로 — 판정 기록이 있으면 아래에서 그 탭으로 바꾼다
     if (f.volume_pct != null && SCN_VOLS.includes(f.volume_pct)) {
-      link.href = scnHref(s.no, f.volume_pct, "F-" + id);
-      link.title = T("주입 때 생성량 {v}% 탭으로 연다", {v: f.volume_pct});
+      link.dataset.href = scnHref(s.no, f.volume_pct, "F-" + id);
+      link.title = T("주입 때 생성량 {v}% 탭으로 엽니다", {v: f.volume_pct});
     }
     fetch("/api/scenario-fault-volume?fault=F-" + id, {cache: "no-store"}).then(r => r.json()).then(v => {
       if (FM_NOW !== id) return;
       if (v && v.volume != null) {
-        link.href = scnHref(s.no, v.volume, "F-" + id);
-        link.title = T("판정 기록이 {v}% 탭에 있다", {v: v.volume});
+        link.dataset.href = scnHref(s.no, v.volume, "F-" + id);
+        link.title = T("판정 기록이 {v}% 탭에 있습니다", {v: v.volume});
       } else if (!(f.volume_pct != null && SCN_VOLS.includes(f.volume_pct))) {
-        link.title = T("아직 판정 기록이 없어 지금 생성량({v}%) 탭으로 연다 — 주입 때 생성량과 다를 수 있다", {v: curVol()});
+        link.title = T("아직 판정 기록이 없어 지금 생성량({v}%) 탭으로 엽니다 — 주입 때 생성량과 다를 수 있습니다", {v: curVol()});
       }
     }).catch(() => {});
   }
   const go = $("fm-go"), msg = $("fm-msg");
-  go.disabled = true; go.onclick = null; msg.textContent = T("탐지 이력을 찾는 중");
+  go.disabled = true; go.onclick = null; msg.textContent = ""; go.title = "";
   $("fm").hidden = false;
   const [how, inc] = await Promise.all([
     s ? howOf(s.no).catch(() => null) : null,
@@ -928,8 +1040,8 @@ async function openFault(id) {
   const got = inc.incidents || [];
   if (inc.error) { msg.textContent = inc.error; return; }
   // 없으면 없다고 말한다 — 그냥 지도로 보내면 "이 장애가 거기 있다"로 읽힌다
-  if (!got.length) { msg.textContent = T("탐지 이력 없음"); return; }
-  msg.textContent = T("탐지 이력 {n}건", {n: got.length});
+  // 이력 건수는 보이지 않는다(2026-11-22 사용자 「필요 없다」) — 없을 때만 버튼이 왜 꺼졌는지 툴팁으로 말한다
+  if (!got.length) { go.title = T("이 장애는 아직 탐지된 이상이 없습니다"); return; }
   go.disabled = false;
   go.onclick = () => { location.href = faultMapUrl(id, got); };
 }
@@ -1002,9 +1114,15 @@ function renderFaults() {
   $("f-range").textContent = faults.length
     ? T("{n}건 · {a}–{b}", {n: faults.length + (faults.length >= FAULT_MAX ? "+" : ""),
         a: FPAGE * FAULT_PAGE + 1, b: FPAGE * FAULT_PAGE + view.length}) : "";
-  $("pager").innerHTML = pages > 1 ? Array.from({length: pages}, (_, i) =>
-    `<button type="button"${i === FPAGE ? ' class="on"' : ""} onclick="goPage(${i})">${i + 1}</button>`
-  ).join("") : "";
+  // 번호는 **지금 쪽 둘레로 10개까지**(창) + 양옆 ‹ › 한 쪽씩 — 처음·끝에서는 화살표를 끈다
+  const PAGER_N = 10;
+  const p0 = Math.max(0, Math.min(FPAGE - Math.floor(PAGER_N / 2), pages - PAGER_N));
+  const nums = Array.from({length: Math.min(PAGER_N, pages)}, (_, k) => p0 + k);
+  $("pager").innerHTML = pages > 1
+    ? `<button type="button" aria-label="${esc(T("이전 쪽"))}"${FPAGE === 0 ? " disabled" : ""} onclick="goPage(${FPAGE - 1})">‹</button>`
+      + nums.map(i => `<button type="button"${i === FPAGE ? ' class="on"' : ""} onclick="goPage(${i})">${i + 1}</button>`).join("")
+      + `<button type="button" aria-label="${esc(T("다음 쪽"))}"${FPAGE === pages - 1 ? " disabled" : ""} onclick="goPage(${FPAGE + 1})">›</button>`
+    : "";
   // 칸은 한 줄로 자르고(`…`) 전체는 툴팁으로 — 줄이 접히면 쪽마다 높이가 달라진다
   const td = (t, tip = t) => `<td data-tip="${esc(tip)}">${esc(t)}</td>`;
   // 종류 칸은 이름 밑에 메모 — 없으면 한 줄
@@ -1023,7 +1141,7 @@ function renderFaults() {
         ${td(volText(f), T("생성량") + " " + volText(f) + " · " + T("가상 시각") + " " + vclockText(f))}
         <td><span class="st st-${shownStatus(f)}" title="${esc(shownStatus(f) + (stoppedMin(f) == null ? "" : " · " + durText(f)))}">${esc(statusPlain(f))}</span></td>
       </tr>`).join("");
-  if (!html) html = `<tr><td colspan="7" class="dim">${T("장애 이력이 없다")}</td></tr>`;
+  if (!html) html = `<tr><td colspan="7" class="dim">${T("장애 이력이 없습니다")}</td></tr>`;
   // **마지막 쪽도 20줄 높이** — 빈 줄로 채워 카드 높이가 쪽마다 같다
   const fill = FAULT_PAGE - Math.max(view.length, 1);
   html += `<tr class="pad"><td colspan="7">&nbsp;</td></tr>`.repeat(Math.max(0, fill));
@@ -1039,11 +1157,33 @@ function applyRange() {
   const on = RANGE_KINDS.has(curKind());
   $("f-int").style.display = on ? "none" : "";
   $("f-rng").style.display = on ? "" : "none";
+  applyWide();
+}
+//: 시나리오 옵션 — kind → 체크하면 보낼 번호(폐기 번호가 내부 주입 번호로 남는다 · `control.RETIRED` 주석). 그 번호의
+//: kind 로 보낸다(5번 옵션은 28 의 `dns_flap`, 6번 옵션은 33 의 `service_4xx`). 26 은 kind 가 같아(ue_model) 번호만 바뀐다
+const SCN_OPTION = {
+  ue_model:        {no: 26, label: "기종 전국"},
+  dns_degradation: {no: 28, label: "간헐·없는 주소"},
+  external_server: {no: 33, label: "4xx 거절"},
+};
+function curOpt() { return SCN_OPTION[curKind()] || null; }
+function wideOn() { return !!curOpt() && $("model-wide").checked; }
+//: 옵션을 켰을 때 보낼 kind — 그 번호 행의 kind
+function optKind() { const o = curOpt(); return (o && (SCN.find(x => x.no === o.no) || {}).kind) || curKind(); }
+function applyWide() {
+  const o = curOpt(), isModel = !!o;
+  $("f-wide").hidden = !isModel;
+  if (o) $("f-wide-t").textContent = T(o.label);
+  if (!isModel) $("model-wide").checked = false;
+  // 전국은 자동 선택에서만 탄다(`faults` 자동 대상 분기) — 대상을 고르면 그 대상이 이긴다
+  const w = wideOn();
+  if (w) $("target").value = "";
+  $("target").disabled = w;
 }
 
 async function inject(ev) {
   ev.preventDefault();
-  const kind = curKind(), ranged = RANGE_KINDS.has(kind);
+  const kind = wideOn() ? optKind() : curKind(), ranged = RANGE_KINDS.has(kind);
   // 범위는 자동 대상에만 뜻이 있다 — 대상을 직접 고르면 그 대상 그대로다(`faults.route_range_of`)
   const tgt = $("target").value || null;
   const body = {
@@ -1053,9 +1193,9 @@ async function inject(ev) {
     // 범위 kind 는 세기를 고정한다 — 생성기도 1.0 으로 본다(`faults.build`)
     intensity: ranged ? 1.0 : parseFloat($("intensity").value),
     // 어느 시나리오로 걸었는지 남긴다 — 같은 kind 를 여러 번호가 쓴다(1/18)
-    note: `#${$("kind").value} ` + ($("note").value || ""),
+    note: `#${wideOn() ? curOpt().no : $("kind").value} ` + ($("note").value || ""),
     // 번호는 칸으로도 — 메모를 고쳐도 번호가 남는다(`CM_DATAGEN_FAULT.SCENARIO_NO`)
-    scenario_no: parseInt($("kind").value, 10) || null,
+    scenario_no: wideOn() ? curOpt().no : (parseInt($("kind").value, 10) || null),
   };
   const m = $("msg");
   // 지정시간 — 작업은 지금 등록하고 장애는 그 시각에 시작한다. 서버는 이미 `start_ts` 를 받는다(리오 주입 경로)
@@ -1470,19 +1610,19 @@ function renderRegionNote() {
   // ② 고르기만 하고 아직 저장 안 한 상태를 구분해 적는다
   if (sel !== pend)
     out.push(`<span style="color:var(--warn,#e8a33d)">`
-           + T("고른 값 {a} — 아직 저장하지 않았다", {a: `<b>${esc(L[sel]||sel)}</b>`}) + `</span>`);
+           + T("고른 값 {a} — 아직 저장하지 않았습니다", {a: `<b>${esc(L[sel]||sel)}</b>`}) + `</span>`);
   // ③ **어긋남을 숨기지 않는다.** 사람이 yaml 에 적은 칸은 지역을 바꿔도
   //    따라오지 않는다 — 그걸 모르면 "바꿨는데 왜 그대로냐"가 된다.
   const cf = REGION.conflicts || [];
   if (cf.length) {
     out.push(`<span style="color:var(--warn,#e8a33d)">`
-           + T("⚠ 설정 파일에 적힌 값이 있어 지역을 바꿔도 따라오지 않는다 —") + `</span>`);
+           + T("⚠ 설정 파일에 적힌 값이 있어 지역을 바꿔도 따라오지 않습니다 —") + `</span>`);
     cf.forEach(c => out.push(`&nbsp;&nbsp;<code>${esc(c.path)}</code> = `
       + `<b>${esc(c.configured)}</b> ` + T("({l} 이면 {e})", {l: esc(c.locale), e: esc(c.expected)})));
-    out.push(`&nbsp;&nbsp;<span class="dim">${T("따라오게 하려면 datagen.yaml 의 그 칸을 지운다")}</span>`);
+    out.push(`&nbsp;&nbsp;<span class="dim">${T("따라오게 하려면 datagen.yaml 의 그 칸을 지웁니다")}</span>`);
   }
   out.push(`<span class="dim">`
-         + T("운영 중에는 바꾸지 않는다 — 같은 분에 두 나라 IMSI 가 섞이면 그 분은 어느 쪽으로도 집계되지 않는다")
+         + T("운영 중에는 바꾸지 않습니다 — 같은 분에 두 나라 IMSI 가 섞이면 그 분은 어느 쪽으로도 집계되지 않습니다")
          + `</span>`);
   $("region-note").innerHTML = out.join("<br>");
 }
@@ -1497,7 +1637,7 @@ async function saveRegion() {
     if (!r.ok) { msg.textContent = T("실패 — ") + (await r.text()).slice(0, 120); return; }
     // **"저장됨" 으로 끝내지 않는다.** 반영 시점을 함께 적는다.
     msg.innerHTML = `<span style="color:var(--warn,#e8a33d)">${T("저장됨 —")}`
-                  + ` <b>${T("재시작해야 반영된다")}</b></span>`;
+                  + ` <b>${T("재시작해야 반영됩니다")}</b></span>`;
     await loadRegion();
   } catch (e) { msg.textContent = T("실패 — ") + e; }
 }
@@ -1523,6 +1663,16 @@ function renderSettings(d) {
   const pct = Number(d.volume_pct ?? 100);
   $("pct").value = pct;
   $("pct-label").textContent = pct;
+  const xr = d.extra_lte_range || [10000, 100000];
+  $("extra").min = xr[0]; $("extra").max = xr[1];
+  $("extra").value = d.extra_lte_subs ?? xr[0];
+  $("extra-label").textContent = Number(d.extra_lte_subs ?? xr[0]).toLocaleString();
+  // 저장된 값(`DAILY_SAVED`)과 화면 값(`DAILY`)을 따로 든다 — 묶음마다 저장하려면 「무엇이 바뀌었나」를 알아야 한다.
+  // 저장 안 된 묶음이 있으면 화면 값을 덮지 않는다(설정을 다시 받을 때 손으로 바꾼 것이 사라지지 않게)
+  DAILY_SAVED = dailyNorm(d.daily_lines || []);
+  if (!DAILY.some((_, i) => dailyDirty(i)))
+    DAILY = DAILY_SAVED.map((x, i) => ({ ...x, hours: [...x.hours], targets: [...x.targets], _sid: i }));
+  renderDaily();
   renderApplied(pct);
   $("gen-on").checked = !!d.enabled;
   $("gen-on-label").textContent = d.enabled ? T("가동") : T("정지");
@@ -1581,18 +1731,18 @@ function renderRetNote() {
   const el = $("ret-note");
   $("ret").disabled = !on;
   if (!on) {
-    el.innerHTML = `<b style="color:var(--yellow)">${T("정리하지 않는다")}</b> — `
-                 + T("파티션이 계속 쌓인다. 디스크를 직접 봐야 한다");
+    el.innerHTML = `<b style="color:var(--yellow)">${T("정리하지 않습니다")}</b> — `
+                 + T("파티션이 계속 쌓입니다. 디스크를 직접 봐야 합니다");
     return;
   }
   const d = h / 24;
   el.innerHTML =
-    T("원시 xDR(시간 파티션) <b>{h}시간</b>치만 남는다<br>", {h})
-    + T("집계 <code>PM_*_1M</code>(일 파티션)은 <b>하루 입도</b>로만 떨어진다 — ")
-    + (d < 1 ? T("{h}시간을 줘도 최대 하루치가 남는다", {h})
+    T("원시 xDR(시간 파티션) <b>{h}시간</b>치만 남습니다<br>", {h})
+    + T("집계 <code>PM_*_1M</code>(일 파티션)은 <b>하루 입도</b>로만 떨어집니다 — ")
+    + (d < 1 ? T("{h}시간을 줘도 최대 하루치가 남습니다", {h})
              : T("약 {d}일치", {d: d.toFixed(d < 10 ? 1 : 0)}))
     + `<br><span style="color:var(--dim)">`
-    + T("원시 Parquet 는 이 값과 별개다 — 생성 설정의 <code>retain_minutes</code>(U-Plane 10분 · C-Plane 1440분)")
+    + T("원시 Parquet 는 이 값과 별개입니다 — 생성 설정의 <code>retain_minutes</code>(U-Plane 10분 · C-Plane 1440분)")
     + `</span>`;
 }
 
@@ -1665,7 +1815,7 @@ function clockFeature(h, m, c) {
       + T(" · 생성량(호)은 피크의 <b>{v}%</b>", {v: pct(c.call)}) + "<br>";
     // 지하철 몫은 전부 노선 셀에서 난다 — 그래서 "그 이상"이다(고정·걷기 호도 일부 노선 셀에 떨어진다)
     if (run && sw > 0 && B.route_cells)
-      out += T("야마노테선 노선 셀({n})에 호의 약 {p}% 이상이 몰린다 — 이 시각에 넣은 전국 장애는 지도에서 노선 모양으로 보일 수 있다",
+      out += T("야마노테선 노선 셀({n})에 호의 약 {p}% 이상이 몰립니다 — 이 시각에 넣은 전국 장애는 지도에서 노선 모양으로 보일 수 있습니다",
                {n: B.route_cells, p: pct(sw)}) + "<br>";
   } else {
     out += T("생성량(호)은 피크의 <b>{v}%</b>", {v: pct(c.call)}) + "<br>";
@@ -1676,7 +1826,7 @@ function clockFeature(h, m, c) {
   if (wn || extra.length)
     out += `<span style="color:var(--yellow)">${esc(T("주의"))} — ${esc([wn, ...extra].filter(Boolean).join(" · "))}</span><br>`;
   out += `<span style="color:var(--dim)">`
-    + T("시각을 옮기면 적용하는 순간 그 시각의 비율로 바뀐다(<code>blend_min</code> {b}분 보간은 시간대 경계를 지날 때만 걸린다) · 걷는 사람 위치는 기동 때 미리 걷기({w}분)로 이미 퍼져 있어 다시 자리 잡지 않는다 — 바뀌는 것은 걷는 속도뿐 · 레코드 시각은 실제 시각 그대로",
+    + T("시각을 옮기면 적용하는 순간 그 시각의 비율로 바뀝니다(<code>blend_min</code> {b}분 보간은 시간대 경계를 지날 때만 걸립니다) · 걷는 사람 위치는 기동 때 미리 걷기({w}분)로 이미 퍼져 있어 다시 자리 잡지 않습니다 — 바뀌는 것은 걷는 속도뿐 · 레코드 시각은 실제 시각 그대로",
         {b: B ? B.blend_min : "-", w: B ? B.walk_warmup_min : 0})
     + "<br>"
     + T("호 {call} · 호당 세션 {sess} · 세션 바이트 {byte} → 총 트래픽 {tot} ({p}시 = 1.000)",
@@ -1717,7 +1867,7 @@ function renderDiurnal() {
   const W = Math.max(Math.round(svg.clientWidth || 0), 240), H = 104;
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   if (!on) {
-    note.innerHTML = T("<b>시간대 무관</b> · 전체 eNB 균등 · 이동·노선 쏠림 없음 · 생성량 피크 수준(장애 주입은 그대로 걸린다)");
+    note.innerHTML = T("<b>시간대 무관</b> · 전체 eNB 균등 · 이동·노선 쏠림 없음 · 생성량 피크 수준(장애 주입은 그대로 걸립니다)");
     svg.innerHTML = `<line x1="5" y1="${(H-16+8)/2}" x2="${W-5}" y2="${(H-16+8)/2}"
       stroke="var(--dim)" stroke-width="1.5" stroke-dasharray="3 3"/>`;
     return;
@@ -1775,13 +1925,13 @@ function renderBlocked() {
        <span class="rt">${rate}</span></button>`;
   }).join("");
   const note = $("blk-note");
-  if (!BLOCKED.size) { note.textContent = T("넷 모두 생성 중 — 끄면 그 xDR 은 파일 자체를 만들지 않는다(0 건이 아니라 없음)"); return; }
+  if (!BLOCKED.size) { note.textContent = T("넷 모두 생성 중 — 끄면 그 xDR 은 파일 자체를 만들지 않습니다(0 건이 아니라 없음)"); return; }
   note.innerHTML =
     `<b style="color:var(--yellow)">${[...BLOCKED].sort().join(" · ")}</b>` + T(" 멈춤 — ")
-    + T("그 분에 파일을 만들지 않는다(0 건이 아니라 <b>없음</b>)")
+    + T("그 분에 파일을 만들지 않습니다(0 건이 아니라 <b>없음</b>)")
     + (callOff
-       ? `<br><b style="color:var(--red)">${T("lte_call 을 끄면 U-Plane 도 멈춘다")}</b>`
-         + T(" — 세션이 성공 호에서 파생된다")
+       ? `<br><b style="color:var(--red)">${T("lte_call 을 끄면 U-Plane 도 멈춥니다")}</b>`
+         + T(" — 세션이 성공 호에서 파생됩니다")
        : "");
 }
 // **누르는 것이 곧 반영이다.** 상태등이 1초 안에 노랑으로 바뀌는 것이 이 조작의
@@ -1814,7 +1964,7 @@ function renderReassign() {
         <a href="#" onclick="dropReassign('${esc(kind)}','${esc(src)}');return false"
            style="margin-left:6px">✕</a></span>`);
   $("ra-list").innerHTML = items.length ? items.join(" ")
-    : `<span class="dim">${T("없음 — 모든 셀이 원래 장비를 쓴다")}</span>`;
+    : `<span class="dim">${T("없음 — 모든 셀이 원래 장비를 씁니다")}</span>`;
   // 드롭다운은 현재 종류의 노드 목록으로
   const kind = $("ra-kind").value;
   const opts = (NODES[kind] || []).map(n => `<option>${esc(n)}</option>`).join("");
@@ -1842,7 +1992,7 @@ async function saveReassign() {
     body: JSON.stringify({ reassign: REASSIGN }) });
   const j = await r.json().catch(() => ({}));
   $("ra-msg").textContent = r.ok ? T("저장됨 — 다음 틱부터") : (j.detail || T("실패"));
-  setTimeout(() => { $("ra-msg").textContent = T("다음 틱부터 반영된다"); }, 4000);
+  setTimeout(() => { $("ra-msg").textContent = T("다음 틱부터 반영됩니다"); }, 4000);
 }
 
 // **슬라이더가 스스로 저장한다**(2026-10-27). 전에는 `oninput` 이 라벨과
@@ -1866,6 +2016,173 @@ async function savePct(v) {
     const j = await r.json().catch(() => ({}));
     el.textContent = r.ok ? T("저장됨 — 다음 틱부터") : (T("실패 — ") + (j.detail || r.status));
     el.style.color = r.ok ? "" : "var(--red)";
+  } catch (e) {
+    el.textContent = T("실패 — ") + e;
+    el.style.color = "var(--red)";
+  }
+  setTimeout(() => { el.textContent = ""; el.style.color = ""; }, 4000);
+}
+
+// 추가 가입자 막대 — `savePct` 와 같다(놓는 순간 그 키 하나만 보낸다)
+async function saveExtra(v) {
+  const el = $("extra-msg");
+  try {
+    const r = await fetch("/api/settings", { method:"POST",
+      headers:{"content-type":"application/json"},
+      body: JSON.stringify({ extra_lte_subs: v }) });
+    const j = await r.json().catch(() => ({}));
+    el.textContent = r.ok ? T("저장됨 — 다음 틱부터") : (T("실패 — ") + (j.detail || r.status));
+    el.style.color = r.ok ? "" : "var(--red)";
+  } catch (e) {
+    el.textContent = T("실패 — ") + e;
+    el.style.color = "var(--red)";
+  }
+  setTimeout(() => { el.textContent = ""; el.style.color = ""; }, 4000);
+}
+
+// ── 매일 같은 시각 부하 (망 조작 · 2026-11-21 묶음판) ──────────────────
+// 화면이 들고 있는 묶음 목록 `[{on, hours:[8,18], targets:["ST:…"]}]`. 저장 때 통째로 보낸다(재배정과 같은 까닭 —
+// 부분 갱신은 「지웠는데 남은」 상태를 만든다). 역은 이름으로 보이고 저장은 역 ID(`ST:<짧은 ID>`)로 한다 — 이름은
+// 사람이 쓴 문자열이라 키로 쓰지 않는다(graphio 불변규칙 14). 같은 이름에 역사가 여럿이면 ID 를 모두 넣고 뺀다
+let DAILY = [];
+// 서버에 저장된 묶음 — 화면 묶음의 `_sid` 가 이 배열의 자리다(새 묶음은 null)
+let DAILY_SAVED = [];
+const dailyNorm = ls => ls.map(x => ({ on: !!x.on, hours: [...(x.hours || [])].sort((a, b) => a - b),
+                                       targets: [...(x.targets || [])].sort() }));
+const dailyKey = x => JSON.stringify(dailyNorm([x])[0]);
+// 저장된 값과 다른가 — 새 묶음은 늘 다르다(처음부터 [저장]이 켜진다)
+const dailyDirty = i => { const d = DAILY[i]; return !!d && (d._sid == null || dailyKey(d) !== dailyKey(DAILY_SAVED[d._sid] || {})); };
+let STATIONS = [];          // [{name, name_ko, name_ja, ids, ids_live, cells, cells_gen}] — `/api/stations` · 생성 셀 많은 순
+// 역 표시 이름 — 화면 언어를 따른다(대응표 `config/station_names.json`). 없으면 DB 이름
+const stName = g => (LANG === "ja" ? g.name_ja : g.name_ko) || g.name;
+let STATIONS_ERR = "";
+async function loadStations() {
+  try {
+    const d = await (await fetch("/api/stations")).json();
+    STATIONS = d.stations || [];
+    STATIONS_ERR = d.error || "";
+  } catch (e) { STATIONS = []; STATIONS_ERR = String(e); }
+  // 「+ 역 추가」 칸의 검색 목록 — 값은 화면 언어 이름, 설명에 다른 언어 이름을 실어 **두 말 다 검색에 걸린다**
+  const other = g => (LANG === "ja" ? g.name_ko : g.name_ja) || "";
+  // **생성 범위 밖 역은 넣지 않는다** — 고를 수 있게 두면 걸었는데 셀 0개로 취소된다(阿佐ヶ谷 F-493~495)
+  $("dl-names").innerHTML = STATIONS.filter(g => g.cells_gen > 0).map(g =>
+    `<option value="${esc(stName(g))}" label="${esc(other(g) + " · " + T("셀 {n}개", {n: g.cells_gen}))}"></option>`).join("");
+  renderDaily();
+}
+// 묶음의 역 토큰 → 역 묶음(이름별). 매핑에 없는 ID 는 ID 그대로 하나로 보인다(숨기지 않는다)
+function dailyStations(d) {
+  const out = [];
+  for (const tok of d.targets) {
+    const id = tok.startsWith("ST:") ? tok.slice(3) : tok;
+    const g = STATIONS.find(x => x.ids.includes(id));
+    const name = g ? stName(g) : tok;
+    // 범위 밖 = 저장된 ID 에 생성 셀이 없다 — 역 하나에 ID 가 여럿이면 일부만 밖일 수 있고, 하나라도 안이면 걸린다
+    const out_ = !!g && !(g.ids_live || []).includes(id);
+    const have = out.find(x => x.name === name);
+    if (have) { have.out = have.out && out_; continue; }
+    out.push({ name, toks: g ? g.ids.map(i => "ST:" + i) : [tok], out: out_ });
+  }
+  return out;
+}
+function renderDaily() {
+  const hourBtns = (d, i) => Array.from({length: 24}, (_, h) =>
+    `<button type="button" class="dl-h${d.hours.includes(h) ? " on" : ""}" aria-pressed="${d.hours.includes(h)}"
+       onclick="toggleDailyHour(${i},${h})">${String(h).padStart(2, "0")}</button>`).join("");
+  $("dl-list").innerHTML = DAILY.length ? DAILY.map((d, i) => {
+    const sts = dailyStations(d).map((g, j) => `<span class="chip${g.out ? " out" : ""}"${g.out ? ` title="${esc(T("생성 범위 밖 — 부하가 걸리지 않음"))}"` : ""}>${esc(g.name)}
+        <button type="button" class="del" title="${esc(T("이 역 빼기"))}" onclick="dropDailyStation(${i},${j})">✕</button></span>`).join("");
+    return `<div class="dl-b${d.on ? "" : " off"}">
+      <div class="dl-hd">
+        <label class="tg" title="${esc(T("켜기·끄기 — 저장해야 반영됩니다"))}">
+          <input type="checkbox" ${d.on ? "checked" : ""} onchange="DAILY[${i}].on=this.checked;renderDaily()"><i></i></label>
+        <b>${T("묶음 {n}", {n: i + 1})}</b>
+        <span class="dim">${d.on ? T("켜짐") : T("꺼짐")}</span>
+        ${dailyDirty(i) ? `<span class="dl-dirty">${T("저장 안 됨")}</span>` : ""}
+        <button type="button" class="del" onclick="deleteDaily(${i})">${T("삭제")}</button>
+        <button type="button" class="dl-save" ${dailyDirty(i) ? "" : "disabled"} onclick="saveDailyOne(${i})">${T("저장")}</button>
+      </div>
+      <div class="dl-r"><b>${T("시간")}</b><div class="dl-hours">${hourBtns(d, i)}</div></div>
+      <div class="dl-r"><b>${T("역")}</b><div class="dl-sts">${sts || `<span class="dim">${T("없음")}</span>`}
+        <input list="dl-names" placeholder="${esc(T("+ 역 추가 (이름 검색)"))}"
+          onchange="addDailyStation(${i}, this)" onkeydown="if(event.key==='Enter'){addDailyStation(${i}, this)}"></div></div>
+    </div>`;
+  }).join("") : `<div class="dim" style="margin-bottom:6px">${T("없음 — 매일 부하를 걸지 않습니다")}</div>`;
+  if (STATIONS_ERR && !STATIONS.length)
+    $("dl-list").insertAdjacentHTML("beforeend",
+      `<div style="color:var(--red); margin-bottom:6px">${esc(T("역 목록을 읽지 못했습니다 — "))}${esc(STATIONS_ERR)}</div>`);
+}
+function toggleDailyHour(i, h) {
+  const hs = DAILY[i].hours;
+  DAILY[i].hours = hs.includes(h) ? hs.filter(x => x !== h) : [...hs, h].sort((a, b) => a - b);
+  renderDaily();
+}
+function addDailyStation(i, el) {
+  const name = el.value.trim();
+  if (!name) return;
+  // 한국어·일본어·DB 이름 어느 것을 쳐도 찾는다
+  const g = STATIONS.find(x => x.cells_gen > 0 && [x.name_ko, x.name_ja, x.name].includes(name));
+  const msg = $("dl-msg");
+  if (!g) { msg.textContent = T("목록에 없는 역입니다 — {s}", {s: name}); msg.style.color = "var(--red)"; return; }
+  msg.style.color = "";
+  // 생성 셀이 있는 ID 만 넣는다 — 범위 밖 ID 를 같이 넣으면 그 줄만 셀 0개로 취소된다
+  for (const id of g.ids_live || g.ids) if (!DAILY[i].targets.includes("ST:" + id)) DAILY[i].targets.push("ST:" + id);
+  renderDaily();
+}
+function dropDailyStation(i, j) {
+  const g = dailyStations(DAILY[i])[j];
+  DAILY[i].targets = DAILY[i].targets.filter(t => !g.toks.includes(t));
+  renderDaily();
+}
+function addDaily() {
+  DAILY.push({ on: true, hours: [], targets: [], _sid: null });
+  renderDaily();
+}
+// 저장 API 는 묶음 전체를 받는다 — 바꾼 묶음 하나만 화면 값으로, **나머지는 저장된 값**으로 보낸다
+// (다른 묶음의 저장 안 된 변경을 함께 올리지 않는다). 부분 갱신 API 를 두지 않는 까닭은 위 주석과 같다
+async function postDaily(lines) {
+  const r = await fetch("/api/settings", { method:"POST", headers:{"content-type":"application/json"},
+    body: JSON.stringify({ daily_lines: lines.map(d => ({ on: d.on, hours: d.hours, targets: d.targets })) }) });
+  const j = await r.json().catch(() => ({}));
+  return { ok: r.ok, err: j.detail || r.status };
+}
+async function deleteDaily(i) {
+  const d = DAILY[i];
+  if (d._sid == null) { DAILY.splice(i, 1); renderDaily(); return; }      // 저장 전 묶음은 화면에서만 지운다
+  if (!confirm(T("묶음 {n}을 삭제할까요? 바로 저장됩니다", {n: i + 1}))) return;
+  const el = $("dl-msg"), lines = DAILY_SAVED.filter((_, k) => k !== d._sid);
+  try {
+    const r = await postDaily(lines);
+    if (!r.ok) { el.textContent = T("실패 — ") + r.err; el.style.color = "var(--red)"; return; }
+    const sid = d._sid;
+    DAILY_SAVED = dailyNorm(lines); DAILY.splice(i, 1);
+    for (const x of DAILY) if (x._sid != null && x._sid > sid) x._sid -= 1;
+    el.textContent = T("삭제했습니다 — 다음 틱부터"); el.style.color = "";
+  } catch (e) { el.textContent = T("실패 — ") + e; el.style.color = "var(--red)"; }
+  renderDaily();
+}
+async function saveDailyOne(i) {
+  const el = $("dl-msg"), d = DAILY[i];
+  // 빈 묶음은 서버가 400 으로 돌려보낸다 — 보내기 전에 말한다
+  if (!d.hours.length || !d.targets.length) {
+    el.textContent = T("묶음 {n} — 시간과 역을 하나 이상 고릅니다", {n: i + 1}); el.style.color = "var(--red)";
+    return;
+  }
+  const lines = DAILY_SAVED.map(x => ({ ...x }));
+  const mine = { on: d.on, hours: [...d.hours], targets: [...d.targets] };
+  const sid = d._sid == null ? lines.length : d._sid;
+  lines[sid] = mine;
+  try {
+    const r = await postDaily(lines);
+    el.textContent = r.ok ? T("묶음 {n} 저장됨 — 다음 틱부터", {n: i + 1}) : (T("실패 — ") + r.err);
+    el.style.color = r.ok ? "" : "var(--red)";
+    if (r.ok) { DAILY_SAVED = dailyNorm(lines); d._sid = sid; renderDaily(); }
+    // 저장은 하되 **생성 범위 밖 역**이 섞여 있으면 알린다 — 그 역은 걸어도 셀 0개로 취소된다
+    const outs = r.ok ? [...new Set(dailyStations(d).filter(g => g.out).map(g => g.name))] : [];
+    if (r.ok && outs.length) {
+      el.textContent = T("저장됨 — 다만 생성 범위 밖 역은 부하가 걸리지 않음: {s}", {s: outs.join(", ")});
+      el.style.color = "var(--yellow)";
+      return;           // 경고는 4초 뒤에 지우지 않는다 — 읽기 전에 사라지면 소용없다
+    }
   } catch (e) {
     el.textContent = T("실패 — ") + e;
     el.style.color = "var(--red)";
@@ -1903,6 +2220,8 @@ function loadHeavy(force) {
 // 2초 주기(`loadHeavy`)의 다음 그림에서 채워진다
 loadHeavy(true);
 getJson("/api/settings").then(renderSettings).catch(() => {});
+// 매일 부하 대상 역 목록(망 조작) — 한 번만 받는다. 역 매핑이 없으면 eNB·셀 지정만 보인다
+loadStations();
 // 지역축은 **주기 폴링에 넣지 않는다** — 재시작 전에는 바뀌지 않는 값이라
 // 1초마다 물으면 질의만 늘고 화면은 그대로다. 저장할 때 다시 읽는다.
 loadRegion();

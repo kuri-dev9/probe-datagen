@@ -11,8 +11,6 @@
 from __future__ import annotations
 
 import random
-from types import SimpleNamespace
-
 from datagen import scenarios as S
 from datagen.session import CUM_PLAIN, TRAFFIC_PAIRS
 
@@ -57,49 +55,5 @@ def test_photo_skips_when_no_packets():
     assert _up(p) == before
 
 
-def test_only_sns_sessions_grow_and_rate_matches_others(monkeypatch):
-    """같은 난수로 돌려 SNS 만 up 바이트·시간이 늘고 처리율은 다른 등급과 같다.
-
-    혼잡 몫(`crowd_user_share`)은 0 으로 둔다 — 그 사람들은 처리율을 범위에서 **뽑아** 정하므로(`_crowd_choke`)
-    SNS 가 사진 때문에 난수를 더 쓰면 같은 시드라도 뽑는 값이 달라진다. 이 테스트가 지키는 것은 사진이 처리율을
-    바꾸지 않는다는 것이고, 몫 경로는 아래 별도 테스트가 본다."""
-    monkeypatch.setattr(S.FAULT, "crowd_user_share", 0.0)
-    mut = S.PLAN_MUTATORS["event_crowd"]
-    # 혼잡 몫(`congested_user`)이 장애 ID 와 IMSI 로 사람을 고정하므로 둘 다 있어야 한다(11-06 · 몫 60% 추가).
-    # 같은 사람을 두 등급에 태워야 "SNS 여부가 발동을 바꾸지 않는다"를 볼 수 있다
-    sc = SimpleNamespace(id="F-T")
-    grew = 0
-    for seed in range(200):
-        sns, pay = _plan("SNS"), _plan("PAY")
-        sns.imsi = pay.imsi = f"4401{seed:011d}"
-        a = mut(sns, sc, 1.0, random.Random(seed), None)
-        b = mut(pay, sc, 1.0, random.Random(seed), None)
-        assert a == b, "SNS 여부가 발동 여부를 바꿨다"
-        if not a:
-            continue
-        s_sz, _, s_t = _up(sns)
-        p_sz, _, p_t = _up(pay)
-        assert s_sz > p_sz and s_t > p_t, "SNS 세션 업로드가 늘지 않았다"
-        assert abs(s_sz / s_t - p_sz / p_t) < 1e-9 * (p_sz / p_t), "처리율이 갈라졌다"
-        grew += 1
-    assert grew >= 100, f"{grew}회만 발동했다"
-
-
-def test_a_congested_person_is_choked_into_the_up_range_whatever_the_grade(monkeypatch):
-    """몫에 든 사람(`crowd_user_share` 1.0)은 등급과 무관하게 업링크가 설정 범위(50~150kbps)로 떨어진다."""
-    monkeypatch.setattr(S.FAULT, "crowd_user_share", 1.0)
-    mut = S.PLAN_MUTATORS["event_crowd"]
-    sc = SimpleNamespace(id="F-T")
-    lo, hi = S.FAULT.crowd_up_bps
-    n = 0
-    for seed in range(100):
-        for g in ("SNS", "PAY"):
-            p = _plan(g)
-            p.imsi = f"4401{seed:011d}"
-            if not mut(p, sc, 1.0, random.Random(seed), None):
-                continue
-            size, _, t = _up(p)
-            bps = size * 8 / (t / 1e6)
-            assert lo * 0.999 <= bps <= hi * 1.001, f"{g} {bps:.0f}bps 가 범위 밖"
-            n += 1
-    assert n >= 100
+# 23번은 11-21 오후에 「게임 한 앱 먹통」으로 재정의됐다 — `_event_crowd` 는 이제 사진을 더하지도 업링크를 조이지도 않는다.
+# 옛 두 시험(SNS 만 up 증가 · 혼잡 몫 업링크 범위)은 걷고, 새 모양은 `test_event_crowd_game_stall_1121.py` 가 본다.

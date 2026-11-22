@@ -74,9 +74,9 @@ def _require_dump(conn, locale: str) -> None:
     if rep["ok"]:
         return
     bad = {i["table"]: i["error"] for i in rep["tables"].values() if i.get("error")}
-    raise HTTPException(409, f"복귀 경로가 서 있지 않다: "
+    raise HTTPException(409, f"복귀 경로가 서 있지 않습니다: "
                              f"{topo.LOCALE_DIR / locale} — 먼저 `사본 뜨기`를"
-                             f" 누른다 · {bad}")
+                             f" 눌러 주세요 · {bad}")
 
 
 @router.get("/api/topo")
@@ -244,8 +244,8 @@ def api_topo_restore(req: TopoReq):
 def api_topo_seed(req: TopoReq):
     xw = _topo_xw()
     if xw is None:
-        raise HTTPException(400, "pemdb1.geo_crosswalk 가 설정에 없다 —"
-                                 " 그릴 수 있는 동을 모르는 채로 놓지 않는다")
+        raise HTTPException(400, "pemdb1.geo_crosswalk 가 설정에 없습니다 —"
+                                 " 그릴 수 있는 동을 모르는 채로 놓지 않습니다")
     conn = _connect()
     try:
         if not req.dry_run:
@@ -372,10 +372,10 @@ def api_topo_seed_enb_jp(req: TopoReq):
     """
     if req.band_start is None:
         raise HTTPException(400,
-                            "ENB_ID 대역 시작 번호가 필요하다 — 빈 대역을 "
-                            "실측해서 넣는다. 기본값을 두지 않는 이유: 어느 "
+                            "ENB_ID 대역 시작 번호가 필요합니다 — 빈 대역을 "
+                            "실측해서 넣습니다. 기본값을 두지 않는 이유: 어느 "
                             "번호가 비어 있는지는 그 DB 의 사실이고, 가정을 "
-                            "코드에 남기면 다른 DB 에서 조용히 겹친다")
+                            "코드에 남기면 다른 DB 에서 조용히 겹칩니다")
     conn = _connect()
     try:
         return {"ok": True, "dry_run": req.dry_run,
@@ -427,12 +427,12 @@ def api_topo_geo_fetch(req: TopoReq):
                              "bytes": dest.stat().st_size if dest.exists() else None})
             return {"ok": True, "dry_run": True, "files": have,
                     "dir": str(topo.geo_level_path(gd, req.locale, "sgg").parent),
-                    "note": "받지 않았다 — 실행을 누르면 없는 것만 받는다"}
+                    "note": "받지 않았습니다 — 실행을 누르면 없는 것만 받습니다"}
         got = topo.fetch_boundaries(_geo_dir(), req.locale, force=req.replace)
     except RuntimeError as e:
         raise HTTPException(400, str(e))
     except OSError as e:      # 폐쇄망·DNS — "받을 수 없다"를 그대로 말한다
-        raise HTTPException(502, f"경계 파일을 받을 수 없다: {e}")
+        raise HTTPException(502, f"경계 파일을 받을 수 없습니다: {e}")
     return {"ok": True, "files": got,
             "dir": str(topo.geo_level_path(_geo_dir(), req.locale, "sgg").parent)}
 
@@ -446,8 +446,8 @@ def api_topo_code_map(req: TopoReq):
     그 차이만큼 조용히 미매핑이 된다.
     """
     if req.locale == "kr":
-        raise HTTPException(400, "코드 맵은 KR 코드를 **받는** 쪽이 만든다 —"
-                                 " locale kr 은 대상이 아니다")
+        raise HTTPException(400, "코드 맵은 KR 코드를 **받는** 쪽이 만듭니다 —"
+                                 " locale kr 은 대상이 아닙니다")
     conn = _connect()
     try:
         kr_gu = [(int(c), int(g)) for c, g in topo._rows(
@@ -527,7 +527,7 @@ def api_topo_rows(table: str = "gu", locale: str = "kr", q: str = "",
     비어 "데이터가 없다"로 보인다.
     """
     if table not in topo.TABLES:
-        raise HTTPException(400, f"대상은 {', '.join(topo.TABLES)} 다")
+        raise HTTPException(400, f"대상은 {', '.join(topo.TABLES)} 입니다")
     conn = _connect()
     try:
         return topo.browse(conn, table, locale, q, limit, offset)
@@ -546,11 +546,11 @@ def api_topo_update(req: TopoReq):
     나머지는 **에러 없이** 끊어진다(`topo.update_row` 머리말).
     """
     if req.target not in topo.TABLES:
-        raise HTTPException(400, f"대상은 {', '.join(topo.TABLES)} 다")
+        raise HTTPException(400, f"대상은 {', '.join(topo.TABLES)} 입니다")
     if not req.key:
-        raise HTTPException(400, "고칠 행의 키가 필요하다")
+        raise HTTPException(400, "고칠 행의 키가 필요합니다")
     if not req.row:
-        raise HTTPException(400, "고칠 컬럼이 비어 있다")
+        raise HTTPException(400, "고칠 컬럼이 비어 있습니다")
     conn = _connect()
     try:
         _require_dump(conn, req.locale)
@@ -565,9 +565,9 @@ def api_topo_update(req: TopoReq):
 @router.post("/api/topo/add")
 def api_topo_add(req: TopoReq):
     if req.target not in topo.TABLES:
-        raise HTTPException(400, f"대상은 {', '.join(topo.TABLES)} 다")
+        raise HTTPException(400, f"대상은 {', '.join(topo.TABLES)} 입니다")
     if not req.row:
-        raise HTTPException(400, "넣을 컬럼이 비어 있다")
+        raise HTTPException(400, "넣을 컬럼이 비어 있습니다")
     # **대상 테이블은 로케일이 정한다** — `gu` + `jp` = `CM_GU_JP`
     try:
         table = topo.table_name(req.target, req.locale)
@@ -585,7 +585,7 @@ def api_topo_add(req: TopoReq):
 @router.post("/api/topo/rm")
 def api_topo_rm(req: TopoReq):
     if req.target not in topo.TABLES:
-        raise HTTPException(400, f"대상은 {', '.join(topo.TABLES)} 다")
+        raise HTTPException(400, f"대상은 {', '.join(topo.TABLES)} 입니다")
     try:
         table = topo.table_name(req.target, req.locale)
     except RuntimeError as e:
@@ -596,9 +596,9 @@ def api_topo_rm(req: TopoReq):
         # `CL_CELL_MAP` 574,404행은 **셀 대장**이다. 전량 삭제할 이유가 없고
         # `DUMP_TABLES` 에도 없어서 지우면 되돌릴 원본이 아예 없다. 전에는
         # 관문이 `CM_*` 네 파일만 보고 이 삭제를 통과시켰다.
-        raise HTTPException(400, f"{table} 는 전체 삭제 대상이 아니다 — 셀 "
+        raise HTTPException(400, f"{table} 는 전체 삭제 대상이 아닙니다 — 셀 "
                                  "대장을 통째로 지울 이유가 없고 복귀 사본도 "
-                                 "없다. 단건 삭제는 된다")
+                                 "없습니다. 한 건씩 지우는 것은 됩니다")
     conn = _connect()
     try:
         _require_dump(conn, req.locale)
@@ -607,11 +607,11 @@ def api_topo_rm(req: TopoReq):
             # 버튼 하나로 수십만 행이 사라진다.
             want = f"{table} 전체 삭제"
             if (req.confirm or "").strip() != want:
-                raise HTTPException(400, f"확인 문구가 다르다 — '{want}' 를 "
-                                         "그대로 입력한다")
+                raise HTTPException(400, f"확인 문구가 다릅니다 — '{want}' 를 "
+                                         "그대로 입력해 주세요")
             return {"ok": True, "table": table, "deleted": topo.wipe(conn, table)}
         if not req.key:
-            raise HTTPException(400, f"지울 행의 키가 필요하다: {', '.join(keys)}")
+            raise HTTPException(400, f"지울 행의 키가 필요합니다: {', '.join(keys)}")
         where = " AND ".join(f"`{k}` = %s" for k in req.key)
         with conn.cursor() as cur:
             n = cur.execute(f"DELETE FROM `{table}` WHERE {where}",

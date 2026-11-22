@@ -45,15 +45,15 @@ from .apps import T_APP  # noqa: E402
 from .scenarios import (DISASTER_DOWN_AT, DISASTER_DOWN_END, DISASTER_SURGE_END,  # noqa: E402
                         DISASTER_UP_FROM, SHIFT_RECOVER, SHIFT_RISE, SHIFT_TOTAL)
 QUAKE_DESC = (
-    "도쿄 둘레 실제 진원역(바다·땅속 깊은 곳)에서 규모 4.5~6.2 지진이 난다 — 진도 3 이상 넓은 지역에서 통화가 "
-    f"몰리고(0~{DISASTER_SURGE_END}분) 진도 5약 이상인 무른 땅의 기지국만 일부 꺼진다({DISASTER_DOWN_AT}분 정지 · "
+    "도쿄 둘레 실제 진원역(바다·땅속 깊은 곳)에서 규모 4.5~6.2 지진이 납니다 — 진도 3 이상 넓은 지역에서 통화가 "
+    f"몰리고(0~{DISASTER_SURGE_END}분) 진도 5약 이상인 무른 땅의 기지국만 일부 꺼집니다({DISASTER_DOWN_AT}분 정지 · "
     f"eNB 마다 {DISASTER_UP_FROM}~{DISASTER_DOWN_END}분 사이 따로 복구 · {DISASTER_DOWN_END}분 정상화 · "
-    "0곳일 수 있다) · CM_QUAKE_EVENT")
+    "0곳일 수 있습니다) · CM_QUAKE_EVENT")
 QUAKE_DESC_JA = (
-    "東京周辺の実際の震源域(海域・地下深く)でM4.5~6.2の地震が起きる — 震度3以上の広い地域で通話が集中し"
-    f"(0~{DISASTER_SURGE_END}分)、震度5弱以上の軟弱地盤の基地局だけが一部停止する({DISASTER_DOWN_AT}分に停止 · "
+    "東京周辺の実際の震源域(海域・地下深く)でM4.5~6.2の地震が起きます — 震度3以上の広い地域で通話が集中し"
+    f"(0~{DISASTER_SURGE_END}分)、震度5弱以上の軟弱地盤の基地局だけが一部停止します({DISASTER_DOWN_AT}分に停止 · "
     f"eNBごとに{DISASTER_UP_FROM}~{DISASTER_DOWN_END}分の間で個別に復旧 · {DISASTER_DOWN_END}分に正常化 · "
-    "0局の場合もある) · CM_QUAKE_EVENT")
+    "0局の場合もあります) · CM_QUAKE_EVENT")
 
 #: 24번 설명 — 국면 길이를 **생성기 상수에서** 만든다(2026-11-17 · 27번 `QUAKE_DESC` 와 같은 이유). 전에는
 #: 문장에 「50분 고정 · 30분간」을 적어 두고 일본어 사전 키는 옛 「30분 고정 · 10분간」이라, 길이를 바꿀 때마다
@@ -82,7 +82,7 @@ KINDS = (
     "mobility", "change_suspected", "ims_pdn", "nsa_nr_leg",
     # 하위 변형 3
     "gw_pgw_restart", "external_path_latency", "nsa_policy_restrict",
-    "anchor_saturation", "son_param_change", "ran_congestion",
+    "anchor_saturation", "ran_congestion",
     "ho_interruption", "earthquake", "cdn_degradation", "pay_dns_delay",
     # 27번 — 지진(`earthquake`)을 대체한다(2026-11-04). 옛 `earthquake` 는 지난 기록·정답지를
     # 다시 읽을 수 있게 남긴다(새로 주입하는 27번은 이쪽이다)
@@ -100,6 +100,8 @@ KINDS = (
     "ran_drop_surge", "transport_cut",
     # 28 ②·33·34·35번 (2026-11-19 · HTTP·DNS 신규)
     "dns_nxdomain", "service_4xx", "service_tls_fail", "ipv6_path_fail", "update_surge",
+    # 36번 신호 폭주 (2026-11-21)
+    "signaling_storm",
 )
 
 #: **장애 시나리오 고정 목록** — `CM_ERROR_SCENARIO` 의 정본 (2026-10-28).
@@ -166,17 +168,17 @@ SCENARIOS: tuple[tuple[int, str, str | None, int | None, tuple[str, ...], str], 
     (20, "음성 통화만 안 걸림 (VoNR)", "ims_pdn", 12,
      ("SGW", "PGW"), "12번과 같은 데이터 — 음성 분기를 주장하지 않는다"),
     (21, "동영상 서버(CDN) 느림", "cdn_degradation", None, ("SGW",),
-     "동영상 CDN 호스트 사이트 하나가 느리게 답한다 — HTTP 응답 지연·처리율 하락, 망은 정상"),
+     "동영상 CDN 호스트 사이트 하나에 붙지 못한다 — TCP 연결 실패(SYN 무응답)·업 방향 지연, 다운 방향은 정상"),
     (22, "결제 앱 느림 (DNS 지연)", "pay_dns_delay", None, ("SGW",),
      "결제 등급 도메인만 DNS 응답시간 상승(일부 실패) — 도메인 패턴으로 등급 판정"),
-    (23, "행사장 인파로 사진 올리기 막힘", "event_crowd", None, ("ENB",),
-     "행사장 셀 8개 활성 가입자 3배·2시간 + 업로드 급증으로 업링크 처리율·RTT 악화"),
+    (23, "행사장 특정 앱 먹통", "event_crowd", None, ("ENB",),
+     "행사장 셀 활성 가입자 3배 + 관객이 같은 게임 앱 하나를 켜 그 게임만 내려받기가 끊긴다(정체 · 2026-11-21)"),
     # 24 는 **장애가 아니다**(2026-10-29) — 정답 원인이 `—`(효과 검증)이고
     # 판정 자리가 스펙 §8.3 투자 효과 검증이다. 그래서 채점에서 빠진다
     # (`write_truth`). 대상은 설정(`pemdb1.capacity_shift`)이 고정하므로
     # 발생 장비가 없다 — 지도에서 고른 eNB 에 걸리는 것처럼 보이면 안 된다.
-    (24, "기지국 증설 뒤 이용자 이동 (장애 아님)", "capacity_shift", None, (), SHIFT_DESC),
-    (25, "설정 변경 뒤 통화 끊김 계단 증가 (SON)", "son_param_change", None, ("ENB",),
+    (24, "같은 지역 같은 시간 혼잡 발생", "capacity_shift", None, (), SHIFT_DESC),
+    (25, "설정 변경 뒤 통화 끊김 계단 증가 (SON)", None, None, ("ENB",),
      "기지국(eNB) 1~2곳의 핸드오버 설정이 바뀐 시각부터 그 기지국의 모든 셀에서 옆 셀로 넘어가는 통화가 "
      "끊기기 시작한다 — 셀마다 정도가 다르고 같은 분에 함께 나빠진다"),
     (26, "SW 업데이트한 기종만 접속 실패", "ue_model", 8,
@@ -207,7 +209,113 @@ SCENARIOS: tuple[tuple[int, str, str | None, int | None, tuple[str, ...], str], 
      "PGW 하나의 IPv6 세션만 서지 않고 단말이 몇 초 뒤 IPv4 로 다시 붙는다 — 끊김이 아니라 접속 지연"),
     (35, "앱 업데이트 배포 폭주", "update_surge", None, ("SGW",),
      "업데이트 배포 서비스 하나의 세션이 3배·내려받기 양이 10배로 전국에서 몰린다 — 지역 편중 없음"),
+    # 36 신호 폭주(2026-11-21 사용자 추가 결정) — 생성기 `scenarios._signaling_storm`(같은 날). 화면 순서 11번(11-22 3번→11번)
+    (36, "신호 폭주 (재접속 폭주)", "signaling_storm", None, ("MME",),
+     "장애 복구 직후 등 단말이 한꺼번에 다시 접속해 접속·인증·위치 갱신·음성이 줄줄이 실패한다"),
 )
+
+#: **화면 순서와 쉬운 이름** (2026-11-21 사용자 확정 · `graphio-probe-rca/docs/jp/시나리오-정리-초안-1121.md` §8).
+#:
+#: `(지금 번호, 이름, 名前, 한 줄 설명, 一行説明)` — 줄 순서가 곧 화면 순서(1~)다. **지금 번호는 내부 키로
+#: 그대로다** — 정답지·회차 기록·현황 json·`CM_ERROR_SCENARIO` 가 이 번호로 잇는다. 번호를 다시 매기면
+#: `seed_scenarios` 가 표에 없는 행을 지운다. 이름은 **명사형**(2026-11-21 오후 사용자 확정 — 「~요」로 끝내지 않는다 · 일본
+#: 운영 화면의 장애명은 体言止め)이고, 「이용자가 겪는 일」은 한 줄 설명 앞머리로 옮겼다. 장비·약어는 설명에 둔다.
+#: `seed_scenarios` 가 이 이름·설명을 `SCENARIO_NAME`·`DESCRIPTION` 에 쓴다(위 `SCENARIOS` 의 이름·설명은
+#: 내부 이름·상세로 남는다). 일본어는 gen-ui 번역 사전이 이 표에서 받는다(`ui.i18n_ja`). 폐기 번호는 없다
+SCENARIO_ORDER: tuple[tuple[int, str, str, str, str], ...] = (
+    (14, "퇴근길 역 앞 속도 저하", "帰宅ラッシュ時の駅前速度低下",
+     "퇴근 시간에 역 앞에서 인터넷이 느려집니다 — 저녁 러시에 역 주변 셀이 붐빕니다",
+     "帰宅時間に駅前でネットが遅くなります — 夕方のラッシュで駅周辺のセルが混雑します"),
+    (23, "행사장 특정 앱 먹통", "イベント会場の特定アプリ不通",
+     "행사장에 모인 관객이 같은 게임을 켜서 그 게임만 내려받기가 끊겨 먹통이 됩니다 — 다른 앱은 정상",
+     "イベント会場に集まった観客が同じゲームを起動し、そのゲームだけダウンロードが途切れて使えなくなります — 他のアプリは正常"),
+    (15, "야마노테선 5G 불안정", "山手線5G不安定",
+     "야마노테선 전철에서 5G가 잡혔다 끊겼다 합니다 — 4G↔5G 전환이 잦습니다",
+     "山手線の電車で5Gがついたり消えたりします — 4G↔5Gの切り替えが多いです"),
+    (27, "지진 발생", "地震発生",
+     "지진으로 기지국 정지·통화 폭주·우회가 함께 옵니다",
+     "地震で基地局の停止・通話の殺到・迂回が同時に起きます"),
+    (5, "앱 첫 연결 실패", "アプリ初回接続失敗",
+     "앱을 처음 열 때 안 열립니다 — 주소 찾기(DNS) 실패·지연",
+     "アプリを最初に開くときに開きません — アドレス検索(DNS)の失敗・遅延"),
+    (22, "결제 앱 지연", "決済アプリ遅延",
+     "결제 앱만 느립니다 — 결제 서비스 주소 찾기가 느립니다",
+     "決済アプリだけ遅いです — 決済サービスのアドレス検索が遅いです"),
+    (12, "데이터 정상·음성 통화 불가", "データ正常・音声通話不可",
+     "데이터는 되는데 전화만 안 됩니다 — VoLTE 음성만 실패",
+     "データは使えるが電話だけつながりません — VoLTE の音声だけ失敗"),
+    (31, "통화 끊김 증가", "通話切断増加",
+     "통화가 자꾸 끊깁니다 — 절단 급증",
+     "通話がよく切れます — 切断の急増"),
+    (2, "무선 품질 저하", "無線品質の低下",
+     "전파가 약해 품질이 나빠집니다 — 무선 품질 열화",
+     "電波が弱く品質が悪くなります — 無線品質の劣化"),
+    (9, "이동 중 끊김", "移動中の切断",
+     "이동 중에 끊깁니다 — 옆 셀로 넘어갈 때 실패(핸드오버)",
+     "移動中に切れます — 隣のセルへ移るときに失敗(ハンドオーバー)"),
+    (36, "단말 동시 재접속", "端末同時再接続",
+     "장애 복구 직후 등 휴대폰이 한꺼번에 다시 붙으면서 접속·인증·전화가 줄줄이 실패합니다",
+     "障害復旧の直後などに端末が一斉に再接続し、接続・認証・通話が次々に失敗します"),
+    (16, "5G 표시 중 속도 저하", "5G表示中の速度低下",
+     "5G라고 뜨는데 느립니다 — 5G가 기대는 4G 기지국이 붐빕니다",
+     "5G表示なのに遅いです — 5Gが頼る4G基地局が混雑しています"),
+    (17, "5G 불가로 4G 집중", "5G不可による4G集中",
+     "5G가 안 돼서 4G로 몰립니다 — 5G 쪽 장애로 5G 단말이 한 지역 4G로 넘어옵니다",
+     "5Gが使えず4Gに集中します — 5G側の障害で5G端末が一つの地域の4Gへ移ってきます"),
+    (8, "특정 기종 접속 불가", "特定機種の接続不可",
+     "특정 기종만 접속이 안 됩니다 — 신기종·업데이트 기종 문제",
+     "特定機種だけ接続できません — 新機種・アップデートした機種の問題"),
+    (6, "특정 사이트 오류", "特定サイトのエラー",
+     "특정 사이트만 오류가 납니다 — 외부 서비스 5xx·4xx, 망 문제가 아님을 가립니다",
+     "特定サイトだけエラーになります — 外部サービスの 5xx・4xx、網の問題ではないことを見分けます"),
+    (21, "동영상 서버 접속 불가", "動画サーバ接続不可",
+     "동영상 서버에 연결 자체가 안 됩니다 — CDN 접속(SYN) 실패",
+     "動画サーバにそもそも接続できません — CDN への接続(SYN)の失敗"),
+    (29, "특정 서비스망 접속 불가", "特定サービス網の接続不可",
+     "특정 서비스 망만 접속이 안 됩니다 — 한 APN 설정·장애",
+     "特定サービス網だけ接続できません — 一つの APN の設定・障害"),
+    (32, "케이블 단선 지역 불통", "ケーブル断による地域不通",
+     "케이블이 끊겨 한 지역이 통째로 안 됩니다 — 전송 구간 절단",
+     "ケーブルが切れて地域ごと使えません — 伝送区間の切断"),
+    (7, "전송망 광역 속도 저하", "伝送網の広域速度低下",
+     "넓은 지역이 함께 느려집니다 — 전송망 손실",
+     "広い地域がまとめて遅くなります — 伝送網の損失"),
+    (1, "데이터 중계 장비 포화", "データ中継装置の飽和",
+     "데이터 중계 장비(SGW) 자원이 바닥나 새 연결이 실패합니다",
+     "データ中継装置(SGW)のリソースが枯渇し、新しい接続が失敗します"),
+    (10, "접속 관리 장비 과부하", "接続管理装置の過負荷",
+     "접속 관리 장비(MME)가 과부하라 접속이 늦거나 실패합니다",
+     "接続管理装置(MME)が過負荷で接続が遅れたり失敗したりします"),
+    (30, "연쇄 복합 장애", "連鎖的な複合障害",
+     "여러 장애가 이어서 납니다 — 전송 → DNS → 웹 오류",
+     "複数の障害が連鎖します — 伝送 → DNS → Web エラー"),
+    (13, "5G 접속 불량", "5G接続不良",
+     "5G가 잘 안 붙습니다 — 5G NSA 연결 실패",
+     "5Gにつながりにくいです — 5G NSA の接続失敗"),
+    (34, "IPv6 전용 접속 불가", "IPv6のみ接続不可",
+     "IPv6로만 접속이 안 됩니다 — IPv6 경로 실패",
+     "IPv6だけ接続できません — IPv6 経路の失敗"),
+)
+#: 번호 → 화면 순서(1~)
+SCENARIO_RANK: dict[int, int] = {no: i + 1 for i, (no, *_rest) in enumerate(SCENARIO_ORDER)}
+SCENARIO_SHOWN: dict[int, tuple[str, str, str, str]] = {no: tuple(rest) for no, *rest in SCENARIO_ORDER}
+
+
+def _kind_shown() -> dict[str, str]:
+    """kind → 화면 이름(2026-11-21 · 24개 정리). 한 kind 를 여러 번호가 쓰면 **화면 순서가 앞선** 번호의 이름이다
+    (`ue_model` 은 8번 · 26번은 그 옵션). 폐기 번호만 쓰는 kind(`dns_flap`·`service_4xx` 등)는 여기 없다 —
+    과거 장애 기록 표시용으로 옛 이름(`ui.KIND_LABELS`·`KIND_SPECS.title`)을 그대로 쓴다."""
+    kind_of = {no: kind for no, _n, kind, *_ in SCENARIOS}
+    out: dict[str, str] = {}
+    for no, name, *_ in SCENARIO_ORDER:
+        k = kind_of.get(no)
+        if k and k not in out:
+            out[k] = name
+    return out
+
+
+#: kind → 화면 이름 — 주입 화면의 종류 이름(`ui.KIND_LABELS`)과 정답지 제목(`scenarios.place`)이 여기서 받는다
+KIND_SHOWN: dict[str, str] = _kind_shown()
 
 #: **증거 없음** — 데이터에 그 장애를 판정할 근거 필드가 없어 만들지 않는 번호.
 #: "준비 중"(아직 안 만들었다)과 다르다. 이쪽은 만들면 근거 없는 주장이 된다 —
@@ -216,6 +324,24 @@ SCENARIOS: tuple[tuple[int, str, str | None, int | None, tuple[str, ...], str], 
 #: 17번은 2026-11-05 에 빠졌다 — 시스템 간 핸드오버 대신 "숨은 5G 단말이 LTE 에 나타나는" 모양으로
 #: 기존 필드(`ue_dcnr`·call_type 1/5)만 써서 만든다(사용자 승인 대안)
 NO_EVIDENCE = frozenset()
+
+#: **폐기** — 번호와 행은 남기고 주입 목록에서만 뺀다(2026-11-20 사용자 시나리오 정리). 행을 지우면
+#: 옛 장애(F-xxx)의 번호·이름을 못 찾는다(`faults.scenario_no` 가 같은 kind 행으로 번호를 잇고, 화면이
+#: 과거 장애에 이 표로 이름을 붙인다). 그래서 `SCENARIOS` 에서 빼지 않는다 — 빼면 `seed_scenarios` 가
+#: 다음 기동 때 행을 지운다. 3(SGW 정지)·4(HSS 인증)는 삭제, 18→1·19→10·20→12·26→8·11→29·35→23 은
+#: 합침, 25(SON)는 삭제다 — **25 는 kind 까지 지웠다**(2026-11-21 · 행의 `FAULT_KIND` 는 None · 옛 장애 행의
+#: `son_param_change` 는 DB 에 그대로 남고 이름은 번호로 붙는다). **26 은 내부 주입 번호로 계속 쓴다** — 8번 화면의 「기종 전국」 체크가
+#: `scenario_no=26` 으로 보내 `faults._MODEL_WIDE_SCENARIOS` 분기를 탄다. 28·33 은 장면을 5·6번 옵션으로 옮기고
+#: 폐기했다(2026-11-21 — 5번 「간헐·없는 주소」가 28 의 kind, 6번 「4xx 거절」이 33 의 kind 를 같은 번호로 보낸다 ·
+#: 26 과 같은 방식). **24 는 시나리오가 아니라 gen-ui 스위치다**(2026-11-21 사용자 「매일 같은 시간에 발생시킬지
+#: ON/OFF 만」 · `daily_load`) — 그래서 주입 목록에서 뺀다
+RETIRED = frozenset({3, 4, 11, 18, 19, 20, 24, 25, 26, 28, 33, 35})
+
+#: **번호 없는 별도 시나리오**(2026-11-22 사용자) — 주입 목록에는 없지만(`RETIRED` 에 남는다 · 주입은
+#: 「매일 같은 시각 부하」 스위치) 시나리오 화면에서는 폐기 묶음이 아니라 목록 끝에 번호 없이 선다.
+#: 24 는 데이터가 몰렸을 때 기지국 증설의 효과를 확인하려고 둔다. 이름 「같은 지역 같은 시간 혼잡 발생」
+UNNUMBERED = frozenset({24})
+UNNUMBERED_NAME = {24: ("같은 지역 같은 시간 혼잡 발생", "同じ地域・同じ時間帯の混雑")}
 
 #: `CM_ERROR_SCENARIO` 의 장비 마스크 컬럼 — 순서가 곧 화면 표기 순서다.
 SCENARIO_EQUIP = ("MME", "SGW", "PGW", "ENB")
@@ -434,7 +560,11 @@ def seed_scenarios(conn) -> None:
     for no, name, kind, same, equip, desc in SCENARIOS:
         if kind is not None and kind not in KINDS:
             raise ValueError(f"SCENARIOS #{no}: 모르는 kind {kind!r}")
-        rows.append([no, name, kind, same, ("READY" if kind
+        # 폐기가 맨 앞이다 — kind 가 있어도 READY 로 보이면 주입 메뉴에 다시 뜬다
+        # 화면 이름·한 줄 설명(`SCENARIO_ORDER`)이 있으면 그것을 쓴다 — 없으면(폐기 번호) 내부 이름 그대로
+        if no in SCENARIO_SHOWN:
+            name, _ja, desc, _desc_ja = SCENARIO_SHOWN[no]
+        rows.append([no, name, kind, same, ("RETIRED" if no in RETIRED else "READY" if kind
                      else "NO_EVIDENCE" if no in NO_EVIDENCE else "PENDING"),
                      *("Y" if e in equip else "N" for e in SCENARIO_EQUIP),
                      desc, now])
@@ -457,7 +587,11 @@ def list_scenarios(conn) -> list[dict]:
             "SGW_YN AS sgw, PGW_YN AS pgw, ENB_YN AS enb, DESCRIPTION AS description "
             f"FROM {T_SCENARIO} ORDER BY SCENARIO_NO")
         cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, r)) for r in cur.fetchall()]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    # 화면 순서(`SCENARIO_RANK`) — DB 칸이 아니다(DDL 없이 · 2026-11-21). 순서가 없는 번호(폐기)는 None 이다
+    for r in rows:
+        r["rank"] = SCENARIO_RANK.get(r["no"])
+    return rows
 
 
 def add_fault(conn, kind: str, target: str | None, start_ts: datetime,
@@ -466,7 +600,8 @@ def add_fault(conn, kind: str, target: str | None, start_ts: datetime,
               scenario_no: int | None = None) -> int:
     if kind not in KINDS:
         raise ValueError(f"알 수 없는 kind: {kind!r} — {', '.join(KINDS)}")
-    if kind == "capacity_shift":
+    if kind == "capacity_shift" and not str(target or "").upper().startswith("DAILY"):
+        # 매일 부하(`DAILY` 대상 · 2026-11-21)는 gen 이 준 길이(1시간 × 이어진 시간)를 그대로 쓴다 — B 개통 국면이 없다.
         # **길이를 여기서 고정한다** — `faults.build` 에서만 `SHIFT_TOTAL` 로 늘리면
         # `poll_transitions` 가 행의 `DURATION_MIN`(화면 기본 10분)으로 장애를
         # 끝내, B 가 켜지는 순간 시나리오가 내려간다. 화면·지도·CLI 어느
@@ -692,6 +827,69 @@ def record_tick(conn, slot_ts: datetime, records: int,
              json.dumps(series_stat, separators=(",", ":")) if series_stat else None,
              datetime.now()])
     conn.commit()
+
+
+#: **매일 같은 시각 부하 묶음**(2026-11-21 사용자 「망 조작 · 장비 재배정 아래 · 역 단위로 등록 · 시간 여러 개 · 1시간 단위」).
+#: 한 묶음 = 설정 키 하나 `daily_load.<n>` · 값 `on|08,18,19|ST:35.68968-139.70035,ST:…` (켜기|가상 시(時) 목록|대상).
+#: 「이 시간들 × 이 역들」이고 부하 하나는 `DAILY_HOUR_MIN`(1시간) — 정시에 시작한다. 이어진 시간(18·19시)은 gen 이
+#: 한 부하로 잇는다(`cli._daily_load`). DDL 없이 `CONFIG_VALUE`(varchar 255)에 담는다 — 역 ID 는 앞머리 `STN-` 를 떼어 적는다.
+#: 대상 토큰 — 화면은 `ST:<역 ID>`(`CM_CELL_STATION_MAP` 의 그 역 셀 전부)만 쓴다. `ENB:<eNB>`·`CELL:<eNB>-<셀>` 은
+#: 1차 판의 해석이 남아 있어 받기만 한다.
+DAILY_KEY = "daily_load."
+DAILY_TOKEN_RE = r"(ST:[0-9.\-]{3,40}|ENB:\d{1,10}|CELL:\d{1,10}-\d{1,5})"
+#: 부하 한 칸의 길이(분) — 사용자 「부하 단위는 1시간」. 몰림·회복 5분은 24번 국면 그대로다(`scenarios._shift_rise`)
+DAILY_HOUR_MIN = 60
+
+
+def parse_daily_line(v: str | None) -> dict | None:
+    """`on|08,18|ST:…,ST:…` → `{"on", "hours": [8, 18], "targets"}`. 형식이 틀리면 None(그 묶음은 걸지 않는다)"""
+    import re
+    parts = str(v or "").strip().split("|")
+    if len(parts) != 3:
+        return None
+    on, hs, tg = (p.strip() for p in parts)
+    if on not in ("on", "off"):
+        return None
+    hl = [h.strip() for h in hs.split(",") if h.strip()]
+    if not hl or not all(re.fullmatch(r"[01]\d|2[0-3]", h) for h in hl):
+        return None
+    toks = [t.strip() for t in tg.split(",") if t.strip()]
+    if not toks or not all(re.fullmatch(DAILY_TOKEN_RE, t) for t in toks):
+        return None
+    return {"on": on == "on", "hours": sorted({int(h) for h in hl}), "targets": list(dict.fromkeys(toks))}
+
+
+def format_daily_line(d: dict) -> str:
+    hours = sorted({int(h) for h in d["hours"]})
+    return f"{'on' if d.get('on') else 'off'}|{','.join(f'{h:02d}' for h in hours)}|{','.join(d['targets'])}"
+
+
+def daily_run(hours, h: int) -> int:
+    """`h` 시부터 이어진 시간 수(자정 넘어 이어짐) — 18·19시면 18시에 2. 이어진 시간을 한 부하로 걸어 정시마다
+    회복 → 몰림 골이 생기지 않게 한다"""
+    hs, n = set(hours), 0
+    while n < 24 and (h + n) % 24 in hs:
+        n += 1
+    return n
+
+
+def daily_lines(conn) -> list[tuple[int, dict]]:
+    """저장된 매일 부하 묶음 — `(묶음 번호, 묶음)`. 빈 값·깨진 값은 건너뛴다(지운 묶음은 빈 값으로 남는다)"""
+    out = []
+    for k, v in config_prefix(conn, DAILY_KEY).items():
+        n = k[len(DAILY_KEY):]
+        d = parse_daily_line(v)
+        if n.isdigit() and d:
+            out.append((int(n), d))
+    return sorted(out)
+
+
+def config_prefix(conn, prefix: str) -> dict[str, str]:
+    """`prefix` 로 시작하는 설정 전부 — 매일 부하 묶음(`daily_load.<n>`)처럼 개수가 정해지지 않은 키를 읽는다"""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT CONFIG_KEY, CONFIG_VALUE FROM {T_CONFIG} WHERE CONFIG_KEY LIKE %s",
+                    [prefix.replace("_", r"\_") + "%"])
+        return {k: v for k, v in cur.fetchall()}
 
 
 def get_config(conn, k: str, default: str | None = None) -> str | None:

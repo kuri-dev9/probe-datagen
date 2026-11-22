@@ -220,7 +220,7 @@ def test_every_subscriber_can_be_found_by_imsi(gen):
 
 def test_congestion_rises_then_recovers():
     sc = S.place("F-1", dict(S.KIND_SPECS["capacity_shift"], kind="capacity_shift",
-                             target=S.Target(), peak=1.0), 0, S.SHIFT_TOTAL,
+                             target=S.Target(shift_to="B"), peak=1.0), 0, S.SHIFT_TOTAL,
                  random.Random(0))
     lv = []
     for m in range(S.SHIFT_TOTAL):
@@ -434,8 +434,9 @@ def test_ramp_out_and_instant_flags():
 INSTANT_KINDS = {
     "gw_node_down", "gw_pgw_restart", "auth_failure", "external_server",
     "change_suspected", "ims_pdn", "nsa_policy_restrict", "auc_no_response",
-    "dra_route_failure", "son_param_change", "earthquake", "enb_s1_outage",
+    "dra_route_failure", "earthquake", "enb_s1_outage",
     "apn_pdn_failure",
+    "signaling_storm",           # 11-21 신호 폭주(36번) — 시작·끝 즉시, 단계는 kind 가 시차로 만든다
     "natural_disaster",          # 11-04 자연재해(27번) — 국면은 kind 가 만들고 시작·끝은 즉시다
     "sa_fallback",               # 11-05 SA→LTE 폴백(17번) — 숨은 단말이 시작 분부터 들어오고(도착 램프는 단말마다) 끝나면 돌아간다
     # 11-19 신규 — 전송선 절단은 한순간(노드 다운·eNB 정지와 같은 이유)이고, 28-②·33·34 는 대상 서비스·PGW 의 모든 세션이

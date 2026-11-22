@@ -293,7 +293,7 @@ def test_scn_href_encodes_what_it_is_given():
 
 def _from_fault(hash_, s):
     src = _slice(STATIC / "scenarios.html", "let FROM_FAULT=null;", "function warn(")
-    return _run_js(f"""{ESC_JS}\n{T_JS}\nconst unk=()=>'?';\n{src}
+    return _run_js(f"""{ESC_JS}\n{T_JS}\nconst unk=()=>'?'; let UNNUM={{}};\n{src}
 FROM_FAULT={json.dumps(hash_)}; console.log(JSON.stringify(fromFault({json.dumps(s)})));""")
 
 
@@ -303,7 +303,7 @@ _CARD = {"no": 9, "latest": {"fault": "F-265"}, "history": [{"fault": "F-151"}]}
 @needs_node
 def test_from_fault_warns_when_the_fault_has_no_record_yet():
     out = _from_fault({"no": "9", "f": "F-285"}, _CARD)
-    assert "F-285" in out and "아직 판정 기록이 없다(판정 전)" in out and "F-265" in out and out.startswith("<p class=unk>")
+    assert "F-285" in out and "아직 판정 기록이 없습니다(판정 전)" in out and "F-265" in out and out.startswith("<p class=unk")
 
 
 @needs_node
@@ -328,7 +328,7 @@ def test_from_fault_says_unknown_when_the_card_has_no_latest():
 def test_from_fault_does_not_match_a_fault_that_only_shares_a_prefix():
     """`F-28` 이 `F-285` 에 걸리지 않는다 — 숫자 전체로 센다"""
     out = _from_fault({"no": "9", "f": "F-26"}, _CARD)
-    assert "아직 판정 기록이 없다" in out
+    assert "아직 판정 기록이 없습니다" in out
 
 
 def test_hash_pattern_reads_no_and_optional_fault_only():
@@ -347,7 +347,7 @@ def test_go_hash_remembers_the_fault_and_opens_the_card():
     src = _slice(STATIC / "scenarios.html", "let FROM_FAULT=null;", "addEventListener('hashchange'")
     src = src.replace(src[src.index("function fromFault"):src.index("function warn(")], "") if "function warn(" in src else src
     code = f"""
-const location={{hash:'#no=9&f=F-285'}}; let DOC={{}}, PICK='x', rendered=0; const OPEN=new Set(['3','notes']);
+const location={{hash:'#no=9&f=F-285'}}; let DOC={{}}, PICK='x', rendered=0, RETIRED=new Set(); const OPEN=new Set(['3','notes']);
 function render(){{ rendered++; }}
 const document={{querySelector:()=>null}}; const window={{scrollBy(){{}}}};
 {_slice(STATIC / "scenarios.html", "let FROM_FAULT=null;", "function fromFault")}
@@ -360,7 +360,7 @@ goHash(); console.log(JSON.stringify({{ff:FROM_FAULT, open:[...OPEN].sort(), pic
 @needs_node
 def test_go_hash_without_a_fault_clears_the_notice():
     code = f"""
-const location={{hash:'#no=9'}}; let DOC={{}}, PICK='x'; const OPEN=new Set();
+const location={{hash:'#no=9'}}; let DOC={{}}, PICK='x', RETIRED=new Set(); const OPEN=new Set();
 function render(){{}} const document={{querySelector:()=>null}}; const window={{scrollBy(){{}}}};
 let FROM_FAULT={{no:'9',f:'F-285'}};
 {_slice(STATIC / "scenarios.html", "function goHash(){", "addEventListener('hashchange'")}
@@ -387,7 +387,7 @@ def test_evt_id_becomes_a_unit_name_without_a_link():
 
 
 @needs_node
-@pytest.mark.parametrize("unit,name", [("L1_BUNDLE", "장애"), ("L2_EVENT", "통합 장애"), ("PIECE", "이상징후")])
+@pytest.mark.parametrize("unit,name", [("L1_BUNDLE", "장애"), ("L2_EVENT", "통합장애"), ("PIECE", "이상징후")])
 def test_each_unit_has_its_name(unit, name):
     (out,) = _upgrade(["EVT-bbbbbbbbbb"], {"EVT-bbbbbbbbbb": {"unit": unit}})
     assert f">{name}</span>" in out
@@ -416,4 +416,14 @@ def test_event_names_have_a_dotted_underline_and_help_cursor_and_ja_text_for_the
     assert re.search(r"\.evtn\s*\{[^}]*dotted[^}]*cursor:help", src)
     from datagen.ui import i18n_ja
     text = json.dumps(vars(i18n_ja), ensure_ascii=False, default=str)
-    assert "아직 판정 기록이 없다(판정 전)" in text
+    assert "아직 판정 기록이 없습니다(판정 전)" in text
+
+
+@needs_node
+def test_from_fault_is_silent_for_an_unnumbered_scenario():
+    """11-22 — 번호 없는 시나리오(같은 지역 같은 시간 혼잡 발생)는 매일 부하라 회차가 날마다 자동으로 생기고 취소분도 섞인다.
+    그래서 「이 장애는 아직 판정 기록이 없습니다」 안내를 띄우지 않는다(`UNNUM`)."""
+    src = _slice(STATIC / "scenarios.html", "let FROM_FAULT=null;", "function warn(")
+    out = _run_js(f"""{ESC_JS}\n{T_JS}\nconst unk=()=>'?'; let UNNUM={{"90": {{"name": "x"}}}};\n{src}
+FROM_FAULT={json.dumps({"no": "90", "f": "F-498"})}; console.log(JSON.stringify(fromFault({json.dumps({"no": 90, "latest": {"fault": "F-511"}})})));""")
+    assert out == ""

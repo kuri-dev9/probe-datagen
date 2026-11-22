@@ -172,6 +172,9 @@ class FaultCfg:
     crowd_user_share: float = 0.6
     #: 23번 자동 대상 eNB 의 셀 수 범위 — 하한은 셀마다 차므로 셀이 많으면 옮기는 호가 커진다. 초기값
     crowd_enb_cells: tuple[int, int] = (2, 3)
+    #: 23번 자동 대상 — 역 하나 근처 eNB 수 `(최소, 최대)`(2026-11-22 사용자 결정 ①). 주입마다 이 범위에서 하나를
+    #: 뽑는다. eNB 하나(셀 3개 · 활성 20명 안팎)는 정체 인원이 판정 하한에 닿지 못했다(F-499·F-508). 초기값
+    venue_enbs: tuple[int, int] = (5, 6)
     #: 23번 혼잡 몫의 처리율 `(최소, 최대)` bps — 행사장은 100kbps 안팎이 정상이다(2026-11-06 사용자
     #: 결정). 셀 용량 ÷ 동시 가입자로 계산한 값이 아니다 — 셀 마스터에 용량이 없다. **초기값**
     crowd_up_bps: tuple[float, float] = (50_000.0, 150_000.0)
@@ -193,11 +196,11 @@ class FaultCfg:
                     raise RuntimeError(f"pemdb1.fault.congestion_rtt 는 0 < 최소 ≤ 최대: {v}")
                 f.congestion_rtt = (lo, hi)
                 continue
-            if k == "crowd_enb_cells":
+            if k in ("crowd_enb_cells", "venue_enbs"):
                 lo, hi = (int(x) for x in v)
                 if not 0 < lo <= hi:
-                    raise RuntimeError(f"pemdb1.fault.crowd_enb_cells 는 0 < 최소 ≤ 최대: {v}")
-                f.crowd_enb_cells = (lo, hi)
+                    raise RuntimeError(f"pemdb1.fault.{k} 는 0 < 최소 ≤ 최대: {v}")
+                setattr(f, k, (lo, hi))
                 continue
             if k in ("crowd_up_bps", "crowd_dn_bps"):
                 lo, hi = (float(x) for x in v)
@@ -336,7 +339,7 @@ class Plan:
 
     __slots__ = ("totals", "const", "outcome", "span", "stall", "ho_stall",
                  "reset", "syn_fail", "retries", "net_mode", "imsi", "fade",
-                 "tls_fail", "v4_retry")
+                 "tls_fail", "v4_retry", "dn_stall", "retry")
 
     def __init__(self, totals: dict[str, float], const: dict[str, str],
                  outcome: str, span: int):
@@ -369,6 +372,12 @@ class Plan:
         self.tls_fail = False
         #: 재시도 세션을 **IPv4 로** 연다(34번 · Happy Eyeballs 로 v4 로 다시 붙는다)
         self.v4_retry = False
+        #: **세션 내내 down 이 멎는다**(23번 · 2026-11-21) — 연결은 섰고(`AckTime` 그대로 · `U-01` 정상) 서버가 보내지
+        #: 않는다. 변형기가 down 양을 0 으로 두고, 세션은 `DnlinkWindowCloseCount` 를 단다 — graphio 정체(Q-04) 모양
+        #: (down 처리 시간 > 0 · down 양 0 · 창 닫힘). `stall`(한 분만 빈다)과 달리 세션 전체다. TCP 만
+        self.dn_stall = False
+        #: 이 세션이 **장애가 요청한 재시도 세션**인가(`SessionEngine._open` 이 채운다) — 재시도는 다시 재시도를 낳지 않는다
+        self.retry = False
         #: 이 세션의 **망 모드** `LTE`·`SA`(`session.net_mode_of`). 읽기
         #: 전용이다 — 장애가 "SA 세션만" 고르는 데 쓴다(`j-sc-16`)
         self.net_mode = "LTE"
@@ -450,11 +459,6 @@ class Target:
     #: 15번(`ho_interruption`)이 고른 **노선 구간** — `route_segment` 가 만든 사전(노선 id·역·SGW 가
     #: 바뀌는 칸 수·모양). 노선을 못 쓴 대상은 `None` 이다. 정답지에 그대로 실린다
     route_seg: dict | None = None
-    #: 25번(`son_param_change`)이 파라미터를 넣은 **eNB 1~2개**(2026-11-13 사용자 결정) — 그 eNB 의 전 셀이
-    #: 출발 셀이다. `enb_id` 를 쓰지 않는다 — 그 칸은 eNB 정지(17번)가 읽어 다른 뜻이 섞인다
-    son_enbs: tuple[str, ...] = ()
-    #: 25번 출발 셀별 세기 배율(`son_focus` · `SON_GAIN_RANGE` × 평소 호 비율). 없는 셀은 1.0 이다
-    son_gain: dict[str, float] = field(default_factory=dict)
 
     def label(self) -> str:
         bits = []
@@ -468,8 +472,6 @@ class Target:
             bits.append(f"MME {len(self.mme_group)}대")
         if self.enb_id:
             bits.append(f"eNB-{self.enb_id}")
-        if self.son_enbs:
-            bits.append("eNB-" + "·".join(self.son_enbs))
         if self.shift_to:
             bits.append(f"→ eNB-{self.shift_to}")
         if self.vendor_model:
@@ -555,8 +557,8 @@ class Scenario:
     flap_low: float = 0.0
     #: 계열별 시작 지연(분) — SC-21 의 "전송망 → 2분 뒤 DNS"
     series_offset: dict[str, int] = field(default_factory=dict)
-    #: **출발 셀 하나당 도착 셀 수** — 25번(`son_param_change`)만 쓴다(2026-11-13 뜻을 바꿨다 · 전에는 셀 하나의
-    #: 쌍 수였다). 0 이면 쌍 목록 전부에 흩는다(9·15번과 같은 옛 동작). 대상은 `son_focus`, 주입은 `_son_param_change`
+    #: **출발 셀 하나당 도착 셀 수** — 쓰던 25번(SON)은 2026-11-21 에 지웠다. 지금 이 칸을 주는 kind 는 없다.
+    #: 0 이면 쌍 목록 전부에 흩는다(9·15번 동작)
     focus_pairs: int = 0
     #: **이 시간대에만 나오는 장애**의 시작 시간대 `((시작시, 끝시), ...)` — 끝시는 넣지 않는다(2026-11-09
     #: 사용자 결정). 15번(`ho_interruption`)은 전철 이동 세션이 몰리는 출퇴근에만 선다. 실측 시간대
@@ -568,6 +570,11 @@ class Scenario:
     #: (`son_focus`) 실제 장애는 점이다. 둘을 한 키로 두면 정답을 POINT 로 고치는 순간 `_route_target`
     #: 이 "구간 모양 ≠ POINT" 로 늘 후퇴해 대상 선택이 방위각 띠로 바뀐다
     select_geo: str | None = None
+    #: **과거 데이터를 채울 날짜 오프셋(일)** — `(1,)` 전일 · `(7,)` 전주 · `(1, 7)` 둘 다(2026-11-21 사용자 결정).
+    #: 장애가 시작되고 대상 셀이 정해지면 gen 이 graphio `POST /api/history/copy` 를 한 번 부른다(`cli._history_request`).
+    #: graphio 가 같은 셀(없으면 장애 없던 유사 셀)의 평소 1분 통계를 그 날짜로 복사해 과거 전용 표에 넣는다 —
+    #: gen 은 요청만 한다(XDR 만 만든다). 비면 요청하지 않는다. 지금은 23번만 켠다
+    history_offsets: tuple[int, ...] = ()
 
     def intensity(self, minute: int) -> float:
         """분 슬롯에서의 장애 강도 0~peak."""
@@ -694,32 +701,7 @@ class Scenario:
             **_disaster_truth(self),
             **_sa_fallback_truth(self),
             **_route_truth(self),
-            **_son_truth(self),
         }
-
-
-def _son_truth(sc) -> dict:
-    """25번 정답지 — 파라미터를 넣은 eNB 와 셀별 역할·배율(2026-11-13). 화면 셀별 표와 대조하려는 값이고 채점은
-    모르는 키를 무시한다. 출발 셀은 구조상 graphio 장애 셀이 아니다(절단은 도착 셀에 계상) — 그래서 따로 싣는다.
-
-    ``as_truth`` 의 ``cells``·``cell_cnt`` 를 **덮는다**(그 사전 맨 끝에 펼쳐진다) — 기대 셀은 도착 셀이다."""
-    t = sc.target
-    if sc.kind != "son_param_change" or not t.son_enbs:
-        return {}
-    src = sorted({a for a, _ in t.cell_pairs} | {k for k in t.son_gain})
-    dst = sorted({b for _, b in t.cell_pairs} - set(src))
-    # **기대 셀(`cells`)은 도착 셀만이다**(2026-11-17 사용자 결정 · 먼 역 동시 주입 ①·③). 끊김은 넘어간 쪽(Last)
-    # 셀에 계상되므로 graphio 가 찾는 장애 셀도 도착 셀이다 — 출발 셀까지 기대하면 채점마다 그 셀들이 「놓친 셀」로
-    # 셌다(F-375·376·380). 출발 셀은 `src_cells` 로 남겨 사람이 본다. 생성 대상(`Target.cell_keys`)은 그대로 —
-    # 출발 셀에서 호가 나야 도착 셀에서 끊긴다. 도착 셀이 없으면(좌표 없음) 바꾸지 않는다
-    keep = {"cells": dst, "cell_cnt": len(dst), "src_cells": src} if dst else {}
-    return {
-        **keep,
-        "son_enbs": list(t.son_enbs),
-        "son_cells": ([{"cell": k, "role": "src", "gain": t.son_gain.get(k)} for k in src]
-                      + [{"cell": k, "role": "dst", "gain": None} for k in dst]),
-        "son_pairs": [list(p) for p in t.cell_pairs],
-    }
 
 
 # Scenario는 분 슬롯마다 활성 셀 집합을 캐시해 두고 mutator가 그걸 본다.
@@ -929,29 +911,6 @@ KIND_SPECS: dict[str, dict] = {
         # F-137 이 주입 25분 뒤에 섰다 — 15분 창에 SA 인원이 차는 시간까지다. 초기값
         detect_min=25,
     ),
-    # 일본 시연 `j-sc-25` — **`change_suspected` 의 정답에 `mobility` 의 주입을
-    # 얹는다**(확정대장 §12.4.1). SON 이 바꾸는 것은 H/O 파라미터라 `C-04`
-    # 를 숫자로 꺾지 않고 **셀 쌍 전환 실패**를 넣어 관측으로 꺾이게 한다.
-    # XDR 만으로는 `R-11` 이 `confidence_cap` 0.65 라 `R-17`(0.75)에 Top-1 을
-    # 내준다 — `change_suspected` 와 같은 이유로 `TOP3` 다.
-    "son_param_change": dict(
-        title="설정 변경 뒤 통화 끊김 계단 증가 (SON)",
-        truth_code="CHANGE_SUSPECTED", truth_category="CHANGE",
-        # R-17 은 셀 쌍 전환 실패로 서지만 RAN_MOBILITY_ISSUE 를 낸다(11-04 25r4 에서 1위였다)
-        # **대상은 eNB 1~2개의 전 셀이다**(2026-11-13 사용자 결정 · 전에는 노선 구간의 셀 하나). 파라미터는 eNB 에
-        # 들어가는데 셀 하나만 영향받는 것은 실제 모양이 아니다. 정답 모양은 고른 셀로 잰다(`faults.build` 의
-        # `geo_shape` · 사용자 결정 B) — eNB 하나는 한 사이트라 대개 POINT, 둘이면 잰 값을 따른다. 여기 POINT 는
-        # 셀을 못 잴 때의 고정값이다. 노선 구간에서 고르지 않으므로 `select_geo` 를 두지 않는다
-        expect_rules=("R-11",), expect_geo="POINT",
-        expect_alternatives={"R-17": "RAN_MOBILITY_ISSUE"},
-        shape="STEP", ramp_in=1, scope_kind="CELL", expect_kpi="C-04",
-        onset="instant", offset="instant",
-        grade="TOP3",
-        # **출발 셀마다 도착 셀 1~2곳**(2026-11-13 · 거리순 · 이웃 관계 표가 없다). SON 은 이웃 관계마다
-        # 핸드오버 파라미터를 바꾼다 — 잘못 바꾸면 그 셀에서 그 이웃으로 가는 전환만 실패한다(11-09). 그
-        # 지문을 출발 셀마다 지킨다. 셀별 세기는 `SON_GAIN_RANGE`·`SON_LOAD_FLOOR`. **초기값이다**
-        focus_pairs=2,
-    ),
     # 일본 시연 `j-sc-14` — 도심 역 저녁 러시. **원인 코드와 룰은 graphio
     # 에 아직 없다**(확정대장 §4.2 A-4 · 룰 번호 미정). gen 은 XDR 과 정답만
     # 적는다 — 그래서 `expect_rules` 가 비어 있다. 2단계(혼잡 룰) 전까지 graphio 는 판단 보류로 낸다.
@@ -1028,7 +987,9 @@ KIND_SPECS: dict[str, dict] = {
         truth_code="EXTERNAL_SERVER", truth_category="EXTERNAL",
         expect_rules=(), rule_pending=True, expect_geo="WIDE",
         shape="RAMP", series=("transport", "http"),
-        scope_kind="SERVICE", expect_kpi="U-12",
+        # 기대 지표는 TCP 연결 성공률(U-01)이다(2026-11-20 사용자 「CDN 장애면 다운 열화가 있을 수 없다」 · `_cdn_plan`).
+        # 전에는 코드가 U-12(다운 재전송) · 보고서가 Q-06 으로 서로 달랐다
+        scope_kind="SERVICE", expect_kpi="U-01",
     ),
     # 일본 시연 `j-sc-22` — 결제 앱 DNS 지연. `Q-07` 등급별 산식이 없다(X-4).
     "pay_dns_delay": dict(
@@ -1044,14 +1005,17 @@ KIND_SPECS: dict[str, dict] = {
     # (2026-11-07 사용자 결정 · 전에는 2시간). 대상이 eNB 하나라 지리는 POINT 다.
     # 정답 룰은 graphio `R-41`(2026-11-03 · 카드 23). 그 룰의 CLUSTER(⑤)·up 부
     # 근거(⑥)가 14번 `ran_congestion`(셀 하나 혼잡 · 룰 미배정)과의 경계다.
+    # 2026-11-21 오후 사용자 — 「다운로드가 끊겨 앱 자체가 먹통 · 게임 또는 웹 한 가지」 → 케이: 게임 한 앱. 업링크 혼잡
+    # (Q-09)을 걷고 **그 게임만 정체(Q-04)** 로 바꿨다(graphio R-41 도 같은 날 Q-04 로). 길이는 계단 그대로 25분이다
     "event_crowd": dict(
-        title="행사장 인파로 사진 올리기 막힘",
+        title="행사장 특정 앱 먹통",
         truth_code="EVENT_CROWD", truth_category="RAN",
         expect_rules=("R-41",), expect_geo="POINT",
         shape="STEPS", steps=((3, 0.50), (23, 1.00), (25, 0.40)),
         series=("transport",),
-        scope_kind="CELL", expect_kpi="Q-09",
-        detect_min=20,          # Q-09 한 표는 15분 창 — 창 15 + 밀기 5. 초기값
+        scope_kind="CELL", expect_kpi="Q-04",
+        # 「과거엔 괜찮았는데 오늘만」을 R-41 이 본다 — 전일·전주 둘 다(2026-11-21 사용자)
+        history_offsets=(1, 7),
     ),
     # 일본 시연 `j-sc-24` — 기지국 증설 후 부하 이동. **장애가 아니다** —
     # 스펙 §8.3 투자 효과 검증이고 정답 원인이 `—` 다. 그래서 `scored=False`
@@ -1060,7 +1024,7 @@ KIND_SPECS: dict[str, dict] = {
     # 실제로 탐지되지만(14번과 같은 식), 그것을 맞히는 것이 이 시나리오의
     # 목적이 아니다. 시간 모양은 `shift_*` 가 만든다(`HOLD`).
     "capacity_shift": dict(
-        title="기지국 증설 뒤 이용자 이동 (장애 아님)",
+        title="매일 같은 시각 부하",  # 2026-11-21 — 옛 24번은 매일 부하 스위치가 됐다(`cli._daily_load`)
         truth_code="", truth_category="", scored=False,
         expect_rules=(), rule_pending=True, expect_geo="POINT",
         shape="HOLD", series=("transport", "http"),
@@ -1177,6 +1141,21 @@ KIND_SPECS: dict[str, dict] = {
         shape="RAMP", series=("transport", "dns"),
         series_offset={"dns": 2},
         scope_kind="CELL", expect_kpi="U-12",
+    ),
+    # 36번 신호 폭주 (2026-11-21 · 설계 `graphio docs/jp/생성기-36-23-설계-1121.md` §1). 설비 전환 하나 뒤 같은 MME
+    # 아래에서 재등록 폭주 → MME 과부하 → 인증 무응답 → IMS 실패가 시차(`STORM_STAGE_AT`)를 두고 번진다.
+    # 결론은 graphio L2 모양 `STORM` 과 R-50 이 낸다. 10번(MME 단독 과부하)과는 ① 폭주(C-24)의 유무로 갈린다
+    "signaling_storm": dict(
+        title="신호 폭주 (재접속 폭주)",
+        truth_code="SIGNALING_STORM", truth_category="CORE_CP",
+        expect_rules=("R-50",), expect_geo="SCATTER",
+        # 모양이 안 서면 10번과 같은 MME 과부하로 읽힌다 — 같은 코어 계층이라 허용 대안이다
+        expect_alternatives={"R-23": "MME_OVERLOAD"},
+        shape="STEP", scope_kind="NODE", expect_kpi="C-24",
+        onset="instant", offset="instant",
+        # C-24 폭주가 5분 창을 세 번 채운다(설계 「두세 번」) — 권장은 여기에 `DETECT_MARGIN_MIN` 을 더한 20분.
+        # 단계 시차(마지막 +3분)는 `faults.build` 가 길이에 더한다(`series_offset` 과 같은 이유)
+        detect_min=15,
     ),
 }
 
@@ -2286,33 +2265,6 @@ def _mobility(rec, sc, intensity, rng, cell) -> bool:
     return _handover_failure(rec, sc, rng)
 
 
-@mutator("son_param_change")
-def _son_param_change(rec, sc, intensity, rng, cell) -> bool:
-    """SON 이 H/O 파라미터를 바꾼 셀 쌍 — 그 시각부터 전환 실패가 계단으로 선다.
-
-    주입은 SC-09 와 **같은 한 건**이다(`_handover_failure`). 다른 것은 시간
-    모양(`STEP` · `ramp_in=1`)과 정답(`CHANGE_SUSPECTED`)뿐이다.
-
-    **`focus_pairs` 가 있으면 그 쌍의 출발 셀에서 시작한 호만 끊는다**(2026-11-09). 실패는 그 호의
-    `First_*`(출발 셀)에서 쌍의 도착 셀(`Last_*`)로 간다 — 호 안의 전환 기록 규칙이 그렇다
-    (`pemdb1._apply_handover` · First = 전환 전, Last = 전환 후). 강도·확률·106 절단·PSF 비율은 그대로고,
-    실패가 퍼지던 자리만 모은다. 9·15번(`mobility`·`ho_interruption`)은 이 분기를 지나지 않는다
-    """
-    if cell.cell_key not in sc.active_cells_cache:
-        return False
-    pairs = None
-    if sc.focus_pairs:
-        pairs = [p for p in sc.target.cell_pairs if p[0] == cell.cell_key]
-        if not pairs:
-            return False
-    # 셀별 세기(2026-11-13) — 출발 셀마다 배율이 다르다. **시작 분은 모든 셀이 같다** — 한 변경이 한 시점에
-    # 들어간다. 배율이 없는 셀(옛 대상)은 1.0 이다
-    gain = sc.target.son_gain.get(cell.cell_key, 1.0)
-    if rng.random() >= intensity * gain * 0.50:
-        return False
-    return _handover_failure(rec, sc, rng, pairs=pairs)
-
-
 #: 전환 실패가 실리는 절차 — 실측 해제 `106` 14호의 `call_type` 전수.
 _HO_CALL_TYPES = frozenset({"3", "4", "5"})
 
@@ -2488,6 +2440,12 @@ def _ims_pdn(rec, sc, intensity, rng, cell) -> bool:
         return False
     if rng.random() >= intensity * 0.80:
         return False
+    return _ims_reject(rec, rng)
+
+
+def _ims_reject(rec, rng) -> bool:
+    """IMS 부가 PDN 거절의 몸통 — 12번(`_ims_pdn` · PGW 로 거름)과 36번(MME 로 거름)이 함께 쓴다.
+    난수를 쓰는 순서는 나누기 전과 같다(12번 동작 불변)."""
     t = _start(rec) + math.exp(rng.uniform(math.log(0.035), math.log(0.25)))
     rec.set("ims_success_flag", 0)
     rec.set("esm_error_Cause", 26)
@@ -3223,11 +3181,46 @@ def disaster_elapsed(sc, minute: int) -> int:
     return minute - sc.start_minute
 
 
+#: 호 폭주(`pemdb1._surge_drafts`)를 내는 kind — 27번 지진과 36번 신호 폭주. 정점 배율(`DISASTER_SURGE_PEAK`)은
+#: 같은 값이다(2026-11-21 사용자 「권장대로」 — 재등록 폭주 실측이 없어 지진 값을 쓴다). **오름·끝은 갈랐다**
+#: (같은 날 저녁 사용자 「서서히」) — 36번은 `storm_surge_shape`, 27번은 `DISASTER_SURGE_RAMP`·`END` 그대로다
+SURGE_KINDS = ("natural_disaster", "signaling_storm")
+#: 36번 폭주로 더하는 호의 절차 — Attach(1)·TAU(5) 반반. **초기값**(실측 없음 · 2026-11-21 「권장대로」)
+STORM_SURGE_MIX = (("1", 0.5), ("5", 0.5))
+#: 36번 단계별 시작(경과 분) — ① 폭주 0 · ② MME 과부하 · ③ 인증 무응답 · ④ IMS 실패 (설계 §1-1 · 동구 설계안 §4-2)
+STORM_STAGE_AT = {"mme": 1, "auth": 2, "ims": 3}
+
+
+def surge_mix(kind: str):
+    """폭주로 더하는 호의 절차 구성 — `((call_type, 몫), ...)`."""
+    return STORM_SURGE_MIX if kind == "signaling_storm" else DISASTER_SURGE_MIX
+
+
+def storm_surge_shape(sc, e: int) -> float:
+    """36번 폭주의 분별 모양 0~1 — 단계 시차(`STORM_STAGE_AT`)에 맞춰 오르고, 정점 뒤 **장애 끝까지** 서서히 준다.
+
+    지진(27) 값을 빌리던 때(2분 만에 정점 · 13분째에 뚝 끊김)는 장애 끝(약 23분)까지 이어지지 않았다
+    (2026-11-21 사용자 「서서히 움직이게」). 실제 단말은 재시도 간격을 두고 다시 붙으므로 한꺼번에 사라지지 않는다.
+    새 기준값을 두지 않는다 — 오르기는 마지막 단계 시작 분, 내리기는 남은 장애 길이 전체다.
+    식은 `Scenario.intensity` 의 램프(`(경과+1)/ramp_in`)·회복(`remain/(ramp_out+1)`)과 같은 꼴이다.
+    """
+    if not (0 <= e < sc.duration):
+        return 0.0
+    r_in = max(1, min(max(STORM_STAGE_AT.values()), sc.duration - 1))
+    if e < r_in:
+        return (e + 1) / r_in
+    r_out = max(1, sc.duration - r_in)
+    return (sc.duration - e) / (r_out + 1.0)
+
+
 def disaster_surge_mult(sc, minute: int) -> float:
-    """그 분의 폭주 배율(1 = 평소). 0 분부터 `DISASTER_SURGE_RAMP` 분에 걸쳐 정점까지 오른다."""
-    if sc.kind != "natural_disaster":
+    """그 분의 폭주 배율(1 = 평소). 27번은 0 분부터 `DISASTER_SURGE_RAMP` 분에 걸쳐 정점까지 오르고
+    `DISASTER_SURGE_END` 에 끝난다. 36번은 `storm_surge_shape` 가 모양을 정한다."""
+    if sc.kind not in SURGE_KINDS:
         return 1.0
     e = disaster_elapsed(sc, minute)
+    if sc.kind == "signaling_storm":
+        return 1.0 + (DISASTER_SURGE_PEAK - 1.0) * storm_surge_shape(sc, e) * max(0.0, min(1.0, sc.peak))
     if not (0 <= e < DISASTER_SURGE_END):
         return 1.0
     ramp = min(1.0, (e + 1) / max(1, DISASTER_SURGE_RAMP))
@@ -3647,17 +3640,29 @@ def _shift_elapsed(sc) -> int:
 
 
 def shift_split(sc) -> float:
-    """지금 A 로 온 호 중 B 로 넘길 몫. B 개통 전에는 0."""
+    """지금 A 로 온 호 중 B 로 넘길 몫. B 개통 전에는 0. **B 가 없는 매일 부하**(`faults._shift_target` 의 `DAILY` ·
+    `shift_to` 비움)는 늘 0 이다 — A 의 혼잡은 같은 국면 곡선(`shift_congestion`)으로 오르고 내려간다"""
+    if not getattr(sc.target, "shift_to", None):
+        return 0.0
     return SHIFT_SPLIT if _shift_elapsed(sc) >= SHIFT_RISE else 0.0
 
 
+def _shift_rise(sc) -> int:
+    """정점이 끝나고 회복이 시작되는 경과 분. 증설(B 있음)은 `SHIFT_RISE`(B 개통 시각)이고, **매일 부하**(B 없음 ·
+    2026-11-21 길이를 줄마다 정한다)는 창 끝에서 `SHIFT_RECOVER` 분 앞이다 — 몰림·회복 길이는 그대로 두고 정점만 늘고 준다"""
+    if getattr(sc.target, "shift_to", None):
+        return SHIFT_RISE
+    return max(SHIFT_RAMP, int(getattr(sc, "duration", SHIFT_TOTAL) or SHIFT_TOTAL) - SHIFT_RECOVER)
+
+
 def shift_congestion(sc) -> float:
-    """A 의 혼잡 강도 — 오르다가 B 개통 뒤 `SHIFT_RECOVER` 분에 걸쳐 내려간다."""
+    """A 의 혼잡 강도 — 오르다가 B 개통 뒤(매일 부하는 창 끝 앞) `SHIFT_RECOVER` 분에 걸쳐 내려간다."""
     e = _shift_elapsed(sc)
-    if e < SHIFT_RISE:
+    rise = _shift_rise(sc)
+    if e < rise:
         lv = min(1.0, (e + 1) / SHIFT_RAMP)
     else:
-        lv = max(0.0, 1.0 - (e - SHIFT_RISE + 1) / SHIFT_RECOVER)
+        lv = max(0.0, 1.0 - (e - rise + 1) / SHIFT_RECOVER)
     return lv * sc.peak
 
 
@@ -3684,6 +3689,11 @@ def _capacity_shift_load(sc, intensity) -> float:
     """
     e = _shift_elapsed(sc)
     frac = min(1.0, (e + 1) / SHIFT_RAMP)
+    rise = _shift_rise(sc)
+    if not getattr(sc.target, "shift_to", None) and e >= rise:
+        # 매일 부하(B 없음) — 사람이 흩어진다. 혼잡과 같은 회복 곡선(`shift_congestion`)으로 내린다. 그대로 두면
+        # 호는 1.8배인데 품질만 평시로 돌아가 「붐비는데 멀쩡한」 모양이 된다
+        frac = max(0.0, 1.0 - (e - rise + 1) / SHIFT_RECOVER)
     return 1.0 + (FAULT.congestion_load - 1.0) * frac
 
 
@@ -3775,6 +3785,36 @@ def _app_session_broken(plan, rng, intensity: float, sc=None) -> None:
         plan.retries = rng.randint(1, 1 + int(3 * intensity))
 
 
+def _cdn_plan(plan, rng, intensity: float, sc=None) -> None:
+    """21번 CDN 장애 세션 — **서버에 붙지 못한다.** 다운 방향은 건드리지 않는다(2026-11-20 사용자).
+
+    사용자: 「CDN 에서 장애가 났는데 어떻게 다운링크가 발생하겠어. 없는 게 정상이거나 UP 쪽이 문제」. 전에는
+    22번과 같은 `_app_session_broken` 을 불러 down RTT·down 재전송·내려받기 양 축소를 넣었다 — 그것은 무선·전송
+    구간의 모양이라 CDN 서버 장애와 맞지 않는다.
+
+    - 연결: 50%·I 의 세션이 **SYN 을 몇 번 보내고 ACK 를 못 받는다**(`syn_fail` · `SynCount` 2~4) — `U-01`↓ · `U-03`↑.
+      주 신호다. 그 세션은 흐른 양이 없다(`session._plan`)
+    - 붙은 세션: up RTT 만 오른다(`_congested_rtt` Uplink) — 요청이 서버 앞에서 줄을 선다. up 재전송도 22번과 같은
+      값(`_app_session_broken` 의 down 몫 상수)으로 오른다
+    - 다운 RTT·다운 재전송·처리율·내려받기 양: **그대로**
+    - 재시도: 22번과 같다 — 붙지 못한 사용자가 다시 누른다(세션 수가 는다)
+    - HTTP 응답 지연·504 는 `_cdn_degradation`(http 계열) 그대로다 — 붙은 세션의 요청 쪽이다
+
+    `plan.fade` 는 `_app_session_broken` 과 같게 등록한다 — 장애 창이 끝나면 이월 세션의 up 열화도 걷힌다.
+    """
+    if sc is not None and intensity > 0 and plan.fade is None:
+        plan.fade = (sc, intensity, dict(plan.totals))
+    if rng.random() < 0.5 * intensity:
+        plan.syn_fail = True
+    else:
+        _congested_rtt(plan, rng, intensity, "Uplink")
+        pay = plan.get("Traffic_Total_Uplink_PayloadPacketCount")
+        rate = clip(rng.uniform(0.02, 0.04) + 0.12 * intensity, 0.0, 0.30)
+        plan.set("Traffic_Total_Uplink_RetransPacketCount", int(pay * rate))
+    if rng.random() < 0.6 * intensity:
+        plan.retries = rng.randint(1, 1 + int(3 * intensity))
+
+
 @mutator("cdn_degradation")
 def _cdn_degradation(rec, sc, intensity, rng, cell) -> bool:
     """CDN 서버가 **느리게 답한다** — HTTP 응답시간 상승 + 일부 5xx.
@@ -3808,7 +3848,7 @@ def _cdn_degradation(rec, sc, intensity, rng, cell) -> bool:
 
 @plan_mutator("cdn_degradation")
 def _cdn_degradation_plan(plan, sc, intensity, rng, cell) -> bool:
-    """그 앱 세션이 망가진다 — `_app_session_broken`.
+    """그 앱 세션이 서버에 붙지 못한다 — `_cdn_plan`(2026-11-20 · 22번 `_app_session_broken` 에서 갈라졌다).
 
     **셀이 아니라 앱으로 고른다** — 그래서 대상 장비 아래 여러 셀에 흩어진다.
     """
@@ -3823,7 +3863,7 @@ def _cdn_degradation_plan(plan, sc, intensity, rng, cell) -> bool:
         return False
     if rng.random() >= intensity * 0.85:
         return False
-    _app_session_broken(plan, rng, intensity, sc)
+    _cdn_plan(plan, rng, intensity, sc)
     return True
 
 
@@ -3898,7 +3938,7 @@ def _pay_session(plan, sc, intensity, rng, cell) -> bool:
 
 
 # --------------------------------------------------------------------------
-# J-SC-23 · event_crowd — 대형 이벤트 일시 군중 혼잡 + 업링크
+# J-SC-23 · event_crowd — 행사장 인파 + 그 게임만 내려받기 끊김(2026-11-21 · 옛 업링크 혼잡은 걷었다)
 # --------------------------------------------------------------------------
 
 
@@ -3913,8 +3953,20 @@ def _event_crowd_load(sc, intensity) -> float:
 
 @app_booster("event_crowd")
 def _event_app_load(sc, intensity, app) -> float:
-    """행사장에서는 **SNS 가 몰린다** — 사진·영상 업로드(§11.1 요구)."""
-    return 1.0 + 2.0 * intensity if app.group == "SNS" else 1.0
+    """행사장에서는 **모두 같은 게임을 켠다**(2026-11-21 · 대상 게임 앱 `target.app_id`).
+
+    배율은 새 값이 아니다 — 늘어난 사람 몫(`_event_crowd_load` 의 `2×강도` / `1+2×강도`)이 그 게임을 쓰게 한다.
+    대상 셀에서 그 게임이 차지하는 몫이 늘어난 사람 몫과 같아지는 배율을 사전의 원래 몫(`_app_share` ·
+    `generator._bind_scenario_targets`)으로 푼다. 원래 몫을 모르면 사람 배율 그대로(3배)다.
+    """
+    if app.idx != sc.target.app_id:
+        return 1.0
+    crowd = 1.0 + 2.0 * intensity
+    p = getattr(sc, "_app_share", None)
+    want = (crowd - 1.0) / crowd
+    if not p or not 0.0 < p < 1.0 or want <= p:
+        return crowd
+    return want * (1.0 - p) / (p * (1.0 - want))
 
 
 #: SNS 사진 한 장의 업로드 바이트 범위 — 🔴 초기값. 스마트폰 12MP 사진의
@@ -3981,32 +4033,36 @@ def _crowd_choke(plan, rng, intensity: float) -> None:
 
 @plan_mutator("event_crowd")
 def _event_crowd(plan, sc, intensity, rng, cell) -> bool:
-    """**업링크가 먼저 무너진다** — 공연장에서 다 같이 사진·영상을 올린다.
+    """**그 게임만 내려받기가 끊긴다** — 행사장 관객이 같은 게임을 켜서 게임 서버가 보내지 못한다(2026-11-21).
 
-    몰린 사람의 일부는 100kbps 안팎으로 무너진다(`_crowd_choke`). 세션이 아니라 사람으로 고른다 —
-    "그 사람이 안 올라간다"가 서려면 분마다 좋았다 나빴다 하면 안 된다. 나머지는 아래 모양이다.
+    사용자 11-21 오후: 「다운로드가 끊기는 거 · 앱 자체가 먹통 · 게임 또는 웹 한 가지」. 옛 모양(사진 업로드로
+    업링크가 무너짐 · `_crowd_uplink`·`_crowd_choke`)은 부르지 않는다 — 함수는 남긴다.
 
-    부하 3배만으로는 `Q-09`(업링크 무선 불량)가 0 이다(§11.1.1). 그래서
-    up 축을 직접 넣는다:
-
-    - up payload ↑ (업로드 증가 — 요구 자체)
-    - up `ThroughputTime` 은 **더 크게** ↑ — 둘을 같이 올리면 처리율이
-      그대로다(`g-sc-16` 의 함정의 거울상)
-    - up RTT ↑ · up 재전송 ↑ — 상행 무선 자원 포화
-
-    down 은 **얕게만** 내린다 — "down 보다 up 열화가 두드러질 것"(조건 5).
-    ⚠️ `g-sc-16` 이 금지한 up 축을 의도적으로 쓰는 유일한 시나리오다 —
-    `R-09d`(양 축 동시)와 경쟁하는지는 graphio 쪽 확인 대상이다(OPEN-39).
+    - 대상 게임을 쓰는 **가입자**의 `0.5×강도`(21번 `_cdn_plan` 의 SYN 몫과 같은 값 · IMSI 고정 · 2026-11-22 전에는
+      세션 추첨)의 대상 게임 세션이 **세션 내내 down 이 멎는다**
+      (`dn_stall`) — down 양·패킷 0, down 처리 시간은 그대로(기다린 시간), 창 닫힘. 연결은 섰다(`U-01` 정상).
+    - **down 재전송은 넣지 않는다** — `U-12` 가 오르면 graphio R-41 이 전송 구간(R-09)에 양보한다(동구 11-21).
+    - 끊긴 세션은 **재시도 1개**를 연다(`retries`) — 사용자가 게임을 다시 켠다. 재시도 세션은 끊지 않는다 —
+      graphio 가 사용자·분·앱 분류 행을 판정하려면 내려받은 패킷이 있어야 하고(`min_packets`), 끊긴 흐름만
+      있는 사람은 판정에서 빠져 정체 비율이 오히려 사라진다. 그래서 끊긴 사람의 그 분은 「끊긴 흐름 + 받는 흐름」
+      이 되어 정체 흐름 몫이 `stall_ratio`(0.3) 위다.
+    - 다른 앱·C-Plane·up 방향은 그대로다.
     """
-    if plan.outcome == "stall":
+    if plan.text("App_ID") != sc.target.app_id or not sc.target.app_id:
         return False
-    if congested_user(plan.imsi, sc.id, intensity, FAULT.crowd_user_share):
-        _crowd_choke(plan, rng, intensity)
-        return True
-    if rng.random() >= intensity * 0.85:
+    if plan.outcome == "stall" or plan.retry:
         return False
-    _crowd_uplink(plan, rng, intensity)
-    plan.scale("Traffic_Total_Dnlink_PayloadSize", max(0.6, 1.0 - 0.2 * intensity))
+    # **사람으로 고른다**(2026-11-22 · F-501 22:56~58 정체 꺼짐 · 케이 승인 가안). 세션마다 추첨하면 그 분의 정체
+    # 인원이 「그 분에 새로 게임을 켠 사람 × 0.5」를 따라가는데, 두 셀이면 분당 0~8명이라 0~1명인 분이 이어지며
+    # 사건이 둘로 갈렸다. 몫은 그대로 `0.5×강도` 이고 IMSI·장애 ID 로 정해(`congested_user` · 14번과 같은 함수)
+    # 고른 사람이 여는 대상 게임 세션은 모두 끊긴다 — 강도가 오르내리면 같은 순위에서 사람이 더해지고 빠진다
+    if not congested_user(plan.imsi, sc.id, intensity, share=0.5):
+        return False
+    for f in ("Traffic_Total_Dnlink_PayloadSize", "Traffic_Total_Dnlink_PayloadPacketCount",
+              "Traffic_Total_Dnlink_RetransPacketCount"):
+        plan.set(f, 0)
+    plan.dn_stall = True
+    plan.retries = max(plan.retries, 1)
     return True
 
 
@@ -4348,6 +4404,34 @@ def _apn_pdn_failure(rec, sc, intensity, rng, cell) -> bool:
 # --------------------------------------------------------------------------
 # SC-21 · compound_causal_failure — 복합 장애·2차 증상
 # --------------------------------------------------------------------------
+
+
+# --------------------------------------------------------------------------
+# 36 · signaling_storm — 신호 폭주 (2026-11-21)
+# --------------------------------------------------------------------------
+
+
+@mutator("signaling_storm")
+def _signaling_storm(rec, sc, intensity, rng, cell) -> bool:
+    """같은 MME 아래에서 단계가 시차를 두고 무너진다 — ① 폭주 호는 `pemdb1._surge_drafts` 가 더한다.
+
+    변형기 서명에 분이 없어 경과는 `sc._minute`(`pemdb1._active` 가 세운다 · 24번 국면과 같은 자리)로 본다.
+    한 호에 실패 하나만 적는다 — 인증(③)·IMS(④)에 걸린 호는 과부하(②)를 겹치지 않는다. 세 단계 모두
+    **기존 함수 그대로**다: ② `_mme_overload`(10번) · ③ `_s6a_fault` 무응답(14번 갈래) · ④ `_ims_reject`(12번 몸통).
+    """
+    if not _node_eq(rec.get("MME_ID"), sc.target.mme_id):
+        return False
+    e = getattr(sc, "_minute", sc.start_minute) - sc.start_minute
+    if e >= STORM_STAGE_AT["auth"] and rec.get("auth_attempt_flag") == "1":
+        # 인증 단계 — `_s6a_fault` 는 `mme_group` 으로 거른다(`faults.build` 가 대상 MME 하나로 채운다)
+        if _s6a_fault(rec, sc, intensity, rng, gate=0.70, timeout=True):
+            return True
+    if (e >= STORM_STAGE_AT["ims"] and rec.get("ims_attempt_flag") == "1"
+            and rng.random() < intensity * 0.80):
+        return _ims_reject(rec, rng)
+    if e >= STORM_STAGE_AT["mme"]:
+        return _mme_overload(rec, sc, intensity, rng, cell)
+    return False
 
 
 @mutator("compound_causal_failure")
@@ -4789,93 +4873,6 @@ def _route_truth(sc) -> dict:
     return out
 
 
-#: 25번 출발 셀 세기 배율 범위 — 셀마다 해시로 고정한다(2026-11-13 사용자 승인). **초기값이다** — 결과를 보고
-#: 바꾼다. 화면에서 "같은 시각, 같은 eNB, 셀마다 다른 정도"가 보이게 하려는 값이고 실측 근거는 없다
-SON_GAIN_RANGE = (0.5, 1.0)
-#: 25번 평소 호 비율(셀 `traffic_weight` ÷ 그 eNB 최대 셀)의 하한 — 배율에 곱한다. 하한이 없으면 한산한
-#: 셀이 0 에 가까워져 사실상 꺼진다(2026-11-13 케이 결정). **초기값이다**
-SON_LOAD_FLOOR = 0.5
-#: 25번 자동 대상 후보 — 셀 `traffic_weight` 합 상위 eNB 수. 그 안에서 회차마다 돌려 고른다. **초기값이다**
-SON_AUTO_TOP_ENBS = 20
-
-
-def son_gain(src: list[Cell]) -> dict[str, float]:
-    """25번 출발 셀별 세기 배율 — `SON_GAIN_RANGE` 해시 배율 × `SON_LOAD_FLOOR` 하한의 평소 호 비율.
-
-    해시는 셀 키로만 정한다 — 같은 셀은 회차·틱·gen 재시작마다 같은 배율이다. 호 비율의 기준은 **그 eNB
-    안의 최대 셀**이다. 다른 eNB 와 비교하면 eNB 가 둘일 때 한쪽 전체가 약해진다
-    """
-    import hashlib
-
-    lo, hi = SON_GAIN_RANGE
-    top: dict[str, float] = {}
-    for c in src:
-        top[c.enb_id] = max(top.get(c.enb_id, 0.0), float(c.traffic_weight or 0.0))
-    out: dict[str, float] = {}
-    for c in src:
-        h = int(hashlib.sha1(f"son:{c.cell_key}".encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
-        t = top.get(c.enb_id) or 0.0
-        load = max(SON_LOAD_FLOOR, float(c.traffic_weight or 0.0) / t) if t > 0 else 1.0
-        out[c.cell_key] = round((lo + (hi - lo) * h) * load, 3)
-    return out
-
-
-def son_near_enb(cells: list[Cell], enb: str) -> str | None:
-    """``enb`` 와 사이트 중심이 가장 가까운 다른 eNB — 25번 "eNB 2개"의 둘째(2026-11-13). 좌표가 없으면 None."""
-    from .geo_lite import haversine_km
-
-    pos: dict[str, list[Cell]] = {}
-    for c in cells:
-        if c.geo_status == "MAPPED":
-            pos.setdefault(c.enb_id, []).append(c)
-    if enb not in pos:
-        return None
-
-    def mid(e: str) -> tuple[float, float]:
-        m = pos[e]
-        return sum(c.latitude for c in m) / len(m), sum(c.longitude for c in m) / len(m)
-
-    la, lo = mid(enb)
-    rest = [(haversine_km(la, lo, *mid(e)), e) for e in pos if e != enb]
-    return min(rest)[1] if rest else None
-
-
-def son_focus(cells: list[Cell], enbs: list[str], n: int) -> Target | None:
-    """25번 대상 — **eNB 1~2개의 전 셀을 출발 셀**로, 출발 셀마다 도착 셀 ``n`` 곳(2026-11-13 사용자 결정).
-
-    파라미터는 eNB 에 들어간다 — 그 eNB 의 셀이 함께 영향받는다. 전에는 노선 구간에서 **셀 하나**만 남겼다
-    (11-09). 이웃 관계(셀 쌍)마다 실패가 몰린다는 설정 변경의 지문은 출발 셀마다 지킨다 — 한 출발 셀의
-    실패는 그 셀의 도착 셀 1~``n`` 곳으로만 간다.
-
-    * 도착 셀은 **거리순**이다 — 셀 마스터에 이웃 관계 표가 없다(리오 확인 · 11-13). 고른 eNB 의 셀은
-      도착 셀에서 뺀다(같은 사이트 안 전환은 이 eNB 의 파라미터만으로 설명되지 않는다).
-    * 좌표 없는 출발 셀은 쌍을 만들지 못한다 — 대상 셀에는 남지만 실패가 나지 않는다(숨기지 않는다).
-    * 셀별 세기는 `son_gain`. **시작 분은 모든 셀이 같다.**
-
-    대상 셀은 출발·도착 셀이다 — 절단은 도착 셀(Last)에 계상되므로 둘 다 정답 셀이다(9번과 같은 이유).
-    UI 주입(`faults`)과 배치(`build_scenarios`)가 이 함수 하나를 쓴다. eNB 셀이 없으면 None.
-    """
-    import heapq
-
-    from .geo_lite import haversine_km
-
-    want = [str(e) for e in enbs if e]
-    mine = set(want)
-    src = sorted((c for c in cells if c.enb_id in mine), key=lambda c: c.cell_key)
-    if not src:
-        return None
-    other = [c for c in cells if c.geo_status == "MAPPED" and c.enb_id not in mine]
-    pairs: list[tuple[str, str]] = []
-    for a in src:
-        if a.geo_status != "MAPPED" or n <= 0:
-            continue
-        near = heapq.nsmallest(n, other, key=lambda c: (
-            haversine_km(a.latitude, a.longitude, c.latitude, c.longitude), c.cell_key))
-        pairs += [(a.cell_key, c.cell_key) for c in near]
-    keys = {c.cell_key for c in src} | {b for _, b in pairs}
-    return Target(cell_keys=keys, cell_pairs=pairs, son_enbs=tuple(want), son_gain=son_gain(src))
-
-
 def busy_cluster(cells: list[Cell], rng: random.Random, want: int = 8,
                  anchor: Cell | None = None) -> list[Cell]:
     """**상위 트래픽 대역**에서 서로 가까운 셀 `want` 개 — 도심 역 혼잡의 자리.
@@ -5063,10 +5060,8 @@ def build_scenarios(
     # 미등록으로 보고된다.
     anchor, corridor = corridor_cells(cells, rng, want=18)
     pairs = [(anchor.cell_key, c.cell_key) for c in corridor[:8]]
-    # J-SC-25 의 SON 앵커 — **`rng` 를 더 소비하지 않는다.** 소비하면
-    # 뒤에 고르는 시나리오의 대상이 전부 바뀌어 기존 채점 기준선이 흔들린다.
-    # SC-09 셀은 뺀다 — 같은 셀에 둘이 걸리면 `R-17` 근거가 섞인다. 대상은 앵커 셀의
-    # eNB 전 셀이다(2026-11-13 · `son_focus`). 띠(`son_band`)는 J-SC-15 를 비키는 데만 남는다
+    # 옛 J-SC-25(SON · 2026-11-21 삭제)의 자리 — **비키는 셀로만 남긴다.** 이 띠를 빼면 아래 J-SC-15 의
+    # 후보가 넓어져 배치 대상이 바뀐다(기존 채점 기준선이 흔들린다). `rng` 는 소비하지 않는다
     sc09 = {anchor.cell_key} | {c.cell_key for c in corridor}
     son_anchor, son_band = corridor_cells(
         [c for c in cells if c.cell_key not in sc09],
@@ -5133,10 +5128,6 @@ def build_scenarios(
         spec("J-SC-16", "anchor_saturation",
              target=Target(cell_keys={c.cell_key for c in anchor_cells},
                            sgg_codes={anchor_sgg})),
-        # 배치도 UI 주입과 같은 대상(`son_focus` · 앵커 셀의 eNB 전 셀) — 한쪽만 바꾸면 같은 kind 의 정답 셀이 갈린다
-        spec("J-SC-25", "son_param_change",
-             target=son_focus(cells, [son_anchor.enb_id],
-                              int(KIND_SPECS["son_param_change"].get("focus_pairs") or 0))),
         spec("SC-13b", "nsa_policy_restrict",
              target=Target(cell_keys={c.cell_key for c in by_mme[other_mme]},
                            mme_id=other_mme)),
@@ -5234,6 +5225,10 @@ def _duration_for(s: dict, dur: int) -> int:
 def place(sid: str, s: dict, start: int, duration: int,
           rng: random.Random) -> Scenario:
     """`KIND_SPECS` 항목 + 시간창 → `Scenario`. 배치·UI 주입이 함께 쓴다."""
+    # 제목은 화면 이름(`control.KIND_SHOWN` · 2026-11-21 24개 정리)이다. 늦게 읽는다 — `control` 이 이 모듈을 먼저 읽는다.
+    # 폐기 번호만 쓰는 kind 는 그 표에 없어 `KIND_SPECS.title`(옛 이름)이 그대로 남는다
+    from .control import KIND_SHOWN
+    s = {**s, "title": KIND_SHOWN.get(s.get("kind"), s.get("title"))}
     sc = Scenario(id=sid, start_minute=start, duration=duration, **s)
     sc.cell_order = sorted(sc.target.cell_keys)
     rng.shuffle(sc.cell_order)

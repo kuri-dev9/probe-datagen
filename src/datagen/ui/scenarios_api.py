@@ -42,7 +42,7 @@ def _read_report(file: Path, key: str, kind: type) -> dict:
     except (OSError, ValueError) as e:      # JSON·UTF-8 오류는 ValueError 다
         return {"ok": False, "reason": "broken", "path": path, "detail": str(e)}
     if not isinstance(doc, dict) or not isinstance(doc.get(key), kind):
-        return {"ok": False, "reason": "broken", "path": path, "detail": f"{key} 항목이 없다"}
+        return {"ok": False, "reason": "broken", "path": path, "detail": f"{key} 항목이 없습니다"}
     return {"ok": True, "doc": doc}
 
 
@@ -131,8 +131,19 @@ def api_scenario_report(volume: int = 15):
     rep = _read_report(report_file, "scenarios", list)
     if not rep["ok"]:
         return rep
+    from ..control import RETIRED, SCENARIO_RANK, SCENARIO_SHOWN, SCENARIOS, UNNUMBERED, UNNUMBERED_NAME
+    kind_of = {no: kind for no, _n, kind, *_ in SCENARIOS}
     out = {"ok": True, "report": rep["doc"], "how": {}, "timing": _timing(rep["doc"]),
-           "equip_kinds": _equip_kinds()}
+           "equip_kinds": _equip_kinds(),
+           # 화면 순서(2026-11-21 사용자 확정 · `control.SCENARIO_ORDER`) — 번호(`no`)는 내부 키로 그대로다
+           "ranks": {str(no): r for no, r in SCENARIO_RANK.items()},
+           # 폐기 번호 — 화면이 목록 맨 뒤 「폐기」 묶음으로 접는다. 과거 회차·서술은 자료에 그대로 남는다
+           "retired": sorted(RETIRED - UNNUMBERED),
+           # 번호 없는 별도 시나리오(11-22 · `control.UNNUMBERED`) — 폐기 묶음이 아니라 목록 끝에 번호 없이 선다
+           "unnumbered": {str(no): {"name": ko, "name_ja": ja} for no, (ko, ja) in UNNUMBERED_NAME.items()},
+           # 화면 이름 — 판정 자료에 줄이 없는 번호(한 번도 안 돌린 36번 등)를 화면이 「미실행」 줄로 세운다
+           "shown": {str(no): {"name": ko, "name_ja": ja, "kind": kind_of.get(no)}
+                     for no, (ko, ja, *_d) in SCENARIO_SHOWN.items()}}
     how = _read_report(SCENARIO_HOW, "scenarios", dict)
     if how["ok"]:
         out["how"] = how["doc"]["scenarios"]

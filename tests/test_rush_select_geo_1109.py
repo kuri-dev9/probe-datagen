@@ -58,8 +58,7 @@ def test_only_15_has_rush_hours_and_nobody_has_select_geo_any_more():
     """25번의 `select_geo` 는 11-13 에 뺐다 — 대상이 노선 구간이 아니라 eNB 1~2개의 전 셀이다(`faults._son_target`)."""
     assert [k for k, v in S.KIND_SPECS.items() if v.get("rush_hours")] == ["ho_interruption"]
     assert [k for k, v in S.KIND_SPECS.items() if v.get("select_geo")] == []
-    sp = S.KIND_SPECS["son_param_change"]
-    assert sp["expect_geo"] == "POINT" and "select_geo" not in sp
+    assert "son_param_change" not in S.KIND_SPECS, "25번(SON)은 11-21 에 코드째 삭제됐다"
     assert S.KIND_SPECS["ho_interruption"]["expect_geo"] == "CORRIDOR"
 
 
@@ -81,15 +80,6 @@ def _patch(monkeypatch, shape):
     monkeypatch.setattr(S, "geo_shape", lambda seg: shape)
 
 
-def test_25_no_longer_picks_a_route_segment(monkeypatch):
-    """25번은 노선 구간을 고르지 않는다(11-13) — 구간 고르기를 부르면 깨지게 해 두고 자동 대상을 만든다."""
-    import test_son_focus_1109 as SF
-
-    monkeypatch.setattr(S, "route_segment", lambda *a, **k: (_ for _ in ()).throw(AssertionError("노선 구간을 불렀다")))
-    t = faults._auto_target("son_param_change", SF.enb_cells(), random.Random(0), routes=["L1"])
-    assert t is not None and t.son_enbs and t.route_seg is None
-
-
 def test_a_kind_with_only_expect_geo_still_checks_expect_geo(monkeypatch):
     _patch(monkeypatch, "POINT")
     assert faults._route_target(["L1"], random.Random(0), "ho_interruption") is None      # expect_geo CORRIDOR
@@ -99,7 +89,7 @@ def test_a_kind_with_only_expect_geo_still_checks_expect_geo(monkeypatch):
 
 # ── 4. 정답지 ────────────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("kind,want", [("son_param_change", "POINT"), ("ho_interruption", "CORRIDOR")])
+@pytest.mark.parametrize("kind,want", [("ho_interruption", "CORRIDOR")])
 def test_truth_expect_geo(make, kind, want):
     g = make()
     scs, bad = g.set_fault_rows([_row(kind=kind, dur=15)])

@@ -51,6 +51,7 @@ _AUTO_NODE = {
     "gw_pgw_restart": "pgw_id",
     "pgw_uplane_degradation": "pgw_id",
     "mme_overload": "mme_id",
+    "signaling_storm": "mme_id",    # 36번 — MME 하나(2026-11-21)
     "change_suspected": "mme_id",
     "nsa_policy_restrict": "mme_id",
     # ── 발생 장비 고정(2026-10-28 · `control.SCENARIOS`) ──────────────────
@@ -83,14 +84,14 @@ _WIDE_AXIS_KINDS = ("auth_failure", "dns_degradation", "ue_model", "ims_pdn",
 
 #: 한 시군구 전 셀을 범위로 잡는 kind — 지리적으로 뭉치는 열화다
 #: 셀 쌍을 대상으로 받는 kind — eNB 를 찍으면 이웃과 짝을 짓는다.
-_PAIR_KINDS = ("mobility", "son_param_change", "ho_interruption")
+_PAIR_KINDS = ("mobility", "ho_interruption")
 #: 셀 쌍을 노선 연속 구간으로 고르는 kind — 정답이 CORRIDOR 인 쌍 kind(9·15번 · B안). 노선을 못
 #: 쓰면 `corridor_cells` 로 돌아간다. 구간은 fault 마다 다른 rng 로 섞어 고르므로 한 곳에 고정되지 않는다.
-#: **25번은 뺐다**(2026-11-13 사용자 결정) — 대상이 eNB 1~2개의 전 셀이다(`_son_target` · `S.son_focus`).
-#: 노선 순환 묶음(`route`)에서도 빠져 15번과 같은 구간을 나눠 쓰지 않는다
 _ROUTE_KINDS = ("ho_interruption", "mobility")
-#: 25번 대상 문자열의 eNB 수 상한 — `ENB:a` · `ENB:a,b` · `ENB:a,+`(a 와 가장 가까운 eNB). 사용자 결정 1~2개
-SON_MAX_ENBS = 2
+#: 9번(이동 중 끊김 · `mobility`) 자동 대상의 철도 노선 구간 — 야마노테선 밖의 기차(사용자 11-22 「야마노테선이
+#: 아니잖아. 기차 대상」). `pemdb1.Mobility.rail_routes_file` 을 생성 범위로 잘라 채운다(`handover.load_routes_in_range`).
+#: 비면 종전대로 탑승자 노선(야마노테선)에서 고른다 — 15번(`ho_interruption`)은 늘 야마노테선이다
+RAIL_ROUTES: list = []
 
 #: 군중 혼잡 kind — **상위 트래픽 대역**의 가까운 셀 8개(`busy_cluster`).
 #: 시군구 전체로 잡으면 한산한 셀이 섞여 ×1.8 을 해도 분모를 못 채운다.
@@ -104,8 +105,27 @@ _AREA_KINDS = ("earthquake", "natural_disaster",
                # 32번 전송 구간 절단 — 한 지역(셀 25개)이 걸친 eNB 전부가 함께 멈춘다(`whole_enbs`)
                "transport_cut")
 
-#: 행사장 kind — **eNB 하나**(2026-11-07 사용자 결정 · `_venue_target`). 군중은 한 기지국에 몰린다.
+#: 행사장 kind — 자동 대상은 **역 하나 근처 eNB 5~6개**(2026-11-22 사용자 결정 · `_station_venue`). 전에는 eNB 하나
+#: (2026-11-07 · `_venue_target`)였고 지금은 역 표가 없을 때의 대체다. `ENB:` 를 찍으면 그 eNB 하나다.
 _VENUE_KINDS = ("event_crowd",)
+
+#: **장애를 거는 단위**(2026-11-22 사용자 「표대로」) — gen-ui 주입 칸이 이 단위만 보인다(`/api/scenarios` 의 `units`).
+#: 해석(`_resolve_target`)은 kind 를 보지 않고 형식만 본다 — 막는 것은 화면이다(셀·eNB 하나는 경고만 · 막지 않는다).
+#: 정답지는 실제로 걸린 셀을 따른다(`expect_geo` = 그 셀의 모양). 여기 없는 kind 는 예전 칸(장비 `*_YN` · 노선 · 진원)
+#:
+#:   지역 무선·혼잡   셀 · eNB · 역 근처 · 읍면동 · 시군구
+#:   행사장           eNB · 역 근처
+#:   구역 설비        읍면동 · 시군구 · 역 근처
+#:   장비 · 서비스·기종·APN  그대로(장비 · 전국)
+UNIT_ALL = ("CELL", "ENB", "ST", "ADM3", "SGG")
+TARGET_UNITS: dict[str, tuple[str, ...]] = {
+    **{k: UNIT_ALL for k in ("ran_radio", "ran_congestion", "anchor_saturation", "sa_fallback",
+                             "nsa_nr_leg", "ran_drop_surge")},
+    "event_crowd": ("ENB", "ST"),
+    **{k: ("ADM3", "SGG", "ST") for k in ("transport_loss", "transport_cut", "compound_causal_failure")},
+}
+#: 표본이 모자라 탐지되지 않을 수 있는 단위 — 화면이 경고한다(막지 않는다)
+UNIT_WARN = ("CELL", "ENB")
 
 _AUTO_SGG = ("ran_radio", "transport_loss", "nsa_nr_leg",
              "compound_causal_failure",
@@ -140,8 +160,6 @@ def _rotate_group(kind: str) -> str | None:
 
 #: 창고(메시 사람 수·eNB 호율)로 후보를 좁히는 자동 대상의 순환 묶음
 _WAREHOUSE_GROUP = {"natural_disaster": "disaster", "ran_congestion": "mesh", "sa_fallback": "mesh",
-                    # 25번 — 셀 `traffic_weight` 상위 eNB 에서 돌려 고른다(`_son_target` · 2026-11-13)
-                    "son_param_change": "son",
                     "anchor_saturation": "anchor", "enb_s1_outage": "outage", "event_crowd": "venue"}
 
 
@@ -393,57 +411,6 @@ def _route_spread_target(routes, rng: random.Random, kind: str, pct: int | None,
     return Target(cell_keys={c.cell_key for c in cells_}, cell_pairs=pairs, route_seg=info)
 
 
-def _son_n() -> int:
-    """25번 출발 셀당 도착 셀 수(`KIND_SPECS.focus_pairs`)."""
-    return int((KIND_SPECS.get("son_param_change") or {}).get("focus_pairs") or 0)
-
-
-def _son_target(cells: list[Cell], rng: random.Random,
-                used: dict[str, int] | None = None) -> Target | None:
-    """25번 자동 대상 — 셀 `traffic_weight` 합이 큰 eNB 하나의 전 셀(2026-11-13 케이 결정 · 초기값).
-
-    "핸드오버가 많은 eNB"를 셀 마스터 가중으로 갈음한다 — 새 창고 조회가 없다. 표본이 모자라면 창고의
-    call_type 3·4·5 호 수로 바꾼다(결정 대기). 상위 `S.SON_AUTO_TOP_ENBS` 안에서 회차마다 돌려 고른다
-    (`_rotating` · 키는 `build` 가 기록하는 대상 셀 지문과 같다). 자동은 eNB 하나다 — 둘은 대상 문자열로 준다
-    """
-    per: dict[str, float] = {}
-    for c in cells:
-        if c.geo_status == "MAPPED":
-            per[c.enb_id] = per.get(c.enb_id, 0.0) + float(c.traffic_weight or 0.0)
-    cand = sorted(per, key=lambda e: (-per[e], str(e)))[:S.SON_AUTO_TOP_ENBS]
-    if not cand:
-        return None
-    n = _son_n()
-    made: dict[str, Target | None] = {}
-
-    def tgt(e: str) -> Target | None:
-        if e not in made:
-            made[e] = S.son_focus(cells, [e], n)
-        return made[e]
-
-    enb = _rotating(cand, lambda e: target_key((tgt(e) or Target()).cell_keys), used, rng)
-    print(f"  · 25번 대상 eNB {enb} (후보 {len(cand)}개)", flush=True)
-    return tgt(enb)
-
-
-def _son_enb_target(cells: list[Cell], text: str) -> Target | None:
-    """25번 `ENB:` 대상 — `a` · `a,b` · `a,+`(a 와 사이트가 가장 가까운 eNB · `S.son_near_enb`)."""
-    got = [x.strip() for x in text.split(",") if x.strip()]
-    if not got or len(got) > SON_MAX_ENBS or got[0] == "+":
-        print(f"  ! 25번 대상 ENB:{text} — eNB 1~{SON_MAX_ENBS}개(`a` · `a,b` · `a,+`)만 받는다", flush=True)
-        return None
-    if got[-1] == "+":
-        near = S.son_near_enb(cells, got[0])
-        if near is None:
-            print(f"  ! 25번 대상 ENB:{text} — {got[0]} 의 좌표가 없어 가까운 eNB 를 못 고른다", flush=True)
-            return None
-        got[-1] = near
-    have = {c.enb_id for c in cells}
-    if any(e not in have for e in got):
-        return None
-    return S.son_focus(cells, got, _son_n())
-
-
 def _auto_target(kind: str, cells: list[Cell], rng: random.Random,
                  routes=None, used: dict[str, int] | None = None) -> Target | None:
     """target 미지정 시 kind 별 기본 범위."""
@@ -501,13 +468,11 @@ def _auto_target(kind: str, cells: list[Cell], rng: random.Random,
             return None
         enb = mapped[rng.randrange(len(mapped))].enb_id
         return Target(cell_keys={c.cell_key for c in cells if c.enb_id == enb}, enb_id=enb)
-    if kind == "son_param_change":
-        return _son_target(cells, rng, used)
     if kind in _ROUTE_KINDS:
-        # 25번은 노선 구간이었다(2026-11-07 · B안 · 11-13 에 eNB 로 바꿨다 — 위 분기) — 정답 CORRIDOR 인데 방위각 띠(`corridor_cells`)는 도심
+        # 25번은 노선 구간이었다(2026-11-07 · B안 · 25번 SON 은 2026-11-21 에 지웠다) — 정답 CORRIDOR 인데 방위각 띠(`corridor_cells`)는 도심
         # 셀 밀도에서 1km 안에 모여 10번 중 8번 POINT 였다. 노선 이웃 칸이 SON 이 손대는 전환 쌍이다.
         # 9번도 같다 — F-186 의 띠 15셀이 SCATTER 3.07km 였다(정답 CORRIDOR)
-        target = _route_target(routes, rng, kind, used)
+        target = _route_target(RAIL_ROUTES if kind == "mobility" and RAIL_ROUTES else routes, rng, kind, used)
         if target is not None:
             return target
     if kind in _PAIR_KINDS:
@@ -543,6 +508,27 @@ def _resolve_target(raw: str | None, kind: str, cells: list[Cell],
         keys = _sgg_all(cells, code)
         return Target(cell_keys=keys, sgg_codes={code}) if keys else None
 
+    if text.upper().startswith("CELL:"):
+        # 셀 하나(2026-11-22 단위 표) — 표본이 적어 탐지되지 않을 수 있다(화면 경고 · `UNIT_WARN`)
+        key = text.split(":", 1)[1].strip()
+        return Target(cell_keys={key}) if any(c.cell_key == key for c in cells) else None
+
+    if text.upper().startswith("ST:"):
+        # 역 근처(2026-11-22 단위 표) — 23번 자동과 같은 정의(그 역에서 가까운 eNB `venue_enbs` 개의 셀 전부)
+        got = _station_venue(cells, rng, None, only=station_key(text.split(":", 1)[1]))
+        if got is not None and kind in _AREA_KINDS:
+            got.cell_keys = {c.cell_key for c in whole_enbs(cells, [c for c in cells if c.cell_key in got.cell_keys])}
+        return got
+
+    if text.upper().startswith("ADM3:"):
+        # 읍면동(`CM_CELL_GEO_MAP` ADM3 · 2026-11-22 단위 표) — 그 칸의 셀 전부. 사이트째 멈추는 kind 는 걸친 eNB 전부
+        code = text.split(":", 1)[1].strip()
+        have = ADM3_CELLS.get(code, set())
+        mine = [c for c in cells if c.cell_key in have]
+        if mine and kind in _AREA_KINDS:
+            mine = whole_enbs(cells, mine)
+        return Target(cell_keys={c.cell_key for c in mine}) if mine else None
+
     if text.upper().startswith("APN:"):
         # APN 축 시나리오(SC-19·SC-11)는 운영자가 APN 을 직접 고를 수 있어야
         # 한다. 범위는 전국이고 걸러지는 것은 그 APN 의 호다.
@@ -560,11 +546,10 @@ def _resolve_target(raw: str | None, kind: str, cells: list[Cell],
 
     if text.upper().startswith("ENB:"):
         num = text.split(":", 1)[1].strip()
-        if kind == "son_param_change":
-            return _son_enb_target(cells, num)
         if "," in num:
-            # 쉼표 목록은 25번만 받는다 — 다른 kind 는 eNB 하나가 뜻이다(17번 정지는 `enb_id` 하나만 끈다)
-            print(f"  ! 대상 {text} — eNB 여러 개는 25번만 받는다", flush=True)
+            # 쉼표 목록은 받지 않는다 — eNB 하나가 뜻이다(17번 정지는 `enb_id` 하나만 끈다 · 둘을 받던 25번 SON 은
+            # 2026-11-21 에 지웠다)
+            print(f"  ! 대상 {text} — eNB 는 하나만 받는다", flush=True)
             return None
         mine = [c for c in cells if c.enb_id == num]
         if not mine:
@@ -622,9 +607,6 @@ def _resolve_target(raw: str | None, kind: str, cells: list[Cell],
             return None
         keys = {c.cell_key for c in mine}
         anchor0 = next((c for c in mine if c.geo_status == "MAPPED"), None)
-        if kind == "son_param_change" and anchor0 is not None:
-            # 25번 — 범위 안 첫 매핑 셀의 eNB 전 셀(2026-11-13). 범위의 셀을 모두 출발 셀로 두면 eNB 장애가 아니다
-            return S.son_focus(cells, [anchor0.enb_id], _son_n())
         if kind in _PAIR_KINDS and anchor0 is not None:
             # 셀 쌍 장애는 범위 안 앵커에서 이웃과 짝을 짓는다 — ENB: 와 같은 이유
             anchor, band = corridor_cells(cells, rng, want=18, anchor=anchor0)
@@ -648,6 +630,83 @@ def _resolve_target(raw: str | None, kind: str, cells: list[Cell],
     return None  # 알 수 없는 형식 — 조용히 전국에 뿌리면 오히려 디버깅이 어려워진다
 
 
+#: 역 → 셀(`CM_CELL_STATION_MAP` · graphio 가 만든다). 매일 부하 `DAILY:ST:<역 ID>` 가 읽는다. 해석(`build`)은 DB 를
+#: 보지 않으므로 gen 이 기동·매일 부하 때 채워 둔다(`load_stations`). 역 ID 는 `STN-` 를 뗀 짧은 꼴이 키다
+STATION_CELLS: dict[str, set[str]] = {}
+STATION_NAMES: dict[str, str] = {}
+
+
+def station_key(sid: str) -> str:
+    """`STN-35.68968-139.70035` · `35.68968-139.70035` → 짧은 꼴(설정·대상 칸에 적는 꼴)"""
+    s = str(sid or "").strip()
+    return s[4:] if s.upper().startswith("STN-") else s
+
+
+#: 읍면동(ADM3) → 셀(`CM_CELL_GEO_MAP` · graphio 가 만든다 · 셀마다 한 칸). 대상 `ADM3:<코드>` 가 읽는다.
+#: 역 표와 같이 gen 이 채워 둔다(`load_adm3`) — 해석은 DB 를 보지 않는다
+ADM3_CELLS: dict[str, set[str]] = {}
+
+
+def load_adm3(conn) -> int:
+    """읍면동 → 셀 표를 다시 읽는다. 돌려준 값은 읍면동 수(표가 없으면 0 — `ADM3:` 대상은 셀 0개로 취소된다)"""
+    with conn.cursor() as cur:
+        cur.execute("SELECT AREA_CD, CONCAT(ENB_ID,'-',CELLNUM) FROM CM_CELL_GEO_MAP WHERE AREA_LEVEL='ADM3'")
+        rows = cur.fetchall()
+    cells: dict[str, set[str]] = {}
+    for code, key in rows:
+        cells.setdefault(str(code), set()).add(str(key))
+    ADM3_CELLS.clear(); ADM3_CELLS.update(cells)
+    return len(cells)
+
+
+def load_stations(conn) -> int:
+    """역 → 셀 표를 다시 읽는다. 돌려준 값은 역 수(표가 없거나 못 읽으면 0 — 역 대상 매일 부하는 걸리지 않는다)"""
+    with conn.cursor() as cur:
+        cur.execute("SELECT STATION_ID, STATION_NAME, CONCAT(ENB_ID,'-',CELLNUM) FROM CM_CELL_STATION_MAP")
+        rows = cur.fetchall()
+    cells: dict[str, set[str]] = {}
+    names: dict[str, str] = {}
+    for sid, name, key in rows:
+        k = station_key(sid)
+        cells.setdefault(k, set()).add(str(key))
+        names[k] = name or k
+    STATION_CELLS.clear(); STATION_CELLS.update(cells)
+    STATION_NAMES.clear(); STATION_NAMES.update(names)
+    return len(cells)
+
+
+def daily_cancel_note(raw: str | None) -> str | None:
+    """매일 부하 대상이 해석 실패했을 때의 **정확한 사유** — 아니면 None(호출부의 일반 사유).
+
+    역 ID 는 역 매핑(`CM_CELL_STATION_MAP` · 셀 마스터 전량에서 graphio 가 만든다)에 있는데 이 gen 의 셀 마스터(생성
+    범위)에 그 셀이 하나도 없으면 「생성 범위 밖」이다(2026-11-21 · 阿佐ヶ谷 F-493~495). 그 역에 걸 셀이 없을 뿐 형식은
+    맞다 — 「형식 오류」로 읽히면 사용자가 엉뚱한 데를 고친다
+    """
+    text = (raw or "").strip()
+    if not text.upper().startswith("DAILY"):
+        return None
+    head, _, val = text[len("DAILY"):].lstrip(":").strip().partition(":")
+    if head.upper() != "ST":
+        return None
+    if STATION_CELLS.get(station_key(val)):
+        return "생성 범위 밖 역(셀 0개) — 이 역의 셀은 생성기가 데이터를 만들지 않습니다"
+    return "역 매핑에 없는 역 — CM_CELL_STATION_MAP 에 그 역 ID 가 없다"
+
+
+def _daily_cells(text: str, cells: list[Cell]) -> set[str]:
+    """매일 부하 대상 토큰 하나(`ST:` · `ENB:` · `CELL:`) → 그 셀(이 gen 의 셀 마스터에 있는 것만)"""
+    head, _, val = text.partition(":")
+    head, val = head.upper(), val.strip()
+    have = {c.cell_key for c in cells}
+    if head == "ST":
+        return STATION_CELLS.get(station_key(val), set()) & have
+    if head == "ENB":
+        return {c.cell_key for c in cells if str(c.enb_id) == val}
+    if head == "CELL":
+        return {val} & have
+    return set()
+
+
 def _shift_target(raw: str | None, start_ts: datetime,
                   cells: list[Cell]) -> Target | None:
     """`j-sc-24` 대상 — **설정의 자리(A·B 쌍)가 정한다.** A 는 그 자리의 `from_enb`, B 는 그 자리 안에서 순환.
@@ -658,11 +717,28 @@ def _shift_target(raw: str | None, start_ts: datetime,
 
     고른 A·B 는 이 장애의 `Target` 에 담긴다 — 다른 자리의 24번이 동시에 돌아도 서로의 A·B 를 쓰지 않는다.
     """
-    site = S.SHIFT.site_for(raw)
+    # **매일 부하**(`DAILY` 머리 · 2026-11-21 · gen `cli._daily_load`) — 같은 A 에 부하만 걸고 B 는 고르지 않는다.
+    # `shift_to` 가 비면 `scenarios.shift_split` 이 0 이라 분산·B 개통이 없다. 나머지 대상 형식은 그대로 뒤에 붙는다
+    text = (raw or "").strip()
+    daily = text.upper().startswith("DAILY")
+    if daily:
+        text = text[len("DAILY"):].lstrip(":").strip()
+        if text.split(":", 1)[0].upper() in ("ST", "ENB", "CELL"):
+            # 줄마다 정한 대상(2026-11-21 · 망 조작 「매일 같은 시각 부하」) — 24번 자리(A)가 아니어도 받는다.
+            # 셀이 0개면 걸지 않는다(호출부가 해석 실패로 취소하고 사유를 남긴다)
+            mine = _daily_cells(text, cells)
+            if not mine:
+                print(f"  ! 매일 부하 대상 {text} — 셀이 없다(역 매핑·셀 마스터에 없음) · 걸지 않는다", flush=True)
+                return None
+            enbs = sorted({k.rsplit("-", 1)[0] for k in mine})
+            return Target(cell_keys=mine, enb_id=enbs[0] if len(enbs) == 1 else None)
+    site = S.SHIFT.site_for(text)
     if site is None:
         return None
     a = site.from_enb
     mine = {c.cell_key for c in cells if c.enb_id == a}
+    if daily:
+        return Target(cell_keys=mine, enb_id=a) if mine else None
     b = S.shift_pick(int(start_ts.timestamp() // 60), site.standby_enbs)
     if not mine or b is None:
         return None
@@ -825,6 +901,67 @@ def _outage_target(cells: list[Cell], rng: random.Random, rate,
     enb = _rotating(cand, lambda e: target_key(c.cell_key for c in per[e]), used, rng)
     print(f"  · eNB 정지 대상 {enb} (후보 {len(cand)}개)", flush=True)
     return Target(cell_keys={c.cell_key for c in per[enb]}, enb_id=enb)
+
+
+#: 지금 켜진 매일 부하 묶음의 대상 토큰(`ST:`·`ENB:`·`CELL:`) — 23번 역 고르기가 그 역을 피한다(2026-11-22).
+#: gen 이 틱마다 `cli._daily_load` 에서 채운다. 해석(`build`)은 DB 를 보지 않는다
+DAILY_TOKENS: list[str] = []
+
+
+def _station_venue(cells: list[Cell], rng: random.Random,
+                   used: dict[str, int] | None = None, only: str | None = None) -> Target | None:
+    """23번 자동 대상 — **역 하나 근처 eNB 5~6개**(2026-11-22 사용자 결정 ① · `venue_enbs`).
+
+    행사장은 역 앞에 모이고, eNB 하나(셀 3개 · 활성 20명 안팎)는 정체 인원이 판정 하한에 닿지 못했다(F-499·F-508).
+    역은 `CM_CELL_STATION_MAP`(`STATION_CELLS`) 중 이 셀 마스터에 셀이 있는 것이다. 역 셀의 중심에서 eNB 셀
+    중심까지 가까운 순으로 eNB 를 고르고 그 eNB 의 셀 전부를 건다(셀을 덜면 같은 기지국의 가입자가 갈린다).
+
+    * 매일 부하가 걸린 역(`DAILY_TOKENS`)은 피한다 — 그 역과 같은 이름의 다른 역사도, 그 셀이 든 eNB 도.
+    * 활성 장애 셀은 `build` 가 후보 셀(`cells`)에서 eNB 째 덜어 넘긴다 — 여기서 따로 보지 않는다.
+    * 역 표를 못 읽었으면(빈 표) None — 호출부가 예전 eNB 하나 고르기로 돌아간다.
+    * ``only`` — 그 역 하나(대상 `ST:<역>` · 운영자가 골랐다). 매일 부하 역도 피하지 않는다(사람이 고른 것이다)
+    """
+    from .geo_lite import haversine_km
+
+    if not STATION_CELLS:
+        return None
+    mapped = [c for c in cells if c.geo_status == "MAPPED"]
+    by_key = {c.cell_key: c for c in mapped}
+    daily: set[str] = set()
+    for tok in (() if only else DAILY_TOKENS):
+        daily |= _daily_cells(tok, cells)
+    daily_names = {STATION_NAMES.get(station_key(t[3:])) for t in (() if only else DAILY_TOKENS)
+                   if t.upper().startswith("ST:")}
+    hot_enbs = {by_key[k].enb_id for k in daily if k in by_key}
+    per: dict = {}
+    for c in mapped:
+        if c.enb_id not in hot_enbs:
+            per.setdefault(c.enb_id, []).append(c)
+    if not per:
+        return None
+    centre = {e: (sum(c.latitude for c in m) / len(m), sum(c.longitude for c in m) / len(m))
+              for e, m in per.items()}
+    lo, hi = S.FAULT.venue_enbs
+    n = rng.randint(lo, hi)
+    cand: dict[str, tuple[str, list]] = {}
+    for sid in ([only] if only else sorted(STATION_CELLS)):
+        mine = [by_key[k] for k in sorted(STATION_CELLS.get(sid, ())) if k in by_key]
+        if not mine or STATION_NAMES.get(sid) in daily_names or {c.cell_key for c in mine} & daily:
+            continue
+        at = (sum(c.latitude for c in mine) / len(mine), sum(c.longitude for c in mine) / len(mine))
+        near = sorted(per, key=lambda e: (haversine_km(*at, *centre[e]), str(e)))[:n]
+        # 같은 eNB 묶음이 되는 역(한 역의 역사 여럿 · 붙은 두 역)은 한 후보다
+        cand.setdefault(target_key(c.cell_key for e in near for c in per[e]), (sid, near))
+    if not cand:
+        print(f"  ! 역 {only} — 생성 범위에 셀이 없다" if only
+              else "  ! 23번 후보 역이 없다 — eNB 하나 고르기로 돌아간다", flush=True)
+        return None
+    key = _rotating(sorted(cand), lambda k: k, used, rng)
+    sid, near = cand[key]
+    keys = {c.cell_key for e in near for c in per[e]}
+    print(f"  · 역 근처 대상 {STATION_NAMES.get(sid, sid)} · eNB {len(near)}개 {sorted(map(str, near))}"
+          f" · 셀 {len(keys)}개 (후보 역 {len(cand)}개)", flush=True)
+    return Target(cell_keys=keys, enb_id=near[0] if len(near) == 1 else None)
 
 
 def _venue_target(cells: list[Cell], rng: random.Random, fault: dict, load,
@@ -1072,7 +1209,9 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
                 if fault["kind"] == "anchor_saturation":
                     target = _anchor_target(pick, rng, fault, mesh_load, used)
                 elif fault["kind"] in _VENUE_KINDS:
-                    target = _venue_target(pick, rng, fault, mesh_load, used)
+                    # 역 근처 eNB 5~6개(2026-11-22) — 역 표가 없으면 예전 eNB 하나(`_venue_target`)
+                    target = (_station_venue(pick, rng, used)
+                              or _venue_target(pick, rng, fault, mesh_load, used))
                 elif fault["kind"] == "enb_s1_outage":
                     target = _outage_target(pick, rng, _rate_at(enb_rate, fault), used)
                 elif fault["kind"] in _CROWD_KINDS or fault["kind"] == "sa_fallback":
@@ -1130,10 +1269,11 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
         # 피할 후보가 없었다 — 지금처럼 걸고 겹침을 남긴다(정답지 기록·판정이 이 줄로 겹침을 안다)
         print(f"  ! F-{fault['fault_id']} 자동 대상이 활성 장애 셀 {len(target.cell_keys & avoid)}개와 겹친다"
               " — 피할 후보가 없어 겹침을 허용한다", flush=True)
-    # 25번 좁히기(`son_focus`)는 대상을 만들 때 이미 했다(2026-11-13 · `_son_target`·`_son_enb_target`) — 전에는
-    # 노선 구간을 고른 뒤 여기서 셀 하나로 좁혔다
     if mode is not None:
         target.outage_mode = mode
+    if fault["kind"] == "signaling_storm" and target.mme_id and not target.mme_group:
+        # 인증 단계(`scenarios._s6a_fault`)는 `mme_group` 으로 거른다 — 대상 MME 하나로 채운다
+        target.mme_group = {str(target.mme_id)}
     s = dict(spec)
     s["kind"] = fault["kind"]
     s["target"] = target
@@ -1141,9 +1281,9 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
     # 적어도 세션별 세기(정체 0.9 · NR 레그 0.35)는 강도 1.0 값이다
     s["peak"] = 1.0 if fault["kind"] in ROUTE_RANGE_KINDS else float(fault["intensity"])
     dur = int(fault["duration_min"])
-    if fault["kind"] == "capacity_shift":
+    if fault["kind"] == "capacity_shift" and target.shift_to:
         # **길이는 시나리오가 정한다** — 상승·분산·분석 세 국면이 `SHIFT_TOTAL` 분이다.
-        # 화면 기본값(10분)으로 자르면 B 가 켜지는 순간 창이 끝난다.
+        # 화면 기본값(10분)으로 자르면 B 가 켜지는 순간 창이 끝난다. 매일 부하(B 없음)는 줄의 길이 그대로다
         dur = S.SHIFT_TOTAL
     if fault["kind"] == "natural_disaster":
         # 국면(폭주 → 다운 → eNB 별 복구)이 `DISASTER_DOWN_END`(18분)까지다 — 짧게 주면 복구 전에 잘린다
@@ -1152,6 +1292,9 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
     if steps:
         dur = max(dur, steps[-1][0])
     dur += max((s.get("series_offset") or {}).values(), default=0)
+    if fault["kind"] == "signaling_storm":
+        # 단계 시차 — 마지막 단계(IMS)가 늦게 서므로 그만큼 더한다(`series_offset` 과 같은 이유)
+        dur += max(S.STORM_STAGE_AT.values())
     sc = place(
         f"F-{fault['fault_id']}", s,
         int((fault["start_ts"] - anchor).total_seconds() // 60), dur, rng,
@@ -1188,8 +1331,9 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
         dshape = S.geo_shape(dead_cells) if dead_cells else "UNKNOWN"
         if dshape != "UNKNOWN":
             sc._geo_shape = dshape
-    if fault["kind"] == "natural_disaster":
-        # 정답지의 `down_enbs_rate` — 지정 대상(ENB:·BOX:)이어도 싣는다. 못 읽으면 None
+    if fault["kind"] in S.SURGE_KINDS:
+        # 정답지의 `down_enbs_rate` — 지정 대상(ENB:·BOX:)이어도 싣는다. 못 읽으면 None.
+        # 36번 신호 폭주도 같은 폭주 기준값(앞 60분 셀 기대 호)을 쓴다
         sc._enb_rate = _rate_at(enb_rate, fault)
         # 폭주 기준값 — 같은 조회의 분당 평균(`EnbRate.mean`)에서 셀 몫으로 나눈다
         # 합이 0 이면 **모름**이다 — 폭주는 그 분 평소 호로 후퇴하고(`pemdb1._surge_drafts` 의 같은

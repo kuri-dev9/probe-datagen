@@ -402,7 +402,7 @@ def test_out_of_view_epicenter_gets_an_arrow_and_its_own_tooltip():
     assert "Math.atan2(qy-ey,qx-ex)" in fn                           # 진원 쪽을 가리키는 방향
     arrow = fn[fn.index("if(out){"):fn.index("}else{")]
     assert arrow.count("L") == 2 and "Z" in arrow                    # 삼각형(점 셋)
-    assert "관동 지도 밖 (화살표 방향)" in fn and "관동 지도 (움직이지 않는다)" in fn
+    assert "관동 지도 밖 (화살표 방향)" in fn and "관동 지도 (움직이지 않습니다)" in fn
 
 
 def test_mini_range_comes_from_the_server_not_a_padded_guess():
@@ -444,7 +444,7 @@ def test_map_script_syntax(tmp_path):
 
 # ---------------------------------------------------------------- 번역
 
-NEW = ("진앙 — 관동 지도 (움직이지 않는다)", "진앙 {m} — 관동 지도 (움직이지 않는다) · 네모 = 지금 보는 범위",
+NEW = ("진앙 — 관동 지도 (움직이지 않습니다)", "진앙 {m} — 관동 지도 (움직이지 않습니다) · 네모 = 지금 보는 범위",
        "진앙 {m} — 관동 지도 밖 (화살표 방향) · 네모 = 지금 보는 범위", "규모 모름")
 
 
@@ -463,7 +463,7 @@ def test_new_phrases_translated_and_present_in_source():
 def test_old_japan_overview_phrases_are_gone():
     assert "일본 전도" not in MAP_HTML.replace("일본 전도를 두고", "")      # 머리 주석의 사용자 인용문만 남는다
     assert not any("일본 전도" in k or "日本全図" in v for k, v in _JA_MAP.items())
-    assert "관동" in MAP_HTML and "関東地図" in _JA_MAP["진앙 {m} — 관동 지도 (움직이지 않는다) · 네모 = 지금 보는 범위"]
+    assert "관동" in MAP_HTML and "関東地図" in _JA_MAP["진앙 {m} — 관동 지도 (움직이지 않습니다) · 네모 = 지금 보는 범위"]
 
 
 # ══ 11-15 오후 — ★ 물결 · 정지 기지국 음영 · 지진을 골랐을 때만 · 정답지 읽기 전용 마운트 ══════════════════════════

@@ -131,7 +131,7 @@ def test_unreadable_times_are_dropped_by_gen_ui_and_graphio_error_is_reported(ap
         raise urllib.error.URLError("down")
     monkeypatch.setattr("urllib.request.urlopen", boom)
     out = ui.api_fault_incidents(227)
-    assert out["incidents"] == [] and "닿지 않는다" in out["error"]
+    assert out["incidents"] == [] and "닿지 않습니다" in out["error"]
 
 
 # ── graphio `_overlap` ───────────────────────────────────────────────────────

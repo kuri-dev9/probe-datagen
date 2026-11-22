@@ -25,7 +25,6 @@ RULES = {
     "gw_pgw_restart": ("R-05b",),
     "mme_overload": ("R-23",),
     "change_suspected": ("R-11",),
-    "son_param_change": ("R-11",),
     "auc_no_response": ("R-00b", "R-15"),
     "s6a_undetermined": ("R-00b",),
     "ran_radio": ("R-06", "R-22"),
@@ -38,10 +37,11 @@ ALTERNATIVES = {
     "gw_pgw_restart": {"R-15": "NF_UNREACHABLE"},
     "mme_overload": {"R-18": "UNDETERMINED", "R-15": "NF_UNREACHABLE"},
     "change_suspected": {"R-21": "SESSION_REJECT"},
-    "son_param_change": {"R-17": "RAN_MOBILITY_ISSUE"},
     "auc_no_response": {},
     # 27번: 세 신호 판정(R-46)이 정답이고, 무호만 본 노드 장애(R-36)는 대안으로 남는다(11-05)
     "natural_disaster": {"R-36": "RAN_NODE_DOWN"},
+    # 36번(11-21): 신호 폭주 모양이 안 서면 10번과 같은 MME 과부하로 읽힌다 — 코어 계층 허용 대안
+    "signaling_storm": {"R-23": "MME_OVERLOAD"},
 }
 
 
@@ -88,7 +88,7 @@ def test_rules_dropped_by_the_cleanup_are_gone():
     assert "R-01" not in sp["auc_no_response"]["expect_rules"] and "R-01" not in sp["s6a_undetermined"]["expect_rules"]
     assert "R-15" not in sp["gw_node_down"]["expect_rules"] and "R-00b" not in sp["gw_node_down"]["expect_rules"]
     assert not {"R-18", "R-15"} & set(sp["mme_overload"]["expect_rules"])
-    assert "R-03" not in sp["change_suspected"]["expect_rules"] and "R-17" not in sp["son_param_change"]["expect_rules"]
+    assert "R-03" not in sp["change_suspected"]["expect_rules"]
 
 
 def test_external_path_latency_keeps_r09b_for_the_kind_that_owns_it():

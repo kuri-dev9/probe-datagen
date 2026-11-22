@@ -251,7 +251,7 @@ def api_map_layer(name: str):
     """
     hit = _LAYER.get(name)
     if not hit:
-        raise HTTPException(404, f"그런 레이어가 없다: {name}")
+        raise HTTPException(404, f"그런 레이어가 없습니다: {name}")
     key, source = hit
     src, err = _layer_path(key)
     if err:
@@ -367,8 +367,8 @@ def api_map_faults(minutes: int = 15, recent: bool = False):
     """
     base = str(_pem_cfg().get("graphio_api") or "").rstrip("/")
     if not base:
-        return {"error": "`pemdb1.graphio_api` 가 비어 있다 — graphio API "
-                         "주소를 설정에 적어야 한다", "incidents": []}
+        return {"error": "`pemdb1.graphio_api` 가 비어 있습니다 — graphio API "
+                         "주소를 설정에 적어야 합니다", "incidents": []}
 
     import urllib.error
     import urllib.request
@@ -383,7 +383,7 @@ def api_map_faults(minutes: int = 15, recent: bool = False):
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         # **무엇이 안 되는지 말한다.** "장애 0건"과 "물어볼 데가 없다"는
         # 다른 사실이고, 전자로 보이면 아무도 이상하다고 생각하지 않는다
-        return {"error": f"graphio API 에 닿지 않는다 ({url}): {e}",
+        return {"error": f"graphio API 에 닿지 않습니다 ({url}): {e}",
                 "incidents": []}
 
     # ## "지금 장애"는 **마지막으로 관측된 시각**으로 가른다 (2026-10-28)
@@ -517,7 +517,7 @@ def api_map_event(incident_id: str, states: bool = False):
 
     base = str(_pem_cfg().get("graphio_api") or "").rstrip("/")
     if not base:
-        return {"error": "`pemdb1.graphio_api` 가 비어 있다", "enbs": [], "pts": []}
+        return {"error": "`pemdb1.graphio_api` 가 비어 있습니다", "enbs": [], "pts": []}
     # 여기서 쓰는 것은 셀과 칸 코드뿐이다 — 둘레·사건 지리 계산을 시키지 않는다
     url = (f"{base}/api/incidents/{urllib.parse.quote(incident_id)}/map"
            "?cells_only=true&with_areas=true&with_members=true")
@@ -525,7 +525,7 @@ def api_map_event(incident_id: str, states: bool = False):
         with urllib.request.urlopen(url, timeout=8) as r:
             doc = json.loads(r.read())
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
-        return {"error": f"graphio API 에 닿지 않는다 ({url}): {e}", "enbs": [], "pts": []}
+        return {"error": f"graphio API 에 닿지 않습니다 ({url}): {e}", "enbs": [], "pts": []}
     at: dict[str, list] = {}
     cells = doc.get("cells") or []
     for c in cells:
@@ -1034,15 +1034,15 @@ def api_map_geo(bbox: str = "", cover: int = 0):
     # 는 graphio 의 셀 귀속과 같은 파일이라 갈아 끼울 수 없다 — 비우면 그쪽으로 간다
     raw = str(_pem_cfg().get("geo_boundary_map") or _pem_cfg().get("geo_boundary") or "")
     if not raw:
-        return {"error": "`pemdb1.geo_boundary` 가 비어 있다 — 행정경계 파일 "
-                         "경로를 설정에 적어야 한다", "features": []}
+        return {"error": "`pemdb1.geo_boundary` 가 비어 있습니다 — 행정경계 파일 "
+                         "경로를 설정에 적어야 합니다", "features": []}
     src = Path(raw)
     if not src.is_absolute():
         src = (HERE / src).resolve()
     if not src.exists():
         # **빈 배열을 돌려주지 않는다** — "경계가 없다"와 "파일이 없다"는
         # 다른 사실이고, 전자로 보이면 지도가 왜 비었는지 알 수 없다
-        return {"error": f"경계 파일이 없다: {src}", "features": []}
+        return {"error": f"경계 파일이 없습니다: {src}", "features": []}
 
     lo_la = lo_lo = -1e9
     hi_la = hi_lo = 1e9
@@ -1244,7 +1244,7 @@ def api_map_quake(at: str = "", outline: int = 0):
     try:
         ts = datetime.fromisoformat(at.replace("Z", "")) if at else None
     except ValueError:
-        raise HTTPException(400, f"at 이 시각이 아니다: {at}")
+        raise HTTPException(400, f"at 이 시각이 아닙니다: {at}")
     from ..control import T_QUAKE
     sel = (f"SELECT q.FAULT_ID, q.LAT, q.LON, q.MAGNITUDE, q.ORIGIN_TIME, f.STATUS, "
            f"q.HYPO_NAME, q.DEPTH_KM, q.INTENSITY "
@@ -1352,10 +1352,10 @@ def api_map_quake_impact(fault_id: int):
                         "ORDER BY ORIGIN_TIME DESC LIMIT 1", [fault_id])
             row = cur.fetchone()
         if not row:
-            return {"error": f"F-{fault_id} 의 지진 정보가 없다", "enbs": []}
+            return {"error": f"F-{fault_id} 의 지진 정보가 없습니다", "enbs": []}
         lat, lon, depth, mag, hypo = row
         if depth is None or mag is None:
-            return {"error": "규모·깊이를 모른다 — 진도를 계산하지 않는다", "enbs": []}
+            return {"error": "규모·깊이를 모릅니다 — 진도를 계산하지 않습니다", "enbs": []}
         d = next((r[4] for r in fc.quake_regions if r[0] == hypo), None)
         q = {"lat": float(lat), "lon": float(lon), "depth_km": float(depth), "magnitude": float(mag),
              "fault_type_d": d or 0.0}
@@ -1384,7 +1384,7 @@ def api_map_quake_impact(fault_id: int):
                             "AND ENB_ID IN (" + ",".join(["%s"] * len(enbs)) + ") GROUP BY ENB_ID", enbs)
                 radius = {str(e): float(r) for e, r in cur.fetchall() if r is not None}
     except pymysql.err.ProgrammingError as e:
-        return {"error": f"표를 읽지 못했다: {e.args[-1] if e.args else e}", "enbs": []}
+        return {"error": f"표를 읽지 못했습니다: {e.args[-1] if e.args else e}", "enbs": []}
     finally:
         conn.close()
 

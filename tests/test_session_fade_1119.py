@@ -73,9 +73,9 @@ def test_fade_is_recorded_only_once():
 def test_only_pay_and_cdn_pass_the_scenario():
     import inspect
     assert "_app_session_broken(plan, rng, intensity, sc)" in inspect.getsource(S._pay_session)
-    assert "_app_session_broken(plan, rng, intensity, sc)" in inspect.getsource(S._cdn_degradation_plan)
+    assert "_cdn_plan(plan, rng, intensity, sc)" in inspect.getsource(S._cdn_degradation_plan)
     src = inspect.getsource(S)
-    assert src.count("_app_session_broken(") == 3                              # 정의 + 두 호출 — 다른 곳은 옛 동작
+    assert src.count("_app_session_broken(") == 2                              # 정의 + 22번 한 호출 — 21번은 `_cdn_plan`(2026-11-20), 다른 곳은 옛 동작
 
 
 # ── 단위: `_fade_g` · 기본값 ────────────────────────────────────────────
@@ -129,6 +129,8 @@ def _run(kind: str, fade: bool, monkeypatch) -> dict:
     if not fade:
         orig = S._app_session_broken
         monkeypatch.setattr(S, "_app_session_broken", lambda plan, rng, i, sc=None: orig(plan, rng, i))
+        orig_cdn = S._cdn_plan                                                    # 21번은 전용 함수다(2026-11-20)
+        monkeypatch.setattr(S, "_cdn_plan", lambda plan, rng, i, sc=None: orig_cdn(plan, rng, i))
     weights: list[tuple[int, float, float]] = []                                  # (분, 열 때 강도, 가중)
     real_emit = SE.SessionEngine._emit
 
@@ -149,6 +151,8 @@ def _run(kind: str, fade: bool, monkeypatch) -> dict:
     sc = scs[0]
     ix = g.gen.index["transport"]
     grp = "PAY" if kind == "pay_dns_delay" else "VIDEO"
+    # 22번은 다운 재전송, 21번은 **업** 재전송이 열화다 — 21번은 다운을 건드리지 않는다(사용자 11-20)
+    dr = "Dnlink" if kind == "pay_dns_delay" else "Uplink"
     seen: dict = {}
     dsum: dict = {}
     per = {m: {"re": 0, "pk": 0, "i": sc.intensity_for("transport", m)} for m in range(MINUTES)}
@@ -159,11 +163,11 @@ def _run(kind: str, fade: bool, monkeypatch) -> dict:
         for r in g.uplane_records(m, ts).get("transport", []):
             if r[ix["App_Group_Code"]] != grp:
                 continue
-            d_re = int(r[ix["Traffic_Delta_Dnlink_RetransPacketCount"]] or 0)
+            d_re = int(r[ix[f"Traffic_Delta_{dr}_RetransPacketCount"]] or 0)
             per[m]["re"] += d_re
-            per[m]["pk"] += int(r[ix["Traffic_Delta_Dnlink_PayloadPacketCount"]] or 0)
+            per[m]["pk"] += int(r[ix[f"Traffic_Delta_{dr}_PayloadPacketCount"]] or 0)
             sid, flag = r[ix["SessionID"]], r[ix["OngoingFlag"]]
-            tot = int(r[ix["Traffic_Total_Dnlink_RetransPacketCount"]] or 0)
+            tot = int(r[ix[f"Traffic_Total_{dr}_RetransPacketCount"]] or 0)
             prev = seen.get(sid)
             if prev is not None and tot < prev and flag not in ("0", "20"):
                 inversions += 1
@@ -220,7 +224,8 @@ def test_after_the_fault_window_carried_sessions_return_to_the_normal_rate(runs,
     new, old = runs[(kind, True)]["per"], runs[(kind, False)]["per"]
     for m in range(END, MINUTES):
         assert new[m]["i"] == 0.0
-        assert _rate(new, m) < 0.02, (m, _rate(new, m))                          # 평소(0.00%대)
+        # 평소: 22번 다운 재전송은 0.00%대, 21번 **업** 재전송은 패킷이 적어 평소에도 0.0~0.45% 로 출렁인다(장애 앞 분 실측)
+        assert _rate(new, m) < (0.02 if kind == "pay_dns_delay" else 0.6), (m, _rate(new, m))
     assert _rate(old, END) > 1.0                                                  # 옛 동작은 창 끝 다음 분에도 높았다
 
 

@@ -45,10 +45,10 @@ def _norm(t):
     return re.sub(r"\s+", "", _TOTOP.sub("", t))
 
 
-def test_scenarios_html_has_one_template_per_scenario_1_to_35():
+def test_scenarios_html_has_one_template_per_scenario_1_to_36():
     """1~13번 그림이 들어왔다(2026-11-20) — 번호마다 템플릿 하나, 한국어판만 센다(`-ja` 는 따로)."""
     ids = [int(x) for x in re.findall(r"<template id=scx-(\d+)>", _html())]
-    assert sorted(ids) == list(range(1, 36)) and len(ids) == len(set(ids))
+    assert sorted(ids) == list(range(1, 37)) and len(ids) == len(set(ids))
     assert set(NOS) <= set(ids)
 
 
@@ -64,7 +64,12 @@ def test_each_template_holds_its_own_section(no):
     t = _template(no)
     assert t.lstrip().startswith(f'<section id="s{no}"')
     assert t.count(f'id="s{no}"') == 1
-    assert re.search(rf"<h1>{no}\. ", t)
+    # 11-21 사용자 지시 — 제목에서 옛 내부 번호(`#9` 등)를 지웠다. 제목은 「화면 순서. 이름」만이다(키 `s{no}` 는 데이터 안에서만)
+    h1 = re.search(r"<h1>(.*?)</h1>", t, re.S).group(1)
+    if "(폐기)" in h1:                  # 폐기 카드는 화면 순서가 없어 옛 내부 번호가 이름 앞에 남는다(맥스 11-21 · 번호 삭제는 활성 카드만)
+        assert h1.startswith(f"#{no} ")
+    else:
+        assert "inner-no" not in t and not re.search(r"#\d+", h1), h1
 
 
 @pytest.mark.skipif(not ORIGINAL.exists(), reason="graphio 원본이 없다")
@@ -75,7 +80,16 @@ def test_template_text_equals_the_original_section(no):
     a = src.index(f'<section id="s{no}"')
     nxt = src.find(f'<section id="s{no + 1}"', a)
     chunk = src[a:nxt if nxt > 0 else len(src)]
-    tpl = _norm(_template(no))
+    # 11-21 — 폐기 번호는 머리에 「폐기」 안내 줄(`retired-note`)이 붙는다. 그 줄만 빼고 같아야 한다
+    tpl = _norm(re.sub(r'<p class="retired-note".*?</p>', "", _template(no), flags=re.S))
+    chunk = re.sub(r'<p class="retired-note".*?</p>', "", chunk, flags=re.S)
+    if no == 24:
+        # 11-22 — 부활한 24번은 맨 아래 「증설 효과 확인」 줄을 안쪽 칸 밖으로 뺐고(글자가 테두리에 붙던 것 · 케이) 위 요약 줄은 사용자 지시로 지웠다.
+        # 태그 모양이 다르므로 이 카드만 글자(태그 뺀 본문)가 같은지 본다
+        def text(x):
+            return re.sub(r"<[^>]+>", "", x)
+        assert text(tpl) in text(_norm(chunk)), "24번 글자가 원본과 다르다"
+        return
     assert _norm(chunk).startswith(tpl), f"{no}번 설명이 원본과 다르다"
 
 
@@ -174,21 +188,30 @@ def test_names_table_has_14_rows():
 
 def test_control_scenarios_use_the_table_names():
     want = _md_names()
+    want[24] = "같은 지역 같은 시간 혼잡 발생"     # 11-22 24번 카드 부활 · 이름 바뀜
+    want[23] = "행사장 특정 앱 먹통"     # 11-21 오후 재정의 — 문서 표(1114 기록)는 옛 이름 그대로 둔다
     got = {r[0]: r[1] for r in control.SCENARIOS if r[0] in want}
     assert got == want
 
 
 #: 현황 화면 목록 줄 이름(11-16 사용자 "한 줄로") — 14~27번. 표(원인-쉬운이름)·`control.SCENARIOS` 이름은
 #: 긴 정본 그대로고 화면 정의 파일(`scenario_report*.json`)만 줄였다. 둘이 갈라진 것은 의도다
-LIST_NAMES = {
-    14: "역 주변 저녁 러시 혼잡", 15: "야마노테선 4G↔5G 전환 때 잠깐 멈춤",
-    16: "5G 잡히는데 느림 (4G 앵커 혼잡)", 17: "5G 장애로 4G에 몰림",
-    18: "5G 데이터 관문(UPF) 자원 바닥", 19: "5G 접속 관리(AMF) 과부하 확산",
-    20: "음성 통화만 안 걸림 (VoNR)", 21: "동영상 서버(CDN) 느림", 22: "결제 앱 느림 (DNS 지연)",
-    23: "행사장 인파로 사진 올리기 막힘", 24: "기지국 증설 뒤 이용자 이동 (장애 아님)",
-    25: "설정 변경 뒤 통화 끊김 계단 증가 (SON)", 26: "SW 업데이트한 기종만 접속 실패",
-    27: "지진 — 통화 몰림·기지국 정지",
-}
+def _list_names():
+    """11-21 — 번호는 내부 키로 그대로이고 이름은 새 순서표(`control.SCENARIO_ORDER`)가 정한다.
+    순서표에 없는 번호(폐기 · 18·19·20·24·25·26)는 옛 이름 그대로 남는다(과거 기록의 이름)."""
+    from datagen import control
+    old = {
+        18: "5G 데이터 관문(UPF) 자원 바닥", 19: "5G 접속 관리(AMF) 과부하 확산",
+        20: "음성 통화만 안 걸림 (VoNR)", 24: "같은 지역 같은 시간 혼잡 발생",   # 24 는 11-22 부활 카드 이름
+       
+        25: "설정 변경 뒤 통화 끊김 계단 증가 (SON)", 26: "SW 업데이트한 기종만 접속 실패",
+    }
+    new = {t[0]: t[1] for t in control.SCENARIO_ORDER if 14 <= t[0] <= 27}
+    assert not (set(old) & set(new)), "폐기 번호가 순서표에 들어 있다"
+    return {**new, **old}
+
+
+LIST_NAMES = _list_names()
 
 
 @pytest.mark.parametrize("fn", ["scenario_report.json", "scenario_report_v50.json"])
@@ -235,8 +258,12 @@ def test_glossary_cause_ja_equals_graphio_cause_labels_ja():
 def test_kind_specs_title_equals_kind_labels_for_every_kind():
     from datagen import scenarios as S
     from datagen.ui import common
-    assert set(S.KIND_SPECS) == set(common.KIND_LABELS) and len(S.KIND_SPECS) == 43      # 33·34번 신규 종류(ran_drop_surge · transport_cut)가 더해졌다(2026-11-19)
-    assert {k: v["title"] for k, v in S.KIND_SPECS.items()} == dict(common.KIND_LABELS)
+    assert set(S.KIND_SPECS) == set(common.KIND_LABELS) and len(S.KIND_SPECS) == 43      # 11-19 33·34번 신규 종류로 43 → 11-21 SON 삭제로 42 → 36번 signaling_storm 으로 43
+    # 11-21 — 24개 정리: 번호가 살아 있는 종류의 화면 이름은 `control.KIND_SHOWN` 이 정한다(KIND_SPECS 의 옛 글자는 내부 이름).
+    # 나머지(폐기 전용·번호 없는 변형 종류)는 전과 같이 제목 = 이름표다
+    want = {k: control.KIND_SHOWN.get(k, v["title"]) for k, v in S.KIND_SPECS.items()}
+    assert want == dict(common.KIND_LABELS)
+    assert {k for k in control.KIND_SHOWN} <= set(S.KIND_SPECS)
 
 
 def test_kind_labels_of_scenarios_14_to_27_equal_the_scenario_names():
@@ -249,7 +276,14 @@ def test_kind_labels_of_scenarios_14_to_27_equal_the_scenario_names():
     checked = 0
     for kind, rows in use.items():
         if kind is not None and len(rows) == 1 and rows[0][0] >= 14:        # 33번처럼 종류가 없는(준비 중) 번호는 뺀다
-            assert common.KIND_LABELS[kind].startswith(rows[0][1]), (kind, rows[0][0])   # 33번 이름표는 「… (HTTP 4xx)」로 구분어가 붙는다
+            no = rows[0][0]
+            if no in control.SCENARIO_SHOWN:        # 11-21 — 화면 이름은 24개 정리의 쉬운 이름이다
+                assert common.KIND_LABELS[kind] == control.SCENARIO_SHOWN[no][0], (kind, no)
+            else:                                   # 폐기 번호 전용 종류는 옛 이름을 남긴다(과거 장애 기록 표시)
+                if kind == "capacity_shift":        # 24번 장면은 「매일 같은 시각 부하」 스위치가 쓴다 — 이름표도 그것이다(11-21)
+                    assert common.KIND_LABELS[kind] == "매일 같은 시각 부하"
+                else:
+                    assert common.KIND_LABELS[kind].startswith(rows[0][1]), (kind, no)
             checked += 1
     assert checked >= 10
 

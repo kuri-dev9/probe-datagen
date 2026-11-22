@@ -327,7 +327,7 @@ def api_set_region(req: RegionReq):
     loc = str(req.locale or "").strip().lower()
     if loc not in region.LOCALES:
         raise HTTPException(
-            400, f"모르는 지역이다: {req.locale!r} "
+            400, f"모르는 지역입니다: {req.locale!r} "
                  f"(가능: {', '.join(region.LOCALES)})")
     conn = _connect()
     try:
@@ -364,11 +364,13 @@ def api_settings():
     try:
         over = {}
         for k in ("enabled", "retention_hours", "retention_on",
-                  "volume_pct", "reassign", "blocked", "diurnal", "virtual_offset_sec"):
+                  "volume_pct", "reassign", "blocked", "diurnal", "virtual_offset_sec",
+                  "extra_lte_subs"):
             v = get_config(conn, k)
             if v is not None:
                 over[k] = v
         cells_list = _cells(conn)
+        daily = _daily_view(conn)
     finally:
         conn.close()
     pct = float(over.get("volume_pct", pct_default))
@@ -392,6 +394,12 @@ def api_settings():
         # "다음 틱부터 반영된다"고 말하고 있었다. 지금은 데몬이 매 분
         # `volume_pct` 를 다시 읽는다(`cli.cmd_run`).
         "volume_pct": pct,
+        # 추가 가입자(lte_call 만) — 막대 범위와 지금 값. 상한은 설정이고 재시작해야 바뀐다(`_extra_range`)
+        "extra_lte_subs": int(float(over.get("extra_lte_subs", _extra_range()[2]))),
+        "extra_lte_range": list(_extra_range()[:2]),
+        # 매일 같은 시각 부하 **묶음**(2026-11-21 · 망 조작) — 묶음마다 켜기·가상 시 목록·역들. 옛 스위치(`daily_load`)는
+        # 내리지 않는다 — gen 이 더는 읽지 않는다(`cli._daily_load`)
+        **daily,
         "reassign": json.loads(over.get("reassign") or "{}" ),
         "base_rates": base,        # 100% 기준 (읽기 전용)
         "rates": applied,          # 지금 실제 생성량
@@ -507,9 +515,33 @@ def _virtual(offset_sec: float) -> str | None:
     return (datetime.now() + timedelta(seconds=offset_sec)).strftime("%H:%M")
 
 
+#: 추가 가입자 막대의 하한 — 사용자 결정(2026-11-20 「최소 1만부터」)
+EXTRA_LTE_MIN = 10_000
+
+
+def _extra_range() -> tuple[int, int, int]:
+    """추가 가입자 막대 (하한, 상한, 기본값). 상한·기본은 설정(`pemdb1.extra_lte_max`·`extra_lte_subs`)이다.
+
+    상한은 생성기가 기동 때 미리 만드는 수라(`PemdbGen._make_extra_subs`) 그보다 큰 값은 받지 않는다."""
+    pem = _pem_cfg()
+    hi = int(pem.get("extra_lte_max", 100_000))
+    return EXTRA_LTE_MIN, hi, int(pem.get("extra_lte_subs", EXTRA_LTE_MIN))
+
+
+def _daily_view(conn) -> dict:
+    """화면용 묶음 목록 + 부하 한 칸 길이(분 · `control.DAILY_HOUR_MIN` — 화면이 「1시간 단위」를 말할 때 쓴다)"""
+    from ..control import DAILY_HOUR_MIN, daily_lines
+    return {"daily_lines": [{"n": n, **d} for n, d in daily_lines(conn)], "daily_hour_min": DAILY_HOUR_MIN}
+
+
 class SettingsReq(BaseModel):
     #: 생성량 비율(%). 0~100. **이것이 정본이고 절대값은 유도값이다.**
     volume_pct: float | None = None
+    #: 추가 가입자(명) — lte_call 만 만든다. 1만~`extra_lte_max`
+    extra_lte_subs: int | None = None
+    #: 매일 같은 시각 부하 묶음 — `[{"on", "hours": [8, 18], "targets": ["ST:…"]}]`. 통째로 보낸다(빈 목록이면 모두 지움).
+    #: 옛 스위치(`daily_load`·`daily_load_at`)는 받지 않는다 — 묶음을 저장하면 끈다
+    daily_lines: list[dict] | None = None
     #: 장비 재배정 — `{"SGW": {"0015": "0103"}}`. 빈 dict 면 해제.
     reassign: dict | None = None
     enabled: bool | None = None
@@ -527,6 +559,86 @@ class SettingsReq(BaseModel):
     virtual_clock: str | None = None
 
 
+def _save_daily_lines(conn, rows: list[dict]) -> None:
+    """묶음 목록을 통째로 쓴다 — `daily_load.1..n`, 남는 옛 묶음은 빈 값으로 지운다(행을 지우지 않는다). 형식은 gen 과
+    같은 `control.parse_daily_line` 으로 되읽어 검사한다(두 쪽이 다른 형식을 들지 않게). 옛 스위치는 끈다 — 케이 11-21
+    「묶음으로 옮기지 말고 끄기만」"""
+    from ..control import DAILY_KEY, config_prefix, format_daily_line, parse_daily_line
+    vals = []
+    for i, r in enumerate(rows, 1):
+        try:
+            d = {"on": bool(r.get("on")), "hours": [int(h) for h in (r.get("hours") or [])],
+                 "targets": [str(t).strip() for t in (r.get("targets") or []) if str(t).strip()]}
+            v = format_daily_line(d)
+        except (TypeError, ValueError, KeyError, AttributeError):
+            raise HTTPException(400, f"매일 부하 묶음 {i} 형식이 틀렸습니다: {r!r}")
+        if parse_daily_line(v) is None:
+            raise HTTPException(400, f"매일 부하 묶음 {i} — 시간은 0~23시에서 하나 이상, 역은 하나 이상 골라 주세요: {r!r}")
+        if len(v) > 255:
+            raise HTTPException(400, f"매일 부하 묶음 {i} 의 역이 너무 많습니다({len(v)}자 · 255자까지) — 묶음을 나눠 주세요")
+        vals.append(v)
+    for i, v in enumerate(vals, 1):
+        set_config(conn, f"{DAILY_KEY}{i}", v)
+    for k, v in config_prefix(conn, DAILY_KEY).items():
+        n = k[len(DAILY_KEY):]
+        if n.isdigit() and int(n) > len(vals) and v:
+            set_config(conn, k, "")
+    set_config(conn, "daily_load", "false")
+
+
+@router.get("/api/stations")
+def api_stations():
+    """매일 부하 대상으로 고를 역 — `CM_CELL_STATION_MAP`(graphio 가 만든다) 의 역 이름별 묶음. 셀이 많은 순.
+
+    같은 이름에 역사 폴리곤이 여럿이면(阿佐ヶ谷 둘) 한 줄에 ID 를 모두 싣는다 — 이름은 사람이 쓴 문자열이라 키로
+    쓰지 않는다(graphio 불변규칙 14). 대상 토큰은 `ST:<짧은 ID>` 다(`faults.station_key`)"""
+    from ..faults import station_key
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT STATION_NAME, STATION_ID, ENB_ID, CELLNUM FROM CM_CELL_STATION_MAP")
+            rows = cur.fetchall()
+        # **생성 범위** — 생성기와 같은 셀 마스터(`common._cells` · `pemdb1.load_cells` 를 같은 인자로)에 든 셀. 역 매핑은
+        # 마스터 전량에서 만들어져 생성하지 않는 셀의 역도 있다(2026-11-21 · 阿佐ヶ谷 등 18역 — 걸면 셀 0개로 취소된다).
+        # 최근 호 유무로 추정하지 않는다 — 한산한 시각에 호가 없는 셀을 범위 밖으로 오판한다
+        gen_keys = {c.cell_key for c in _cells(conn)}
+    except Exception as e:     # 표가 없으면(역 매핑 전) 빈 목록 — 화면이 「역 목록을 못 읽었다」고 말한다
+        return {"stations": [], "error": str(e)}
+    finally:
+        conn.close()
+    # 표시 이름은 대응표(`config/station_names.json`)에서 — DB 이름은 일본어 하나뿐이고 「駅」·노선 접두어가 붙거나
+    # 건물 이름(구 이름으로 바꿨다)이 섞여 있다(2026-11-21 사람 지시). 표에 없는 ID 는 DB 이름 그대로 낸다
+    names = _station_names()
+    by: dict[str, dict] = {}
+    for name, sid, enb, cellnum in rows:
+        m = names.get(sid) or {}
+        ja = m.get("ja") or name or sid
+        g = by.setdefault(ja, {"name": ja, "name_ja": ja, "name_ko": m.get("ko") or ja, "ids": [], "ids_live": [],
+                               "cells": 0, "cells_gen": 0})
+        k = station_key(sid)
+        if k not in g["ids"]:
+            g["ids"].append(k)
+        g["cells"] += 1
+        if f"{enb}-{cellnum}" in gen_keys:
+            g["cells_gen"] += 1
+            if k not in g["ids_live"]:
+                g["ids_live"].append(k)
+    # `ids` 는 그 이름의 역 ID 전부(저장된 묶음을 이름으로 보이려고), `ids_live` 는 생성 범위 안 셀이 있는 ID —
+    # 화면은 `cells_gen` 0 인 역을 검색·추가에서 빼고, 이미 저장된 범위 밖 역은 흐리게 보인다
+    return {"stations": sorted(by.values(), key=lambda g: (-g["cells_gen"], -g["cells"], g["name"]))}
+
+
+STATION_NAMES = Path(__file__).resolve().parents[3] / "config" / "station_names.json"
+
+
+def _station_names() -> dict:
+    """`STATION_ID → {ja, ko, kind, src}`. 파일이 없거나 깨졌으면 빈 표 — 화면은 DB 이름으로 남는다(목록은 그대로 뜬다)"""
+    try:
+        return json.loads(STATION_NAMES.read_text(encoding="utf-8")).get("stations", {})
+    except (OSError, ValueError):
+        return {}
+
+
 @router.post("/api/settings")
 def api_set_settings(req: SettingsReq):
     conn = _connect()
@@ -539,17 +651,25 @@ def api_set_settings(req: SettingsReq):
             bad = [k for k in req.reassign if str(k).upper()
                    not in ("MME", "SGW", "PGW")]
             if bad:
-                raise HTTPException(400, f"장비 종류는 MME·SGW·PGW 다: {bad}")
+                raise HTTPException(400, f"장비 종류는 MME·SGW·PGW 입니다: {bad}")
             set_config(conn, "reassign",
                        json.dumps(req.reassign) if req.reassign else "")
         if req.volume_pct is not None:
             pct = float(req.volume_pct)
             if not 0 <= pct <= 100:
-                raise HTTPException(400, f"생성량 비율은 0~100 이다: {pct}")
+                raise HTTPException(400, f"생성량 비율은 0~100 입니다: {pct}")
             # 0 은 받는다 — "만들지 않는다"는 뜻이고 그 구간은 **비어 있는 것이
             # 사실이다**(불변규칙 4). `enabled=false` 와 다르다: 그쪽은 틱
             # 자체를 건너뛰고 이쪽은 틱이 돌면서 0건을 만든다.
             set_config(conn, "volume_pct", f"{pct:g}")
+        if req.extra_lte_subs is not None:
+            lo, hi, _ = _extra_range()
+            n = int(req.extra_lte_subs)
+            if not lo <= n <= hi:
+                raise HTTPException(400, f"추가 가입자는 {lo:,}~{hi:,}명입니다: {n:,}")
+            set_config(conn, "extra_lte_subs", str(n))
+        if req.daily_lines is not None:
+            _save_daily_lines(conn, req.daily_lines)
         if req.enabled is not None:
             set_config(conn, "enabled", "true" if req.enabled else "false")
         if req.retention_hours is not None:
@@ -557,7 +677,7 @@ def api_set_settings(req: SettingsReq):
             # 1시간 미만은 받지 않는다 — 원시 파티션이 시간 입도라 0 을 주면
             # **방금 쓴 칸까지 떨어뜨린다**(상한 ≤ cutoff). 상한 2160 = 90일.
             if not 1 <= h <= 2160:
-                raise HTTPException(400, f"보존 시간은 1~2160 이다: {h}")
+                raise HTTPException(400, f"보존 시간은 1~2160 입니다: {h}")
             set_config(conn, "retention_hours", str(h))
         if req.retention_on is not None:
             set_config(conn, "retention_on", "true" if req.retention_on else "false")
@@ -569,7 +689,7 @@ def api_set_settings(req: SettingsReq):
             bad = [x for x in req.blocked if x not in BLOCKABLE_SERIES]
             if bad:
                 raise HTTPException(
-                    400, f"끊을 수 없는 계열이다: {bad} "
+                    400, f"끊을 수 없는 계열입니다: {bad} "
                          f"(가능: {', '.join(BLOCKABLE_SERIES)})")
             set_config(conn, "blocked", ",".join(sorted(set(req.blocked))))
         if req.diurnal is not None:
@@ -583,7 +703,7 @@ def api_set_settings(req: SettingsReq):
                     hh, mm = (int(x) for x in v.split(":"))
                     assert 0 <= hh < 24 and 0 <= mm < 60
                 except (ValueError, AssertionError):
-                    raise HTTPException(400, f"가상 시각은 HH:MM 이다: {v!r}")
+                    raise HTTPException(400, f"가상 시각은 HH:MM 입니다: {v!r}")
                 now = datetime.now()
                 # 오늘 그 시각까지의 차(초)를 ±12시간으로 접는다 — 곡선은 시·분만 보므로
                 # 날짜는 뜻이 없다. 지금부터 실제 시간과 같은 속도로 흐른다(오프셋 방식)
@@ -635,15 +755,46 @@ def api_targets():
     for c in cells_list:
         if c.adm_sgg_cd:
             sgg[c.adm_sgg_cd] = sgg.get(c.adm_sgg_cd, 0) + 1
+    enb_top = tally("enb_id")[:30]
+    # ── 거는 단위 표(2026-11-22)의 후보 — 셀 · 역 근처 · 읍면동 ──
+    # 셀은 위 eNB 30개의 셀만 내린다(전량 6,900개는 select 로 고를 수 없다 · eNB 와 같은 이유).
+    # 읍면동은 `CM_CELL_GEO_MAP` ADM3 중 생성 범위 셀이 있는 칸, 이름은 `CM_GEO_UNIT`(graphio 가 만든다).
+    # 역은 `/api/stations` 와 같은 묶음(이름별 · 생성 범위 셀이 있는 역)이고 값은 그 이름의 첫 역 ID 다
+    top = {str(x["id"]) for x in enb_top}
+    cell_rows = [{"key": c.cell_key, "enb": c.enb_id, "name": names.get(str(c.enb_id))}
+                 for c in sorted(cells_list, key=lambda c: (str(c.enb_id), c.cell_key)) if str(c.enb_id) in top]
+    adm3, geo_names = [], {}
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT AREA_LEVEL, AREA_CD, AREA_NAME FROM CM_GEO_UNIT WHERE AREA_LEVEL IN ('ADM2','ADM3')")
+            geo_names = {(lv, str(cd)): nm for lv, cd, nm in cur.fetchall()}
+            cur.execute("SELECT AREA_CD, CONCAT(ENB_ID,'-',CELLNUM) FROM CM_CELL_GEO_MAP WHERE AREA_LEVEL='ADM3'")
+            have = {c.cell_key for c in cells_list}
+            cnt: dict[str, int] = {}
+            for cd, key in cur.fetchall():
+                if key in have:
+                    cnt[str(cd)] = cnt.get(str(cd), 0) + 1
+        adm3 = [{"code": k, "name": geo_names.get(("ADM3", k)) or "", "cells": n}
+                for k, n in sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0]))]
+    except Exception:          # 표가 없으면(매핑 전) 읍면동 후보가 비고 화면은 그 단위를 비운다 — 지어내지 않는다
+        conn.rollback()
+    finally:
+        conn.close()
+    st = [g for g in api_stations().get("stations", []) if g.get("cells_gen")]
     return {
         "sgw": tally("sgw_id"), "mme": tally("mme_id"), "pgw": tally("pgw_id"),
         # eNB — `enb_s1_outage`(무호) 전용 축이다. **상위 30개만 내린다**:
         # 로컬은 60개지만 현장 마스터는 22,722개여서 전량을 내리면 select 가
         # 쓸 수 없고 응답도 무겁다. 셀 수가 많은 eNB 라야 D4 의 베이스라인
         # 조건(직전 60분 중앙값 ≥ 20호)을 넘긴다.
-        "enb": tally("enb_id")[:30],
+        "enb": enb_top,
+        "cell": cell_rows,
+        "adm3": adm3,
+        "st": [{"id": g["ids_live"][0], "name": g["name"], "name_ko": g.get("name_ko"), "cells": g["cells_gen"]}
+               for g in st if g.get("ids_live")],
         # 시군구 이름은 추출 단계에서 한글이 깨져 비어 있다 — 지어내지 않고
         # 코드를 그대로 보여 준다(불변규칙 17).
-        "sgg": [{"code": k, "name": "", "cells": n}
+        "sgg": [{"code": k, "name": geo_names.get(("ADM2", k)) or "", "cells": n}
                 for k, n in sorted(sgg.items(), key=lambda kv: (-kv[1], kv[0]))],
     }

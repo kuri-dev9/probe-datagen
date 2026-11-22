@@ -65,7 +65,7 @@ def _enb_of(keys, cells=BY):
     return sorted({cells[k].enb_id for k in keys if k in cells})[0]
 
 
-KINDS = ["transport_loss", "ran_congestion", "enb_s1_outage", "son_param_change", "event_crowd", "gw_resource"]
+KINDS = ["transport_loss", "ran_congestion", "enb_s1_outage", "event_crowd", "gw_resource"]
 
 
 @pytest.fixture(autouse=True)
@@ -97,7 +97,7 @@ def test_a_non_overlapping_neighbour_leaves_the_target_unchanged(kind):
 # ── ② 겹치면 피한다 (구·군집·eNB·SON·행사) ─────────────────────────────
 
 @pytest.mark.parametrize("fid", [510, 520])
-@pytest.mark.parametrize("kind", ["transport_loss", "ran_congestion", "enb_s1_outage", "son_param_change", "event_crowd"])
+@pytest.mark.parametrize("kind", ["transport_loss", "ran_congestion", "enb_s1_outage", "event_crowd"])
 def test_a_forced_overlap_is_avoided_and_logged(kind, fid):
     base = _solo(kind, fid + 1)
     first = _row(fid, "ran_radio", f"ENB:{_enb_of(base)}")

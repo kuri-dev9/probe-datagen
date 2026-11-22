@@ -165,23 +165,6 @@ def _enb_cells():
     return out
 
 
-def test_son_param_change_picks_all_cells_of_one_enb_and_ignores_routes(monkeypatch):
-    """25번은 노선 구간을 고르지 않는다(11-13) — eNB 하나의 전 셀이 출발 셀이다."""
-    monkeypatch.setattr(S, "route_segment", lambda *a, **k: (_ for _ in ()).throw(AssertionError("노선 구간을 불렀다")))
-    cells = _enb_cells()
-    t = faults._auto_target("son_param_change", cells, random.Random(0), routes=["L1"])
-    assert t is not None and len(t.son_enbs) == 1 and t.route_seg is None
-    enb = t.son_enbs[0]
-    mine = {c.cell_key for c in cells if c.enb_id == enb}
-    assert {a for a, _ in t.cell_pairs} == mine                                         # 출발 셀 = 그 eNB 의 전 셀
-    assert mine < t.cell_keys and set(t.son_gain) == mine
-
-
-def test_son_param_change_without_routes_works_the_same():
-    t = faults._auto_target("son_param_change", _enb_cells(), random.Random(0), routes=None)
-    assert t is not None and t.cell_pairs and t.son_enbs
-
-
 def test_route_target_none_when_no_routes(capsys):
     assert faults._route_target(None, random.Random(0), "son_param_change") is None
     assert "없음" in capsys.readouterr().out
@@ -229,8 +212,7 @@ def test_route_kinds_cover_the_two_corridor_scenarios():
     for k in faults._ROUTE_KINDS:
         sp = faults.KIND_SPECS[k]
         assert (sp.get("select_geo") or sp["expect_geo"]) == "CORRIDOR", k
-    assert faults.KIND_SPECS["son_param_change"]["expect_geo"] == "POINT"
-    assert not faults.KIND_SPECS["son_param_change"].get("select_geo")
+    assert "son_param_change" not in faults.KIND_SPECS, "25번(SON)은 11-21 에 코드째 삭제됐다"
 
 
 def test_mobility_auto_target_uses_the_route_segment(monkeypatch):

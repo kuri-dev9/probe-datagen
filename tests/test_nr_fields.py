@@ -50,6 +50,7 @@ class _Harness(PemdbGen):
         self.gen = gen
         self._nr_enb_share = share
         self._nr_rng = random.Random(seed + 5050)
+        self.extra_by_imsi = {}          # 11-21 — NR 조건이 추가 가입자(`extra_by_imsi`)도 본다
 
 
 @pytest.fixture()

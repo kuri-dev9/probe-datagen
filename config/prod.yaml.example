@@ -57,6 +57,9 @@ pemdb1:
   # `/graphio-probe-rca` 로 풀리고, 장애가 처음 주입되는 순간
   # `PermissionError` 로 gen 이 죽는다(2026-10-27 dev 에서 실측).
   truth_out: /app/data/truth/ground_truth.json
+  # graphio web API — **컨테이너 안 이름이다**(compose 서비스 `web`). 장애 현황 화면이 읽고, 장애가 시작되면
+  # 과거 데이터 요청(`POST /api/history/copy` · 2026-11-21)도 여기로 간다. 베이스값 `127.0.0.1` 은 호스트 실행용이다
+  graphio_api: http://web:8008
   # ── 행정코드 crosswalk — **컨테이너 안 경로다** ─────────────────────────
   #
   # 기본값은 `../graphio-probe-rca/data/geo/...` 로 호스트 상대경로이고,

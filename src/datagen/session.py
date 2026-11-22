@@ -528,6 +528,8 @@ class Session:
     retries: int = 0
     #: 재시도를 **IPv4 로** 연다(`Plan.v4_retry` · 34번 IPv6 경로 실패 · 2026-11-19)
     v4_retry: bool = False
+    #: **세션 내내 down 이 멎었다**(`Plan.dn_stall` · 23번 · 2026-11-21) — 모든 레코드가 정체 구간이다
+    dn_stall: bool = False
     #: 핸드오버 직후 정체 **길이(초)**. `0` 은 없음. 첫 전환에서 `freeze` 로
     #: 바뀌고 0 이 된다 — 한 세션에 한 번이다.
     ho_stall_s: float = 0.0
@@ -913,7 +915,7 @@ class SessionEngine:
             # 즉시 끊김 — 무선이 끊어졌으므로 길게 못 간다
             span = 1 if rng.random() < 0.7 else 2
         sess = self._plan(ts, tf, call, t0, span, sid, plan_mutate, app, host,
-                          app_ip, ipv)
+                          app_ip, ipv, retry=retry_of is not None)
         # **다운 장비를 코어로 열린 세션** — 다운 시각 전에 붙은 호에서 열렸다(시작 분 안).
         # 그 시각에 끊는다 — 안 끊으면 다음 분까지 죽은 SGW 로 데이터가 흐른다(2026-11-04).
         # 다운 시각 **뒤**에 시작하는 세션은 위(`_open` 머리)에서 이미 열지 않았다
@@ -1033,7 +1035,7 @@ class SessionEngine:
     def _plan(self, ts: datetime, tf: float, call: Call, t0: float,
               span: int, sid: str, plan_mutate=None,
               app=None, host: str | None = None, app_ip: str = "",
-              ipv: str = "") -> Session:
+              ipv: str = "", retry: bool = False) -> Session:
         """세션 하나의 수명치를 **한 번에** 정한다.
 
         짧은 단위로 레코드 하나씩 만들지 않는 이유는 성능이다(설계 §5.1) —
@@ -1098,7 +1100,7 @@ class SessionEngine:
         const[_C["RstDirection"]] = "0" if const[_C["RstCount"]] in ("0", "") else ""
         freeze: tuple[float, float] | None = None
         ho_stall_s = 0.0
-        reset = syn_fail = tls_fail = v4_retry = False
+        reset = syn_fail = tls_fail = v4_retry = dn_stall = False
         retries = 0
         fade_sc, fade_i0 = None, 0.0
         norm_traffic: list[float] = []
@@ -1122,6 +1124,7 @@ class SessionEngine:
                       call.outcome, span)
             pl.net_mode = call.net_mode
             pl.imsi = call.user[0]
+            pl.retry = retry
             plan_mutate(call.cell, pl)
             traffic = [totals[f"Traffic_Total_{n}"] for n in TRAFFIC_PAIRS]
             plain = tuple(totals[n] for n in CUM_PLAIN)
@@ -1139,6 +1142,7 @@ class SessionEngine:
                 ho_stall_s = rng.uniform(3.0, 8.0)
             reset, syn_fail, retries = pl.reset, pl.syn_fail, pl.retries
             tls_fail, v4_retry = pl.tls_fail, pl.v4_retry
+            dn_stall = pl.dn_stall and call.outcome != OUT_STALL
 
         # 규칙 U-4 — **재전송은 페이로드 패킷을 넘지 않는다.** 배율이 겹치면
         # (`OUT_STALL` 의 8~20배 × 장애 훅) 넘을 수 있다. 장애가 없는 분에도
@@ -1160,9 +1164,10 @@ class SessionEngine:
             # ACK 이 안 왔다 → `TCP_OK` 가 세어지지 않아 `U-01` 이 내려간다
             const[_C["AckTime"]] = "0.0"
             const[_C["DnlinkWindowCloseCount"]] = str(rng.randint(1, 4))
-        elif freeze is not None or ho_stall_s > 0:
+        elif freeze is not None or ho_stall_s > 0 or dn_stall:
             # 수신 창이 닫혔다 — 정체(bad_mask 16)의 증거 필드다. `AckTime`
-            # 은 그대로 둔다: 연결은 섰고(`U-01` 정상) 도중에 막힌 것이다
+            # 은 그대로 둔다: 연결은 섰고(`U-01` 정상) 도중에 막힌 것이다.
+            # `dn_stall`(23번 · 2026-11-21)은 세션 내내 down 이 오지 않는다 — 양은 변형기가 0 으로 두었다
             const[_C["DnlinkWindowCloseCount"]] = str(rng.randint(1, 4))
 
         tcp = app is None or app.protocol != "17"
@@ -1250,7 +1255,7 @@ class SessionEngine:
             domain=(host if host is not None
                     else smp.domain() if smp is not None else ""),
             freeze=freeze, ho_stall_s=ho_stall_s, app=app, app_ip=app_ip,
-            retries=retries, v4_retry=v4_retry,
+            retries=retries, v4_retry=v4_retry, dn_stall=dn_stall,
             fade_sc=fade_sc, fade_i0=fade_i0,
             norm_traffic=tuple(norm_traffic) if fade_sc is not None else (),
             norm_plain=norm_plain if fade_sc is not None else (),
@@ -1519,7 +1524,7 @@ class SessionEngine:
 
     def _stalled(self, s: Session, a: float, b: float) -> bool:
         """누적 비율 `[a, b)` 구간에 정체가 있었나 — 창 닫힘 카운터의 귀속."""
-        if s.outcome == OUT_STALL:
+        if s.outcome == OUT_STALL or s.dn_stall:
             return True                     # 세션 전체가 막혔다
         fz = s.freeze
         return fz is not None and fz[0] < b and fz[1] > a

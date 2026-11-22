@@ -415,6 +415,36 @@ def build_routes(topo: "Topology", cells: list[Cell], n: int, rng,
     return out
 
 
+def load_routes_in_range(path, cells: list[Cell], min_cells: int = 2) -> list[Route]:
+    """철도 노선 구간 파일(`rail_lines.json` · graphio `tools/build_rail_routes.py`)을 **생성 범위 안 셀로 잘라** 읽는다.
+
+    `load_routes` 와 달리 모르는 셀 키에서 멈추지 않는다 — 이 파일은 도쿄 전 셀로 만들고 생성기는 생성 범위(구)만
+    쓴다. 범위 밖 셀에서 경로를 **끊어** 앞뒤를 다른 경로로 둔다(건너뛰어 이으면 떨어진 두 셀이 이웃 칸이 된다).
+    9번 자동 대상(`faults.RAIL_ROUTES`)만 쓴다 — 노선 탑승자는 `load_routes` 의 노선 파일을 탄다.
+    """
+    import json
+    from pathlib import Path
+
+    by_key = {c.cell_key: c for c in cells}
+    out: list[Route] = []
+    for e in json.loads(Path(path).read_text(encoding="utf-8")):
+        st_of = list(e.get("station_of") or [""] * len(e["cells"]))
+        run: list[int] = []
+        for i, k in enumerate(list(e["cells"]) + [None]):
+            if k is not None and k in by_key:
+                run.append(i)
+                continue
+            if len(run) >= min_cells:
+                out.append(Route(
+                    id=f"{e['id']}.{len(out)}", name=e.get("name", e["id"]),
+                    cells=tuple(by_key[e["cells"][j]] for j in run),
+                    dwell_sec=tuple([90] * len(run)), loop=False,
+                    station_of=tuple(st_of[j] for j in run),
+                    stations=e.get("stations") or {}, station_pos={}))
+            run = []
+    return out
+
+
 def load_routes(path, cells: list[Cell]) -> list[Route]:
     """`routes.json` 에서 읽는다 — **실제 노선을 그대로 쓰는 길.**
 

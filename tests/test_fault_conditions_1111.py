@@ -370,7 +370,9 @@ def test_target_column_and_sort_use_the_resolved_target_for_auto_faults():
 
 
 def test_injection_sends_the_scenario_no_as_a_field():
-    assert 'scenario_no: parseInt($("kind").value, 10) || null' in HTML
+    # 11-20 — 넓은 모델 모드(`wideOn()`)면 고정 번호를 보내고, 아니면 고른 종류의 번호를 그대로 보낸다
+    # 11-21 — 옵션 표(`SCN_OPTION`)로 넓어졌다: 옵션을 켜면 그 번호(26·28·33), 아니면 고른 종류의 번호
+    assert 'scenario_no: wideOn() ? curOpt().no : (parseInt($("kind").value, 10) || null)' in HTML
 
 
 def test_recorded_volume_opens_that_tab_before_any_judgement_exists():
@@ -378,7 +380,7 @@ def test_recorded_volume_opens_that_tab_before_any_judgement_exists():
     assert 'scnHref(s.no, f.volume_pct, "F-" + id)' in HTML
 
 
-@pytest.mark.parametrize("key", ["기록 전", "실제 대상", "생성기", "주입 때 생성량 {v}% 탭으로 연다"])
+@pytest.mark.parametrize("key", ["기록 전", "실제 대상", "생성기", "주입 때 생성량 {v}% 탭으로 엽니다"])
 def test_japanese_texts_exist(key):
     from datagen.ui import i18n_ja
     assert i18n_ja._JA_COMMON.get(key), key

@@ -2075,6 +2075,9 @@ class Mobility:
     #: 경로 정의 파일(`routes.json`). 비우면 `build_routes` 로 자동 생성한다.
     #: **실제 노선을 쓰려면 이 파일을 적는다** — 형식은 `handover.load_routes`.
     routes_file: str = ""
+    #: **9번(이동 중 끊김) 자동 대상만** 쓰는 철도 노선 구간 파일(2026-11-22 · graphio `tools/build_rail_routes.py`).
+    #: 노선 탑승자는 타지 않는다(`routes_file` 이 그 몫). 비우면 9번도 `routes_file` 노선(야마노테선)에서 고른다
+    rail_routes_file: str = ""
     #: 자동 생성할 경로 수와 칸 수. `routes_file` 이 있으면 무시된다
     count: int = 0
     length: int = 8
@@ -2125,6 +2128,8 @@ class Mobility:
     home_locality: bool = False
     #: 거주지로 볼 주변 반경(m). `home_locality` 가 켜졌을 때만 쓴다
     home_radius_m: float = 10_000.0
+    #: 그 셀 주민을 뽑는 몫(나머지는 반경 안 주변 주민 · `Generator._sub_for`). 켜졌을 때만 쓴다
+    home_stay_share: float = 0.72
 
     @classmethod
     def from_cfg(cls, cfg: dict | None) -> "Mobility":
@@ -2185,7 +2190,10 @@ class PemdbGen:
                  net_mode: dict | None = None,
                  #: 기동 구 검사(`check_geo_drift`) — ``stop``(기본) 이면 셀 마스터 구가 셀 귀속과 어긋날 때
                  #: 생성을 시작하지 않는다. ``warn`` 은 알리고 진행
-                 geo_drift_check: str = "stop"):
+                 geo_drift_check: str = "stop",
+                 #: **추가 가입자** 상한 — lte_call 만 만드는 가입자를 미리 이만큼 만들어 둔다(`set_extra_subs`).
+                 #: 0 이면 만들지 않는다(기본 · 시험·배치 경로는 지금과 같다)
+                 extra_lte_max: int = 0):
         self.plmn = plmn or Plmn()
         #: 시군구 코드 → (시도 이름, 시군구 이름) — 좌표로 준 27번 진앙의 지명(`scenarios.quake_place_name`).
         #: 셀 마스터의 이름 칸은 비어 있다(`load_cells` · 한글 깨짐) — 이름은 지역 벌 표에서 읽는다
@@ -2280,6 +2288,7 @@ class PemdbGen:
             sa_device_share=float((net_mode or {}).get("sa_device_share", 0.3)),
         )
         self._reseat_subscribers(random.Random(seed + 202))
+        self._make_extra_subs(int(extra_lte_max or 0), random.Random(seed + 303))
         # 평시 PathSwitch 는 `_coerce` 가 셀 마스터를 보고 심는다. 생성기 쪽에도
         # 걸어 두는 이유는 구 경로(`generate_minute`)가 `_coerce` 를 타지 않아
         # **평시 배경이 없다**는 것을 코드에서 읽히게 하려는 것이다.
@@ -2391,8 +2400,16 @@ class PemdbGen:
         # (2026-11-17 · `generator` 「셀 키로 정하는 배치」). 누적 가중 순번이면 셀이 하나만 바뀌어도 숨은 SA
         # 단말 전원의 상주 셀이 바뀌었다
         ring = CellRing(gen.cells, gen.cell_weights, f"sa_hidden:{seed}")
-        for k in range(int(share * base_n)):
-            i = base_n + k
+        # **기준은 정식 + 추가 가입자다**(2026-11-22 · F-506 미탐 · 케이 승인). 정식 풀의 15% 만 만들면 추가
+        # 가입자(최대 `extra_lte_max`)가 셀의 평소 호를 늘리는 만큼 넘어오는 단말 몫이 묽어진다(풀 3만 + 추가 5만이면
+        # 15% → 5.6%). 최대치 기준으로 미리 만들고, 장애 때 지금 추가 가입자 수만큼의 순번만 쓴다(`_sa_seat`).
+        # 앞 `share × 정식 풀` 명은 예전과 같은 사람·같은 셀이다 — 순번·난수 흐름이 그대로다
+        extra_max = len(getattr(self, "extra_subs", ()) or ())
+        self._sa_share = share
+        self._sa_rank: dict[str, int] = {}
+        for k in range(int(share * (base_n + extra_max))):
+            # 식별자 — 앞 몫은 풀 뒤 번호(`base_n + k`), 넘는 몫은 추가 가입자 번호(`2 × base_n + j`) 뒤라 겹치지 않는다
+            i = base_n + k if k < base_n else 2 * base_n + extra_max + (k - base_n)
             src = gen.subs[rng.randrange(base_n)]
             ci = ring.pick(i)
             sub = dataclasses.replace(
@@ -2401,8 +2418,13 @@ class PemdbGen:
                 service_code=encrypt_id(f"svc:{i % 40}", "sub"),
                 dcnr="1", home_cell=ci, route=-1)
             sub.walk_cell = None
+            self._sa_rank[sub.imsi] = k
             out.setdefault(gen.cells[ci].cell_key, []).append(sub)
         return out
+
+    def _sa_live_n(self) -> int:
+        """지금 쓰는 숨은 SA 단말 수 — `share × (정식 풀 + 지금 추가 가입자 수)`. 순번이 이 아래인 단말만 넘어온다."""
+        return int(getattr(self, "_sa_share", 0.0) * (len(self.gen.subs) + int(getattr(self, "extra_n", 0) or 0)))
 
     def _reseat_subscribers(self, rng: random.Random) -> None:
         """가입자 풀의 Vendor/Model·PLMN 을 상용 실측 분포로 바꾼다.
@@ -2435,6 +2457,116 @@ class PemdbGen:
         # 대부분 일어나지 않고, U-Plane 세션이 이동 가입자를 되찾지 못한다
         # (`session` 의 `sub_i`).
         self.gen.sub_by_imsi = {s.imsi: i for i, s in enumerate(self.gen.subs)}
+
+    def _make_extra_subs(self, n: int, rng: random.Random) -> None:
+        """**추가 가입자** — lte_call 만 만드는 사람을 ``n`` 명 미리 만든다(2026-11-20 사용자 「추가 lte-call 만
+        생산할 생산량」 · 최소 1만).
+
+        U-Plane 은 성능 때문에 기존 가입자(`gen.subs`)에게서만 나오고, 추가 가입자는 C-Plane 호만 건다. 그래서
+        **`gen.sub_by_imsi` 에 넣지 않는다** — U-Plane 세션이 가입자를 되찾는 색인이라, 빠져 있으면 추가
+        가입자의 세션은 원리적으로 생길 수 없다. 대신 정지 셀에서 같은 사람을 이웃 셀로 옮길 때 쓰는 색인을
+        따로 둔다(`extra_by_imsi` · 27번 재접속·24번 이동).
+
+        **기존 난수 흐름을 건드리지 않는다** — 자기 난수(``rng``)로만 뽑고, 기종 분포도 `dist` 의 난수를 쓰지
+        않고 그 표·가중치만 빌린다. `_make_subscribers` 를 부르면 샘플러 난수를 소비해 기존 가입자·호가 모두
+        다른 값이 된다. 식별자 순번은 기존 풀·숨은 SA 단말 뒤(`2 × len(gen.subs) + j`)라 IMSI·IMEI·MDN 이 겹치지 않는다.
+        나머지 칸(요금제·성별·나이·교환국)은 기존 가입자를 차례로 본뜬다 — 분포가 같다.
+        이동 그룹에 넣지 않는다 — 고정 가입자다(노선·이동 시나리오 9·15 는 기존 가입자가 맡는다).
+        """
+        import dataclasses
+        from .generator import CellRing
+
+        base = self.gen.subs
+        out: list = []
+        # 머무는 셀 — 기존 가입자를 본뜨면 같은 순번 둘이 같은 셀에 살게 된다. 자기 링으로 정한다(난수를 쓰지 않는다 ·
+        # 기존 가입자 집과 같은 eNB 균등 가중). 머무는 셀(`home_locality`)을 껐으면 읽지 않는다
+        home = CellRing(self.gen.cells, self.gen.flat_weights, "home_extra")
+        share = self.gen.sa_device_share
+        dist = self.dist
+        for j in range(max(0, n) if base else 0):
+            # **순번은 기존 풀의 두 배 뒤부터다**(2026-11-21). 숨은 SA 단말(17번 · `_make_sa_hidden`)이
+            # `len(base) + k`(k < 비율 × len(base) ≤ len(base))를 쓴다 — 같은 자리에서 시작하면 IMSI·IMEI·MDN 이
+            # 겹쳐 다른 두 사람이 한 IMSI 가 됐다(그 IMSI 로 NR·정지 기록을 찾으면 엉뚱한 사람이 걸린다)
+            i = 2 * len(base) + j
+            s = dataclasses.replace(base[j % len(base)], route=-1)
+            s.vendor, s.model = rng.choices(dist.vendor_models, weights=dist.vendor_model_w, k=1)[0]
+            # 로머 몫은 `_reseat_subscribers` 와 같다
+            s.mcc_mnc = self.plmn.roaming if rng.random() < 0.026 else self.plmn.imsi_prefix
+            s.imsi = synth_imsi(s.mcc_mnc, i)
+            s.mdn = synth_mdn(i, s.mcc_mnc)
+            s.imei = synth_imei(s.vendor, s.model, i)
+            s.dcnr = "1" if rng.random() < share else "0"
+            s.home_cell = home.pick(i)
+            out.append(s)
+        #: 추가 가입자 — 앞에서부터 `extra_n` 명을 쓴다. 값을 바꿔도 같은 사람이 남는다
+        self.extra_subs = out
+        self.extra_by_imsi = {s.imsi: j for j, s in enumerate(out)}
+        #: 셀 인덱스 → 그 셀에 사는 추가 가입자 순번(오름차순 · `_extra_local` 이 `extra_n` 아래만 쓴다)
+        self._extra_by_cell: dict[int, list[int]] = {}
+        for j, s in enumerate(out):
+            self._extra_by_cell.setdefault(s.home_cell, []).append(j)
+        self.extra_n = 0
+        #: 추가 호를 뽑는 난수 — 기존 호 추첨(`gen.rng`)과 섞지 않는다
+        self._extra_rng = random.Random(rng.getrandbits(64))
+
+    def _rng_pool(self) -> list[random.Random]:
+        """추가 호가 닿을 수 있는 **모든 난수** — 생성기·어댑터의 속성을 한 겹(dict 값·작은 목록 원소는 두 겹) 훑는다.
+
+        `base_lte_call` 하나가 `gen.rng`(셀·가입자 추첨) · 표본기(`samplers[*].rng`) · 어댑터의 분포 난수(`dist`) ·
+        NR·절단 난수 · 장애 변형이 붙든 난수(같은 `gen.rng` 객체)를 두루 쓴다. 이름으로 고르면 하나를 빠뜨려도
+        에러가 없이 U-Plane 이 어긋난다(에스터 21:05 · 둘째 분부터 행 수 +3%). 큰 목록(셀·가입자)은 건너뛴다 —
+        거기에는 난수가 없다. 추가 호 전용 난수(`_extra_rng`)는 뺀다 — 그것은 흘러가야 한다"""
+        out: dict[int, random.Random] = {}
+
+        def take(v, depth: int) -> None:
+            if isinstance(v, random.Random):
+                out.setdefault(id(v), v)
+            elif depth <= 0:
+                return
+            elif isinstance(v, dict):
+                for x in list(v.values())[:200]:
+                    take(x, depth - 1)
+            elif isinstance(v, (list, tuple)):
+                if len(v) <= 200:
+                    for x in v:
+                        take(x, depth - 1)
+            elif hasattr(v, "__dict__") and not isinstance(v, type):
+                for x in vars(v).values():
+                    take(x, depth - 1)
+
+        for root in (self.gen, self):
+            for v in vars(root).values():
+                take(v, 2)
+        out.pop(id(self._extra_rng), None)
+        return list(out.values())
+
+    def _extra_local(self, cell, k: int, xr: random.Random):
+        """그 셀(몫 `home_stay_share`)·주변(`Generator.near_cells`)에 사는 추가 가입자 — 기존 가입자의 `_sub_for` 와 같은
+        모양이다. 머무는 셀을 껐거나, 찾아온 몫(장애 배율 · `Generator.visitor`)이거나, 주변에 쓰는 순번(``k`` 아래)의
+        주민이 없으면 None(호출부가 전체에서 뽑는다). 난수는 추가 호 전용(``xr``)만 쓴다"""
+        gen = self.gen
+        if not gen.home_locality or gen.visitor(cell, xr):
+            return None
+        idx = gen.cell_index[cell.cell_key]
+        by = self._extra_by_cell
+        if xr.random() < gen.home_stay_share:
+            mine = [j for j in by.get(idx, ()) if j < k]
+            if mine:
+                return self.extra_subs[mine[xr.randrange(len(mine))]]
+        near = gen.near_cells(idx)
+        for _ in range(4 if near else 0):
+            mine = [j for j in by.get(near[xr.randrange(len(near))], ()) if j < k]
+            if mine:
+                return self.extra_subs[mine[xr.randrange(len(mine))]]
+        mine = [j for j in by.get(idx, ()) if j < k]
+        return self.extra_subs[mine[xr.randrange(len(mine))]] if mine else None
+
+    def set_extra_subs(self, n: int) -> int:
+        """추가 가입자 수를 맞춘다 — 미리 만든 수(`extra_lte_max`)를 넘지 않는다. 적용된 값을 돌려준다.
+
+        범위(최소 1만)는 UI·API 의 정책이다(`ui.status_api`) — 여기서는 0 도 받는다(시험·대조용)."""
+        self.extra_n = max(0, min(int(n), len(self.extra_subs)))
+        return self.extra_n
 
     # -- 분 단위 ---------------------------------------------------------
 
@@ -2617,6 +2749,12 @@ class PemdbGen:
                 # **단말 구성의 변화**(N-01 · 5G 능력 단말 비중)다. 하한이 대상 25셀을 평소 6.3호 → 200호로
                 # 채워 넘어온 단말 몇 명의 레코드가 평소 구성의 호에 묻혔다 — `dcnr=1` 비중이 지역 밖과
                 # 같아졌다(리오 실측 29.9% 대 29.8%). 셀당 호를 맞추는 장치와 구성비 신호는 함께 못 간다
+                continue
+            if sc.kind == "event_crowd":
+                # **23번도 하한을 채우지 않는다**(2026-11-21 · F-490·F-491). 크기는 `_event_crowd_load`(사람 3배)
+                # 하나가 정한다. 옛 하한 셀당 120호(업링크 혼잡 시절 서버 2곳 표본용)가 평소 셀당 약 7호를
+                # 대신해 행사장 셀 3개의 사람이 77배·세션이 85배가 됐고, 그 셀들이 구 세션의 3분의 1을 먹어
+                # 新宿区 전체 내려받기 속도(U-15 · 1,039셀)가 떨어져 보였다
                 continue
             if sc.kind == "ran_congestion":
                 # **14번도 하한을 채우지 않는다**(2026-11-05 · F-129). 원래 있던 사람이 나빠지는 장애라
@@ -2980,6 +3118,14 @@ class PemdbGen:
         # **경로와 독립이다.** 노선을 깔지 않아도 지역성만 켤 수 있다
         self.gen.home_locality = bool(mb.home_locality)
         self.gen.home_radius_m = float(mb.home_radius_m)
+        if not 0.0 <= float(mb.home_stay_share) <= 1.0:
+            raise RuntimeError(f"mobility.home_stay_share 는 0~1 이다: {mb.home_stay_share}")
+        self.gen.home_stay_share = float(mb.home_stay_share)
+        # 9번 자동 대상의 철도 구간 — 탑승자 경로와 독립이다. 파일이 있는데 읽히지 않으면 멈춘다(위 docstring 과 같은 이유)
+        if mb.rail_routes_file:
+            from . import faults as F
+            F.RAIL_ROUTES[:] = HO.load_routes_in_range(mb.rail_routes_file, self.cells)
+            print(f"  9번 철도 구간 {len(F.RAIL_ROUTES)}개 (범위 안 · {mb.rail_routes_file})", flush=True)
         if mb.routes_file:
             routes = HO.load_routes(mb.routes_file, self.cells)
         elif mb.count > 0:
@@ -3115,6 +3261,43 @@ class PemdbGen:
                 # SA 폴백(17번) — 숨은 5G 단말이 들어오는 TAU·Attach 와, 들어온 단말의 호
                 yield from self._sa_fallback_drafts(minute, active, n_calls, ts,
                                                     slot_start, force_ct, sa_entry)
+            # **추가 가입자 호는 맨 끝이다** — 기존 호가 모두 같은 난수로 처리된 뒤에 온다. 그래서 기존 호와
+            # 거기서 파생되는 U-Plane 세션(`calls`)이 추가 가입자 수와 무관하게 그대로다
+            yield from extra_drafts()
+
+        def extra_drafts():
+            """추가 가입자 호 — 기존 가입자 1인당 호율과 같게(`n_calls × extra_n / len(subs)`).
+
+            사람은 자기 난수로 고르고 셀은 평소 호와 같은 가중 추첨이다(`_pick_cell`). 억제된 셀이면 평소 호처럼
+            다시 고른다. 하한 채움·폭주의 기준(`n_calls`)은 바꾸지 않는다 — 바꾸면 기존 시나리오 강도가 조용히
+            달라진다"""
+            k = self.extra_n
+            if not (k and n_calls and gen.subs):
+                return
+            xr = self._extra_rng
+            # **공용 난수를 얼려 둔다**(2026-11-20 에스터 21:05). 추가 호 경로(`_pick_cell`·`base_lte_call`·`_coerce`·
+            # 장애 변형·다운 거름)가 공용 난수를 소비하면 같은 분 U-Plane 측정값과 다음 분 추첨이 달라진다. 여기서
+            # 상태를 떠 두고 각 난수를 전용 난수에서 뽑은 씨로 바꿔 쓴 뒤, 호 루프가 끝나면 되돌린다(`frozen`).
+            # 추가 호는 맨 끝이라 그 사이에 기존 호가 끼지 않는다 — 기존 경로가 보는 난수 흐름은 추가 가입자가
+            # 없을 때와 비트 단위로 같다
+            for r in self._rng_pool():
+                frozen.append((r, r.getstate()))
+                r.seed(xr.getrandbits(64))
+            want = n_calls * k / len(gen.subs)
+            for _ in range(int(want + xr.random())):
+                cell = gen._pick_cell()
+                if suppress is not None:
+                    for _retry in range(8):
+                        if not suppress(cell):
+                            break
+                        cell = gen._pick_cell()
+                    else:
+                        continue
+                # 머무는 셀(2026-11-22) — 셀을 먼저 뽑고 그 셀·주변에 사는 추가 가입자. 끄면 예전처럼 전체에서
+                sub = self._extra_local(cell, k, xr) or self.extra_subs[xr.randrange(k)]
+                rec, cell = gen.base_lte_call(ts, slot_start, at=(sub, cell))
+                extra_ids.add(id(rec))
+                yield rec, cell
 
         #: 폭주 호의 절차 고정 — `id(rec)` → call_type. 재배치로 레코드가 바뀌기 전에 꺼낸다
         force_ct: dict[int, str] = {}
@@ -3122,8 +3305,14 @@ class PemdbGen:
         emergency: set[int] = set()
         #: SA 폴백으로 **들어오는** 레코드 — `id(rec)` → 도착 시각. 직전 호 기록을 비우고 끝 시각을 맞춘다
         sa_entry: dict[int, float] = {}
+        #: 추가 가입자 호 — `id(rec)`. U-Plane 세션을 만들지 않는다(`_make_extra_subs`). 재배치로 바뀌기 전에 꺼낸다
+        extra_ids: set[int] = set()
+        #: 추가 호 동안 바꿔 끼운 공용 난수의 원래 상태 — 호 루프가 끝나면 되돌린다(`extra_drafts`)
+        frozen: list = []
         for rec, cell in drafts():
             fct = force_ct.pop(id(rec), None)
+            is_extra = id(rec) in extra_ids
+            extra_ids.discard(id(rec))
             emg = id(rec) in emergency
             emergency.discard(id(rec))
             t_sa = sa_entry.pop(id(rec), None)
@@ -3144,6 +3333,12 @@ class PemdbGen:
                 if si >= 0:
                     rec, cell = gen.base_lte_call(ts, slot_start,
                                                   at=(gen.subs[si], dst))
+                elif is_extra:
+                    # 추가 가입자도 같은 사람이 옮겨 간다 — 그대로 두면 정지 셀에 호가 남는다(27번 무호)
+                    xi = self.extra_by_imsi.get(rec.values[i_imsi], -1)
+                    if xi >= 0:
+                        rec, cell = gen.base_lte_call(ts, slot_start,
+                                                      at=(self.extra_subs[xi], dst))
             self._coerce(rec, cell, force_call_type=fct)
             if emg:
                 rec.set("InitialUEMessage_RRC_Establishment_Cause", "0")
@@ -3169,6 +3364,13 @@ class PemdbGen:
             # `success_flag=1` 이라 그냥 두면 죽은 SGW 로 세션이 열렸다(에스터 회귀)
             if any_down and not _scenarios.down_opens_session(rec, cell, down):
                 continue
+            # **추가 가입자 호는 세션을 열지 않는다.** 세션 엔진이 호당 세션을 `sessions_peak / 호 수` 로 내므로
+            # 여기 넣으면 U-Plane 총량은 그대로인 채 더 많은 사람에게 흩어져 사람당 세션이 준다(체감 판정 붕괴)
+            if is_extra:
+                # 대신 「접속 중」 명부에만 적는다 — 장비가 멈추면 끊김·재연결 기록을 낸다(`_extra_down_cuts`).
+                # 여기는 공용 난수를 얼려 둔 구간이라(`frozen`) `classify`·`_span` 이 기존 흐름을 소비하지 않는다
+                self._xlive_note(rec, cell, minute)
+                continue
             outcome = self.sessions.classify(rec)
             if outcome is not None:
                 # **레코드에 적힌 값을 그대로 가져간다.** 생성기의 가입자
@@ -3184,6 +3386,9 @@ class PemdbGen:
                     apn=vals[i_apn], t=t, outcome=outcome, rel=vals[i_rel],
                     call_type=(vals[i_ct] if i_ct >= 0 else ""),
                     net_mode=net_mode_of(gen, vals[i_imsi], vals[i_nr])))
+        # 추가 호 동안 바꿔 끼운 공용 난수를 되돌린다 — 뒤의 TAU·세션·U-Plane 은 추가 가입자가 없을 때와 같은 흐름이다
+        for r, st in frozen:
+            r.setstate(st)
         # ── TAU — **TAC 가 바뀐 전환마다 한 건** ────────────────────────
         #
         # 핸드오버 레코드와 **별개 절차**다. 이것이 없으면 "TAC 가 바뀌었는데
@@ -3234,6 +3439,11 @@ class PemdbGen:
         # 이미 열린 세션 — 다운 장비를 지나면 끊는다. 이번 분 세션 엔진이 그 표식을 읽는다
         if any_down and "lte_call" not in self._blocked:
             out.extend(self._node_down_cuts(minute, ts, slot_start, down, relocate))
+        # 추가 가입자의 열린 접속 — 기존 정리가 끝난 **뒤**, 자기 난수로(추가 가입자가 0이면 들어가지 않는다)
+        if self.__dict__.get("_xlive") or self.__dict__.get("_xdown_pending"):
+            out.extend(self._extra_down_cuts(minute, ts, slot_start,
+                                             down if any_down and "lte_call" not in self._blocked else None,
+                                             relocate))
 
         self._calls, self._calls_at = calls, ts
         return out
@@ -3268,12 +3478,14 @@ class PemdbGen:
         by_key = gen.cell_by_key
         pool = gen._fixed or range(len(gen.subs))
         budget = int(self.SURGE_CAP * n_calls)
-        cts = [c for c, _w in _scenarios.DISASTER_SURGE_MIX]
-        wts = [w for _c, w in _scenarios.DISASTER_SURGE_MIX]
         for sc in active:
             mult = _scenarios.disaster_surge_mult(sc, minute)
             if mult <= 1.0 or budget <= 0:
                 continue
+            # 절차 구성은 kind 가 정한다 — 27번은 음성·데이터 호, 36번 신호 폭주는 Attach·TAU(`surge_mix`)
+            mix = _scenarios.surge_mix(sc.kind)
+            cts = [c for c, _w in mix]
+            wts = [w for _c, w in mix]
             # 지진은 폭주 셀만(`_surge_keys`) — 정지 둘레 셀(2026-11-16)은 대상이지만 호를 더하지 않는다
             keys = [k for k in sorted(sc.__dict__.get("_surge_keys") or sc.target.cell_keys) if k in by_key]
             cell_base = sc.__dict__.get("_surge_cell_base") or {}
@@ -3409,8 +3621,10 @@ class PemdbGen:
         if t0 is None:
             t0 = (self.anchor.timestamp() + sc.start_minute * 60.0) if self.anchor else 0.0
         rng = random.Random(zlib.crc32(sc.id.encode()))
+        # 지금 추가 가입자 수에 맞는 몫만 쓴다(`_sa_live_n` · 2026-11-22). 순번을 모르는 단말(옛 경로)은 쓴다
+        live, rank = self._sa_live_n(), getattr(self, "_sa_rank", {})
         pool = [(sub, by_key[k]) for k in sorted(sc.target.cell_keys) if k in by_key
-                for sub in self.sa_hidden.get(k, ())]
+                for sub in self.sa_hidden.get(k, ()) if rank.get(sub.imsi, 0) < live]
         rng.shuffle(pool)
         n = int(round(max(0.0, min(1.0, sc.peak)) * len(pool)))
         ramp = _scenarios.SA_FALLBACK_RAMP_MIN * 60.0
@@ -3525,6 +3739,88 @@ class PemdbGen:
             prev[2] = True
             later.append((s.user[0], dst, s.core, minute + 1, at + gap, "reconnect"))
 
+    def _person(self, imsi: str):
+        """정지 기록을 낼 사람 — 기존 가입자, 없으면 추가 가입자(`extra_by_imsi`). 둘 다 아니면 None"""
+        si = self.gen.sub_by_imsi.get(imsi, -1)
+        if si >= 0:
+            return self.gen.subs[si]
+        xi = self.extra_by_imsi.get(imsi, -1)
+        return self.extra_subs[xi] if xi >= 0 else None
+
+    def _xlive_note(self, rec, cell, minute: int) -> None:
+        """추가 가입자 호를 「접속 중」 명부에 적는다(2026-11-21 · 케이 03:00 장비 100% 장애).
+
+        추가 가입자는 U-Plane 세션이 없어 `_node_down_cuts` 가 훑는 `sessions.active` 에 없다. 그래서 장비가
+        멈춰도 이미 붙어 있던 추가 가입자는 끊김으로 남지 않았다 — 영향 가입자가 장비 사용자 전체보다 적게
+        잡힌다. 세션을 열 호인지는 세션 엔진 판정(`classify`) 그대로이고, 수명도 세션 엔진의 수명 분포
+        (`_span`)다 — 새 기준값이 없다. 절단으로 끝난 호는 이미 끊긴 것이라 적지 않는다. 한 사람에 한 항목이다
+        (새 호가 앞 항목을 덮는다). 코어는 세션이 박는 것과 같은 셀의 장비다(`session.py` `core=`)
+        """
+        if self.sessions.classify(rec) is None or rec.get("drop_flag") == "1":
+            return
+        live = self.__dict__.setdefault("_xlive", {})
+        live[rec.get("IMSI")] = (cell, (cell.mme_id, cell.sgw_id, cell.pgw_id),
+                                 minute + self.sessions._span())
+
+    def _extra_down_cuts(self, minute: int, ts: datetime, slot_start: float,
+                         down: dict | None, relocate=None) -> list[list[str]]:
+        """추가 가입자 명부의 정지 처리 — `_node_down_cuts` 의 규칙을 그대로 옮겼다.
+
+        * SGW·PGW 정지 — 가입자 해시로 절반은 다음 분, 나머지는 그다음 분에 504 절단 기록(`_down_cut_rec`).
+        * eNB 정지 — 재연결 시각을 뽑아 이웃 셀이 있으면 다음 분에 재연결 Service Request(`_reconnect_rec`).
+        * 끊었거나 옮긴 사람, 수명이 다한 사람은 명부에서 뺀다.
+
+        **공용 난수를 얼려 둔다** — 기록 함수(`base_lte_call`·`_coerce`·`callflow.drop`)가 공용 난수를 쓴다.
+        추가 호(`extra_drafts`)와 같은 방식으로 떠 두고 전용 난수의 씨로 바꿔 쓴 뒤 되돌린다. 그래서 뒤의
+        U-Plane 과 다음 분 추첨은 추가 가입자가 없을 때와 같은 흐름이다. 명부가 비었으면 불리지 않는다
+        """
+        out: list[list[str]] = []
+        live: dict = self.__dict__.setdefault("_xlive", {})
+        frozen = []
+        xr = self._extra_rng
+        for r in self._rng_pool():
+            frozen.append((r, r.getstate()))
+            r.seed(xr.getrandbits(64))
+        try:
+            later: list[tuple] = []
+            for item in self.__dict__.get("_xdown_pending", []):
+                imsi, cell, core, due, at0 = item[:5]
+                if minute < due:
+                    later.append(item)
+                elif len(item) > 5 and item[5] == "reconnect":
+                    self._reconnect_rec(out, ts, slot_start, imsi, cell, core, at0)
+                else:
+                    self._down_cut_rec(out, ts, slot_start, imsi, cell, core, at0)
+            for imsi in sorted(live):
+                cell, core, exp = live[imsi]
+                if minute >= exp:
+                    del live[imsi]
+                    continue
+                if down is None:
+                    continue
+                hit = _scenarios.down_of(down, core=core)
+                if hit is None and str(cell.enb_id) in down["ENB"]:
+                    hit = ("ENB", str(cell.enb_id), down["ENB"][str(cell.enb_id)])
+                if hit is None:
+                    continue
+                del live[imsi]
+                at = _scenarios.down_at(down, hit[0], hit[1])
+                if hit[0] == "ENB":
+                    # 세션 쪽 `_enb_down_hold` 와 같다 — 재연결 시각에 이웃 셀로, 기록은 다음 분 한 건
+                    at = slot_start if at is None or at < slot_start else at
+                    dst = relocate(cell) if relocate is not None else None
+                    if dst is not None:
+                        gap = self.gen.rng.uniform(*_scenarios.DISASTER_RECONNECT_S)
+                        later.append((imsi, dst, core, minute + 1, at + gap, "reconnect"))
+                    continue
+                first_half = zlib.crc32(imsi.encode()) % self.DOWN_CUT_MINUTES == 0
+                later.append((imsi, cell, core, minute + (1 if first_half else 2), at))
+            self._xdown_pending = later
+        finally:
+            for r, st in frozen:
+                r.setstate(st)
+        return out
+
     def _reconnect_rec(self, out: list, ts: datetime, slot_start: float,
                        imsi: str, cell0, core, t_at: float | None) -> None:
         """다운 eNB 에서 넘어온 단말의 **재연결 Service Request** — 성공 호, 같은 코어.
@@ -3533,11 +3829,11 @@ class PemdbGen:
         `Service MO(3)` 이고 끝 시각은 재연결 시각 이후, 이 분 안이다(`fit_minute` 하한)
         """
         gen = self.gen
-        si = gen.sub_by_imsi.get(imsi, -1)
-        if si < 0:
+        sub = self._person(imsi)
+        if sub is None:
             return
         for _try in range(3):
-            rec, cell = gen.base_lte_call(ts, slot_start, at=(gen.subs[si], cell0))
+            rec, cell = gen.base_lte_call(ts, slot_start, at=(sub, cell0))
             self._coerce(rec, cell, force_call_type="3")
             if str(rec.get("success_flag")) in ("1", "True") and str(rec.get("drop_flag")) != "1":
                 break
@@ -3557,11 +3853,11 @@ class PemdbGen:
         gen = self.gen
         rng = gen.rng
         from . import callflow
-        si = gen.sub_by_imsi.get(imsi, -1)
-        if si < 0:
+        sub = self._person(imsi)
+        if sub is None:
             return
         for _try in range(3):
-            rec, cell = gen.base_lte_call(ts, slot_start, at=(gen.subs[si], cell0))
+            rec, cell = gen.base_lte_call(ts, slot_start, at=(sub, cell0))
             self._coerce(rec, cell, force_call_type="3")
             if str(rec.get("success_flag")) in ("1", "True"):
                 break
@@ -3765,7 +4061,8 @@ class PemdbGen:
         change = 0
         dur = rec.num("call_duration_time") / 1e6
         if (ct in self.NR_CALL_TYPES and cell is not None and f["suc"]
-                and rec.get("ue_dcnr") == "1" and rec.get("IMSI") in self.gen.sub_by_imsi
+                and rec.get("ue_dcnr") == "1"
+                and (rec.get("IMSI") in self.gen.sub_by_imsi or rec.get("IMSI") in self.extra_by_imsi)
                 and self._nr_on(str(cell.enb_id))):
             p = next(v for lim, v in self.NR_BY_LENGTH if dur < lim)
             if rng.random() < p:

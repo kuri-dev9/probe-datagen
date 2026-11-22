@@ -39,11 +39,13 @@ def test_repo_yaml_fault_block_is_accepted_by_the_code():
     S.FaultCfg.from_cfg(_repo_fault_cfg())
 
 
-def test_repo_yaml_raises_only_mobility_and_event_crowd_floors():
-    """9번 16호, 23번 120호(eNB 하나에 몰아 셀 1분 서버 2곳을 채운다 · 평소 호에서 옮겨 온다 `floor_moved_kinds`)."""
+def test_repo_yaml_raises_only_the_mobility_floor_and_no_longer_event_crowd():
+    """9번 16호만. 23번 120호는 11-21 오후에 걷었다 — 옛 업링크 혼잡용 하한이라 행사장 셀 사람을 평소 3배가 아니라 약 17배로
+    부풀렸다(F-490·F-491 · 新宿区 U-15 조각의 뿌리). 크기는 「사람 3배」(`_event_crowd_load`) 하나다."""
     f = S.FaultCfg.from_cfg(_repo_fault_cfg())
-    assert f.floor_by_kind == {"mobility": 16.0, "event_crowd": 120.0}
-    assert f.floor_moved_kinds == ("event_crowd",)
+    assert f.floor_by_kind == {"mobility": 16.0}, "23번 전용 하한이 되살아나면 사람 배율이 정의(3배)를 넘는다"
+    assert "event_crowd" not in f.floor_by_kind
+    assert f.floor_moved_kinds == ()
     assert f.floor_per_cell == S.FaultCfg().floor_per_cell, "다른 시나리오의 하한을 건드리면 안 된다"
 
 

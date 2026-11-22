@@ -226,7 +226,7 @@ def test_a_missing_graphio_address_is_reported(api):
 def test_a_graphio_that_cannot_be_reached_is_told_apart_from_no_history(api, exc):
     api["boom"] = exc
     out = ui.api_fault_incidents(168)
-    assert out["incidents"] == [] and out["error"].startswith("graphio API 에 닿지 않는다")
+    assert out["incidents"] == [] and out["error"].startswith("graphio API 에 닿지 않습니다")
 
 
 def test_the_history_is_read_from_the_map_list_with_a_timeout(api):

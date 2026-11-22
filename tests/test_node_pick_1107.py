@@ -270,8 +270,8 @@ def _repo_fault():
 
 def test_repo_yaml_carries_the_initial_values():
     f = S.FaultCfg.from_cfg(_repo_fault())
-    assert f.floor_by_kind.get("event_crowd") == 120.0
-    assert f.floor_moved_kinds == ("event_crowd",) and f.floor_moved_share == 0.2
+    assert "event_crowd" not in f.floor_by_kind           # 11-21 오후 23번 하한 120호를 걷었다(사람 3배 하나로 정한다)
+    assert f.floor_moved_kinds == () and f.floor_moved_share == 0.2
     assert f.crowd_enb_cells == (2, 3)
     assert (f.auto_node_min_share, f.auto_wide_min_share) == (0.5, 0.75)
     assert (f.outage_min_cells, f.outage_min_rate) == (3, 1.5)

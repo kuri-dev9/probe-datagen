@@ -38,7 +38,7 @@ def test_50_has_27_scenarios_and_judged_ones_carry_50_runs():
     d = ui.api_scenario_report(50)
     assert d["ok"] and d["report"] == load("scenario_report_v50.json")
     sc = d["report"]["scenarios"]
-    assert len(sc) == 35 and sorted(s["no"] for s in sc) == list(range(1, 36))   # 28~35 신규(2026-11-19)
+    assert len(sc) == 36 and sorted(s["no"] for s in sc) == list(range(1, 37))   # 28~35 신규(2026-11-19) · 36 신호 폭주(11-21)
     judged = [s for s in sc if s.get("latest") or s.get("history")]
     assert judged, "50% 재주행 결과가 하나도 없다"
     # 50% 회차는 `noN-` 으로 시작하는 이름이고(15번 러시 재주행은 `no15-r50-rush2` — runs.md 행 이름과 같다) 통과 기준(네 단계 모두 정상)은 15% 탭과 같다 — 통과가 있어도 되고 단계 상태가 뒷받침해야 한다
@@ -105,7 +105,7 @@ def test_broken_50_file_does_not_break_the_15_tab(monkeypatch, tmp_path):
 def test_missing_50_translation_only_drops_the_japanese(monkeypatch, tmp_path):
     monkeypatch.setitem(ui.SCENARIO_VOLUMES, 50, (CONF / "scenario_report_v50.json", tmp_path / "no_ja.json"))
     d = ui.api_scenario_report(50)
-    assert d["ok"] and "report_ja" not in d and len(d["report"]["scenarios"]) == 35   # 28~35 신규(2026-11-19)
+    assert d["ok"] and "report_ja" not in d and len(d["report"]["scenarios"]) == 36   # 28~35 신규(2026-11-19) · 36(11-21)
 
 
 # ── 화면 ────────────────────────────────────────────────────────────────────

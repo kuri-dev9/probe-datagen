@@ -27,7 +27,7 @@ T0 = datetime(2026, 11, 15, 0, 30)
 
 
 def _sc(minute: int):
-    return SimpleNamespace(start_minute=0, _minute=minute, peak=1.0)
+    return SimpleNamespace(start_minute=0, _minute=minute, peak=1.0, target=SimpleNamespace(shift_to="B"))  # B 있음=증설 곡선(없으면 매일 부하, 창 끝 기준)
 
 
 # ── 1 · 국면 ─────────────────────────────────────────────────────────────
@@ -38,9 +38,14 @@ def test_constants_are_twenty_and_thirty_with_the_recover_unchanged():
     assert S.SHIFT_RISE + S.SHIFT_RECOVER < S.SHIFT_TOTAL                    # A 회복 뒤에도 B 가 켜져 있는 구간이 남는다
 
 
+def _sc_b(minute: int, shift_to="B"):
+    """증설 기지국 B 가 있는 24번 — 11-21 부터 `shift_split` 은 `target.shift_to` 가 있을 때만 호를 넘긴다"""
+    return SimpleNamespace(start_minute=0, _minute=minute, peak=1.0, target=SimpleNamespace(shift_to=shift_to))
+
+
 def test_split_is_zero_before_twenty_minutes_and_sixty_percent_from_twenty():
-    assert [S.shift_split(_sc(m)) for m in (0, 10, 19)] == [0.0, 0.0, 0.0]
-    assert S.shift_split(_sc(20)) == S.SHIFT_SPLIT == 0.6 and S.shift_split(_sc(29)) == 0.6
+    assert [S.shift_split(_sc_b(m)) for m in (0, 10, 19)] == [0.0, 0.0, 0.0]
+    assert S.shift_split(_sc_b(20)) == S.SHIFT_SPLIT == 0.6 and S.shift_split(_sc_b(29)) == 0.6
 
 
 def test_congestion_rises_for_five_minutes_holds_until_twenty_then_falls_to_zero_by_twenty_five():

@@ -517,7 +517,7 @@ class Generator:
         #: 수십 km 를 잡는다 — 거주지로는 "주변"이 아니다. 거주지는
         #: `_cells_around` 가 **거리로** 찾는다.
         self.ho_topo = None
-        self._near_cache: dict[int, list[int]] = {}
+        self._near_cell_cache: dict[int, list[int]] = {}
         self._far_cache: dict[int, list[int]] = {}
         self._grid: dict[tuple[int, int], list[int]] | None = None
         #: 거주지로 볼 **주변 반경**(m). 전환 토폴로지의 k-최근접과 다른
@@ -527,6 +527,8 @@ class Generator:
         #: 10km 는 도심 생활권이다. 실측에서 자르지 않으면 90km 가 나왔고,
         #: 2km 로 조이면 희소 지역 셀이 자기 주민만 보게 되어 꼬리가 사라진다.
         self.home_radius_m = 10_000.0
+        #: 그 셀 주민을 뽑는 몫 — 나머지는 반경 안 주변 주민이다(`_sub_for`). 0.72 는 2026-10-27 사람 결정의 값이다
+        self.home_stay_share = 0.72
         #: 가입자를 **거주지 근처에서 뽑나.** 기본은 끄기다.
         #:
         #: **샘플 XDR 이 이 축을 규정하지 않는다** — 분포에 가입자↔셀 관계가
@@ -1138,7 +1140,10 @@ class Generator:
         subs: list[Subscriber] = []
         # 집 셀 — 셀 키 링(고르게 · 예전 `randrange(len(cells))` 와 같은 균등 몫). 순번으로 뽑으면 셀이 하나만
         # 바뀌어도 모두의 집이 밀리고, 이 난수의 소비 개수도 셀 수에 따라 바뀌어 나이·교환국까지 흔들렸다
-        home = CellRing(self.cells, [1.0] * len(self.cells), f"home:{self.seed}")
+        # **가중은 eNB 균등**(`flat_weights` · 2026-11-22) — 머무는 셀(`home_locality`)을 켜면 셀의 호가 대부분 그 셀
+        # 주민에게서 나온다. 곡선 끔(운영)의 호 추첨이 eNB 균등이라 주민도 같은 몫이어야 셀 하나짜리 eNB 의 호가 소수
+        # 주민에게 몰리지 않는다. 셀 균등이던 예전 값은 머무는 셀을 끈 동안 아무도 읽지 않았다(`_subs_by_cell` 만)
+        home = CellRing(self.cells, self.flat_weights, f"home:{self.seed}")
         for i in range(n):
             vendor = smp.categorical("Vendor", "100SS") if smp else "100SS"
             model = smp.categorical("Model", "A1DE") if smp else "A1DE"
@@ -1190,6 +1195,8 @@ class Generator:
     _SITE_KINDS = ("cdn_degradation",)
     #: 결제 그룹 앱으로 거는 kind (`j-sc-22`)
     _PAY_KINDS = ("pay_dns_delay",)
+    #: 게임 앱 하나로 거는 kind(`j-sc-23` · 2026-11-21 「행사장 특정 앱 먹통」)
+    _GAME_KINDS = ("event_crowd",)
     #: **결제·스트리밍 밖의 서비스 앱 하나**로 거는 kind(2026-11-19 · 28 ②·33). 22번(결제)·21번(스트리밍)과
     #: 대상이 겹치지 않게 그 두 그룹을 뺀다. 33 ② 는 TLS 를 TCP 위에서 보므로 TCP 앱만 고른다
     _SERVICE_KINDS = ("dns_nxdomain", "service_4xx", "service_tls_fail")
@@ -1244,6 +1251,18 @@ class Generator:
                     sc.target.app_id, sc.target.app_group = a.idx, a.group
                 else:
                     sc.target.domain = self._top_video_site()
+            if sc.kind in self._GAME_KINDS and not sc.target.app_id and self.app_book:
+                # **23번 — 게임 그룹에서 비중이 가장 큰 TCP 앱**(2026-11-21). TCP 인 것은 정체의 증거(수신 창 닫힘)가
+                # TCP 에만 있기 때문이다 — UDP 세션은 그 칸을 비운다(`session._plan`). TCP 게임이 없으면 그룹 1위다
+                game = [x for x in self.app_book.apps if x.group == "GAME"]
+                a = max([x for x in game if x.protocol == "6"] or game, key=lambda x: x.weight, default=None)
+                if a is not None:
+                    sc.target.app_id, sc.target.app_group = a.idx, a.group
+            if sc.kind in self._GAME_KINDS and sc.target.app_id and self.app_book:
+                # 대상 앱의 원래 몫 — 행사장 배율(`scenarios._event_app_load`)이 사람 몫으로 푼다
+                tot = sum(x.weight for x in self.app_book.apps)
+                w = sum(x.weight for x in self.app_book.apps if x.idx == sc.target.app_id)
+                sc._app_share = (w / tot) if tot > 0 else None
             if sc.kind in self._PAY_KINDS and not sc.target.app_hosts and self.app_book:
                 hosts = self.app_book.domains_of("PAY")
                 if hosts:
@@ -1439,11 +1458,16 @@ class Generator:
         """
         rng = self.rng
         pool = self._subs_by_cell.get(cell_idx)
-        if pool and rng.random() < 0.72:
+        if pool and rng.random() < self.home_stay_share:
             return self.subs[rng.choice(pool)]
-        near = self._near_subs(cell_idx)
-        if near:
-            return self.subs[near[rng.randrange(len(near))]]
+        # 주변은 **셀을 먼저 고르고 그 셀 주민**이다(2026-11-22). 전에는 반경 안 주민 전부를 셀마다 목록으로 들고
+        # 있었다(`_near_subs`) — 도쿄 도심은 1km 에 셀 250개라 가입자 4.5만이면 셀당 1,600명 × 6,900셀이고, 반경
+        # 10km 면 셀마다 거의 전원이라 수억 칸이 됐다. 주민이 없는 셀을 고르면 몇 번 다시 고른다
+        near = self.near_cells(cell_idx)
+        for _ in range(4 if near else 0):
+            mine = self._subs_by_cell.get(near[rng.randrange(len(near))])
+            if mine:
+                return self.subs[rng.choice(mine)]
         # **주변에 없으면 그 셀 사람으로 되돌린다.** 꼬리를 뽑으려다 전국에서
         # 뽑으면 지역성이 거기서 깨진다 — 실측에서 그 경로가 home 에서
         # 90km 떨어진 셀까지 만들었다.
@@ -1457,22 +1481,38 @@ class Generator:
         nearest = self._nearest_subs(cell_idx)
         return self.subs[nearest[rng.randrange(len(nearest))]]
 
-    def _near_subs(self, cell_idx: int) -> list[int]:
-        """그 셀 **주변**에 사는 가입자 인덱스. 한 번 구해 캐시한다.
+    def near_cells(self, cell_idx: int) -> list[int]:
+        """반경(`home_radius_m`) 안 다른 셀의 인덱스. 한 번 구해 캐시한다(셀당 셀 수백 개 — 매 호 격자를 되짚지 않는다).
 
-        매 호마다 토폴로지를 되짚으면 분당 수천 번이다. 셀 수만큼만 캐시하면
-        되므로 메모리는 문제가 아니다.
+        `_sub_for` 와 추가 가입자(`pemdb1` 의 `_extra_local`)가 같은 주변을 쓴다. 두 벌이면 기존 가입자와 추가
+        가입자의 「주변」이 갈린다"""
+        got = self._near_cell_cache.get(cell_idx)
+        if got is None:
+            here = self.cells[cell_idx]
+            got = [i for i in self._cells_around(cell_idx) if _dist_m(here, self.cells[i]) <= self.home_radius_m]
+            self._near_cell_cache[cell_idx] = got
+        return got
+
+    def visitor(self, cell: Cell, rng) -> bool:
+        """이 호가 **찾아온 사람**의 호인가 — 장애 배율(`set_weight_boost`)로 늘어난 몫이다(2026-11-22).
+
+        머무는 셀을 켜면 셀의 호가 그 셀·주변 주민에게서 나온다. 그대로 두면 행사장·러시(23·14번 · 배율 ×3·×1.8)의
+        늘어난 호가 **같은 주민이 더 자주 건 호**가 되어 사람 수가 늘지 않는다 — 몰려온 사람이 없는 군중이 된다.
+        배율 ``b`` 인 셀에서 ``1 − 1/b`` 몫은 예전처럼 전체에서 뽑는다(평시 몫 ``1/b`` 만 주민이다)
         """
-        got = self._near_cache.get(cell_idx)
-        if got is not None:
-            return got
-        here = self.cells[cell_idx]
-        out: list[int] = []
-        for i in self._cells_around(cell_idx):
-            if _dist_m(here, self.cells[i]) <= self.home_radius_m:
-                out.extend(self._subs_by_cell.get(i, ()))
-        self._near_cache[cell_idx] = out
-        return out
+        b = self._boost.get(cell.cell_key, 1.0) if self._boost else 1.0
+        return b > 1.0 and rng.random() < 1.0 - 1.0 / b
+
+    def _local_sub(self, cell: Cell, ok=None) -> Subscriber | None:
+        """머무는 셀(`home_locality`)의 사람 — 찾아온 몫이거나 ``ok`` 를 넘는 사람이 없으면 None(호출부의 예전 추첨)"""
+        if self.visitor(cell, self.rng):
+            return None
+        idx = self.cell_index[cell.cell_key]
+        for _ in range(4):
+            sub = self._sub_for(idx)
+            if ok is None or ok(sub):
+                return sub
+        return None
 
     def _nearest_subs(self, cell_idx: int) -> list[int]:
         """**가장 가까운** 주민이 있는 셀의 가입자들. 반경을 넘어도 돌려준다.
@@ -1598,7 +1638,20 @@ class Generator:
             # 사람이 더하는 것이다 — 지하철 노선(`mobility.journeys`)과 같은
             # 층이고, 켜면 셀·분 `SUBS` 가 **-22%** 움직여(8.7 → 6.8)
             # 기존 기준선과 전후 비교가 끊긴다.
-            if flat:
+            # **머무는 셀**(`home_locality` · 2026-11-22 사용자 「무작위로 움직이는 게 더 이상하다 · 무조건 ①」) — 셀을
+            # 먼저 가중 추첨하고(셀별 호 몫은 그대로) 그 셀·주변 주민을 고른다. 곡선 끔(운영)에서도 켠다 — 전에는
+            # 아래 `flat` 갈래가 이 설정을 보지 않아 켜도 무작위였다. 찾아온 몫(장애 배율)·조건에 맞는 주민이 없으면
+            # 예전 추첨이다(`_local_sub`)
+            local = None
+            if self.home_locality:
+                if flat or not (fixed_only and self._fixed):
+                    local = self._local_sub(cell)
+                else:
+                    # 그룹을 나눈 고정 호 — 이동 중인 주민은 건너뛴다(아래 `cell_of` 가 셀을 옮겨 고정 몫이 샌다)
+                    local = self._local_sub(cell, ok=lambda s: self.cell_of(s) is None)
+            if local is not None:
+                sub = local
+            elif flat:
                 # 고정 가입자가 있으면 그 안에서, 없으면 전체에서 — 이동 중인 사람을 뽑아도
                 # 그 사람 위치(`cell_of`)로 옮기지 않는다(아래). 추첨한 셀에 둔다
                 pool = self._fixed or None
@@ -1609,8 +1662,6 @@ class Generator:
                 # 아래 `cell_of` 가 이동 중인 사람의 위치로 셀을 바꿔, 고정
                 # 몫이 이동 몫으로 새어 나간다
                 sub = self.subs[self._fixed[rng.randrange(len(self._fixed))]]
-            elif self.home_locality:
-                sub = self._sub_for(self.cell_index[cell.cell_key])
             else:
                 sub = self.subs[rng.randrange(len(self.subs))]
             # **고른 사람이 이동 중이면 셀을 그 사람 위치로 옮긴다.**
@@ -2064,6 +2115,7 @@ class Generator:
         active = [sc for sc in self.scenarios if sc.covers(minute)]
         for sc in active:
             sc.active_cells_cache = sc.active_cells(minute)  # type: ignore[attr-defined]
+            sc._minute = minute     # 경과 분을 보는 변형기(36번 단계) — `pemdb1._active` 와 같은 자리
 
         out: dict[str, list[str]] = {}
         for series in ("lte_call", "transport", "dns", "http"):

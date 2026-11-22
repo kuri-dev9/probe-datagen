@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 HTML = (ROOT / "src" / "datagen" / "ui" / "static" / "scenarios.html").read_text(encoding="utf-8")
 FILES = ["scenario_report.json", "scenario_report_v50.json", "scenario_report_ja.json", "scenario_report_v50_ja.json"]
 # 29(특정 APN 접속 실패)가 신규 번호로 더해졌다(2026-11-19) — 31·32(절단 급증·전송 구간 절단)는 장비 종류가 아니다
-EQUIP_NOS = [1, 3, 4, 10, 18, 19, 29, 34]   # 34 = IPv6 경로(PGW 장비형 · 2026-11-19)
+EQUIP_NOS = [1, 3, 4, 10, 18, 19, 29, 34]   # 34 = IPv6 경로(PGW 장비형 · 2026-11-19) · 36 = 신호 폭주(MME 장비형 · 11-21)
 
 
 def _rows(fn):
@@ -45,7 +45,8 @@ def test_equip_kinds_are_exactly_core_categories():
 @pytest.mark.parametrize("fn", FILES[:2])
 def test_badge_numbers(fn):
     eq = set(scenarios_api._equip_kinds())
-    assert [int(r["no"]) for r in _rows(fn) if r.get("kind") in eq] == EQUIP_NOS
+    want = EQUIP_NOS + ([36] if any(int(r["no"]) == 36 for r in _rows(fn)) else [])   # 36 신호 폭주(MME 장비형)는 50% 현황에만 있다
+    assert [int(r["no"]) for r in _rows(fn) if r.get("kind") in eq] == want
     # 경계 번호(변경 의심·IMS)는 넣지 않는다 — 사용자 결정 전
     for r in _rows(fn):
         if int(r["no"]) in (11, 12, 20):
@@ -70,8 +71,9 @@ def test_html_badge_and_no_description_column():
     render = HTML.split("function render()")[1].split("\nfunction ")[0]
     assert "'brief'" not in render
     # 판정 앞에 배지: eq 가 st 보다 먼저, 같은 칸(.stc) 안
-    row = re.search(r"<span class=stc>.*?</span></span>", HTML).group(0)
-    assert row.index("${eq}") < row.index('class="st ')
+    # 11-21 — 폐기 카드가 같은 줄을 `st` 변수로 쓰도록 바뀌었다(`${eq}${st}`) · 상태 칸 변수 앞에 배지가 있다
+    row = re.search(r"<span class=stc>.*?</span>", HTML).group(0)
+    assert row.index("${eq}") < row.index("${st}")
     # 그림·카드(펼침)는 그대로
     assert "${fromFault(s)}${detail(s)}" in HTML
     # 이름은 한 줄

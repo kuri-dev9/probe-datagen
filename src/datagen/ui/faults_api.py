@@ -54,7 +54,12 @@ def api_scenarios():
     # 권장 지속시간(`scenarios.recommended_duration`) — 주입 칸 기본값과 확정 대기 표시
     from ..scenario_ja import why_ja
     from ..scenarios import recommended_duration, recommended_hours
+    from ..faults import TARGET_UNITS, UNIT_WARN
     for r in rows:
+        # 거는 단위(2026-11-22 단위 표 · `faults.TARGET_UNITS`) — 있으면 화면이 장비 칸 대신 이 단위만 보인다.
+        # `unit_warn` 단위(셀·eNB 하나)를 고르면 「탐지 안 될 수 있음」을 띄운다 — 막지 않는다
+        r["units"] = list(TARGET_UNITS.get(r.get("kind") or "", ()))
+        r["unit_warn"] = [u for u in r["units"] if u in UNIT_WARN]
         r["dur"] = recommended_duration(r.get("kind") or "")
         if r["dur"]:
             r["dur"]["why_ja"] = why_ja(r["dur"]["why"])
@@ -124,9 +129,9 @@ def _match_score(i: dict, spec: dict, truth: dict, target: str) -> int:
         n += 2
     cells = {str(sc.get("scope_id")) for sc in i.get("scopes") or [] if sc.get("scope_type") == "CELL"}
     axis = {str(x) for x in (i.get("detail") or {}).get("axis_ids") or []}
-    # `ENB:a,b`·`ENB:a,+` — 25번은 eNB 를 둘까지 받는다(2026-11-13). `+` 는 정답지 `son_enbs` 에 풀린 이름이 있다
+    # `ENB:a` — 그 eNB 의 셀이면 맞는 장애다(eNB 둘을 받던 25번 SON 은 2026-11-21 에 지웠다)
     enbs = ({e.strip() for e in target.split(":", 1)[1].split(",") if e.strip() and e.strip() != "+"}
-            | {str(e) for e in truth.get("son_enbs") or ()}) if target.upper().startswith("ENB:") else set()
+            if target.upper().startswith("ENB:") else set())
     if (cells & set(truth.get("cells") or ()) or truth.get("expect_node") in axis or target in axis
             or any(c.startswith(e + "-") for e in enbs for c in cells)):
         n += 3
@@ -153,7 +158,7 @@ def api_evt_lookup(ids: str = ""):
     want = [x for x in dict.fromkeys(i.strip() for i in ids.split(",")) if _EVT_RE.match(x)][:40]
     base = str(_pem_cfg().get("graphio_api") or "").rstrip("/")
     if not want or not base:
-        return {"events": {}, **({} if base else {"error": "`pemdb1.graphio_api` 가 비어 있다"})}
+        return {"events": {}, **({} if base else {"error": "`pemdb1.graphio_api` 가 비어 있습니다"})}
 
     def one(eid: str) -> dict | None:
         try:
@@ -232,11 +237,11 @@ def api_fault_incidents(fault_id: int):
     finally:
         conn.close()
     if row is None:
-        return {"error": f"장애 {fault_id} 가 없다", "incidents": []}
+        return {"error": f"장애 {fault_id} 가 없습니다", "incidents": []}
     f = dict(zip(cols, row))
     base = str(_pem_cfg().get("graphio_api") or "").rstrip("/")
     if not base:
-        return {"error": "`pemdb1.graphio_api` 가 비어 있다", "incidents": []}
+        return {"error": "`pemdb1.graphio_api` 가 비어 있습니다", "incidents": []}
     lo = f["start_ts"]
     hi = lo + timedelta(minutes=int(f["duration_min"] or 0) + SETTLE_MIN)
     # 그 장애 시간대만 받는다(2026-11-09) — 전에는 7일치 사건 전부(512건 · 2.2MB)를 받아 여기서 걸렀다.
@@ -247,7 +252,7 @@ def api_fault_incidents(fault_id: int):
         with urllib.request.urlopen(f"{base}/api/incidents?{q}", timeout=10) as r:
             doc = json.loads(r.read())
     except (urllib.error.URLError, TimeoutError, OSError) as e:
-        return {"error": f"graphio API 에 닿지 않는다: {e}", "incidents": []}
+        return {"error": f"graphio API 에 닿지 않습니다: {e}", "incidents": []}
 
     def at(v) -> datetime | None:
         try:
@@ -271,13 +276,13 @@ def api_fault_incidents(fault_id: int):
 @router.post("/api/faults")
 def api_add_fault(req: FaultReq):
     if req.kind not in KINDS:
-        raise HTTPException(400, f"알 수 없는 kind: {req.kind!r}")
+        raise HTTPException(400, f"알 수 없는 kind 입니다: {req.kind!r}")
     if req.duration_min <= 0:
-        raise HTTPException(400, "duration_min 은 1 이상이어야 한다")
+        raise HTTPException(400, "duration_min 은 1 이상이어야 합니다")
     try:
         start = datetime.fromisoformat(req.start_ts) if req.start_ts else datetime.now()
     except ValueError:
-        raise HTTPException(400, f"start_ts 형식 오류: {req.start_ts!r}")
+        raise HTTPException(400, f"start_ts 형식이 틀렸습니다: {req.start_ts!r}")
     target = req.target or None  # 빈 문자열 = 자동 선택 → NULL 로 저장
     conn = _connect()
     try:
@@ -303,5 +308,5 @@ def api_cancel_fault(fault_id: int):
         conn.close()
     if not ok:
         # pending/active 가 아니면 UPDATE 0행 — 이미 끝났거나 없는 id
-        raise HTTPException(404, f"취소할 수 없는 fault: {fault_id}")
+        raise HTTPException(404, f"취소할 수 없는 장애입니다: {fault_id}")
     return {"ok": True}

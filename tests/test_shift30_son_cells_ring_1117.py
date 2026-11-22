@@ -30,7 +30,7 @@ RATES = {"lte_call": 300, "transport": 300, "dns": 100, "http": 100}
 # ── 1 · 24번 30분 ───────────────────────────────────────────────────────
 
 def _sc(minute: int, peak: float = 1.0):
-    return SimpleNamespace(start_minute=0, _minute=minute, peak=peak)
+    return SimpleNamespace(start_minute=0, _minute=minute, peak=peak, target=SimpleNamespace(shift_to="B"))  # B 있음=증설 곡선
 
 
 def test_constants_are_five_twenty_thirty_and_the_rest_unchanged():
@@ -49,9 +49,18 @@ def test_congestion_reaches_one_at_five_minutes_and_falls_to_zero_over_the_next_
     assert S.shift_congestion(_sc(10, peak=0.5)) == pytest.approx(0.5)
 
 
+def _sc_b(minute: int, peak: float = 1.0, shift_to="B"):
+    return SimpleNamespace(start_minute=0, _minute=minute, peak=peak, target=SimpleNamespace(shift_to=shift_to))
+
+
 def test_split_is_zero_before_twenty_and_sixty_percent_from_twenty():
-    assert [S.shift_split(_sc(m)) for m in (0, 10, 19)] == [0.0, 0.0, 0.0]
-    assert S.shift_split(_sc(20)) == 0.6 and S.shift_split(_sc(29)) == 0.6
+    assert [S.shift_split(_sc_b(m)) for m in (0, 10, 19)] == [0.0, 0.0, 0.0]
+    assert S.shift_split(_sc_b(20)) == 0.6 and S.shift_split(_sc_b(29)) == 0.6
+
+
+def test_split_is_always_zero_without_a_destination_b_the_daily_load():
+    """11-21 — 매일 부하(`DAILY` · 증설 기지국 B 없음)는 호를 넘기지 않는다. 혼잡만 오르고 내려간다"""
+    assert [S.shift_split(_sc_b(m, shift_to=None)) for m in (0, 10, 20, 25, 29)] == [0.0] * 5
 
 
 def test_visible_level_follows_the_five_minute_ramp():
@@ -116,7 +125,7 @@ def test_shift_desc_is_built_from_the_constants_and_is_the_table_row():
 def test_ja_dictionary_translates_the_24_description():
     ja = i18n_ja._JA_COMMON
     assert ja[control.SHIFT_DESC] == control.SHIFT_DESC_JA
-    assert " · 24번 진행 중, {m}분 시점에 켜진다" in i18n_ja._JA_MAP
+    assert " · 24번 진행 중, {m}분 시점에 켜집니다" in i18n_ja._JA_MAP
 
 
 def test_map_html_uses_the_b_open_minute_from_the_api():
@@ -161,49 +170,6 @@ def _cell(enb, n, lat, lon, w=1.0):
                 adm_sgg_cd="11200", adm_sgg_nm="", adm_emd_cd="11200011", adm_emd_nm="", geo_status="MAPPED",
                 rat="EUTRAN", mme_id="0001", sgw_id="0037", pgw_id="0037", ims_pgw_id="0037",
                 traffic_weight=w, display_name="")
-
-
-def _son(pairs, gain, enbs=("510001",)):
-    tgt = SimpleNamespace(son_enbs=list(enbs), cell_pairs=pairs, son_gain=gain, cell_keys=set(gain))
-    return SimpleNamespace(kind="son_param_change", target=tgt)
-
-
-def test_son_truth_cells_are_the_destination_cells_only():
-    pairs = [("510001-0", "520001-0"), ("510001-1", "520001-0"), ("510001-2", "520001-1")]
-    gain = {"510001-0": 0.3, "510001-1": 0.5, "510001-2": 0.6}
-    t = S._son_truth(_son(pairs, gain))
-    assert t["cells"] == ["520001-0", "520001-1"] and t["cell_cnt"] == 2
-    assert t["src_cells"] == ["510001-0", "510001-1", "510001-2"]
-
-
-def test_son_truth_keeps_son_cells_pairs_and_enbs():
-    pairs = [("510001-0", "520001-0")]
-    t = S._son_truth(_son(pairs, {"510001-0": 0.3}))
-    assert t["son_enbs"] == ["510001"] and t["son_pairs"] == [["510001-0", "520001-0"]]
-    assert t["son_cells"] == [{"cell": "510001-0", "role": "src", "gain": 0.3},
-                              {"cell": "520001-0", "role": "dst", "gain": None}]
-
-
-def test_son_truth_leaves_cells_alone_without_destination_cells():
-    t = S._son_truth(_son([], {"510001-0": 0.3}))
-    assert "cells" not in t and "cell_cnt" not in t and "src_cells" not in t
-    assert t["son_cells"][0]["role"] == "src"
-
-
-def test_son_truth_excludes_a_destination_that_is_also_a_source():
-    pairs = [("510001-0", "510001-1")]
-    t = S._son_truth(_son(pairs, {"510001-0": 0.3, "510001-1": 0.4}))
-    assert "cells" not in t                                                 # 도착 셀이 하나도 안 남으면 바꾸지 않는다
-    assert "510001-1" not in {c["cell"] for c in t["son_cells"] if c["role"] == "dst"}
-
-
-def test_son_truth_is_empty_for_other_kinds():
-    assert S._son_truth(SimpleNamespace(kind="enb_s1_outage", target=SimpleNamespace(son_enbs=[]))) == {}
-
-
-def test_generation_target_cells_are_not_changed_by_the_truth_change():
-    src = (ROOT / "src/datagen/scenarios.py").read_text(encoding="utf-8")
-    assert "Target.cell_keys" in src and "생성 대상" in src
 
 
 # ── 3 · CellRing ────────────────────────────────────────────────────────

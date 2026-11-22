@@ -95,15 +95,7 @@ def test_unmapped_cells_are_ignored_by_the_shape():
     assert t["expect_geo"] == S.geo_shape([c for c in _target_cells(sc, cells) if c.geo_status == "MAPPED"])
 
 
-# ── 3 · 25번은 좁힌 셀 · 15번 범위 배치는 노선 값이 이긴다 ────────────────────
-
-def test_son_focus_uses_the_narrowed_cells():
-    sc, t = _truth("son_param_step") if "son_param_step" in S.KIND_SPECS else (None, None)
-    if sc is None:
-        pytest.skip("25번 kind 이름이 다르다")
-    assert len(sc.target.cell_keys) <= 3
-    assert t["expect_geo"] == S.geo_shape(_target_cells(sc))
-
+# ── 3 · 15번 범위 배치는 노선 값이 이긴다 (25번 SON 시험은 11-21 삭제) ────────────────────
 
 def test_chosen_shape_never_overrides_a_later_explicit_geo():
     sc = _build("ims_pdn")

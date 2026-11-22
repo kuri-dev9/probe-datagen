@@ -34,7 +34,6 @@ KIND_LABELS = {
     "external_path_latency": "인터넷 연결 구간 지연 (백본)",
     "nsa_policy_restrict": "5G 사용 정책 제한",
     "anchor_saturation": "5G 잡히는데 느림 (4G 앵커 혼잡)",
-    "son_param_change": "설정 변경 뒤 통화 끊김 계단 증가 (SON)",
     "ran_congestion": "역 주변 저녁 러시 혼잡",
     "ho_interruption": "야마노테선 4G↔5G 전환 때 잠깐 멈춤",
     "earthquake": "옛 지진 — 국지 기지국 정지 (옛 27번)",
@@ -43,7 +42,7 @@ KIND_LABELS = {
     "cdn_degradation": "동영상 서버(CDN) 느림",
     "pay_dns_delay": "결제 앱 느림 (DNS 지연)",
     "event_crowd": "행사장 인파로 사진 올리기 막힘",
-    "capacity_shift": "기지국 증설 뒤 이용자 이동 (장애 아님)",
+    "capacity_shift": "매일 같은 시각 부하",  # 2026-11-21 — 옛 24번이 이 스위치로 바뀌었다. 옛 24번 기록도 이 이름이다
     # ── 신규 8종 ─────────────────────────────────────────────────────────
     "auc_no_response": "가입자 확인 장비 응답 없음 (S6a TIMEOUT)",
     "dra_route_failure": "가입자 확인 경로 이상 (S6a 라우팅)",
@@ -63,7 +62,14 @@ KIND_LABELS = {
     "service_tls_fail": "특정 서비스 보안 연결 실패 (TLS)",
     "ipv6_path_fail": "IPv6 경로만 실패",
     "update_surge": "앱 업데이트 배포 폭주",
+    # 36번 (2026-11-21) — 화면 이름은 아래 `KIND_SHOWN` 이 덮는다
+    "signaling_storm": "신호 폭주 (재접속 폭주)",
 }
+# 화면 이름으로 덮는다(2026-11-21 · 24개 정리 · 정본 `control.SCENARIO_ORDER`). 위 글자는 내부 이름으로 남기고,
+# 폐기 번호만 쓰는 kind 는 위 옛 이름 그대로다 — 과거 장애 기록을 보여 줄 때 쓴다
+from ..control import KIND_SHOWN  # noqa: E402
+
+KIND_LABELS.update({k: v for k, v in KIND_SHOWN.items() if k in KIND_LABELS})
 
 #: **주입 메뉴는 `CM_ERROR_SCENARIO` 를 읽는다** (2026-10-28). 전에는 여기
 #: `FAULT_MENU` 상수였는데, 지도·다른 화면도 같은 목록과 발생 장비를 봐야

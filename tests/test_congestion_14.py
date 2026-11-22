@@ -52,13 +52,18 @@ def test_the_old_module_constant_and_the_14_booster_are_gone():
     assert KIND in S.PLAN_MUTATORS and S.PLAN_MUTATORS[KIND] is S._ran_congestion_users
 
 
+class _WithB:
+    """증설 기지국(B)이 있는 24번 모양 — `shift_to` 가 있어야 평소 곡선(끝까지 유지)을 탄다. 없으면 매일 부하(11-21)라 내려간다"""
+    target = type("T", (), {"shift_to": ("B",)})()
+
+
 @pytest.mark.parametrize("load", [1.8, 3.0])
 def test_capacity_shift_a_reads_the_same_setting(monkeypatch, load):
     monkeypatch.setattr(S, "FAULT", S.FaultCfg.from_cfg({"congestion_load": load}))
     monkeypatch.setattr(S, "_shift_elapsed", lambda sc: S.SHIFT_RISE + 5)
-    assert S._capacity_shift_load(object(), 1.0) == pytest.approx(load)
+    assert S._capacity_shift_load(_WithB(), 1.0) == pytest.approx(load)
     monkeypatch.setattr(S, "_shift_elapsed", lambda sc: 0)
-    assert S._capacity_shift_load(object(), 1.0) == pytest.approx(1.0 + (load - 1.0) / S.SHIFT_RAMP), "첫 분은 상승 1/RAMP"
+    assert S._capacity_shift_load(_WithB(), 1.0) == pytest.approx(1.0 + (load - 1.0) / S.SHIFT_RAMP), "첫 분은 상승 1/RAMP"
 
 
 # ---------------------------------------------------------------- 호 수 배율 · 하한 꼬리
@@ -377,6 +382,7 @@ def _at(e):
         start_minute = 0
         _minute = e
         kind = "capacity_shift"
+        target = type("T", (), {"shift_to": ("B",)})()
     return _Sc()
 
 
@@ -415,9 +421,9 @@ def test_the_call_weight_reaches_the_load_at_the_ramp_and_holds_to_the_end(monke
     monkeypatch.setattr(S, "FAULT", S.FaultCfg.from_cfg({"congestion_load": 1.8}))
     for e in (S.SHIFT_RAMP - 1, S.SHIFT_RAMP, S.SHIFT_RISE - 1, S.SHIFT_RISE + 5):
         monkeypatch.setattr(S, "_shift_elapsed", lambda sc, e=e: e)
-        assert S._capacity_shift_load(object(), 1.0) == pytest.approx(1.8)
+        assert S._capacity_shift_load(_WithB(), 1.0) == pytest.approx(1.8)
     monkeypatch.setattr(S, "_shift_elapsed", lambda sc: S.SHIFT_RAMP - 2)
-    assert 1.0 < S._capacity_shift_load(object(), 1.0) < 1.8
+    assert 1.0 < S._capacity_shift_load(_WithB(), 1.0) < 1.8
 
 
 def test_the_opening_time_and_split_do_not_move_with_the_ramp():
