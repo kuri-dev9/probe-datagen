@@ -63,12 +63,29 @@ def test_the_everyday_map_still_reads_the_latest_200(graphio):
     ui.api_map_faults()
     ui.api_map_faults(minutes=30)
     assert [u for u, _ in graphio["urls"]] == ["http://g:8008/api/incidents?scope=1&limit=200"] * 2
-    assert all(t == 3 for _, t in graphio["urls"])
+    # 제한 시간은 8초 — web 재시작·동시 요청 때 3초를 넘겨 「닿지 않습니다」가 자주 뜨던 것을 줄였다(2026-11-24 · 사용자 「자주 뜬다」)
+    assert all(t == 8 for _, t in graphio["urls"])
 
 
 def test_a_map_opened_from_a_fault_reads_the_recent_days_instead(graphio):
     ui.api_map_faults(recent=True)
-    assert graphio["urls"] == [("http://g:8008/api/incidents?scope=1&recent=1", 3)]
+    assert graphio["urls"] == [("http://g:8008/api/incidents?scope=1&recent=1", 8)]
+
+
+def test_map_warns_only_after_two_consecutive_graphio_failures():
+    """한 번 못 받은 것은 web 재시작·순간 지연일 수 있다 — 두 번 연속일 때만 경고하고, 받으면 카운터를 0 으로 돌린다
+    (2026-11-24 · `pollFaults` · 맥스 수정). 스크립트 문자열 검사다"""
+    h = html("map")
+    m = re.search(r"async function pollFaults\(\)\{.*?\n\}\n", h, re.S)
+    assert m, "pollFaults 를 못 찾음"
+    body = m.group(0)
+    assert re.search(r"let FAULT_FAILS=0;", h)
+    assert re.search(r"\+\+FAULT_FAILS>=2", body)                       # 두 번째 연속 실패부터 경고
+    assert "note.textContent=doc.error" in body.split("++FAULT_FAILS>=2", 1)[1].split("\n", 1)[0]
+    ok_part = body.split("if(doc.error)", 1)[1].split("\n", 1)[1]        # 오류 분기 뒤 = 성공 경로
+    assert ok_part.lstrip().startswith("FAULT_FAILS=0;")                 # 성공하면 0 으로
+    assert "graphio/.test(note.textContent)" in ok_part                  # 성공하면 남은 경고도 지운다
+    assert body.index("++FAULT_FAILS>=2") < body.index("FAULT_FAILS=0;")  # 오류 분기가 앞이다
 
 
 def test_the_recent_flag_is_a_query_parameter_of_the_route():

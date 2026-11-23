@@ -377,8 +377,11 @@ def api_map_faults(minutes: int = 15, recent: bool = False):
     # 회차가 목록에 없어 지도가 그 이력을 고르지 못한다(2026-11-09). 평소 지도는 그대로 200건이다
     url = (f"{base}/api/incidents?scope=1&recent=1" if recent
            else f"{base}/api/incidents?scope=1&limit=200")
+    # **기다림은 8초다**(2026-11-24 · 사용자 「자주 뜬다」). 3초였는데 web 은 평소 0.2초여도 동시 요청 10개에 1.2초까지
+    # 늘고, L3 질의가 증거를 모으는 동안은 더 늦어 3초를 넘겼다. 같은 graphio 를 부르는 사건 지도(`/map` 8초)와
+    # 장애 목록(`faults_api` 10초)에 맞춘다 — 화면은 10초마다 부르므로 8초면 다음 호출과 겹치지 않는다
     try:
-        with urllib.request.urlopen(url, timeout=3) as r:
+        with urllib.request.urlopen(url, timeout=8) as r:
             doc = json.loads(r.read())
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         # **무엇이 안 되는지 말한다.** "장애 0건"과 "물어볼 데가 없다"는

@@ -1164,13 +1164,17 @@ function miniView(){
   r.setAttribute('x', VB.x+VB.w/2-w/2); r.setAttribute('y', VB.y+VB.h/2-h/2);
   r.setAttribute('width', w); r.setAttribute('height', h);
 }
+// graphio 를 **연달아** 못 받은 횟수 — 한 번은 web 재시작·순간 지연일 수 있다(2026-11-24 · 사용자 「자주 뜬다」).
+// 두 번 연속(약 20초)일 때만 경고를 띄우고, 받으면 0 으로 돌린다. 못 받는 동안 장애 표시는 마지막 받은 것을 둔다
+let FAULT_FAILS=0;
 async function pollFaults(){
   let doc;
   // 한 번 못 받아도 조용히 넘긴다 — 10초 뒤에 다시 묻는다
   // 장애에서 넘어왔으면 며칠 지난 회차도 목록에 있어야 고를 수 있다(`/api/faults/{id}/incidents` 와 같은 범위)
   try{ doc=await (await fetch('/api/map/faults?minutes='+LIVE_WINDOW_MIN+(LINK?'&recent=1':''))).json(); }catch(e){ return; }
   const note=document.getElementById('note');
-  if(doc.error){ if(note) note.textContent=doc.error; return; }
+  if(doc.error){ if(note && ++FAULT_FAILS>=2) note.textContent=doc.error; return; }
+  FAULT_FAILS=0;
   if(note && /graphio/.test(note.textContent)) note.textContent='';
   // **받아서 반영한 시각** — 바뀐 것이 없어도 갱신한다. 멈춰 있으면 "장애가
   // 없다"인지 "안 묻고 있다"인지 사람이 가를 수 있게(graphio 마지막 관측은 툴팁)
