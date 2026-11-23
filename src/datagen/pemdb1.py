@@ -3307,8 +3307,9 @@ class PemdbGen:
             통화·데이터 절차가 아니라서 Call Type 을 고정하는 지표(C-01~C-05 · 3·4번)의 분모에 들어가지 않는다(불변규칙 3).
 
             전에는 기존 가입자와 같은 「통화형」 호를 7분에 한 번꼴로 셀 가중 추첨으로 냈다 — 평소 통화·앱 사용과 장애 강도는
-            기본 가입자 몫이다(사용자). 기록은 지금처럼 아래 공통 루프를 지나므로 **그 셀에 걸린 장애의 C-Plane 변형**
-            (`mutate` · 장비 정지 거름 · 27번 재배치 · 정지 끊김 명부 `_xlive_note`)을 함께 받는다. U-Plane 은 만들지 않는다.
+            기본 가입자 몫이다(사용자). 기록은 아래 공통 루프를 지나 **서비스가 없어지는 일**(장비 정지 거름 · 27번 재배치 ·
+            정지 끊김 명부 `_xlive_note`)은 함께 받지만, **장애 변형(`mutate` — 절단·실패 Cause·지연)은 받지 않는다**
+            (2026-11-24 · 8번 F-581 절단이 추가 가입자 TAU 에 실렸다). U-Plane 은 만들지 않는다.
             억제된 셀(서비스 없음)이면 그 분 기록이 없다 — 머무는 사람이라 다른 셀로 옮겨 내지 않는다"""
             k = self.extra_n
             if not (k and n_calls and gen.subs):
@@ -3380,7 +3381,11 @@ class PemdbGen:
             lo_down = _scenarios.down_floor(rec, cell, down) if any_down else None
             if t_sa is not None:
                 lo_down = t_sa if lo_down is None else max(lo_down, t_sa)
-            if mutate is not None:
+            # **추가 가입자 기록은 장애 변형을 받지 않는다**(2026-11-24 · 사용자 결정 「장애와 모든 활동은 기본 가입자가
+            # 한다 · 추가 가입자는 연결만 유지」). 전에는 받았다 — 8번 연결 끊김 증가 F-581 에서 절단 45건이 추가 가입자 TAU
+            # (호 유형 5)에 실리고 호 유형 3·4 에는 9건뿐이라 C-04 가 서지 않았다. 서비스가 **없어지는** 일(억제·재배치·
+            # 장비 다운 거름·정지 끊김 명부)은 변형이 아니라 그 셀에 접속할 수 없다는 사실이라 그대로 받는다
+            if mutate is not None and not is_extra:
                 mutate("lte_call", rec, cell)
             # 다운 SGW·PGW 아래의 호 — 성공으로 두지 않는다(`scenarios.node_down_gate`)
             if any_down and not _scenarios.node_down_gate(rec, cell, down, gen.rng,
