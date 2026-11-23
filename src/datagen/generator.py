@@ -772,6 +772,21 @@ class Generator:
         칸 번호가 늘어나는 쪽이 그 노선의 진행 방향이다."""
         return sorted(self.routes[ri].station_pos.values())
 
+    @staticmethod
+    def _station_idx(st: list[int], pos: int, loop: bool) -> int:
+        """`pos` 칸의 역 순번 — 역 칸이 아니면 **진행 방향으로 다음 역**(끝을 넘으면 순환은 처음 역, 아니면 마지막 역).
+
+        머무는 중인 탑승자는 역 칸에 있어야 하지만, 이동 상태 이어 받기(`seat_from_cells`)는 역이 아닌 경로
+        칸으로도 되돌린다. 그때 `st.index(pos)` 가 `ValueError` 로 gen 을 죽였다 — 곡선을 켠 11-24 07:52 뒤
+        1시간에 8번, 매번 컨테이너가 다시 뜨는 동안 분이 비었다. 곡선 끔(균등 모드)에는 아무도 움직이지 않아 드러나지 않았다
+        """
+        if pos in st:
+            return st.index(pos)
+        nxt = next((k for k, p in enumerate(st) if p > pos), None)
+        if nxt is None:
+            return 0 if loop else len(st) - 1
+        return nxt
+
     def _next_hop(self, sub: Subscriber, ri: int, at_idx: int, rng) -> None:
         """`at_idx` 번째 역에서 타서 n 역 뒤를 하차 칸으로 정한다."""
         st = self._stations_of(ri)
@@ -874,7 +889,8 @@ class Generator:
                     # **내린 역에서 다시 탄다** — 순간이동이 없으므로 회차를
                     # 올리지 않아도 셀이 이어진다. 다음 n 역을 새로 뽑는다
                     st = self._stations_of(sub.route)
-                    self._next_hop(sub, sub.route, st.index(sub.route_pos), rng=self.rng)
+                    self._next_hop(sub, sub.route, self._station_idx(st, sub.route_pos, rt.loop),
+                                   rng=self.rng)
                     continue
                 if sub.route_to >= 0:
                     # **같은 구간을 같은 방향으로 다시 간다.** 왕복이 아니다 —
@@ -1009,7 +1025,8 @@ class Generator:
             if pos is None:
                 continue
             sub.route_pos = pos
-            if got[1]:
+            if got[1] or pos not in rt.station_pos.values():
+                # 역이 아닌 칸이면 머무는 중일 수 없다 — 타고 있는 중으로 둔다(`_station_idx` 머리말)
                 sub.route_wait = 0.0
             n += 1
         if seated_w:
