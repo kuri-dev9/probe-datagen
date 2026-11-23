@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-11-24 04:42",
+  "updated_at": "2026-11-24 06:03",
   "volume_pct": 50,
   "notes": [
     "생성량 50% 는 분당 XDR 약 1만 건입니다. 시나리오 검증 기준인 15%(약 3천 건)의 약 3.3배입니다.",
@@ -6473,23 +6473,39 @@
         "kpi": "C-02",
         "geo": "WIDE"
       },
-      "status": "partial",
+      "status": "pass",
       "latest": {
-        "fault": "F-586",
-        "run": "no29-v50-1124a",
-        "at": "2026-11-24 03:10",
+        "fault": "F-592",
+        "run": "no29-v50-1124c",
+        "at": "2026-11-24 06:03",
         "detect_min": 0,
-        "cause": "NF_UNREACHABLE",
-        "confidence": 0.764,
-        "plain": "17번 특정 서비스망 접속 불량을 10분(02:39~02:49, APN mpr2.bizho.net.mnc010.mcc440.gprs) 넣었습니다. APN 축 이상징후는 시작과 동시에(02:39) 서서 당시 판정은 「서비스망 설정 오류」(APN_CONFIG_ERROR)였고, 荒川区 셀 조각 4개도 같은 판정이었습니다. 그런데 장애가 끝나고도 이 통합장애가 열려 있다가 02:53 11번(F-587) 조각을 받아들여, 지금은 구성 7개 가운데 11번 조각이 섞이고 APN 조각의 원인도 「서버 도달 불가」(NF_UNREACHABLE 0.764 · 대안 APN_CONFIG_ERROR 0.731)로 바뀌어 있습니다. 14번(F-585)과는 묶이지 않았습니다.",
-        "summary": "F-586(17번 · apn_pdn_failure · 02:39:33~02:49:33 · 10분 · APN mpr2.bizho.net.mnc010.mcc440.gprs · 정답 truth/no17-v50-1124a.json F-586 · 기대 C-02·APN_CONFIG_ERROR·R-07·WIDE). **D** APN 축 C-02 IX2611240239af2c 02:39(+0분) · 荒川区 C-02 CLUSTER 조각 IX26112402402d1c 02:40(셀 71) 외 APN_CONFIG_ERROR 조각 4. **L1** 당시 구성 조각 코드 APN_CONFIG_ERROR(R-07 발동) — 현재 APN 축 조각 재판정은 NF_UNREACHABLE 0.764(R-07 APN_CONFIG_ERROR 0.8 발동 · 대안 MME_OVERLOAD 0.789·APN 0.731 · 02:56:24 생성 = 11번 시작 뒤 재계산). **L2** 통합장애 IX2611240239af2c(APN 축)와 IX26112402402d1c(荒川区)가 OPEN 인 채 02:53~02:54 11번(F-587) 조각(MME_OVERLOAD·NF_UNREACHABLE·CHANGE_SUSPECTED·RAN_RADIO_QUALITY)을 받아 구성 7이 됨 — F-586 은 02:49 끝났는데 사건이 02:50 이후 닫히지 않고 다음 장애를 흡수. 14번(F-585 UE_MODEL_ISSUE 통합장애)과 구성 겹침 0. EV-21: 트리거 C-02(N-02 아님)라 하락률 기준 수정의 영향 없음(증거팩 EV-21 비어 있음 — 비교 지표 미실림). L3 미수행.",
+        "cause": "APN_CONFIG_ERROR",
+        "confidence": 0.75,
+        "plain": "17번 특정 서비스망 접속 불가를 10분(05:16~05:26, APN spmode.ne.jp) 넣었습니다. APN 축 이상징후가 시작과 동시에(05:16) 서서 「서비스망 설정 오류」(APN_CONFIG_ERROR 0.75, R-07)로 맞게 판정됐고, 통합장애 하나(조각 20개 중 14개가 같은 원인)가 05:30에 닫혔습니다. 앞 회차 F-586 때와 달리 다른 장애 조각이 섞이지 않았습니다(11번과 간격 확보). 다만 corr 가 05:18~05:35에 멈춰(메모리 부족) 05:19~05:20 두 분은 판정되지 않았습니다. L3 질의에서도 원인·영향·조치가 맞아 통과로 올렸습니다.",
+        "summary": "F-592(17번 · apn_pdn_failure · 05:16:07~05:26:07 · 10분 · APN spmode.ne.jp.mnc010.mcc440.gprs · 정답 truth/no17-v50-1124c.json F-592 · 기대 C-02·APN_CONFIG_ERROR·R-07·WIDE · 앞 장애 F-591 04:55 종료·21분 간격 · 다른 활성 장애 없음). **D** APN 축 C-02 조각 IX2611240516daed 05:16(+0분) · 05:16~05:25 이상징후(05:19·05:20 두 분은 corr 정지로 빠짐). **L1·L2** 통합장애 IX2611240516daed(EVT) APN_CONFIG_ERROR 0.75(R-07 · 조각 20 = APN_CONFIG_ERROR 14 + UNDETERMINED 6) · 영향 34,457명 · 05:16~05:30 RESOLVED · 단말 기종 축 조각 2건(APN_CONFIG_ERROR 0.646)은 따로 서고 닫힘 · N-02 千代田区 조각(NSA_NR_LEG_FAILURE 0.568)은 별건 05:17~05:19. 다른 장애와 구성 겹침 0. 체감 Q-02 칸 조각 다수는 UNDETERMINED 로 따로 섬. **corr 정지:** 05:18~05:35 틱 전패(duckdb OutOfMemory · 셀 6,323 사건의 OR 조건) → 사건 05:30 에 닫힘 확인, 판정 단위 유지. **L3** 케이 질의 통과(45초 · 버린 문장 0 · 원인·영향·조치 일치 · 과거 비교 확인 불가는 설계).",
         "issues": [
-          "이 장애가 끝난 뒤(02:50) 통합장애가 닫히지 않고 3분 뒤 시작한 11번(F-587) 조각 3~5개를 흡수함 — 연속 주입에서 앞 장애 사건이 다음 장애와 섞여 원인(NF_UNREACHABLE)·구성(7)이 바뀜. 당시 판정(APN_CONFIG_ERROR)은 맞았으나 최종 화면 값이 틀어짐.",
-          "APN 축 조각 L1 이 11번 시작 뒤 재계산되어 NF_UNREACHABLE 0.764(APN 0.731)로 뒤집힘 — 증거 창에 다음 장애가 들어오는 문제.",
-          "EV-21(과거 비교) 증거가 비어 있음(APN 축 조각은 셀 범위가 없어 비교 불가) — 하락률 기준 수정과 무관."
+          "corr 가 05:18~05:35 틱 전패(duckdb 메모리 부족 — 셀 6천 개 사건 영향 가입자 질의의 eNB 별 OR 조건)로 05:19~05:20 두 분이 판정되지 않음 — 같은 날 맥스가 IN 목록 조건·메모리 한도 4GB·사건 단위 가드로 고침(05:46 재시작 반영). 판정 단위는 유지됨.",
+          "체감 Q-02 칸 조각(약 15건)이 통합장애에 못 붙고 UNDETERMINED 로 따로 섬(설계 · 결정 대기) · 단말 기종 축 조각 2건도 따로 섬.",
+          "N-02 千代田区 NR 레그 조각(NSA_NR_LEG_FAILURE)이 05:17 에 별건으로 섬 — APN 장애 영향으로 보이나 출처 미확인.",
+          "과거 비교 확인 불가(APN 축은 과거 데이터를 복사하지 않는 설계 — 결함 아님)."
         ]
       },
       "history": [
+        {
+          "fault": "F-586",
+          "run": "no29-v50-1124a",
+          "at": "2026-11-24 03:10",
+          "detect_min": 0,
+          "cause": "NF_UNREACHABLE",
+          "confidence": 0.764,
+          "plain": "17번 특정 서비스망 접속 불량을 10분(02:39~02:49, APN mpr2.bizho.net.mnc010.mcc440.gprs) 넣었습니다. APN 축 이상징후는 시작과 동시에(02:39) 서서 당시 판정은 「서비스망 설정 오류」(APN_CONFIG_ERROR)였고, 荒川区 셀 조각 4개도 같은 판정이었습니다. 그런데 장애가 끝나고도 이 통합장애가 열려 있다가 02:53 11번(F-587) 조각을 받아들여, 지금은 구성 7개 가운데 11번 조각이 섞이고 APN 조각의 원인도 「서버 도달 불가」(NF_UNREACHABLE 0.764 · 대안 APN_CONFIG_ERROR 0.731)로 바뀌어 있습니다. 14번(F-585)과는 묶이지 않았습니다.",
+          "summary": "F-586(17번 · apn_pdn_failure · 02:39:33~02:49:33 · 10분 · APN mpr2.bizho.net.mnc010.mcc440.gprs · 정답 truth/no17-v50-1124a.json F-586 · 기대 C-02·APN_CONFIG_ERROR·R-07·WIDE). **D** APN 축 C-02 IX2611240239af2c 02:39(+0분) · 荒川区 C-02 CLUSTER 조각 IX26112402402d1c 02:40(셀 71) 외 APN_CONFIG_ERROR 조각 4. **L1** 당시 구성 조각 코드 APN_CONFIG_ERROR(R-07 발동) — 현재 APN 축 조각 재판정은 NF_UNREACHABLE 0.764(R-07 APN_CONFIG_ERROR 0.8 발동 · 대안 MME_OVERLOAD 0.789·APN 0.731 · 02:56:24 생성 = 11번 시작 뒤 재계산). **L2** 통합장애 IX2611240239af2c(APN 축)와 IX26112402402d1c(荒川区)가 OPEN 인 채 02:53~02:54 11번(F-587) 조각(MME_OVERLOAD·NF_UNREACHABLE·CHANGE_SUSPECTED·RAN_RADIO_QUALITY)을 받아 구성 7이 됨 — F-586 은 02:49 끝났는데 사건이 02:50 이후 닫히지 않고 다음 장애를 흡수. 14번(F-585 UE_MODEL_ISSUE 통합장애)과 구성 겹침 0. EV-21: 트리거 C-02(N-02 아님)라 하락률 기준 수정의 영향 없음(증거팩 EV-21 비어 있음 — 비교 지표 미실림). L3 미수행.",
+          "issues": [
+            "이 장애가 끝난 뒤(02:50) 통합장애가 닫히지 않고 3분 뒤 시작한 11번(F-587) 조각 3~5개를 흡수함 — 연속 주입에서 앞 장애 사건이 다음 장애와 섞여 원인(NF_UNREACHABLE)·구성(7)이 바뀜. 당시 판정(APN_CONFIG_ERROR)은 맞았으나 최종 화면 값이 틀어짐.",
+            "APN 축 조각 L1 이 11번 시작 뒤 재계산되어 NF_UNREACHABLE 0.764(APN 0.731)로 뒤집힘 — 증거 창에 다음 장애가 들어오는 문제.",
+            "EV-21(과거 비교) 증거가 비어 있음(APN 축 조각은 셀 범위가 없어 비교 불가) — 하락률 기준 수정과 무관."
+          ]
+        },
         {
           "fault": "F-474",
           "run": "no29-v50-1120",
@@ -6524,7 +6540,7 @@
           "status": "pass"
         }
       ],
-      "next": "17번 F-586 부분(D·당시 L1 맞음 · L2 가 다음 장애 11번 조각 흡수). 남은 것: 앞 장애 끝난 뒤 사건 종결 시점·재판정이 다음 장애 증거를 읽는 문제 · 사건 안 닫힘 조사 · L3 케이 질의.",
+      "next": "17번 통과(D·L1·L2·L3). 남은 것: 체감 Q-02 칸 조각 · 앞 장애 뒤 사건이 다음 장애를 흡수하는 5분 병합 경계(아침 결정).",
       "evidence": [
         "docs/jp/scenario-cards/runs.md 11-20 파동9 행",
         "재생 /tmp/es_rp3 · /tmp/es_rp2"
@@ -6532,23 +6548,23 @@
       "stages": {
         "D": {
           "state": "ok",
-          "detail": "APN 축 C-02 02:39(+0분) · 荒川区 셀 조각 02:40"
+          "detail": "APN 축 C-02 05:16(+0분) · 05:19~05:20 은 corr 정지로 빠짐"
         },
         "L1": {
-          "state": "issue",
-          "detail": "당시 APN_CONFIG_ERROR(R-07) → 11번 시작 뒤 재판정 NF_UNREACHABLE 0.764"
+          "state": "ok",
+          "detail": "APN_CONFIG_ERROR 0.75(R-07)"
         },
         "L2": {
-          "state": "issue",
-          "detail": "통합장애가 02:50 뒤에도 열려 11번 조각을 흡수(구성 7) · F-585 와는 안 묶임"
+          "state": "ok",
+          "detail": "통합장애 20조각(14 APN_CONFIG_ERROR) · 영향 34,457 · 05:30 종결 · 다른 장애 안 섞임"
         },
         "L3": {
-          "state": "pending",
-          "detail": "미질의"
+          "state": "ok",
+          "detail": "IX2611240516daed 질의 45초 · 원인 APN 설정 오류(spmode APN Unknown APN esm 27 26,228건·access denied s11 93 17,653건) · 영향 34,457명·장비 38곳 · 조치 APN 정의·APN DNS 확인·변경 전 사전 검증(KB 문구) · 버린 문장 0"
         }
       },
-      "reached": "L2",
-      "updated_at": "2026-11-24 03:10"
+      "reached": "L3",
+      "updated_at": "2026-11-24 05:55"
     },
     {
       "no": 30,
