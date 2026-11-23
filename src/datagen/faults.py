@@ -58,7 +58,10 @@ _AUTO_NODE = {
     # 전에는 전국(`Target()`)이었다. 지도에서 장비를 찍지 않았을 때도
     # 시나리오 목록이 말하는 장비에 건다 — 후보 안에서 주입마다 돌려 고른다.
     "auth_failure": "mme_id",       # MME–HSS 구간
-    "dns_degradation": "sgw_id",    # 사용자 평면 경로
+    # 5번 앱 첫 연결 실패 — **DNS 는 외부망 관문(PGW) 뒤에 있다**(2026-11-23 사용자 결정 1 · 재점검 §2). 전에는 SGW 였다.
+    # 이 생성기는 SGW·PGW 가 1:1(SPGW · `PM_LINK_CELL_NODE_1M` 전 행 SGW_ID = PGW_ID)이라 걸리는 셀은 같고 정답
+    # `expect_node` 만 `PGW-n` 이 된다. graphio `U-29 NODE` 가 SGW 만 보므로 짝을 맞춰야 한다(`detector.py` U-29 노드 스펙)
+    "dns_degradation": "pgw_id",
     # "external_server" — **자동 선택은 전국이다**(2026-11-05 · 6번 · 케이 수정안 A). 외부 서버 장애는
     # 그 도메인을 쓰는 전국 가입자에게 동시에 보인다(정답지도 `WIDE`). SGW 하나로 좁히면 도메인
     # 축(U-25 · 셀 조건 없음)에서 5xx 가 그 SGW 의 트래픽 몫만큼 묽어져 F-108 이 3.4%(임계 5%)로
@@ -66,8 +69,12 @@ _AUTO_NODE = {
     # `SGW-n`·`ENB:`·`BOX:` 를 지정하면 지금처럼 그 범위로 좁힌다(`_resolve_target`)
     "ue_model": "sgw_id",           # SGW 아래 여러 셀에 흩어진다(R-10)
     "ims_pdn": "sgw_id",            # PGW 번호 = SGW 번호(구 SPGW)
-    "cdn_degradation": "sgw_id",    # 6번과 같은 자리
-    "pay_dns_delay": "sgw_id",      # 5번과 같은 자리
+    # 16번 동영상 서버 접속 불가 — CDN 은 PGW 출구 쪽 단위(2026-11-23 사용자 결정 1). 셀은 SGW 때와 같다(SPGW 1:1)
+    "cdn_degradation": "pgw_id",
+    # "pay_dns_delay" — **자동 선택은 전국이다**(2026-11-23 사용자 결정 1 · 6번 결제 앱 지연). 결제 사업자 쪽 DNS·서버
+    # 문제는 그 결제 도메인을 쓰는 전국 가입자에게 보인다. 변형기가 결제 도메인(`APP_CLASS_PATTERNS["PAY"]`)으로
+    # 거르므로 셀 조건이 없어도 된다. SGW 로 좁히면 15번(F-108)·26번(F-351)처럼 그 SGW 몫만큼 묽어진다.
+    # `SGW-n` 을 지정하면 그 범위로 좁힌다(`_resolve_target`)
     "ipv6_path_fail": "pgw_id",     # 34번 — IPv6 경로는 PGW(사용자 평면 출구) 하나에서 끊긴다
 }
 
@@ -75,12 +82,15 @@ _AUTO_NODE = {
 #: 「SW 업데이트한 기종」은 어느 장비를 지나든 그 기종 전체에서 난다. SGW 아래 셀로 좁히면 기종 축(C-02)에서
 #: 그 SGW 를 지나는 몫(5~7%)만큼 묽어져 실패율이 70% → 2~5% 가 됐고, 고른 SGW 에 따라 통과(F-297)와
 #: 미탐지(F-351)가 갈렸다. 6번(외부 서버 5xx)과 같은 모양이다 — 장비 표시(`SGW`)와 `SGW-n` 지정 경로는
-#: 남고, 지정하면 그 SGW 로 좁힌다. 같은 kind 인 8번은 그대로 SGW 다(`scenario_no` 로 가른다)
-_MODEL_WIDE_SCENARIOS = (26,)
+#: 남고, 지정하면 그 SGW 로 좁힌다. 같은 kind 인 8번도 아래처럼 전국이다(`scenario_no` 로 가르던 자리)
+#: 8번(화면 14번 특정 기종 접속 불가)도 2026-11-23 사용자 결정 1 로 여기에 든다 — 기종 펌웨어 문제는 그 기종이 있는
+#: 전국에서 난다(재점검 §2). 26번이 이 길로 통과했다(11-16 F-362)
+_MODEL_WIDE_SCENARIOS = (8, 26)
 
 #: 장비에 걸지만 **전국 축**(도메인·기종·전국 합)으로 판정하는 kind — 신호가 그 장비 몫만큼 묽어진다.
+#: `pay_dns_delay`(6번 결제 앱 지연)는 2026-11-23 자동 선택이 전국이 되어 장비에 걸지 않으므로 뺐다
 _WIDE_AXIS_KINDS = ("auth_failure", "dns_degradation", "ue_model", "ims_pdn",
-                    "cdn_degradation", "pay_dns_delay")
+                    "cdn_degradation")
 
 #: 한 시군구 전 셀을 범위로 잡는 kind — 지리적으로 뭉치는 열화다
 #: 셀 쌍을 대상으로 받는 kind — eNB 를 찍으면 이웃과 짝을 짓는다.
@@ -127,10 +137,14 @@ TARGET_UNITS: dict[str, tuple[str, ...]] = {
 #: 표본이 모자라 탐지되지 않을 수 있는 단위 — 화면이 경고한다(막지 않는다)
 UNIT_WARN = ("CELL", "ENB")
 
-_AUTO_SGG = ("ran_radio", "transport_loss", "nsa_nr_leg",
-             "compound_causal_failure",
-             # 31번 절단 급증 — 2번과 같은 자리(한 시군구 전 셀)
-             "ran_drop_surge")
+_AUTO_SGG = ("transport_loss", "compound_causal_failure")
+
+#: **인접 eNB 몇 곳(10~15셀)을 거는 무선 kind**(2026-11-23 사용자 결정 2 · 재점검 §2). 무선 품질·절단·NR 레그 문제는
+#: 실제로 셀 몇 개·기지국 몇 곳 단위로 난다. 전에는 `_AUTO_SGG`(시군구 전 셀 · 200~1,165셀)였다. 군집은 12번이 쓰는
+#: `enb_cluster`(10~15셀) 그대로다 — 새 크기가 아니다. 대상이 `floor_max_cells` 아래라 셀당 하한(`floor_per_cell`)이
+#: 표본을 채운다. 화면 번호: 9번 무선 품질 저하(`ran_radio`) · 8번 통화 끊김 증가(`ran_drop_surge`) ·
+#: 23번 5G 접속 불량(`nsa_nr_leg` — NR 가능 eNB 안에서만 고른다 · `build`)
+_CLUSTER_KINDS = ("ran_radio", "ran_drop_surge", "nsa_nr_leg")
 
 #: MME 집합을 범위로 잡는 kind → 상위 몇 대인가 `(건너뛸 수, 가져갈 수)`.
 #:
@@ -160,7 +174,8 @@ def _rotate_group(kind: str) -> str | None:
 
 #: 창고(메시 사람 수·eNB 호율)로 후보를 좁히는 자동 대상의 순환 묶음
 _WAREHOUSE_GROUP = {"natural_disaster": "disaster", "ran_congestion": "mesh", "sa_fallback": "mesh",
-                    "anchor_saturation": "anchor", "enb_s1_outage": "outage", "event_crowd": "venue"}
+                    "anchor_saturation": "anchor", "enb_s1_outage": "outage", "event_crowd": "venue",
+                    **{k: "cluster" for k in _CLUSTER_KINDS}}
 
 
 def target_key(keys) -> str:
@@ -451,6 +466,14 @@ def _auto_target(kind: str, cells: list[Cell], rng: random.Random,
         picked, code = _cells_in_one_sgg(cells, rng, 50)
         keys = {c.cell_key for c in enb_cluster(cells, picked[0])} if picked else set()
         return Target(cell_keys=keys, sgg_codes={code}) if keys else None
+    if kind in _CLUSTER_KINDS:
+        # 앵커 eNB 하나를 뽑고 가까운 eNB 를 통째로 더한다(`enb_cluster`). 다른 장애 셀은 `build` 가 eNB 째 덜어 낸
+        # 뒤 여기로 온다(`_AVOID`). 앵커는 셀 하나를 고르게 뽑는다 — 셀이 많은 eNB 가 조금 더 자주 걸린다
+        mapped = [c for c in cells if c.geo_status == "MAPPED"]
+        if not mapped:
+            return None
+        keys = {c.cell_key for c in enb_cluster(cells, mapped[rng.randrange(len(mapped))])}
+        return Target(cell_keys=keys) if keys else None
     if kind == "enb_s1_outage":
         enb = _pick_node(cells, "enb_id", rng, S.FAULT.auto_node_min_share)
         return Target(cell_keys={c.cell_key for c in cells if c.enb_id == enb}, enb_id=enb)
@@ -1136,7 +1159,9 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
     # 16번은 NR 가능 eNB 안에서만 고른다(2026-11-05 사용자 결정) — 불가 eNB 에는 SA 세션이 없어
     # 걸어도 아무 일이 없다. 자동·`ENB:`·`BOX:`·`TAC:`·`SGG:` 가 한 길로 지나게 후보 셀을 좁힌다
     pick = cells
-    if fault["kind"] == "anchor_saturation" and nr_on is not None:
+    # 23번 5G 접속 불량(`nsa_nr_leg`)도 같다(2026-11-23 · 인접 eNB 군집으로 바꾸며) — NR 가능 eNB 가 아니면 NR 레그
+    # 시도 자체가 없어 걸어도 아무 일이 없다
+    if fault["kind"] in ("anchor_saturation", "nsa_nr_leg") and nr_on is not None:
         pick = [c for c in cells if nr_on(str(c.enb_id))]
     mode = None
     raw_target = fault.get("target")

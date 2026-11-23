@@ -153,6 +153,7 @@ def test_anchor_saturation_slows_only_sa_sessions(gen):
     cell = gen.cells[0]
     sc = S.Scenario.__new__(S.Scenario)
     sc.active_cells_cache = {cell.cell_key}
+    sc.kind = "gw_resource"          # 변형기가 걷힘 등록 여부를 보려고 kind 를 읽는다(`scenarios._fade_on`) — 등록 대상이 아닌 kind 로 둔다
     mut = S.PLAN_MUTATORS["anchor_saturation"]
     rng = random.Random(1)
     sa_hit = 0

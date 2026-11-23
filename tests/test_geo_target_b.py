@@ -1,3 +1,5 @@
+# 2026-11-23 사용자 결정 2 — 8·9·23번(ran_drop_surge·ran_radio·nsa_nr_leg)은 시군구 전체가 아니라 인접 eNB 군집이다(`faults._CLUSTER_KINDS`).
+# 아래 시군구 자동 선택 시험은 시군구 전체를 잡는 kind(transport_loss·compound_causal_failure)로 옮겼다.
 """B안 대상 고르기 (2026-11-07) — 정답지 `expect_geo` 모양이 되도록 대상을 고른다.
 
 * `scenarios.geo_shape` — graphio `detect/detector.geo_pattern` 과 같은 판정(문턱 0.9·2.5·3.2·3.0·60km)
@@ -102,7 +104,7 @@ def _sgg_city():
             + _ring("d", 10, 2.0, sgg="D", lon0=LON0 + 1.5, start=300))
 
 
-@pytest.mark.parametrize("kind", ["ran_radio", "transport_loss"])
+@pytest.mark.parametrize("kind", ["transport_loss", "compound_causal_failure"])
 def test_sgg_of_shape_picks_only_sggs_whose_whole_shape_matches(kind):
     cells = _sgg_city()
     picked = {faults._sgg_of_shape(kind, cells, random.Random(s)) for s in range(60)}
@@ -111,30 +113,30 @@ def test_sgg_of_shape_picks_only_sggs_whose_whole_shape_matches(kind):
 
 def test_sgg_of_shape_rotates_with_the_rng():
     cells = _sgg_city()
-    assert len({faults._sgg_of_shape("ran_radio", cells, random.Random(s)) for s in range(40)}) == 2
+    assert len({faults._sgg_of_shape("transport_loss", cells, random.Random(s)) for s in range(40)}) == 2
 
 
 def test_sgg_of_shape_same_rng_same_pick():
     cells = _sgg_city()
-    assert (faults._sgg_of_shape("ran_radio", cells, random.Random(5))
-            == faults._sgg_of_shape("ran_radio", cells, random.Random(5)))
+    assert (faults._sgg_of_shape("transport_loss", cells, random.Random(5))
+            == faults._sgg_of_shape("transport_loss", cells, random.Random(5)))
 
 
 def test_sgg_of_shape_none_when_nothing_matches(capsys):
     cells = _ring("b", 24, 4.5, sgg="B")
-    assert faults._sgg_of_shape("ran_radio", cells, random.Random(0)) is None
+    assert faults._sgg_of_shape("transport_loss", cells, random.Random(0)) is None
     assert "시군구가 없다" in capsys.readouterr().out, "조용히 넘어가지 않고 남긴다"
 
 
 def test_sgg_of_shape_ignores_unmapped_cells():
     cells = _ring("a", 24, 2.0, sgg="A")
     cells += [_cell(f"u{i}-0", LAT0, LON0, sgg="U", mapped=False) for i in range(30)]
-    assert faults._sgg_of_shape("ran_radio", cells, random.Random(0)) == "A"
+    assert faults._sgg_of_shape("transport_loss", cells, random.Random(0)) == "A"
 
 
 # ---------------------------------------------------------------- _auto_target — 2·7번
 
-@pytest.mark.parametrize("kind", ["ran_radio", "transport_loss"])
+@pytest.mark.parametrize("kind", ["transport_loss", "compound_causal_failure"])
 def test_auto_target_takes_every_cell_of_the_chosen_sgg(kind):
     cells = _sgg_city()
     t = faults._auto_target(kind, cells, random.Random(1))
@@ -145,7 +147,7 @@ def test_auto_target_takes_every_cell_of_the_chosen_sgg(kind):
 
 def test_auto_target_falls_back_to_a_sgg_when_no_shape_matches():
     cells = _ring("b", 24, 4.5, sgg="B")
-    t = faults._auto_target("ran_radio", cells, random.Random(0))
+    t = faults._auto_target("transport_loss", cells, random.Random(0))
     assert t is not None and t.sgg_codes == {"B"}
 
 

@@ -62,7 +62,9 @@ def test_rotate_group_warehouse_kinds():
     assert faults._rotate_group("enb_s1_outage") == "outage"
     assert faults._rotate_group("event_crowd") == "venue"
     assert faults._rotate_group("natural_disaster") == "disaster"
-    assert faults._rotate_group("nsa_nr_leg") == "sgg"
+    # 8·9·23번은 시군구 전체가 아니라 인접 eNB 군집이다(2026-11-23 사용자 결정 2)
+    assert faults._rotate_group("nsa_nr_leg") == faults._rotate_group("ran_radio") == faults._rotate_group("ran_drop_surge") == "cluster"
+    assert faults._rotate_group("transport_loss") == "sgg"
 
 
 def test_rotate_group_unrotated_kinds_stay_none():

@@ -1978,7 +1978,7 @@ _BYTE_FIELDS = ("Traffic_Delta_Uplink_PayloadSize",
 _BYTE_IDX: dict[str, tuple[int, ...]] = {}
 
 
-def series_stat(lte_rows: list, uplane_rows: dict[str, list]) -> dict:
+def series_stat(lte_rows: list, uplane_rows: dict[str, list], extra_n: int | None = None) -> dict:
     """계열별 ``{n, bytes}`` — `CM_DATAGEN_HISTORY.SERIES_STAT` 에 들어간다.
 
     C-Plane(`lte_call`)은 건수만 센다. 시그널링 기록이라 페이로드 바이트가
@@ -1986,6 +1986,10 @@ def series_stat(lte_rows: list, uplane_rows: dict[str, list]) -> dict:
     0으로 적지 않는다). 화면은 그 계열에 바이트를 표시하지 않는다.
     """
     out: dict[str, dict] = {"lte_call": {"n": len(lte_rows)}}
+    # 추가 가입자 TAU 몫(2026-11-23 사용자 「분리 표기」) — `n` 에 **포함된** 건수다. 화면이 기본 몫과 나눠 그린다.
+    # 모르면(옛 경로·배치) 키를 두지 않는다 — 0 으로 적으면 「추가 몫 없음」으로 읽힌다(불변규칙 17)
+    if extra_n is not None:
+        out["lte_call"]["extra"] = int(extra_n)
     for series, rows in (uplane_rows or {}).items():
         if series not in _BYTE_IDX:
             fields = SERIES_FIELDS.get(series) or []
@@ -2561,6 +2565,23 @@ class PemdbGen:
         mine = [j for j in by.get(idx, ()) if j < k]
         return self.extra_subs[mine[xr.randrange(len(mine))]] if mine else None
 
+    def _extra_beat(self, slot_start: float, k: int):
+        """이 분 ``[slot_start, slot_start + 60)`` 에 주기 기록을 낼 추가 가입자 순번(``k`` 아래 · 오름차순).
+
+        사람마다 주기 ``p`` = 60~120초, 위상 ``φ`` = 0~p 초를 IMSI 의 CRC 로 정한다 — 난수를 쓰지 않아 재시작·인원 변경에도
+        같은 사람이 같은 박자다. 기록 시각은 절대 초 ``φ + n·p`` 이고 ``p ≥ 60`` 이라 한 분에 많아야 한 건이다"""
+        import zlib
+
+        import numpy as np
+        if getattr(self, "_beat", None) is None or len(self._beat[0]) != len(self.extra_subs):
+            h = np.array([zlib.crc32(s.imsi.encode()) for s in self.extra_subs], dtype=np.int64)
+            per = 60 + (h % 61)
+            self._beat = (per, (h // 61) % per)
+        per, ph = self._beat[0][:k], self._beat[1][:k]
+        t0 = int(slot_start)
+        n = -(-(t0 - ph) // per)                   # 올림 — t0 이상인 첫 박
+        return np.nonzero(ph + n * per < t0 + 60)[0].tolist()
+
     def set_extra_subs(self, n: int) -> int:
         """추가 가입자 수를 맞춘다 — 미리 만든 수(`extra_lte_max`)를 넘지 않는다. 적용된 값을 돌려준다.
 
@@ -2756,10 +2777,20 @@ class PemdbGen:
                 # 대신해 행사장 셀 3개의 사람이 77배·세션이 85배가 됐고, 그 셀들이 구 세션의 3분의 1을 먹어
                 # 新宿区 전체 내려받기 속도(U-15 · 1,039셀)가 떨어져 보였다
                 continue
+            if sc.kind == "capacity_shift" and not getattr(sc.target, "shift_to", None):
+                # **매일 같은 시각 부하(B 없음)도 하한을 채우지 않는다**(2026-11-22 · F-523 · 사용자 (가)). 크기는
+                # `_capacity_shift_load`(평소 호의 `congestion_load` 배) 하나가 정한다 — 23번과 같은 모양. 하한(셀당
+                # 8호 × 21셀 ≈ 168호)이 대상 셀 호를 평소 42 → 176으로 채워, 혼잡을 겪는 사람이 가입자 풀과 무관하게
+                # 약 115명으로 고정됐다. 풀을 3만+5만 → 10만+8만으로 키우자 동네 사람만 늘어 그 몫(Q-11 불량 ÷ 활성)이
+                # 하한 5% 아래로 묽어졌다(F-511 5.45% → F-523 4.73% · 동구 실측). 배율에만 맡기면 몫이 풀·생성량을 따라
+                # 같이 움직인다. B 가 있는 증설 재현(`shift_to`)은 그대로 둔다 — B 개통 뒤 꼬리 처리(아래)가 하한 호를 전제로 한다
+                continue
             if sc.kind == "ran_congestion":
                 # **14번도 하한을 채우지 않는다**(2026-11-05 · F-129). 원래 있던 사람이 나빠지는 장애라
                 # 호를 늘리지 않는다. 하한이 대상 8셀을 평소 분당 4호 → 60호로 채워 고유 가입자가
-                # 약 8배가 됐다 — 판정 단위가 메시·정목이라 셀 표본을 채울 이유도 없다
+                # 약 8배가 됐다 — 판정 단위가 메시·정목이라 셀 표본을 채울 이유도 없다.
+                # 2026-11-23 결정 3 부터 사람은 늘리지만(`scenarios._ran_congestion_load` · `congestion_load` 배) 그것은
+                # 셀 추첨 비중이고 하한이 아니다 — 23번·매일 부하와 같은 모양이다
                 continue
             keys = sc.target.cell_keys
             if not keys or len(keys) > cfg.floor_max_cells:
@@ -3193,6 +3224,8 @@ class PemdbGen:
 
         out: list[list[str]] = []
         calls: list[Call] = []
+        #: 이 분 `out` 에 들어간 추가 가입자 기록 수 — 화면 분리 표기용 건수만 센다(생성·난수와 무관)
+        self.last_extra_n = 0
         # **끊긴 계열은 만들지 않는다**(2026-10-15). `_calls` 를 비워 두면
         # U-Plane 도 자연히 멈춘다 — 세션이 호에서 파생되므로 따로 막을 필요가
         # 없고, 그 인과를 끊어 두면 "호는 0인데 트래픽은 있다"가 된다.
@@ -3266,37 +3299,36 @@ class PemdbGen:
             yield from extra_drafts()
 
         def extra_drafts():
-            """추가 가입자 호 — 기존 가입자 1인당 호율과 같게(`n_calls × extra_n / len(subs)`).
+            """추가 가입자 — **연결만 유지하는 사람의 주기 기록**(2026-11-23 사용자 확정).
 
-            사람은 자기 난수로 고르고 셀은 평소 호와 같은 가중 추첨이다(`_pick_cell`). 억제된 셀이면 평소 호처럼
-            다시 고른다. 하한 채움·폭주의 기준(`n_calls`)은 바꾸지 않는다 — 바꾸면 기존 시나리오 강도가 조용히
-            달라진다"""
+            「lte-call 은 만들어야지. 실제 전화 통화나 앱 사용 같은 게 없을 뿐. 그냥 1분~2분마다 xdr 하나 만들고 있는 게
+            다야」 — 한 사람이 **60~120초에 한 번, 사는 셀에서 TAU(주기 위치 갱신 · `TAU_CALL_TYPE`) 1건**을 낸다. 주기와
+            위상은 IMSI 로 정해(`_extra_beat`) 매 분 고르게 나온다 — 8만 명이면 분당 약 5.5만 건(평균 60/주기 ≈ 0.69).
+            통화·데이터 절차가 아니라서 Call Type 을 고정하는 지표(C-01~C-05 · 3·4번)의 분모에 들어가지 않는다(불변규칙 3).
+
+            전에는 기존 가입자와 같은 「통화형」 호를 7분에 한 번꼴로 셀 가중 추첨으로 냈다 — 평소 통화·앱 사용과 장애 강도는
+            기본 가입자 몫이다(사용자). 기록은 지금처럼 아래 공통 루프를 지나므로 **그 셀에 걸린 장애의 C-Plane 변형**
+            (`mutate` · 장비 정지 거름 · 27번 재배치 · 정지 끊김 명부 `_xlive_note`)을 함께 받는다. U-Plane 은 만들지 않는다.
+            억제된 셀(서비스 없음)이면 그 분 기록이 없다 — 머무는 사람이라 다른 셀로 옮겨 내지 않는다"""
             k = self.extra_n
             if not (k and n_calls and gen.subs):
                 return
             xr = self._extra_rng
-            # **공용 난수를 얼려 둔다**(2026-11-20 에스터 21:05). 추가 호 경로(`_pick_cell`·`base_lte_call`·`_coerce`·
-            # 장애 변형·다운 거름)가 공용 난수를 소비하면 같은 분 U-Plane 측정값과 다음 분 추첨이 달라진다. 여기서
-            # 상태를 떠 두고 각 난수를 전용 난수에서 뽑은 씨로 바꿔 쓴 뒤, 호 루프가 끝나면 되돌린다(`frozen`).
-            # 추가 호는 맨 끝이라 그 사이에 기존 호가 끼지 않는다 — 기존 경로가 보는 난수 흐름은 추가 가입자가
-            # 없을 때와 비트 단위로 같다
+            # **공용 난수를 얼려 둔다**(2026-11-20 에스터 21:05). 추가 호 경로(`base_lte_call`·`_coerce`·장애 변형·다운
+            # 거름)가 공용 난수를 소비하면 같은 분 U-Plane 측정값과 다음 분 추첨이 달라진다. 여기서 상태를 떠 두고 각
+            # 난수를 전용 난수에서 뽑은 씨로 바꿔 쓴 뒤, 호 루프가 끝나면 되돌린다(`frozen`). 추가 호는 맨 끝이라 그
+            # 사이에 기존 호가 끼지 않는다 — 기존 경로가 보는 난수 흐름은 추가 가입자가 없을 때와 비트 단위로 같다
             for r in self._rng_pool():
                 frozen.append((r, r.getstate()))
                 r.seed(xr.getrandbits(64))
-            want = n_calls * k / len(gen.subs)
-            for _ in range(int(want + xr.random())):
-                cell = gen._pick_cell()
-                if suppress is not None:
-                    for _retry in range(8):
-                        if not suppress(cell):
-                            break
-                        cell = gen._pick_cell()
-                    else:
-                        continue
-                # 머무는 셀(2026-11-22) — 셀을 먼저 뽑고 그 셀·주변에 사는 추가 가입자. 끄면 예전처럼 전체에서
-                sub = self._extra_local(cell, k, xr) or self.extra_subs[xr.randrange(k)]
+            for j in self._extra_beat(slot_start, k):
+                sub = self.extra_subs[j]
+                cell = gen.cells[sub.home_cell]
+                if suppress is not None and suppress(cell):
+                    continue
                 rec, cell = gen.base_lte_call(ts, slot_start, at=(sub, cell))
                 extra_ids.add(id(rec))
+                force_ct[id(rec)] = TAU_CALL_TYPE
                 yield rec, cell
 
         #: 폭주 호의 절차 고정 — `id(rec)` → call_type. 재배치로 레코드가 바뀌기 전에 꺼낸다
@@ -3360,6 +3392,8 @@ class PemdbGen:
             _scenarios.fit_minute(rec, slot_start, lo_down)
             vals = rec.values
             out.append(vals)
+            if is_extra:
+                self.last_extra_n += 1
             # 다운 SGW·PGW 에서 다운 시각 뒤에 끝난 호는 세션을 열지 않는다 — 절단된 호도
             # `success_flag=1` 이라 그냥 두면 죽은 SGW 로 세션이 열렸다(에스터 회귀)
             if any_down and not _scenarios.down_opens_session(rec, cell, down):
@@ -3488,20 +3522,24 @@ class PemdbGen:
             wts = [w for _c, w in mix]
             # 지진은 폭주 셀만(`_surge_keys`) — 정지 둘레 셀(2026-11-16)은 대상이지만 호를 더하지 않는다
             keys = [k for k in sorted(sc.__dict__.get("_surge_keys") or sc.target.cell_keys) if k in by_key]
+            # **27번은 셀 진도만큼 폭주한다**(2026-11-23 사용자 결정 2 · `scenarios.quake_surge_weight`). 셀마다
+            # 더하는 몫 = 기준 × (배율 − 1) × 진도 몫. 36번 신호 폭주·진도 표가 없는 지진은 몫 1(전과 같다)
+            inten = (sc.__dict__.get("_quake_cell_intensity") or {}) if sc.kind == "natural_disaster" else {}
+            wq = [_scenarios.quake_surge_weight(inten.get(k)) if inten else 1.0 for k in keys]
             cell_base = sc.__dict__.get("_surge_cell_base") or {}
             if cell_base and sum(cell_base.get(k, 0.0) for k in keys) > 0:
                 # **장애 시작 앞 60분의 셀 기대 호**(`faults._surge_base`)가 기준이다(2026-11-05 · F-112).
                 # 그 분 평소 호(6~15건)를 기준으로 삼으면 그 출렁임이 ×39 로 커져 분당 21~62배를
                 # 오갔다. 더하는 수는 `기준 × (배율 − 1)` 의 **포아송 추첨**이다 — 흔들림은 남기되
                 # 평소 호의 흔들림을 곱하지 않는다
-                base = [cell_base.get(k, 0.0) for k in keys]
+                base = [cell_base.get(k, 0.0) * w for k, w in zip(keys, wq)]
                 total = sum(base)
                 extra = min(budget, _poisson(rng, total * (mult - 1.0)))
             else:
                 # 기준값이 없으면(창고 조회 실패 · 지정 대상 전 데이터 없음) 전처럼 **하한 전 평소량**
                 # (`natural`)이고 더하는 수는 `평소 × (배율 − 1)` 이다
                 nat = natural if natural is not None else landed
-                base = [nat.get(k, 0) for k in keys]
+                base = [nat.get(k, 0) * w for k, w in zip(keys, wq)]
                 total = sum(base)
                 if not total:
                     continue
@@ -3509,6 +3547,7 @@ class PemdbGen:
             if extra <= 0:
                 continue
             budget -= extra
+            # 셀 고르기 가중치도 진도 몫을 곱한 기준이다 — 센 곳일수록 더 몰린다
             picks = rng.choices(keys, weights=base, k=extra)
             for k, ct in zip(picks, rng.choices(cts, weights=wts, k=extra)):
                 sub = gen.subs[pool[rng.randrange(len(pool))]]
@@ -4489,15 +4528,69 @@ def enb_call_rate(conn, end: datetime, minutes: int = 60) -> dict[str, float]:
             f"SUM(ATTEMPT_CNT) FROM {PM_ENB} WHERE EVENT_TIME >= %s AND EVENT_TIME < %s "
             f"GROUP BY ENB_ID", (lo, end))
         rows = cur.fetchall()
+    # **창 안의 다른 폭주 장애 분은 뺀다**(2026-11-23 · 4번 지진 발생 F-550 기준 호 854 = 평소 약 300 의 3배).
+    # 같은 지역에 F-548 지진을 37분 앞에 넣어 그 폭주 13분(분당 약 3,000건)이 「평소」 평균에 들어갔다 — 결정 2
+    # 「장애 없는 평소 × 진도 배율」이 아니게 된다. 분은 생성기 원장(`CM_DATAGEN_FAULT`)의 장애 시간이고 새 값은 없다
+    skip = _surge_minutes(conn, lo, end)
+    cut: dict[str, tuple[int, float]] = {}
+    if skip and len(skip) < minutes:
+        cut = _enb_counts_in(conn, sorted(skip))
+    else:
+        skip = set()                       # 남는 분이 없으면 그대로 — 0 으로 만들지 않는다(불변규칙 4)
+    span = minutes - len(skip)
     out = EnbRate()
     for enb, busy, att in rows:
-        busy = min(int(busy or 0), minutes)
-        mean = float(att or 0) / minutes
-        idle = (minutes - busy) / minutes
+        busy, att = int(busy or 0), float(att or 0)
+        b2, a2 = cut.get(str(enb), (0, 0.0))
+        busy = min(max(busy - b2, 0), span)
+        mean = max(att - a2, 0.0) / span
+        idle = (span - busy) / span
         lam = -math.log(idle) if idle > 0 else mean
         out[str(enb)] = min(mean, lam)
         out.mean[str(enb)] = mean
     return out
+
+
+def _surge_minutes(conn, lo: datetime, end: datetime) -> set[datetime]:
+    """``[lo, end)`` 안에서 **호를 직접 올리는 장애**(`scenarios.SURGE_KINDS` — 지진·신호 폭주)가 활성이던 분.
+
+    생성기 원장(`CM_DATAGEN_FAULT`)의 `START_TIME`·`DURATION_MIN` 이다(취소된 장애는 빼지 않는다 — 돌지 않았다).
+    매일 부하(`capacity_shift`) 같은 배경 부하는 평소의 일부라 넣지 않는다. 원장은 장애마다 대상 eNB 를 남기지
+    않으므로(`RESOLVED_TARGET` 은 「셀 80개」 요약) **모든 eNB 에서** 그 분을 뺀다 — 겹치지 않는 eNB 는 평소 분이
+    조금 줄 뿐 평균이 치우치지 않는다. 원장을 못 읽으면 빈 집합(지금까지의 동작)"""
+    from .control import T_FAULT
+    kinds = tuple(_scenarios.SURGE_KINDS)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT START_TIME, DURATION_MIN FROM {T_FAULT} WHERE FAULT_KIND IN "
+                f"({', '.join(['%s'] * len(kinds))}) AND STATUS IN ('active', 'done') "
+                f"AND START_TIME < %s AND START_TIME >= %s", (*kinds, end, lo - timedelta(days=1)))
+            got = cur.fetchall()
+    except Exception:  # noqa: BLE001 — 원장을 못 읽으면 빼지 않는다
+        return set()
+    out: set[datetime] = set()
+    for row in got or ():
+        if len(row) != 2 or not isinstance(row[0], datetime):
+            continue                       # 원장 행 모양이 아니다
+        t0 = row[0].replace(second=0, microsecond=0)
+        t1 = t0 + timedelta(minutes=int(row[1] or 0))
+        t = max(t0, lo)
+        while t < min(t1, end):
+            out.add(t)
+            t += timedelta(minutes=1)
+    return out
+
+
+def _enb_counts_in(conn, mins: list[datetime]) -> dict[str, tuple[int, float]]:
+    """eNB → (호가 있던 분 수, 시도 합) — 뺄 분(`_surge_minutes`)만. `enb_call_rate` 본 질의와 같은 식"""
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT ENB_ID, COUNT(DISTINCT CASE WHEN ATTEMPT_CNT > 0 THEN EVENT_TIME END), "
+            f"SUM(ATTEMPT_CNT) FROM {PM_ENB} WHERE EVENT_TIME IN ({', '.join(['%s'] * len(mins))}) "
+            f"GROUP BY ENB_ID", tuple(mins))
+        rows = cur.fetchall()
+    return {str(e): (int(b or 0), float(a or 0)) for e, b, a in rows}
 
 
 def mesh_people(conn, end: datetime, minutes: int = 60) -> dict[str, tuple[float, list[str]]]:

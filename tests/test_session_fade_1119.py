@@ -71,6 +71,8 @@ def test_fade_is_recorded_only_once():
 
 
 def test_only_pay_and_cdn_pass_the_scenario():
+    """`_app_session_broken` 은 결제·CDN 만 `sc` 를 받는다. 셀 범위 장애의 걷힘은 다른 길(`_fade_on` · `FADE_CELL_BOUND` ·
+    2026-11-23)이라 이 시험은 그대로다 — `test_fade_cell_bound_1123.py`"""
     import inspect
     assert "_app_session_broken(plan, rng, intensity, sc)" in inspect.getsource(S._pay_session)
     assert "_cdn_plan(plan, rng, intensity, sc)" in inspect.getsource(S._cdn_degradation_plan)
@@ -184,7 +186,8 @@ def runs():
     mp = pytest.MonkeyPatch()
     out = {}
     try:
-        for kind in ("pay_dns_delay", "cdn_degradation"):
+        # 16번 `cdn_degradation` 은 2026-11-23 부터 대상 세션이 모두 연결 요청만 쌓이고 흐른 양이 없어(`_udp_no_answer`) 걷을 것이 없다 — 앱 범위 하니스는 `pay_dns_delay` 로 바꿨다
+        for kind in ("pay_dns_delay",):
             for fade in (True, False):
                 with mp.context() as m:
                     out[(kind, fade)] = _run(kind, fade, m)
@@ -197,7 +200,7 @@ def _rate(per, m):
     return 100.0 * per[m]["re"] / max(1, per[m]["pk"])
 
 
-KINDS = ("pay_dns_delay", "cdn_degradation")
+KINDS = ("pay_dns_delay",)      # 16번 `cdn_degradation` 은 2026-11-23 부터 대상 세션이 모두 연결 요청만 쌓이고 흐른 양이 없어(`_udp_no_answer`) 걷을 것이 없다 — 앱 범위 하니스는 `pay_dns_delay` 로 바꿨다
 
 
 # ── 장애 창 안은 그대로 ─────────────────────────────────────────────────

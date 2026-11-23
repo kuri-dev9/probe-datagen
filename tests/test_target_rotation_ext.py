@@ -46,8 +46,9 @@ def test_history_before_filter_applies_to_the_fault_number_part_of_the_key(tmp_p
 # ---------------------------------------------------------------- _rotate_group — 노드
 
 def test_rotate_group_node_kinds_share_by_node_field():
-    assert faults._rotate_group("dns_degradation") == faults._rotate_group("ims_pdn") == "node:sgw_id"
-    assert faults._rotate_group("gw_resource") == faults._rotate_group("ue_model") == "node:sgw_id"
+    assert faults._rotate_group("ims_pdn") == faults._rotate_group("gw_resource") == faults._rotate_group("ue_model") == "node:sgw_id"
+    # 5·16번은 PGW 축이 됐다(2026-11-23 사용자 결정 1)
+    assert faults._rotate_group("dns_degradation") == faults._rotate_group("cdn_degradation") == "node:pgw_id"
     assert faults._rotate_group("mme_overload") == faults._rotate_group("auth_failure") == "node:mme_id"
     assert faults._rotate_group("gw_pgw_restart") == "node:pgw_id"
 
@@ -116,7 +117,7 @@ def test_build_rotates_nodes_across_consecutive_faults(tmp_path):
     anchor = dt.datetime(2026, 11, 8, 0, 0)
     seen = []
     for fid in range(1, 9):
-        row = {"fault_id": fid, "kind": "gw_resource" if fid % 2 else "dns_degradation", "target": None,
+        row = {"fault_id": fid, "kind": "gw_resource" if fid % 2 else "ims_pdn", "target": None,
                "start_ts": dt.datetime(2026, 11, 8, 1, 0), "duration_min": 11, "intensity": 1.0}
         seen.append(faults.build(row, cells, anchor, faults.target_rng(7, fid), seed=7, history=h).target.sgw_id)
     assert all(a != b for a, b in zip(seen, seen[1:])), "같은 종류 노드를 쓰는 kind 끼리 연달아 같은 노드가 없다"

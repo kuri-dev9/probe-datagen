@@ -89,7 +89,7 @@ def test_the_wide_axis_kinds_are_auto_node_kinds_and_include_the_national_ones()
 
 def test_a_wide_axis_kind_uses_the_narrower_share():
     cells = _sgw_cells({"A": 100, "B": 60, "C": 80})
-    got = {faults._auto_target("dns_degradation", cells, random.Random(s)).sgw_id for s in range(80)}
+    got = {faults._auto_target("ue_model", cells, random.Random(s)).sgw_id for s in range(80)}  # 5번 dns_degradation 은 PGW 축이 됐다(11-23)
     assert got == {"A", "C"}, "B(60%)는 전국 축 하한 0.75 아래다"
 
 

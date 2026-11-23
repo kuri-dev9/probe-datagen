@@ -245,6 +245,12 @@ def api_series(hours: int = 3, date: str | None = None):
         # 로 `lte_call` 하나만 세운다 — 0 으로 채우지 않는다(불변규칙 17).
         series = ({k2: int((v or {}).get("n") or 0) for k2, v in stat.items()}
                   if stat else {"lte_call": int(records or 0)})
+        # 추가 가입자 TAU(`lte_call.extra` · `n` 에 포함)는 따로 그린다(2026-11-23 사용자 「분리 표기」). 합계는 그대로다.
+        # 칸이 없는 옛 분은 나누지 않는다 — 추가 몫을 모른다
+        xn = ((stat or {}).get("lte_call") or {}).get("extra") if stat else None
+        if xn is not None and "lte_call" in series:
+            series["lte_call"] -= int(xn)
+            series["lte_call_extra"] = int(xn)
         by_slot[k] = series
         point = {
             "ts": k,

@@ -18,7 +18,7 @@ from datagen import cli
 from datagen import scenarios as S
 
 ANCHOR = datetime(2026, 11, 21, 17, 3)
-HIST = {"default_offsets": [1, 7], "repeat_offsets": [1, 2, 3, 4, 5, 6, 7], "repeat_after_min": 3, "max_tries": 3}
+HIST = {"default_offsets": [1], "repeat_offsets": [1, 2, 3, 4, 5, 6, 7], "repeat_after_min": 3, "max_tries": 3}
 PEM = {"graphio_api": "http://web:8008", "history": HIST}
 
 
@@ -103,10 +103,6 @@ def test_aside_swallows_the_failure_so_the_injection_goes_on(monkeypatch, capsys
 
 
 @pytest.mark.parametrize("sc", [
-    _sc(sgw_id="7"),                              # 장비 대상 — 셀 목록이 그 장비 아래 전부라 과거 표(셀·지역)로 비교할 자리가 아니다
-    _sc(mme_id="6"),
-    _sc(pgw_id="3"),
-    _sc(mme_group="G1"),
     _sc(cells=()),                                # 장비·전국 대상 — 셀 목록이 없다
     _sc(fid="T-3"),                               # 채점 장애(F-)가 아니다
     _sc(fid="F-x"),
@@ -115,6 +111,14 @@ def test_aside_swallows_the_failure_so_the_injection_goes_on(monkeypatch, capsys
 def test_faults_without_a_reason_to_ask_are_not_sent(sent, sc):
     cli._history_request(PEM, _gen(), [sc])
     assert sent == []
+
+
+@pytest.mark.parametrize("target", [{"sgw_id": "7"}, {"mme_id": "6"}, {"pgw_id": "3"}, {"mme_group": "G1"}])
+def test_equipment_targets_with_cells_are_sent_now(sent, target):
+    """2026-11-23 사용자 「장비가 평가 대상이면 그 장비 아래 셀의 과거 정상」 — 전에는 장비 대상을 뺐다(5번 F-553 「사건 셀의 과거
+    같은 시각 복사본 없음」). 셀 목록이 있는 장비 대상은 이제 보낸다. 셀 목록이 없으면 그대로 보내지 않는다(위 시험)"""
+    cli._history_request(PEM, _gen(), [_sc(**target)])
+    assert len(sent) == 1, target
 
 
 def test_no_anchor_means_nothing_is_sent_yet(sent):
@@ -137,9 +141,10 @@ def test_each_fault_is_sent_separately(sent):
 # ───────────────────────────────────────────────────────── 시나리오 정의
 
 def test_event_crowd_keeps_its_own_offsets_and_others_fall_back_to_the_config_default(sent):
-    assert S.KIND_SPECS["event_crowd"]["history_offsets"] == (1, 7)
+    # 11-23 사용자 「전일이 필요하면 전일, 7일 전이 필요하면 7일 전 — 하나만」: 행사장도 전일 하루
+    assert S.KIND_SPECS["event_crowd"]["history_offsets"] == (1,)
     cli._history_request(PEM, _gen(), [_sc("F-1", off=(), kind="ran_radio", start=0)])    # 시나리오 날짜 없음 → 설정 기본
-    assert sent[0]["body"]["offsets"] == [1, 7] and "mode" not in sent[0]["body"]
+    assert sent[0]["body"]["offsets"] == [1] and "mode" not in sent[0]["body"]
     sent.clear()
     cli._history_request({**PEM, "history": {**HIST, "default_offsets": [1, 3]}}, _gen(), [_sc("F-2", off=())])
     assert sent[0]["body"]["offsets"] == [1, 3]
@@ -299,5 +304,18 @@ def test_datagen_yaml_has_the_history_settings_the_request_reads():
     import yaml
     from pathlib import Path
     h = yaml.safe_load((Path(__file__).resolve().parents[1] / "config" / "datagen.yaml").read_text(encoding="utf-8"))["pemdb1"]["history"]
-    assert h["default_offsets"] == [1, 7] and h["repeat_offsets"] == [1, 2, 3, 4, 5, 6, 7]
+    assert h["default_offsets"] == [1] and h["repeat_offsets"] == [1]       # 11-23 하루만 복사
     assert h["repeat_after_min"] == 3 and h["max_tries"] == 3
+
+
+def test_an_app_fault_sends_the_apps_only_and_no_cells(sent):
+    """11-23 사용자 「앱 장애인데 왜 셀 단위로 복사를 해」 — 16번은 대상에 셀 464개가 있어도 앱만 보낸다"""
+    cli._history_request(PEM, _gen(), [_sc("F-570", off=(), kind="cdn_degradation", cells=("1-1", "1-2"), app_id="3001")])
+    body = sent[0]["body"]
+    assert body["apps"] == ["3001"] and body["cells"] == [] and body["offsets"] == [1]
+
+
+def test_a_cell_fault_still_sends_its_cells_and_no_apps_key(sent):
+    cli._history_request(PEM, _gen(), [_sc("F-2", off=())])
+    body = sent[0]["body"]
+    assert body["cells"] and "apps" not in body

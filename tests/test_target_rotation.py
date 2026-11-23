@@ -116,7 +116,8 @@ def test_rotating_empty_candidates_is_none():
 
 # ---------------------------------------------------------------- _rotate_group
 
-@pytest.mark.parametrize("kind,want", [("ran_radio", "sgg"), ("transport_loss", "sgg"), ("mobility", "route"),
+@pytest.mark.parametrize("kind,want", [("ran_radio", "cluster"), ("ran_drop_surge", "cluster"), ("nsa_nr_leg", "cluster"),   # 2026-11-23 결정 2
+                                       ("transport_loss", "sgg"), ("compound_causal_failure", "sgg"), ("mobility", "route"),
                                        ("ho_interruption", "route"),
                                        ("natural_disaster", "disaster"), ("gw_resource", "node:sgw_id"),
                                        ("auth_failure", "node:mme_id"), ("dns_flap", None),
@@ -237,7 +238,7 @@ def _build(cells, kind, fid, history, target=None, seed=7):
 def test_build_records_automatic_targets_only(tmp_path):
     cells = _city(4)
     h = faults.TargetHistory(tmp_path / "t.json")
-    sc = _build(cells, "ran_radio", 1, h)
+    sc = _build(cells, "transport_loss", 1, h)        # ran_radio 는 군집이 됐다(2026-11-23 결정 2)
     assert sc is not None
     rec = json.loads((tmp_path / "t.json").read_text())
     assert rec["1:sgg"]["group"] == "sgg" and rec["1:sgg"]["key"] == faults.target_key(sc.target.cell_keys)
@@ -256,7 +257,7 @@ def test_build_consecutive_faults_do_not_repeat_the_target(tmp_path):
     h = faults.TargetHistory(tmp_path / "t.json")
     seen = []
     for fid in range(1, 11):
-        seen.append(frozenset(_build(cells, "ran_radio", fid, h).target.cell_keys))
+        seen.append(frozenset(_build(cells, "transport_loss", fid, h).target.cell_keys))
     assert all(a != b for a, b in zip(seen, seen[1:])), "연속 10회 중복 없음"
     assert len(set(seen)) == 5, "후보 5곳을 돌려 쓴다"
 

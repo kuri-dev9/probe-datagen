@@ -45,13 +45,13 @@ from .apps import T_APP  # noqa: E402
 from .scenarios import (DISASTER_DOWN_AT, DISASTER_DOWN_END, DISASTER_SURGE_END,  # noqa: E402
                         DISASTER_UP_FROM, SHIFT_RECOVER, SHIFT_RISE, SHIFT_TOTAL)
 QUAKE_DESC = (
-    "도쿄 둘레 실제 진원역(바다·땅속 깊은 곳)에서 규모 4.5~6.2 지진이 납니다 — 진도 3 이상 넓은 지역에서 통화가 "
-    f"몰리고(0~{DISASTER_SURGE_END}분) 진도 5약 이상인 무른 땅의 기지국만 일부 꺼집니다({DISASTER_DOWN_AT}분 정지 · "
+    "도쿄 둘레 실제 진원역(바다·땅속 깊은 곳)에서 규모 4.5~6.2 지진이 납니다 — 진도 3 이상 넓은 지역에서 흔들림이 셀수록 "
+    f"통화가 많이 몰리고(진도 3 약 4배 ~ 진도 5강 이상 40배 · 0~{DISASTER_SURGE_END}분) 진도 5약 이상인 무른 땅의 기지국만 일부 꺼집니다({DISASTER_DOWN_AT}분 정지 · "
     f"eNB 마다 {DISASTER_UP_FROM}~{DISASTER_DOWN_END}분 사이 따로 복구 · {DISASTER_DOWN_END}분 정상화 · "
     "0곳일 수 있습니다) · CM_QUAKE_EVENT")
 QUAKE_DESC_JA = (
-    "東京周辺の実際の震源域(海域・地下深く)でM4.5~6.2の地震が起きます — 震度3以上の広い地域で通話が集中し"
-    f"(0~{DISASTER_SURGE_END}分)、震度5弱以上の軟弱地盤の基地局だけが一部停止します({DISASTER_DOWN_AT}分に停止 · "
+    "東京周辺の実際の震源域(海域・地下深く)でM4.5~6.2の地震が起きます — 震度3以上の広い地域で揺れが強いほど通話が多く集中し"
+    f"(震度3 約4倍 ~ 震度5強以上 40倍 · 0~{DISASTER_SURGE_END}分)、震度5弱以上の軟弱地盤の基地局だけが一部停止します({DISASTER_DOWN_AT}分に停止 · "
     f"eNBごとに{DISASTER_UP_FROM}~{DISASTER_DOWN_END}分の間で個別に復旧 · {DISASTER_DOWN_END}分に正常化 · "
     "0局の場合もあります) · CM_QUAKE_EVENT")
 
@@ -117,6 +117,8 @@ KINDS = (
 #:   * MME·SGW 장애는 그 장비에서 난다.
 #:   * S6a 인증 거절은 MME–HSS 구간 문제라 그 아래 SGW·eNB 도 함께 받는다.
 #:   * DNS 열화·외부 서버 5xx 는 SGW(사용자 평면 경로) 단위.
+#:     **DNS 열화(5번)·CDN(21번)은 2026-11-23 부터 PGW 다**(사용자 결정 1 · DNS·CDN 은 외부망 관문 뒤). SPGW 1:1 이라
+#:     걸리는 셀은 같다. 결제 DNS(22번)·단말 기종(8번)의 자동 선택은 같은 날부터 전국이다(`faults._AUTO_NODE`)
 #:     **외부 서버 5xx(6번)의 자동 선택은 2026-11-05 부터 전국이다**(케이 수정안 A · 아침 확인
 #:     대기). 외부 서버 장애는 그 도메인 전국 가입자에게 보이고, SGW 로 좁히면 도메인 축에서
 #:     3.4% 로 묽어져(F-108 실측 · 임계 5%) 결과가 고른 SGW 의 몫에 달렸다. 장비 표시(`SGW`)와
@@ -134,7 +136,7 @@ SCENARIOS: tuple[tuple[int, str, str | None, int | None, tuple[str, ...], str], 
      "S11 재전송 타임아웃(First 900) — 결국 거절 응답, 하류 ESM 30"),
     (4, "인증(S6a) 거절", "auth_failure", None, ("MME", "SGW", "ENB"),
      "MME–HSS 구간 인증 거절 — 정답지 Result-Code 구성비, 해제 301"),
-    (5, "DNS 열화", "dns_degradation", None, ("SGW",),
+    (5, "DNS 열화", "dns_degradation", None, ("PGW",),
      "DNS 응답 지연·실패 증가 — 도메인 자동 선택"),
     (6, "외부 서버 5xx", "external_server", None, ("SGW",),
      "특정 도메인 HTTP 5xx 증가 — 망 지표는 정상"),
@@ -153,7 +155,7 @@ SCENARIOS: tuple[tuple[int, str, str | None, int | None, tuple[str, ...], str], 
     (13, "NSA NR leg 실패", "nsa_nr_leg", None, ("ENB",),
      "5G NSA 단말의 NR 레그 미성립"),
     (14, "역 주변 저녁 러시 혼잡", "ran_congestion", None, ("ENB",),
-     "역 주변 셀의 기존 가입자 60% 처리율·RTT 악화·정체(호는 늘지 않음) — CP 정상"),
+     "역 주변 셀에 사람이 1.8배 몰리고 가입자 60% 처리율·RTT 악화·정체 — CP 정상"),
     (15, "야마노테선 4G↔5G 전환 때 잠깐 멈춤", "ho_interruption", None, ("ENB",),
      "코리도 셀 쌍에서 전환 직후 3–8초 down 정체 + NR 레그 해제 — CP 정상"),
     (16, "5G 잡히는데 느림 (4G 앵커 혼잡)", "anchor_saturation", None, ("ENB",),
@@ -167,7 +169,7 @@ SCENARIOS: tuple[tuple[int, str, str | None, int | None, tuple[str, ...], str], 
      "10번과 같은 데이터 — AMF 라고 주장하지 않는다"),
     (20, "음성 통화만 안 걸림 (VoNR)", "ims_pdn", 12,
      ("SGW", "PGW"), "12번과 같은 데이터 — 음성 분기를 주장하지 않는다"),
-    (21, "동영상 서버(CDN) 느림", "cdn_degradation", None, ("SGW",),
+    (21, "동영상 서버(CDN) 느림", "cdn_degradation", None, ("PGW",),
      "동영상 CDN 호스트 사이트 하나에 붙지 못한다 — TCP 연결 실패(SYN 무응답)·업 방향 지연, 다운 방향은 정상"),
     (22, "결제 앱 느림 (DNS 지연)", "pay_dns_delay", None, ("SGW",),
      "결제 등급 도메인만 DNS 응답시간 상승(일부 실패) — 도메인 패턴으로 등급 판정"),
@@ -244,9 +246,10 @@ SCENARIO_ORDER: tuple[tuple[int, str, str, str, str], ...] = (
     (12, "데이터 정상·음성 통화 불가", "データ正常・音声通話不可",
      "데이터는 되는데 전화만 안 됩니다 — VoLTE 음성만 실패",
      "データは使えるが電話だけつながりません — VoLTE の音声だけ失敗"),
-    (31, "통화 끊김 증가", "通話切断増加",
-     "통화가 자꾸 끊깁니다 — 절단 급증",
-     "通話がよく切れます — 切断の急増"),
+    # 8번은 통화가 아니라 연결이 끊긴다(무선 사유 121 · C-04 는 데이터 연결 기준) — 2026-11-23 사용자 「통화가 아니면 연결 끊김 증가」
+    (31, "연결 끊김 증가", "接続切断増加",
+     "연결이 자꾸 끊깁니다 — 절단 급증",
+     "接続がよく切れます — 切断の急増"),
     (2, "무선 품질 저하", "無線品質の低下",
      "전파가 약해 품질이 나빠집니다 — 무선 품질 열화",
      "電波が弱く品質が悪くなります — 無線品質の劣化"),
@@ -287,8 +290,8 @@ SCENARIO_ORDER: tuple[tuple[int, str, str, str, str], ...] = (
      "접속 관리 장비(MME)가 과부하라 접속이 늦거나 실패합니다",
      "接続管理装置(MME)が過負荷で接続が遅れたり失敗したりします"),
     (30, "연쇄 복합 장애", "連鎖的な複合障害",
-     "여러 장애가 이어서 납니다 — 전송 → DNS → 웹 오류",
-     "複数の障害が連鎖します — 伝送 → DNS → Web エラー"),
+     "여러 장애가 이어서 납니다 — 전송 → DNS → 웹 이용 감소",
+     "複数の障害が連鎖します — 伝送 → DNS → Web 利用の減少"),
     (13, "5G 접속 불량", "5G接続不良",
      "5G가 잘 안 붙습니다 — 5G NSA 연결 실패",
      "5Gにつながりにくいです — 5G NSA の接続失敗"),

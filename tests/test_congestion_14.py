@@ -1,4 +1,7 @@
-"""14번 도심 역 저녁 러시(`ran_congestion`) — 기존 가입자의 일부가 나빠진다 (2026-11-05 · 사용자 결정).
+"""14번 도심 역 저녁 러시(`ran_congestion`) — 기존 가입자의 일부가 나빠진다 (2026-11-05 · 사용자 결정 · **2026-11-23 결정 3 으로 사람도 늘린다**).
+
+**2026-11-23:** 퇴근길 혼잡은 사람이 몰려서 생긴다 — 대상은 메시 그대로 두고 사람을 `congestion_load`(1.8) 배로 늘린다
+(`_ran_congestion_load` · 24번 A 와 같은 방식). 아래 「호를 늘리지 않는다」 시험은 그 결정에 맞게 바꿨다.
 
 처음에는 활성 가입자 1.8배(`congestion_load`)였다. F-129 에서 판정 하한이 덮어 7배가 됐고, 호를 늘리면 판정
 표본까지 부풀어 "잡혔다"가 착시였다. 지금은 **호·가입자를 늘리지 않고 원래 있던 사람의 약 60%
@@ -47,8 +50,9 @@ def test_defaults_in_code_and_yaml_and_unknown_keys_still_stop():
 
 def test_the_old_module_constant_and_the_14_booster_are_gone():
     assert not hasattr(S, "CONGESTION_LOAD"), "상수는 설정으로 옮겼다 — 두 벌이면 한쪽만 고쳐진다"
-    assert not hasattr(S, "_ran_congestion_load")
-    assert KIND not in S.BOOSTERS, "14번은 호·가입자를 늘리지 않는다"
+    # 2026-11-23 사용자 결정 3 — 사람도 늘린다(`congestion_load` 배). 부스터가 생겼고 변형기는 그대로다
+    assert hasattr(S, "_ran_congestion_load")
+    assert KIND in S.BOOSTERS, "1번 퇴근길은 사람을 늘린다(결정 3)"
     assert KIND in S.PLAN_MUTATORS and S.PLAN_MUTATORS[KIND] is S._ran_congestion_users
 
 
@@ -98,14 +102,14 @@ def _mean(d, rng):
     return sum(xs) / len(xs)
 
 
-def test_call_volume_on_target_cells_is_unchanged(gen):
-    """호를 늘리지 않는다 — 대상 셀 호 수가 평소와 같다(하한도 없다)."""
+def test_call_volume_on_target_cells_rises_by_the_congestion_load(gen):
+    """사람을 `congestion_load`(1.8) 배로 늘린다(2026-11-23 결정 3) — 대상 셀 호 수가 그만큼 오른다(하한은 없다)."""
     runs, sc = _run(gen)
     d = _target_calls(gen, runs, sc, range(len(runs)))
     base = _mean(d, range(0, START14))
     peak = _mean(d, range(START14 + 5, START14 + DUR - 5))
     assert base > 5, f"대상 셀 평소 호가 너무 적어 비교가 안 된다: {base}"
-    assert 0.8 <= peak / base <= 1.25, f"배율 {peak / base:.2f} (기준 {base:.1f} → 정점 {peak:.1f}) — 1.0 이어야 한다"
+    assert 1.4 <= peak / base <= 2.2, f"배율 {peak / base:.2f} (기준 {base:.1f} → 정점 {peak:.1f}) — 약 1.8 이어야 한다"
 
 
 def test_no_floor_tail_remains_after_the_window(gen):
@@ -116,13 +120,13 @@ def test_no_floor_tail_remains_after_the_window(gen):
     assert 0.75 <= after / base <= 1.3, f"끝난 뒤 호가 평소와 다르다: 평소 {base:.1f} → {after:.1f}"
 
 
-@pytest.mark.parametrize("load", [1.0, 3.0])
-def test_congestion_load_setting_does_not_move_14(gen, load):
-    """`congestion_load` 는 24번 A 의 것이다 — 14번은 따르지 않는다."""
+@pytest.mark.parametrize("load,lo,hi", [(1.0, 0.8, 1.25), (3.0, 2.3, 3.2)])
+def test_congestion_load_setting_moves_the_volume_of_14(gen, load, lo, hi):
+    """`congestion_load` 를 1번도 따른다(2026-11-23 결정 3) — 1.0 이면 늘지 않고 3.0 이면 약 3배다."""
     runs, sc = _run(gen, load=load)
     d = _target_calls(gen, runs, sc, range(len(runs)))
     ratio = _mean(d, range(START14 + 5, START14 + DUR - 5)) / _mean(d, range(0, START14))
-    assert 0.8 <= ratio <= 1.25, f"load={load} → 배율 {ratio:.2f}"
+    assert lo <= ratio <= hi, f"load={load} → 배율 {ratio:.2f}"
 
 
 def test_other_kinds_still_get_the_floor(make):
@@ -230,6 +234,12 @@ def _plan(imsi, outcome="normal", span=3):
 
 class _Sc:
     id = "F-14"
+    # 변형기가 걷힘을 등록하려고(`scenarios._fade_on` · 2026-11-23) kind·강도를 읽는다 — 강도 0 이라 등록은 없다
+    kind = KIND
+    start_minute = 0
+
+    def intensity_for(self, *_a):
+        return 0.0
 
 
 class _Cell:
@@ -240,7 +250,9 @@ def _snap(p):
     return dict(p.totals), p.stall
 
 
-def test_chosen_people_get_the_congested_quality_and_others_are_untouched(share):
+def test_every_session_of_the_target_cell_gets_the_congested_quality(share):
+    """2026-11-23 사용자 「사람 단위로 하지 마 · 대부분 셀 단위」 — 전에는 IMSI 로 고른 60%만 나빠지고 나머지는 평시였다
+    (의도가 바뀜). 이제 대상 셀의 세션은 사람과 상관없이 전부 나빠진다."""
     share(0.6)
     fn = S.PLAN_MUTATORS[KIND]
     chosen = next(i for i in IMSIS if S.congested_user(i, "F-14", 1.0))
@@ -248,8 +260,9 @@ def test_chosen_people_get_the_congested_quality_and_others_are_untouched(share)
     p0, p1 = _plan(chosen), _plan(other)
     before0, before1 = _snap(p0), _snap(p1)
     assert fn(p0, _Sc(), 1.0, random.Random(1), _Cell()) is True
-    assert fn(p1, _Sc(), 1.0, random.Random(1), _Cell()) is False
-    assert _snap(p1) == before1, "고르지 않은 사람의 품질은 평시 그대로다"
+    assert fn(p1, _Sc(), 1.0, random.Random(1), _Cell()) is True
+    assert _snap(p1) != before1, "고르지 않던 사람의 품질도 나빠진다"
+    assert p1.totals["Traffic_Total_Dnlink_PayloadSize"] < before1[0]["Traffic_Total_Dnlink_PayloadSize"] * 0.7
     t = p0.totals
     assert t["Traffic_Total_Dnlink_PayloadSize"] < before0[0]["Traffic_Total_Dnlink_PayloadSize"] * 0.7, "처리율 하락"
     assert t["DnlinkRTTTime"] / t["DnlinkRTTCount"] > 3.0 * 1000, "RTT 상승(평균 3ms → 수십~수백 ms)"
@@ -357,8 +370,10 @@ def test_sessions_of_chosen_people_are_degraded_in_the_records(make):
             n_other += 1
             bad_other += ms > 150
     assert n_chosen and n_other
-    assert bad_other / n_other < 0.05, f"고르지 않은 사람의 초과 비율 {bad_other / n_other:.2%}"
-    assert bad_chosen / n_chosen > 0.3, f"고른 사람 {bad_chosen}/{n_chosen} 이 고르지 않은 사람 {bad_other}/{n_other} 보다 나빠야 한다"
+    # 사람 단위 추첨이 없다(2026-11-23) — 예전에 고르지 않던 사람도 같은 정도로 나빠진다. 셀 안 세션은 전부 혼잡이다
+    assert bad_other / n_other > 0.3, f"고르지 않던 사람의 초과 비율 {bad_other / n_other:.2%}"
+    assert bad_chosen / n_chosen > 0.3, f"고른 사람 {bad_chosen}/{n_chosen}"
+    assert abs(bad_chosen / n_chosen - bad_other / n_other) < 0.2, "사람에 따라 갈리지 않는다"
 
 
 # ---------------------------------------------------------------- 정답지 · BOX 대상 (새 방식)

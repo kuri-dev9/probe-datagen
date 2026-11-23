@@ -88,11 +88,40 @@ def test_uplane_rows_and_who_are_the_same_whatever_the_extra_count(runs):
 
 
 def test_lte_call_grows_with_the_extra_count(runs):
+    """추가 가입자는 60~120초에 한 번 TAU 1건(11-23 확정) — 분당 늘어난 수 ≈ 인원 × 평균(60/주기) = 인원 × ln2 ≈ 0.69"""
     c0, c1, c3 = (len(runs[n][1]) for n in (0, 1000, 3000))
     assert c0 < c1 < c3
-    # 1인당 호율이 기존 가입자와 같다 — 늘어난 수 ≈ 기존 호 × 추가 / 풀 (포아송 몫 ±)
-    assert abs((c1 - c0) - c0 * 1000 / POOL) <= max(5, 0.15 * c0 * 1000 / POOL)
-    assert abs((c3 - c0) - c0 * 3000 / POOL) <= max(5, 0.15 * c0 * 3000 / POOL)
+    for n, c in ((1000, c1), (3000, c3)):
+        want = n * 0.693
+        assert abs((c - c0) - want) <= 0.1 * want, (n, c - c0, want)
+
+
+def test_extra_records_are_one_tau_per_person_from_the_home_cell(runs):
+    """늘어난 기록은 전부 TAU(call_type 5) · 한 사람 한 분에 많아야 한 건 · 통화·데이터 절차가 아니다"""
+    g, calls, _up = runs[3000]
+    ix = g.gen.index["lte_call"]
+    extra = {s.imsi for s in g.extra_subs}
+    got = [r for r in calls if r[ix["IMSI"]] in extra]
+    assert got, "추가 가입자 기록이 없다"
+    assert {r[ix["call_type"]] for r in got} == {P.TAU_CALL_TYPE}
+    who = collections.Counter(r[ix["IMSI"]] for r in got)
+    assert max(who.values()) == 1
+
+
+def test_extra_beat_is_a_fixed_60_to_120s_period_per_person(monkeypatch):
+    """박자는 IMSI 로 정해져 재시작·인원 변경에도 같고, 한 사람의 간격은 60~120초다"""
+    g = _gen(monkeypatch, MAXN, 3000)
+    t0 = int(T0.timestamp())
+    seen = collections.defaultdict(list)
+    for m in range(6):
+        for j in g._extra_beat(t0 + 60 * m, 3000):
+            seen[j].append(m)
+    assert len(seen) > 2000
+    per, ph = g._beat
+    assert per.min() >= 60 and per.max() <= 120
+    assert (ph < per).all()
+    g2 = _gen(monkeypatch, MAXN, 1000)
+    assert g2._extra_beat(t0, 1000) == [j for j in g._extra_beat(t0, 3000) if j < 1000]
 
 
 def test_existing_lte_calls_are_a_prefix_of_the_run_with_extras(runs):

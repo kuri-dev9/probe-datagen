@@ -49,24 +49,25 @@ def test_downlink_values_are_never_touched():
         assert _down(p.totals) == _down(before)
 
 
-def test_about_half_of_the_sessions_fail_to_connect_at_full_intensity():
+def test_every_session_fails_to_connect_at_any_intensity():
+    """2026-11-23 사용자 「down 이 거의 0 이고 연결 요청만 쌓인다」 — 전에는 50%·I 만 `syn_fail` 이었다(의도가 바뀜)."""
+    for intensity in (0.4, 1.0):
+        got = _many(intensity)
+        assert all(p.syn_fail for _b, p in got), intensity
+
+
+def test_the_retry_count_range_scales_with_the_intensity():
+    """강도는 「누가 붙지 못하나」가 아니라 재시도 개수 범위(1~(1+3I))에 쓰인다 — 시험 가정이 바뀜(실패 비율 → 재시도 범위)."""
+    hi = max(p.retries for _b, p in _many(1.0))
+    lo = max(p.retries for _b, p in _many(0.4))
+    assert lo < hi and lo <= 1 + int(3 * 0.4) and hi <= 1 + 3, (lo, hi)
+
+
+def test_no_session_connects_so_the_totals_are_left_for_the_no_answer_branch():
+    """붙은 세션이 없다(전에는 붙은 세션에 up 지연·재전송을 더했다 — 2026-11-23 의도가 바뀜). 총량은 그대로 두고
+    `session._udp_no_answer`(UDP)·SYN 칸(TCP)이 응답 없음 모양을 만든다."""
     got = _many()
-    frac = sum(1 for _b, p in got if p.syn_fail) / len(got)
-    assert 0.42 <= frac <= 0.58, frac
-
-
-def test_connect_failure_scales_with_the_intensity():
-    hi = sum(p.syn_fail for _b, p in _many(1.0)) / 400
-    lo = sum(p.syn_fail for _b, p in _many(0.4)) / 400
-    assert lo < hi and 0.12 <= lo <= 0.28, (lo, hi)
-
-
-def test_a_session_that_connected_gets_uplink_delay_and_retransmission():
-    got = [(b, p) for b, p in _many() if not p.syn_fail]
-    assert got
-    for before, p in got:
-        assert p.totals["Traffic_Total_Uplink_RetransPacketCount"] > before["Traffic_Total_Uplink_RetransPacketCount"]
-        assert p.totals["UplinkRTTTime"] / p.totals["UplinkRTTCount"] > before["UplinkRTTTime"] / before["UplinkRTTCount"]
+    assert got and all(p.syn_fail and p.totals == before for before, p in got)
 
 
 def test_a_failed_session_only_gets_the_syn_flag():

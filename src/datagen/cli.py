@@ -359,6 +359,91 @@ def _capacity_shift(pem: dict) -> dict | None:
     return sec
 
 
+#: 이동 상태 파일 이름 — 정답 파일 옆(`truth` 디렉터리 · gen 이 rw 로 마운트한 자리 · 2026-11-23)
+MOBILITY_STATE_FILE = "gen_mobility_state.json.gz"
+
+
+def _mobility_state_path(gen) -> Path | None:
+    """이동 상태 파일 — 정답 파일과 같은 디렉터리. 정답 경로가 없으면(배치·시험) None"""
+    tp = getattr(gen, "truth_path", None)
+    return None if tp is None else Path(tp).parent / MOBILITY_STATE_FILE
+
+
+def _save_mobility(gen) -> None:
+    """움직이는 가입자의 지금 위치를 남긴다 — **종료할 때 한 번**(2026-11-23 사용자 「종료할 때 캐시 스타일로 덤프」).
+
+    틱마다 쓰지 않는다. 강제 종료·크래시로 덤프가 없으면 기동 때 최근 5분 통계의 마지막 셀로 앉힌다(`_load_mobility`).
+
+    임시 파일에 쓴 뒤 이름을 바꾼다 — 쓰는 중에 죽어도 앞 파일이 남는다. DB 에는 쓰지 않는다(DDL 없음)."""
+    import gzip
+    import json
+
+    path = _mobility_state_path(gen)
+    if path is None:
+        return
+    state = gen.gen.mobility_state()
+    state["saved_at"] = datetime.now().isoformat(timespec="seconds")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with gzip.open(tmp, "wt", encoding="utf-8", compresslevel=3) as f:
+        json.dump(state, f, ensure_ascii=False, separators=(",", ":"))
+    os.replace(tmp, path)
+
+
+#: 덤프가 없을 때 마지막 셀을 찾는 창(분) — 그 안에 행이 없는 사람만 기동 배치다(2026-11-23 사용자 「5분 이내」)
+MOBILITY_LOOKBACK_MIN = 5
+
+
+def _load_mobility(gen, conn=None) -> None:
+    """기동 때 위치를 정한다 — ① 종료 덤프 ② 최근 5분 체감 사용자 1분 표의 마지막 셀 ③ 기동 배치.
+
+    덤프는 읽은 뒤 `.used` 로 이름을 바꾼다 — 다음에 비정상 종료하면 오래된 위치를 이어 받지 않고 ②로 간다.
+    """
+    import gzip
+    import json
+
+    g = gen.gen
+    want = {s.imsi for s in g.subs if s.route >= 0 or s.walk_cell is not None}
+    path = _mobility_state_path(gen)
+    if path is not None and path.exists():
+        try:
+            with gzip.open(path, "rt", encoding="utf-8") as f:
+                state = json.load(f)
+        except (OSError, ValueError) as e:
+            state = None
+            print(f"  ⚠ 이동 상태 — 덤프를 읽지 못함({type(e).__name__})", flush=True)
+        os.replace(path, path.with_name(path.name + ".used"))
+        if state is not None:
+            ok, why = g.restore_mobility(state)
+            if ok:
+                print(f"  이동 상태 — 덤프 {len(state.get('subs') or ()):,} · 통계 0 · 새 배치 0", flush=True)
+                return
+            print(f"  ⚠ 이동 상태 — 덤프를 이어 받지 않음: {why}", flush=True)
+    n = 0
+    if conn is not None and want:
+        try:
+            n = g.seat_from_cells(_last_cells_xp(conn, want, MOBILITY_LOOKBACK_MIN))
+        except Exception as e:                     # noqa: BLE001 — 표가 없거나 접속 실패 → 기동 배치
+            print(f"  ⚠ 이동 상태 — 체감 표를 읽지 못함({type(e).__name__})", flush=True)
+    print(f"  이동 상태 — 덤프 0 · 통계 {n:,} · 새 배치 {len(want) - n:,}", flush=True)
+
+
+def _last_cells_xp(conn, want: set[str], minutes: int) -> dict[str, tuple[str, bool]]:
+    """체감 사용자 1분 표(graphio 가 쓴다)에서 가입자마다 가장 최근 행의 분 끝 셀과 그 분에 셀을 옮겼는지. 읽기만 한다"""
+    with conn.cursor() as cur:
+        cur.execute("SELECT MAX(EVENT_TIME) FROM PM_COR_XP_SUB_1M")
+        top = cur.fetchone()[0]
+        if top is None:
+            return {}
+        # 미상 셀(CELLNUM -1)은 위치가 아니다. 이동 여부 = 그 분 마지막 전환의 떠난 셀이 있나(`PREV_ENB_ID`)
+        cur.execute(
+            "SELECT IMSI, ENB_ID, CELLNUM, PREV_ENB_ID IS NOT NULL FROM (SELECT IMSI, ENB_ID, CELLNUM, PREV_ENB_ID, "
+            "ROW_NUMBER() OVER (PARTITION BY IMSI ORDER BY EVENT_TIME DESC) AS rn FROM PM_COR_XP_SUB_1M "
+            "WHERE EVENT_TIME > %s AND CELLNUM >= 0) AS t WHERE t.rn = 1",
+            (top - timedelta(minutes=minutes),))
+        return {str(i): (f"{e}-{c}", bool(m)) for i, e, c, m in cur.fetchall() if str(i) in want}
+
+
 def _truth_path(pem: dict, data_dir: Path) -> Path:
     """`ground_truth.json` 경로. 상대경로는 **저장소 루트 기준**으로 푼다 —
     cwd 에 따라 정답이 엉뚱한 자리에 떨어지면 graphio 는 "ground_truth.json
@@ -526,9 +611,12 @@ def _history_request(pem: dict, gen, scs: list, now: datetime | None = None) -> 
     live: set[int] = set()
     for sc in scs:
         fid = fid_of(sc)
-        if fid is None or fid in done or not sc.target.cell_keys:
+        apps = _history_apps(gen, sc.target)
+        if fid is None or fid in done or not (sc.target.cell_keys or apps):
             continue
         if _history_daily(sc):
+            if not sc.target.cell_keys:
+                continue
             live.add(fid)
             last = sc.start_minute + sc.duration - 1
             if now is not None:
@@ -537,10 +625,14 @@ def _history_request(pem: dict, gen, scs: list, now: datetime | None = None) -> 
             span[1] = max(span[1], last)
             continue
         offsets = tuple(getattr(sc, "history_offsets", ()) or ()) or default
-        if offsets and getattr(sc, "scored", True) and _history_cell_target(sc.target):
-            todo.append((fid, {"fault_id": fid, "cells": sorted(sc.target.cell_keys),
+        if offsets and getattr(sc, "scored", True) and (_history_cell_target(sc.target) or apps):
+            # **앱 장애는 앱(가입자) 단위만 복사한다**(2026-11-23 사용자 「앱 장애인데 왜 셀 단위로 복사를 해 · 셀 단위일 땐 셀로,
+            # 가입자 단위일 땐 가입자별로」). 16번 F-570 은 대상 「PGW-6 · APP-3001 · 셀 464개」라 셀 464 + 인접 3,198 +
+            # 칸 733 을 하루 231만 행씩 복사했는데 판정에 쓰인 것은 앱 127행이었다
+            todo.append((fid, {"fault_id": fid, "cells": [] if apps else sorted(sc.target.cell_keys),
                                "start": at(sc.start_minute), "end": at(sc.start_minute + sc.duration),
-                               "offsets": [int(d) for d in offsets]}))
+                               "offsets": [int(d) for d in offsets],
+                               **({"apps": apps} if apps else {})}))
     if repeat_offsets:
         cur = int((now - gen.anchor).total_seconds() // 60) if now is not None else None
         for fid, (start, last, cells) in list(waiting.items()):
@@ -595,15 +687,83 @@ def _history_request(pem: dict, gen, scs: list, now: datetime | None = None) -> 
         raise RuntimeError("; ".join(errors))
 
 
+#: 반복 복사 되찾기가 돌아보는 범위(시간) — 하루. 그보다 오래된 매일 부하는 다음 날 같은 시각 회차가 새로 만든다
+REPEAT_RECOVER_HOURS = 24
+
+
+def _history_repeat_recover(conn, pem: dict, gen, now: datetime) -> list[int]:
+    """**재시작에 사라진 반복 복사 요청을 되찾는다**(2026-11-23 · F-566~569). 되찾은 장애 번호를 돌려준다.
+
+    반복 복사(`_history_request` 의 repeat 갈래)는 끝 + `repeat_after_min` 분까지 **gen 메모리**(`_history_repeat_wait`)
+    에서 기다린다. 그 사이 gen 이 다시 뜨면 대기가 사라져 요청이 나가지 않았다 — 17:01 에 끝난 매일 부하 넷이 17:04
+    재시작으로 원장 `CM_HIST_COPY` 0행이 됐고, EV-21 이 어제 같은 시각 부하를 반복으로 세지 못했다.
+
+    새 표 없이 **장애 표와 원장만으로** 판단한다 — 최근 `REPEAT_RECOVER_HOURS` 안에 끝난(`done`) 매일 부하
+    (`INJECT_MODE='daily'`) 중 원장에 행이 하나도 없는 것을 대기표에 다시 넣는다. 보내는 일(시각 조건 · 실패 재시도 ·
+    시간 초과)은 그대로 `_history_request` 가 한다. 셀은 해석과 같은 함수(`faults._daily_cells`)로 다시 센다 — 역 표가
+    아직 없으면(기동 직후) 이번 틱은 건너뛰고 다음 틱에 다시 본다. 구간은 시작 분 ~ 시작 + 길이(끝난 장애라 관측
+    구간과 같다). 취소된 것은 넣지 않는다 — 해석 실패(셀 0개)가 대부분이고, 도중 취소는 관측 끝을 알 수 없다.
+    graphio 가 같은 장애를 덮어쓰므로 혹시 겹쳐 보내도 멱등이다"""
+    from . import faults as F
+
+    hcfg = pem.get("history") or {}
+    if gen.anchor is None or not (hcfg.get("repeat_offsets") or ()):
+        return []
+    done: set = gen.__dict__.setdefault("_history_done", set())
+    waiting: dict = gen.__dict__.setdefault("_history_repeat_wait", {})
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT f.FAULT_ID, f.TARGET, f.START_TIME, f.DURATION_MIN FROM {control.T_FAULT} f "
+            "WHERE f.INJECT_MODE='daily' AND f.FAULT_KIND='capacity_shift' AND f.STATUS='done' "
+            "AND f.START_TIME >= %s AND NOT EXISTS (SELECT 1 FROM CM_HIST_COPY h WHERE h.FAULT_ID=f.FAULT_ID)",
+            [now - timedelta(hours=REPEAT_RECOVER_HOURS)])
+        rows = cur.fetchall()
+    got = []
+    for fid, target, start, dur in rows:
+        fid = int(fid)
+        if fid in done or fid in waiting:
+            continue
+        tok = str(target or "")[len(DAILY_PREFIX):].lstrip(":").strip()
+        cells = F._daily_cells(tok, gen.cells) if tok else set()
+        if not cells:
+            continue
+        s0 = int((start - gen.anchor).total_seconds() // 60)
+        waiting[fid] = [s0, s0 + int(dur) - 1, sorted(cells)]
+        got.append(fid)
+    if got:
+        print(f"  반복 복사 되찾기 — 원장에 없는 매일 부하 {', '.join(f'F-{f}' for f in got)} 를 다시 보낸다", flush=True)
+    return got
+
+
 def _history_daily(sc) -> bool:
     """24번 매일 부하 — `capacity_shift` 중 B(`shift_to`)가 없는 것. `faults` 의 `DAILY` 대상만 B 를 고르지 않는다."""
     return sc.kind == "capacity_shift" and not getattr(sc.target, "shift_to", None)
 
 
+def _history_apps(gen, t) -> list[str]:
+    """과거 정상 복사를 요청할 **대상 앱**(`CM_APP_CODE.APP_IDX`) — 앱이 평가 대상이면 그 앱 사용자의 과거를 복사한다
+    (2026-11-23 사용자 · graphio `history.copy(apps=)`). 앱 하나(`app_id` · 16번 동영상 서버 접속 불가 3001)면 그것,
+    그룹만 있으면(`app_group` · 6번 결제 앱 지연 PAY) 앱 사전에서 그 그룹 앱 전부. 앱 대상이 아니면 빈 목록이다.
+    gen 은 요청만 보낸다 — 복사 원본(같은 앱 하루 전 → 주입 직전 창)은 graphio 가 정한다"""
+    if getattr(t, "app_id", None):
+        return [str(t.app_id)]
+    if getattr(t, "app_group", None):
+        # 앱 사전은 안쪽 생성기에 있다(`PemdbGen.gen.app_book` · pemdb1 `load_apps`) — 바깥에 있으면 그것을 쓴다
+        book = getattr(gen, "app_book", None) or getattr(getattr(gen, "gen", None), "app_book", None)
+        return sorted({str(a.idx) for a in (getattr(book, "apps", None) or ()) if a.group == t.app_group})
+    return []
+
+
 def _history_cell_target(t) -> bool:
-    """셀·지역 대상인가 — 장비(SGW·PGW·MME·MME 묶음) 대상은 셀 목록이 그 장비 아래 셀 전부라 과거 표(셀·지역)로
-    비교할 자리가 아니다. 셀 목록이 없는 전국 대상(기종·앱·APN·도메인)은 호출부가 이미 걸렀다."""
-    return bool(t.cell_keys) and not (t.sgw_id or t.pgw_id or t.mme_id or t.mme_group)
+    """과거 정상 복사를 요청할 대상인가 — **셀 목록이 있으면 장비 대상도 든다**(2026-11-23 사용자 「장비가 평가 대상이면
+    그 장비 아래 셀의 과거 정상」).
+
+    전에는 장비(SGW·PGW·MME·MME 묶음) 대상을 뺐다 — 「셀 목록이 장비 아래 셀 전부라 셀·지역 표로 비교할 자리가
+    아니다」. 그래서 5번 앱 첫 연결 실패(PGW-14 · 449셀)가 「사건 셀의 과거 같은 시각 복사본 없음」이 됐다(F-553).
+    graphio EV-21 은 사건 셀 중 복사본이 있는 셀끼리 견주므로(`history.past_same_time`) 장비 아래 셀 복사로 그대로
+    읽힌다. 복사 원본 규칙(같은 셀 하루 전 → 주입 직전 창 → 규모가 가까운 정상 셀)은 graphio 가 정한다. 셀 목록이
+    없는 전국 대상(기종·앱·APN·도메인)은 셀 복사를 보내지 않는다 — 앱 대상은 앱 목록(`_history_apps`)으로 따로 보낸다"""
+    return bool(t.cell_keys)
 
 
 def _uplane_store(cfg: dict, pem: dict) -> tuple[Path, int]:
@@ -830,9 +990,25 @@ DAILY_PREFIX = "DAILY"
 
 #: 못 읽은 매핑 표 — 틱마다 다시 시도해 로그를 채우지 않는다
 _TABLE_WARNED: set[str] = set()
+#: 셀이 0개라 등록하지 않은 매일 부하 대상 토큰 — 로그를 토큰마다 한 번만 남긴다(`_daily_load`)
+_DAILY_NO_CELLS: set[str] = set()
 
 
-def _daily_load(conn, ts: datetime, vo_sec: float) -> int | None:
+def _vo_effective(diurnal: bool, stored) -> float:
+    """데몬이 쓰는 **가상 시각 오프셋(초)** — 곡선 켬이면 저장값, 끔이면 0(2026-11-23 사용자 결정).
+
+    가상 시각은 새벽·출퇴근 같은 시간대를 일부러 보려고 곡선과 함께 쓰는 장치다. 곡선이 꺼져 있으면 기록 시각·
+    매일 부하 정시·이동(지하철 운행·걷는 속도)·장애 조건 기록이 모두 실제 시각을 본다. 이 값 하나를
+    `set_virtual_offset`·`_daily_load`·`_fault_cond` 가 같이 받는다 — 화면(`status_api`)도 같은 규칙으로 보여 준다"""
+    if not diurnal:
+        return 0.0
+    try:
+        return float(stored or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _daily_load(conn, ts: datetime, vo_sec: float, cells=None) -> int | None:
     """매일 같은 시각 부하 — 옛 24번(증설)을 시나리오 대신 **망 조작**으로 건다(2026-11-21).
 
     사용자 11-21: 「망 조작의 장비 재배정 아래 · 역 단위로 등록 · 시간을 여러 개 골라 그 시간에 그 역에 묶어서 ·
@@ -847,6 +1023,10 @@ def _daily_load(conn, ts: datetime, vo_sec: float) -> int | None:
       두 묶음이 같은 역을 고른 경우에 두 번 걸지 않는다. 이어진 구간 중간(재기동으로 앞 정시를 놓침)이면 남은
       시간만큼 건다.
     * **옛 스위치(`daily_load`·`daily_load_at`)는 읽지 않는다** — 케이 11-21 13:45 「묶음으로 옮기지 말고 끄기만」.
+    * **이 gen 이 데이터를 만들지 않는 대상(셀 0개)은 등록하지 않는다**(2026-11-22 · F-524~529). 묶음 1 에 생성 범위
+      밖 역(杉並 쪽 좌표 셋)이 들어 있어, 매시 등록 → 해석 때 「생성 범위 밖 역(셀 0개)」로 취소를 되풀이하며 장애
+      목록을 채웠다(중복 검사는 대기·진행만 본다). 해석과 같은 함수(`faults._daily_cells`)로 미리 세고, 로그는 토큰마다
+      한 번만 남긴다. ``cells`` 가 없으면(옛 호출) 세지 않고 예전처럼 등록한다
     돌려준 값은 마지막으로 건 장애 번호(없으면 None)
     """
     from . import faults as F
@@ -880,6 +1060,11 @@ def _daily_load(conn, ts: datetime, vo_sec: float) -> int | None:
         end = (h + run) % 24
         for tok in d["targets"]:
             target = f"{DAILY_PREFIX}:{tok}"
+            if cells is not None and not F._daily_cells(tok, cells):
+                if tok not in _DAILY_NO_CELLS:
+                    _DAILY_NO_CELLS.add(tok)
+                    print(f"[{ts:%H:%M}] 매일 부하 — 묶음 {n} · {tok} 는 셀 0개(생성 범위 밖) · 등록하지 않는다", flush=True)
+                continue
             with conn.cursor() as cur:
                 cur.execute(f"SELECT COUNT(*) FROM {control.T_FAULT} WHERE FAULT_KIND='capacity_shift' "
                             "AND TARGET=%s AND STATUS IN ('pending','active')", [target])
@@ -984,6 +1169,14 @@ def cmd_run(args) -> int:
         )
         # 실시간 주입도 정답을 남긴다 — `_live_truth` 가 활성 집합이 바뀔 때 쓴다
         gen.truth_path = _truth_path(pem, data_dir)
+        # 가입자 위치를 이어 받는다 — 재시작 때 걷는 사람이 다시 흩어져 외곽 셀이 무호가 되지 않게(`_load_mobility`)
+        _aside("이동 상태 이어 받기", _load_mobility, gen, conn)
+        # `docker stop` 은 SIGTERM 이다 — 기본 동작은 `finally` 없이 끝나 마지막 위치를 못 남긴다
+        import signal
+
+        def _term(_sig, _frm):
+            raise KeyboardInterrupt
+        signal.signal(signal.SIGTERM, _term)
         # ── 생성량 비율 (2026-10-14) ──────────────────────────────────
         # **기준은 `pemdb1.rates` 의 절대값이고 비율이 그 위에 걸린다.**
         # DB(`CM_DATAGEN_CONFIG.volume_pct`)가 있으면 그것이 이기고, 없으면
@@ -1037,7 +1230,11 @@ def cmd_run(args) -> int:
         gen.set_diurnal(di_now)
         if not di_now:
             print("  시간대 곡선 꺼짐 — 피크 수준 평탄 · 그룹·이동 없이 전체 eNB 에 골고루", flush=True)
-        vo_now = gen.set_virtual_offset(float(control.get_config(conn, "virtual_offset_sec", vo_default) or 0))
+        # **유효 오프셋 = 곡선 켬이면 저장값, 끔이면 0**(2026-11-23 사용자 「곡선을 켰을 때만 시간 이동이 가능하고, 그 외에는
+        # 시간 자체가 현재 시간으로 흐른다」). 전에는 곡선을 꺼도 저장값(+3시간)이 그대로 들어가 매일 부하가 가상 18시
+        # = 실제 15:01 에 걸렸고, 이동(지하철 운행·걷는 속도)도 옮긴 시각을 봤다 — 화면은 끔이면 0 으로 보여 줘
+        # (`status_api` `virtual_offset_sec`) 겉과 속이 달랐다. 저장값은 건드리지 않는다 — 곡선을 다시 켜면 살아난다
+        vo_now = gen.set_virtual_offset(_vo_effective(di_now, control.get_config(conn, "virtual_offset_sec", vo_default)))
         if vo_now:
             print(f"  가상 시각 {vo_now / 60:+.0f}분 — 곡선·그룹 비율만 옮긴다(레코드 시각은 실제 시각)",
                   flush=True)
@@ -1150,15 +1347,16 @@ def cmd_run(args) -> int:
                       + ("켜짐 — 04시 최저 · 19시 최고"
                          if di_want else "꺼짐 — 피크 수준 평탄 · 전체 eNB 에 골고루"),
                       flush=True)
-            vo_want = gen.set_virtual_offset(float(
-                control.get_config(conn, "virtual_offset_sec", vo_default) or 0))
+            # 곡선을 켜고 끄면 이 틱부터 따라간다 — 위 `di_now` 를 먼저 갱신했다(`_vo_effective`)
+            vo_want = gen.set_virtual_offset(_vo_effective(
+                di_now, control.get_config(conn, "virtual_offset_sec", vo_default)))
             if vo_want != vo_now:
                 vo_now = vo_want
                 print(f"[{ts:%H:%M}] 가상 시각 "
                       + (f"{vo_now / 60:+.0f}분" if vo_now else "해제 — 지금 시각"), flush=True)
 
             # 매일 같은 시각 부하(옛 24번 · 2026-11-21 망 조작 묶음 「시간들 × 역들」) — `_daily_load`
-            _aside("매일 부하", _daily_load, conn, ts, vo_now)
+            _aside("매일 부하", _daily_load, conn, ts, vo_now, gen.cells)
 
             # ── 보존 정리 (2026-10-15) ────────────────────────────────
             # **생성 정지보다 앞이다.** 전에는 틱 맨 끝, `enabled=false` 의
@@ -1236,6 +1434,7 @@ def cmd_run(args) -> int:
             if quakes:
                 quake_done.update(_aside("지진 기록", control.record_quakes, conn, quakes) or ())
             _aside("정답 기록", _live_truth, P, gen, scs)
+            _aside("반복 복사 되찾기", _history_repeat_recover, conn, pem, gen, ts)
             _aside("과거 데이터 요청", _history_request, pem, gen, scs, now=ts)
 
             t0 = time.time()
@@ -1271,7 +1470,7 @@ def cmd_run(args) -> int:
             # 이력이 쌓여 제어 화면이 생성량을 2배·3배로 보고한다.
             control.record_tick(
                 conn, ts, n, ",".join(str(f["fault_id"]) for f in active),
-                series_stat=P.series_stat(rows, up_rows))
+                series_stat=P.series_stat(rows, up_rows, getattr(gen, "last_extra_n", None)))
             # 하한 꼬리 상태를 화면에 알린다(`PemdbGen.floor_tail_until`). 바뀔
             # 때만 쓴다 — 기동 직후 첫 틱은 반드시 쓴다(재시작으로 꼬리가
             # 사라졌다는 사실까지 덮어야 한다)
@@ -1290,6 +1489,8 @@ def cmd_run(args) -> int:
                 break
     except KeyboardInterrupt:
         print("\n■ 중단 요청 — 연결 정리 후 종료")
+        if "gen" in locals():
+            _aside("이동 상태 저장", _save_mobility, gen)
     finally:
         conn.close()
     return 0
@@ -1571,6 +1772,7 @@ def _pem_follow(conn, P, gen, w, last_done, *, umaps: dict,
             for fid in bad:
                 print(f"  ! fault {fid} 해석 실패 — 건너뛴다", flush=True)
             _aside("정답 기록", _live_truth, P, gen, scs)
+            _aside("반복 복사 되찾기", _history_repeat_recover, conn, pem or {}, gen, pending)
             _aside("과거 데이터 요청", _history_request, pem or {}, gen, scs, now=pending)
 
             t0 = time.time()

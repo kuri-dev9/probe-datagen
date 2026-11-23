@@ -174,7 +174,8 @@ def test_32_has_no_call_flood_during_the_down_phase(gen):
 
 def test_kinds_are_registered_in_gen_and_control():
     assert "ran_drop_surge" in control.KINDS and "transport_cut" in control.KINDS
-    assert "ran_drop_surge" in faults._AUTO_SGG
+    # 8번 통화 끊김 증가는 시군구 전체가 아니라 인접 eNB 군집이다(2026-11-23 사용자 결정 2)
+    assert "ran_drop_surge" in faults._CLUSTER_KINDS and "ran_drop_surge" not in faults._AUTO_SGG
     assert "transport_cut" in faults._AREA_KINDS
 
 

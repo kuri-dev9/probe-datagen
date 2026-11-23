@@ -910,6 +910,125 @@ class Generator:
                 sub.route_wait = now + self.rng.randint(a, b)
         return moved
 
+    # -- 이동 상태 이어 받기 (2026-11-23) -------------------------------------
+    #
+    # gen 을 다시 띄우면 걷는 사람·노선 탑승자가 기동 배치(`seat_walkers`·`seat_routes`)로 돌아간다. 미리 걷기
+    # (`_warm_walkers` 180분)는 며칠 돌던 분포를 되살리지 못한다 — 11-14 05:17 재시작 뒤 머무는 걷는 사람 33명에게서
+    # 통화가 나오던 외곽 셀(184701-84)이 47분 무호였고 그것이 지진(F-329) 근거에 섞였다(야간-보고-1114 §3). 그래서
+    # **종료할 때 한 번** 움직이는 몫만 파일로 남기고(`mobility_state`) 기동 때 그대로 되돌린다(`restore_mobility`).
+    # 덤프가 없으면(강제 종료·크래시) 최근 5분 통계의 마지막 셀로 앉힌다(`seat_from_cells`).
+    # 기동 배치가 같아야 되돌릴 수 있다 — 셀·노선·가입자·씨앗이 같은지 지문(`mobility_fingerprint`)으로 본다.
+
+    #: 가입자마다 남기는 칸 — 기동 배치가 정하는 것(노선 번호·걷기 여부)은 지문이 지킨다
+    _MOB_FIELDS = ("route_pos", "route_fwd", "route_t", "route_to", "route_from", "trip", "route_wait",
+                   "walk_t", "walk_dwell")
+
+    def mobility_fingerprint(self) -> str:
+        """기동 배치의 지문 — 셀 목록·노선 칸·가입자(IMSI)·걷기/노선 씨앗·걷는 사람 몫. 하나라도 다르면 이어 받지 않는다"""
+        import hashlib
+        h = hashlib.blake2b(digest_size=16)
+        for part in ([c.cell_key for c in self.cells],
+                     [[c.cell_key for c in rt.cells] for rt in self.routes],
+                     [s.imsi for s in self.subs],
+                     [getattr(self, "_walk_base", 0), getattr(self, "_route_base", 0), list(self.walk_sec)],
+                     [s.route for s in self.subs], self._walkers):
+            h.update(repr(part).encode())
+            h.update(b"\x1e")
+        return h.hexdigest()
+
+    def mobility_state(self) -> dict:
+        """움직이는 가입자(노선·걷기)의 지금 상태 — JSON 으로 쓸 수 있는 모양. 고정 가입자는 싣지 않는다"""
+        subs = {}
+        for i, sub in enumerate(self.subs):
+            if sub.route < 0 and sub.walk_cell is None:
+                continue
+            row = [getattr(sub, f) for f in self._MOB_FIELDS]
+            row.append(None if sub.walk_cell is None else sub.walk_cell.cell_key)
+            row.append(list(sub.route_hops) if sub.route_hops is not None else None)
+            subs[sub.imsi] = row
+        return {"fingerprint": self.mobility_fingerprint(), "fields": [*self._MOB_FIELDS, "walk_cell", "route_hops"],
+                "subs": subs, "walk_n": {self.subs[i].imsi: n for i, n in self._walk_n.items()}}
+
+    def restore_mobility(self, state: dict) -> tuple[bool, str]:
+        """`mobility_state` 를 되돌린다 — ``(되돌렸나, 이유)``. 지문이 다르거나 모양이 틀리면 아무것도 바꾸지 않는다"""
+        if not isinstance(state, dict) or state.get("fingerprint") != self.mobility_fingerprint():
+            return False, "기동 배치가 다르다(셀·노선·가입자·씨앗 중 하나가 바뀜)"
+        if list(state.get("fields") or ()) != [*self._MOB_FIELDS, "walk_cell", "route_hops"]:
+            return False, "저장 형식이 다르다"
+        by_key = {c.cell_key: c for c in self.cells}
+        idx = self.sub_by_imsi
+        todo = []
+        for imsi, row in (state.get("subs") or {}).items():
+            i = idx.get(imsi)
+            if i is None or len(row) != len(self._MOB_FIELDS) + 2:
+                return False, f"가입자 {imsi!r} 를 되돌릴 수 없다"
+            wc = row[len(self._MOB_FIELDS)]
+            if wc is not None and wc not in by_key:
+                return False, f"셀 {wc!r} 이 셀 목록에 없다"
+            todo.append((i, row, None if wc is None else by_key[wc]))
+        # 다 읽은 뒤에 쓴다 — 중간에 멈추면 반쯤 되돌린 상태가 남는다
+        for i, row, cell in todo:
+            sub = self.subs[i]
+            for f, v in zip(self._MOB_FIELDS, row):
+                setattr(sub, f, v)
+            if sub.walk_cell is not None and cell is not None:
+                sub.walk_cell = cell
+            hops = row[len(self._MOB_FIELDS) + 1]
+            sub.route_hops = tuple(hops) if hops is not None else None
+        self._walk_n = {idx[k]: int(n) for k, n in (state.get("walk_n") or {}).items() if k in idx}
+        # 미리 걷기는 하지 않는다 — 이어 받은 위치가 이미 평시 분포다
+        self.walk_warmup_stats = {"minutes": 0, "walkers": len(self._walkers), "moves": 0, "sec": 0.0,
+                                  "restored": len(todo)}
+        return True, f"가입자 {len(todo):,}명 위치를 이어 받음"
+
+    def seat_from_cells(self, last: dict[str, tuple[str, bool]]) -> int:
+        """덤프가 없을 때 최근 통계의 **마지막 셀·이동 여부**(``IMSI → (cell_key, moving)``)로 앉힌다 (2026-11-23 사용자).
+
+        * 걷는 사람 — 그 셀에 앉힌다.
+        * 노선 탑승자 — 여정 위에 그 셀이 있을 때만 그 칸에 앉힌다. 그 분에 셀을 옮겼으면(이동 중) 하차 대기를 푼다.
+        * 셀 목록·여정에 없는 셀이면 기동 배치 그대로다.
+
+        앉힌 걷는 사람은 미리 걷기(`_warm_walkers`)에서 뺀다 — 걸리면 되살린 위치가 흩어진다. 반환은 앉힌 사람 수다.
+        """
+        by_key = self.cell_by_key
+        seated_w: set[int] = set()
+        n = 0
+        for i, sub in enumerate(self.subs):
+            got = last.get(sub.imsi)
+            cell = by_key.get(got[0]) if got else None
+            if cell is None:
+                continue
+            if sub.route < 0:
+                if sub.walk_cell is not None:
+                    sub.walk_cell = cell
+                    seated_w.add(i)
+                    n += 1
+                continue
+            rt = self.routes[sub.route]
+            pos = next((p for p in self._journey_cells(sub, rt) if rt.cells[p] is cell), None)
+            if pos is None:
+                continue
+            sub.route_pos = pos
+            if got[1]:
+                sub.route_wait = 0.0
+            n += 1
+        if seated_w:
+            self._warm_skip = seated_w
+        return n
+
+    @staticmethod
+    def _journey_cells(sub: Subscriber, rt) -> list[int]:
+        """그 가입자 여정이 지나는 칸 — 승차 칸에서 방향대로 하차 칸까지. 여정이 없으면 노선 전체"""
+        if sub.route_to < 0 or sub.route_from < 0:
+            return list(range(len(rt)))
+        out, p, fwd = [sub.route_from], sub.route_from, sub.route_fwd
+        for _ in range(2 * len(rt)):
+            if p == sub.route_to:
+                break
+            p, fwd = rt.step(p, fwd)
+            out.append(p)
+        return out
+
     def cell_of(self, sub: Subscriber) -> Cell | None:
         """이동 가입자의 **현재 위치 셀**. 고정 가입자는 `None`."""
         if sub.route < 0:
@@ -968,6 +1087,11 @@ class Generator:
 
         t0 = _time.monotonic()
         keep, self.rng = self.rng, random.Random(self.rng.random())
+        # 통계 위치로 앉힌 사람(`seat_from_cells`)은 걷지 않는다 — 되살린 위치가 흩어진다
+        skip = getattr(self, "_warm_skip", None) or set()
+        walkers = self._walkers
+        if skip:
+            self._walkers = [i for i in walkers if i not in skip]
         moved = 0
         try:
             start = now - 60.0 * self.walk_warmup_min
@@ -975,9 +1099,10 @@ class Generator:
                 moved += self._advance_walkers(start + 60.0 * k)
         finally:
             self.rng = keep
+            self._walkers = walkers
             self.tau_events.clear()
         self.walk_warmup_stats = {"minutes": self.walk_warmup_min, "walkers": len(self._walkers),
-                                  "moves": moved, "sec": round(_time.monotonic() - t0, 2)}
+                                  "moves": moved, "sec": round(_time.monotonic() - t0, 2), "skipped": len(skip)}
 
     def _advance_walkers(self, now: float) -> int:
         """머문 시간이 지난 걷는 사람을 **이웃 eNB 의 셀**로 옮긴다.

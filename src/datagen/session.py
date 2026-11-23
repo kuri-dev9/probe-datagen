@@ -97,7 +97,7 @@ from datetime import datetime
 from .cells import Cell
 from .handover import HO_INTRA, HO_S1, HO_S1_MME, Topology, kind_of
 from .generator import USER_FIELDS, diurnal_factor
-from .scenarios import Plan, Rec
+from .scenarios import FADE_CELL_BOUND, Plan, Rec
 
 # --------------------------------------------------------------------------
 # ONGOINGFLAG — 규격 값. graphio `schema/codes.ONGOING_FLAG` 와 같아야 한다
@@ -231,6 +231,25 @@ def _tls_handshake_only(traffic: list[float], rng) -> list[float]:
     for d in ("Uplink", "Dnlink"):
         i_all, i_pay = TRAFFIC_PAIRS.index(f"{d}_PacketCount"), TRAFFIC_PAIRS.index(f"{d}_PayloadPacketCount")
         out[i_pay] = min(out[i_pay], out[i_all])
+    return out
+
+
+def _udp_no_answer(traffic: list[float], rng) -> list[float]:
+    """UDP 연결 요청만 있고 답이 없는 세션 총량 — up 패킷 1~3(QUIC Initial 은 최소 1,200B · RFC 9000 §14.1) ·
+    up 재전송 = 개수 − 1 · down 전부 0 · 처리 시간 0(흐른 데이터가 없다)."""
+    n = rng.randint(1, 3)
+    out = []
+    for name in TRAFFIC_PAIRS:
+        if not name.startswith("Uplink"):
+            out.append(0.0)
+        elif name.endswith("PayloadSize"):
+            out.append(float(sum(rng.randint(1200, 1252) for _ in range(n))))
+        elif name.endswith("RetransPacketCount"):
+            out.append(float(n - 1))
+        elif name.endswith("PacketCount"):
+            out.append(float(n))
+        else:
+            out.append(0.0)
     return out
 
 
@@ -1184,6 +1203,15 @@ class SessionEngine:
             span = 1
             freeze, ho_stall_s = None, 0.0
             fade_sc = None                  # 흐른 양이 없다 — 걷을 것도 없다
+        elif syn_fail:
+            # **UDP(QUIC) 연결 요청에 답이 없다**(2026-11-23 · 16번 동영상 서버 접속 불가 · 설계 §7-4). TCP 처럼 SYN 칸은
+            # 없다(UDP 는 아래에서 비운다) — 단말이 연결 요청(Initial)을 1~3번 보내고 서버가 한 번도 답하지 않는다.
+            # down 은 전부 0, RTT 를 잴 왕복이 없어 RTT 도 0 이다. 1분 안에 끝난다
+            traffic = _udp_no_answer(traffic, rng)
+            plain = tuple(0.0 for _ in plain)
+            span = 1
+            freeze, ho_stall_s = None, 0.0
+            fade_sc = None
         elif tcp and tls_fail:
             # **보안 연결이 서지 않았다**(33번 ② · 2026-11-19) — TCP 는 섰고(악수 그대로 · `U-01` 성공)
             # 인증서 검증에 실패한 단말이 **곧바로 RST** 로 끊는다. 흐른 것은 TLS 악수 몇 패킷뿐이고
@@ -1231,7 +1259,7 @@ class SessionEngine:
 
         m = 0
         # 연결이 안 섰으면 요청도 없다 — 보안 연결이 안 선 세션도 요청이 없다
-        if not (tcp and (syn_fail or tls_fail)) and rng.random() < self.p_http:
+        if not (syn_fail or (tcp and tls_fail)) and rng.random() < self.p_http:
             # 긴 세션이 더 많이 요청한다(§1.3). 평균은 `http_tx_mean` 이고
             # 그것이 `p_http` 와 짝이라 분당 HTTP 레코드 수가 설정을 재현한다.
             scale = span / max(1.0, self.shape.span_mean)
@@ -1344,11 +1372,9 @@ class SessionEngine:
             frac = min(1.0, max(0.0, (t - max(s.t0, slot)) / 60.0))
             now = min(1.0, prev + frac / s.span)
         if s.fade_sc is not None:
-            # 이 분의 망가짐 가중 — 그 장애의 이 분 강도 / 열 때 강도. 장애 창 밖이면 0 이라 평소 양이 흐른다
-            w = 1.0
-            if self.fade_minute is not None:
-                w = s.fade_sc.intensity_for("transport", self.fade_minute) / s.fade_i0
-            s.fade_seg.append((prev, now, min(1.0, max(0.0, w))))
+            # 이 분의 망가짐 가중 — 이 분을 여는 셀(`s.cell`)로 낸다. 분 안에서 전환하면 아래 핸드오버 분기가
+            # 전환 시각(`mid`)에서 구간을 쪼개 뒤 몫에 새 셀의 가중을 준다
+            s.fade_seg.append((prev, now, self._fade_w(s, s.cell)))
         # **매 분 초기화한다.** 남겨 두면 다음 분의 HTTP 가 이미 떠난 셀로
         # 들어가고, 그것은 에러가 아니라 틀린 셀 귀속으로만 나타난다.
         s.ho_t = -1.0
@@ -1475,6 +1501,14 @@ class SessionEngine:
             else:
                 flag2 = F_END if last else F_INTERIM
             s.cell = after
+            # **전환 뒤 몫은 새 셀의 가중이다**(2026-11-23 · 22번 F-536). 위에서 붙인 이 분 구간은 옛 셀 가중이라,
+            # 대상 셀을 떠난 세션이 그 분 남은 몫의 망가짐을 이웃 셀로 들고 갔다 — 정답 밖 115셀이 셀마다 1~2분씩
+            # 손실을 냈다. 앞 줄(`prev`~`mid`)은 이미 냈고 `_fade_g` 가 `mid` 까지만 읽어 쪼개도 어긋나지 않는다
+            if s.fade_sc is not None and s.fade_seg and s.fade_seg[-1][:2] == (prev, now):
+                w_old = s.fade_seg[-1][2]
+                w_new = self._fade_w(s, after)
+                if w_new != w_old and prev < mid < now:
+                    s.fade_seg[-1:] = [(prev, mid, w_old), (mid, now, w_new)]
             self._put(out, mutate, s, flag2, t, mid, now, t_ho, s.cell)
             s.ho_t = t_ho
 
@@ -1608,6 +1642,19 @@ class SessionEngine:
             vals[i_del] = str(cum - int(v * fp))
         for j, v in zip(self._i_plain, s.plain):
             vals[j] = str(int(v * f_now) - int(v * b))
+
+    def _fade_w(self, s: Session, cell) -> float:
+        """이 분 ``cell`` 에서의 망가짐 가중(0~1) — 그 장애의 이 분 강도 / 열 때 강도. 장애 창 밖이면 0 이라 평소 양이
+        흐른다. **대상 셀 밖이면 0 이다**(2026-11-23 · `scenarios.FADE_CELL_BOUND`) — 대상 셀이 없는 장애(전국)는 셀로
+        거르지 않는다. 분 번호를 모르면(`fade_minute` 없음) 1 이다(옛 동작)."""
+        if self.fade_minute is None:
+            return 1.0
+        fsc = s.fade_sc
+        w = fsc.intensity_for("transport", self.fade_minute) / s.fade_i0
+        if (fsc.kind in FADE_CELL_BOUND and fsc.target.cell_keys
+                and cell.cell_key not in fsc.active_cells_cache):
+            w = 0.0
+        return min(1.0, max(0.0, w))
 
     @staticmethod
     def _fade_g(s: Session, x: float) -> float:

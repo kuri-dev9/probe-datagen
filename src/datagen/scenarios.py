@@ -166,6 +166,10 @@ class FaultCfg:
     congestion_rtt: tuple[float, float] = (100_000.0, 400_000.0)
     #: 혼잡 활성 가입자 배율의 상한 — 확정대장 §3.0 의 "17–20시 1.8배"(24번 A). 14번은 호를 늘리지 않는다
     congestion_load: float = 1.8
+    #: **매일 같은 시각 부하(B 없음)의 혼잡 배율** — 위 `congestion_load` 대신 쓴다(2026-11-22 사용자 결정 (가)).
+    #: 하한 호를 끈 뒤(F-532) 1.8배로는 대상 호 약 1.6배·Q-11 불량 몫 SA 1.9%(하한 5%)라 장애로 서지 않았다.
+    #: B 있는 증설 재현은 `congestion_load` 그대로다. 기본값은 옛 동작(1.8)이고 값은 yaml 이 준다
+    daily_load_congestion: float = 1.8
     #: 14번에서 품질이 나빠지는 기존 가입자 비율(강도 1.0 일 때 · 2026-11-05 사용자 결정). **초기값**
     congestion_user_share: float = 0.6
     #: 23번에서 몰려서 무너진 가입자 비율(강도 1.0 일 때). 14번과 같은 몫이다. **초기값**
@@ -229,7 +233,7 @@ class FaultCfg:
                 continue
             if k in ("floor_per_cell", "floor_max_cells", "floor_tail_min",
                      "floor_tail_half_min", "floor_tail_eps", "disaster_emergency_share",
-                     "congestion_load", "congestion_user_share", "crowd_user_share",
+                     "congestion_load", "daily_load_congestion", "congestion_user_share", "crowd_user_share",
                      "anchor_min_people", "anchor_min_cells", "congestion_meshes",
                      "floor_moved_share", "auto_node_min_share", "auto_wide_min_share",
                      "outage_min_cells", "outage_min_rate", "quake_jitter_deg",
@@ -1014,8 +1018,9 @@ KIND_SPECS: dict[str, dict] = {
         shape="STEPS", steps=((3, 0.50), (23, 1.00), (25, 0.40)),
         series=("transport",),
         scope_kind="CELL", expect_kpi="Q-04",
-        # 「과거엔 괜찮았는데 오늘만」을 R-41 이 본다 — 전일·전주 둘 다(2026-11-21 사용자)
-        history_offsets=(1, 7),
+        # 「과거엔 괜찮았는데 오늘만」을 R-41 이 본다 — 전일 하나(2026-11-23 사용자 「하나만」 · 11-21 전일·전주 둘을
+        # 줄였다. 정상 원본은 날마다 같아 전주는 전일과 같은 행이었고 판정에서 빠졌다)
+        history_offsets=(1,),
     ),
     # 일본 시연 `j-sc-24` — 기지국 증설 후 부하 이동. **장애가 아니다** —
     # 스펙 §8.3 투자 효과 검증이고 정답 원인이 `—` 다. 그래서 `scored=False`
@@ -2021,8 +2026,11 @@ def _dns_fail(rec: Rec, rng: random.Random, intensity: float) -> None:
 
     `900` 은 C-Plane 과 같은 프로브 전용 Process Specific Cause 다
     (`pemdb6.CD_CAUSE` 에 `C_07000900 Request Time Out` 으로도 있다).
-    평시 배경은 `generator._emit` 이 `smp.categorical("ReplyCode")` 로 실측
-    분포를 쓰므로 `900` 이 섞여 나온다 — **장애 때만 안 나오면 역전이다.**
+    `success_only: true`(기본 · `datagen.yaml`)에서는 평시 DNS 가 전부 성공이다
+    (`generator._emit` 이 `ReplyCode` 를 `"0"` 으로 누른다) — 실패는 fault 주입으로만
+    생긴다. 실측 재현 모드(`false`)일 때만 평시 배경이 `smp.categorical("ReplyCode")`
+    로 실측 분포를 써서 `900` 이 섞여 나온다 — 그 모드에서 장애 때만 `900` 이 안
+    나오면 역전이므로 여기서도 무응답을 `900` 으로 적는다(2026-11-22 주석 정정).
 
     `ResolvedIP` 는 **건드리지 않는다** — Parquet 에 없다(V3 §4.4).
     """
@@ -2171,6 +2179,36 @@ def _down_loss(plan: Plan, rng: random.Random, intensity: float,
     plan.set("Traffic_Total_Dnlink_RetransPacketCount", int(pay * rate))
 
 
+#: **셀에 묶인 걷히는 망가짐**(2026-11-23 · 22번 F-535) — 이 kind 의 세션 망가짐은 장애가 약해지면(`Plan.fade`) 그리고
+#: **세션이 대상 셀 밖으로 옮기면** 걷힌다(`session._emit` 의 걷힘 가중이 0). 전에는 세션을 연 셀·분에 정한 손실을
+#: 수명 내내 냈다 — 台東区 에서 연 세션이 핸드오버로 11개 구 97셀에 재전송 3~15% 를 옮겨 놓았고(대표 조각 SCATTER
+#: 378셀), 그 셀이 新宿 F-534 셀과 eNB 를 나눠 두 장애가 K1 으로 묶였고, 정답 셀도 주입 끝(00:03) 뒤 00:09 까지 재전송을
+#: 내 주된 셀 정상화(`_main_end`)가 끊을 자리가 없었다. 실제 망에서도 고장 난 전송 구간·붐비는 셀을 벗어나거나 장애가
+#: 끝나면 재전송·지연이 멎는다. **장비 범위 kind(PGW·SGW·MME)는 넣지 않는다** — 핸드오버해도 PGW 는 그대로라 옮긴 셀에서도
+#: 망가짐이 맞다. 앱·기종 kind 도 셀과 상관없다. 23번 행사장(`event_crowd`)은 넣지 않는다 — 망가짐이 총량이 아니라 세션
+#: 깃발(`dn_stall` · 세션 내내 down 이 멎음)이라 총량만 평소로 되돌리면 깃발과 양이 어긋난다(연결 결말은 세션을 열 때의
+#: 사건이다 · `_app_session_broken` 머리말)
+#:
+#: **한계 — 한 세션에 걷히는 장애는 하나다.** `Plan.fade` 는 처음 등록한 시나리오만 싣는다(`plan.fade is None` 일 때만).
+#: 두 장애가 같은 세션을 망가뜨리면 뒤의 것은 열 때 정한 양 그대로 수명 내내 남는다 — 같은 셀에 두 셀 범위 장애를 겹쳐
+#: 주입할 때만 생긴다
+FADE_CELL_BOUND = frozenset({"transport_loss", "compound_causal_failure", "ran_congestion", "anchor_saturation",
+                             "capacity_shift", "natural_disaster"})
+
+
+def _fade_on(plan, sc) -> None:
+    """`FADE_CELL_BOUND` kind 의 세션 망가짐을 걷히게 등록한다 — **망가뜨리기 전에** 부른다(평소 총량을 남긴다).
+
+    열 때 강도는 걷힘 가중이 읽는 것과 같은 값(`intensity_for("transport", 분)`)이다 — 변형기가 받은 강도는 kind 마다
+    다른 국면 값(24번 `shift_congestion` · 지진 둘레 0.6 배)일 수 있어 그것으로 나누면 분 가중이 어긋난다
+    """
+    if sc is None or plan.fade is not None or sc.kind not in FADE_CELL_BOUND:
+        return
+    i0 = sc.intensity_for("transport", getattr(sc, "_minute", sc.start_minute))
+    if i0 > 0:
+        plan.fade = (sc, i0, dict(plan.totals))
+
+
 @plan_mutator("transport_loss")
 def _transport_loss_plan(plan, sc, intensity, rng, cell) -> bool:
     """특정 지역 전송 구간의 Downlink 손실 — **C-Plane 은 건드리지 않는다**.
@@ -2187,6 +2225,7 @@ def _transport_loss_plan(plan, sc, intensity, rng, cell) -> bool:
         return False
     if rng.random() >= intensity * 0.80:
         return False
+    _fade_on(plan, sc)
     _down_loss(plan, rng, intensity, 0.03, 0.08, 0.12)
     _congested_rtt(plan, rng, intensity)
     plan.scale("Traffic_Total_Dnlink_ThroughputTime", 1.0 + 1.9 * intensity)
@@ -2578,6 +2617,7 @@ def _anchor_saturation(plan, sc, intensity, rng, cell) -> bool:
     # 군집 10~15셀로 좁힌 만큼 셀 안에서 진하게 한다 — 전국 volume 은 그대로
     if rng.random() >= intensity * 1.0:
         return False
+    _fade_on(plan, sc)
     # 하한 0.25 는 `g-sc-16`(0.2)보다 얕다. 저쪽은 손실과 RTT 를 함께
     # 올려 신호가 셋이고, 이쪽은 **처리율 하나로만** 판정되므로 폭이
     # 필요하다 — `EV-08` 의 `throughput_drop_pct` 가 30% 다.
@@ -2644,15 +2684,32 @@ def congested_user(imsi: str, sid: str, intensity: float, share: float | None = 
 
 @plan_mutator("ran_congestion")
 def _ran_congestion_users(plan, sc, intensity, rng, cell) -> bool:
-    """14번 — **원래 있던 사람이 나빠진다.** 호·가입자는 늘지 않는다(2026-11-05 사용자 결정).
+    """14번 — **원래 있던 사람이 나빠진다.** 호·가입자는 늘지 않는다(2026-11-05 사용자 결정 · 2026-11-23 결정 3 으로
+    사람은 `congestion_load` 배 늘린다 — `_ran_congestion_load`).
 
-    세션마다 추첨하면 같은 사람이 분마다 좋았다 나빴다 해서 "그 사람이 불편하다"가 서지 않는다.
-    고른 사람의 세션은 전부 혼잡 품질이 되고 나머지는 평시 그대로다
+    **혼잡은 셀·분의 성질이다**(2026-11-23 사용자 「사람 단위로 하지 마 · 대부분 셀 단위로 해야 맞아 · 셀로 안 묶이는
+    전국 같은 것일 때 개인별로 본다」). 셀이 붐비면 무선 자원을 모두 나눠 쓰므로 그 분 그 셀의 세션은 **전부**
+    느려진다 — 전에는 IMSI 로 고른 60%(`congested_user` · `congestion_user_share`)만 나빠졌다. 세션 추첨으로도
+    돌아가지 않는다(같은 사람이 분마다 좋았다 나빴다 한다 — 같은 지역 같은 시간 혼잡 발생 F-534). 강도는 「누가」가
+    아니라 「얼마나」(`_congest` 의 RTT·처리율 정도)에만 쓴다 — 같은 지역 같은 시간 혼잡 발생(`_capacity_shift`)과 같다
     """
-    if plan.outcome == "stall" or not congested_user(plan.imsi, sc.id, intensity):
+    if plan.outcome == "stall" or intensity <= 0.0:
         return False
+    _fade_on(plan, sc)
     _congest(plan, rng, intensity)
     return True
+
+
+@booster("ran_congestion")
+def _ran_congestion_load(sc, intensity) -> float:
+    """1번 퇴근길 역 앞 속도 저하 — **사람이 몰려 붐빈다**(2026-11-23 사용자 결정 3 · 11-05 「호는 늘지 않는다」를 뒤집음).
+
+    퇴근길 혼잡은 원래 사람이 몰려서 생긴다. 배율은 기존 `congestion_load`(1.8 · 확정대장 §3.0 「17–20시 1.8배」)이고
+    23번 행사장(`_event_crowd_load`)과 같은 장치(셀 추첨 비중)다. 대상은 메시 그대로다(`faults._congestion_target`) —
+    역 근처 eNB 몇 곳으로 좁히면 Q-11 칸 비율이 묽어진다(F-129·F-155). 하한은 지금처럼 채우지 않는다(`pemdb1`).
+    나빠지는 사람은 여전히 IMSI 로 고른 몫(`congestion_user_share`)이고, 늘어난 사람도 같은 규칙에 든다
+    """
+    return 1.0 + (FAULT.congestion_load - 1.0) * max(0.0, min(1.0, intensity))
 
 
 def _ran_congestion(plan, sc, intensity, rng, cell) -> bool:
@@ -2661,6 +2718,8 @@ def _ran_congestion(plan, sc, intensity, rng, cell) -> bool:
         return False                        # 겹침 방지 (V3 §7.2)
     if rng.random() >= intensity * 0.8:
         return False
+    # 24번 A·지진 둘레가 쓴다 — 걷힘은 kind 가 `FADE_CELL_BOUND` 일 때만이다(옛 `earthquake` 재현은 그대로)
+    _fade_on(plan, sc)
     _congest(plan, rng, intensity)
     return True
 
@@ -2848,6 +2907,11 @@ DISASTER_DOWN_END = DISASTER_UP_TO
 #: 처리 용량 때문에 전국 합은 평소의 3배로 묶는다(`pemdb1` 의 `SURGE_CAP` · 사용자 "최대치의
 #: 1.2~3배, 몇 분 이내")
 DISASTER_SURGE_PEAK = 40.0
+#: **위 40배를 잰 지진의 도쿄 진도** — 동일본대지진(2011-03-11) 때 도쿄 23구는 진도 5강이었고, 그 아래 끝이 계측
+#: 진도 5.0 이다(기상청 진도 계급 · 외부 기준이라 맞춤 값이 아니다). 셀 폭주 배율은 이 진도에서 40배가 되고, 그보다 약한
+#: 셀은 **흔들림 속도(PGV) 비**만큼 줄인다(`quake_surge_weight` · 2026-11-23 사용자 결정 2). 전에는 진도 3 이든 6 이든
+#: 같은 40배라, 진도 2.6~2.8 의 F-531 에서 eNB 6곳 호가 396 → 15,121건(38배)이 됐다(재점검 §2 4번)
+DISASTER_SURGE_REF_INTENSITY = 5.0
 #: 폭주로 더해지는 호의 구성 — 음성(VoLTE 확장 서비스 7·8)이 데이터(3·4)보다 많고 발신이 착신보다
 #: 많다. 비율은 실측 증가 배수(발신 50 : 착신 20 = 5 : 2)를 따르고, 음성 몫 0.6 은 **초기값**이다
 #: (총무성 H24 "패킷은 음성만큼 늘지 않았다"). 평소 구성(3 이 68.7% · 7·8 거의 0)은 건드리지 않는다 —
@@ -3213,6 +3277,33 @@ def storm_surge_shape(sc, e: int) -> float:
     return (sc.duration - e) / (r_out + 1.0)
 
 
+def quake_surge_weight(intensity: float | None) -> float:
+    """셀 진도 → 폭주 몫(0~1). 폭주 배율은 ``1 + (배율 − 1) × 몫`` 이다(`pemdb1._surge_drafts`).
+
+    ``min(1, 10^((I − DISASTER_SURGE_REF_INTENSITY) / QUAKE_I_SLOPE))`` — 진도 차를 흔들림 속도 비로 되돌린
+    값이다(진도 1.72 차 = 속도 10배 · 翠川 1999 · 정지 eNB 가중치와 같은 환산). **새 기준값은 없다** — 기준 진도는
+    40배를 잰 지진의 도쿄 진도, 기울기는 이미 있는 환산 상수다. 들어간 판단은 「흔들림 속도에 비례해 사람들이 전화를
+    건다」는 가정 하나다. 정점 40배 기준으로 진도 3 → 약 3.7배 · 4 → 약 11배 · 4.5(5약) → 약 21배 · 5.0 이상 → 40배.
+
+    진도를 모르면(지진 정보 없이 만든 옛 경로 · 셀 진도 표 없음) 1 — 전처럼 정점 그대로다.
+    """
+    if intensity is None:
+        return 1.0
+    return min(1.0, 10.0 ** ((float(intensity) - DISASTER_SURGE_REF_INTENSITY) / QUAKE_I_SLOPE))
+
+
+def _surge_peak_mult(sc) -> float | None:
+    """27번 지역 정점 배율(강도 반영) — 셀 기준 호로 가중한 `1 + (정점 − 1) × 진도 몫`. 기준 호가 없으면 None."""
+    base = sc.__dict__.get("_surge_cell_base") or {}
+    keys = [k for k in (sc.__dict__.get("_surge_keys") or sc.target.cell_keys) if base.get(k)]
+    tot = sum(base[k] for k in keys)
+    if not tot:
+        return None
+    inten = sc.__dict__.get("_quake_cell_intensity") or {}
+    w = sum(base[k] * (quake_surge_weight(inten.get(k)) if inten else 1.0) for k in keys) / tot
+    return round(1.0 + (DISASTER_SURGE_PEAK - 1.0) * w * max(0.0, min(1.0, sc.peak)), 1)
+
+
 def disaster_surge_mult(sc, minute: int) -> float:
     """그 분의 폭주 배율(1 = 평소). 27번은 0 분부터 `DISASTER_SURGE_RAMP` 분에 걸쳐 정점까지 오르고
     `DISASTER_SURGE_END` 에 끝난다. 36번은 `storm_surge_shape` 가 모양을 정한다."""
@@ -3329,6 +3420,9 @@ def _disaster_truth(sc) -> dict:
         # 대략 이 값 × 배율이다. 창고를 못 읽었으면 None(그 분 평소 호를 기준으로 썼다)
         "surge_base_per_min": (round(sc._surge_base, 2)
                                if sc.__dict__.get("_surge_base") is not None else None),
+        # 지역 정점 배율 — 셀 진도 몫(`quake_surge_weight`)을 기준 호로 가중 평균한 값(2026-11-23). 판정이 「몇 배로
+        # 늘었나」를 대조하는 값이다. 기준 호가 없으면 None(불변규칙 17)
+        "surge_peak_mult": _surge_peak_mult(sc),
         "outage_mode": sc.target.outage_mode or "local",
         # 폭주 셀은 정지 둘레 셀(`ring_cells`)을 뺀 지역이다 — 둘레는 정답 지역이지만 폭주 셀이 아니다(2026-11-16)
         "context": [{"code": "CALL_SURGE", "from_min": 0, "to_min": DISASTER_SURGE_END,
@@ -3694,7 +3788,9 @@ def _capacity_shift_load(sc, intensity) -> float:
         # 매일 부하(B 없음) — 사람이 흩어진다. 혼잡과 같은 회복 곡선(`shift_congestion`)으로 내린다. 그대로 두면
         # 호는 1.8배인데 품질만 평시로 돌아가 「붐비는데 멀쩡한」 모양이 된다
         frac = max(0.0, 1.0 - (e - rise + 1) / SHIFT_RECOVER)
-    return 1.0 + (FAULT.congestion_load - 1.0) * frac
+    # 매일 부하(B 없음)는 따로 정한 배율이다(`daily_load_congestion` · 2026-11-22 사용자 (가))
+    load = FAULT.congestion_load if getattr(sc.target, "shift_to", None) else FAULT.daily_load_congestion
+    return 1.0 + (load - 1.0) * frac
 
 
 @plan_mutator("capacity_shift")
@@ -3708,7 +3804,17 @@ def _capacity_shift(plan, sc, intensity, rng, cell) -> bool:
     lv = shift_congestion(sc)
     if lv <= 0.0:
         return False
-    return _ran_congestion(plan, sc, lv, rng, cell)
+    # **혼잡은 셀·분의 성질이다**(2026-11-23 사용자 결정 12 「세션이 아니라 혼잡한 셀이나 기지국 단위」). 셀이 붐비면
+    # 무선 자원을 모두 나눠 쓰므로 그 분 그 셀의 세션은 **전부** 느려진다 — 세션마다 동전(`_ran_congestion` 의
+    # `intensity × 0.8`)을 던지면 같은 사람이 분마다 좋았다 나빴다 해 RTT 평균이 문턱을 못 넘었다(F-534 대상 21셀
+    # RTT 불량 45%). 강도 ``lv`` 는 「누가」가 아니라 「얼마나」(`_congest` 의 RTT·처리율 정도)에만 쓴다.
+    # 지진·재해 둘레(`_quake_ring`·`_disaster_ring`)는 그대로 둔다 — 주 원인이 정지라 둘레를 전부 나쁘게 하면
+    # 원인 순위가 흔들릴 수 있고(그 머리말), 4번 지진 발생은 지금 통과다. 같은 원리로 넓히려면 4번 재생 뒤에 한다
+    if plan.outcome == "stall":
+        return False                        # 겹침 방지 (V3 §7.2)
+    _fade_on(plan, sc)
+    _congest(plan, rng, lv)
+    return True
 
 
 # --------------------------------------------------------------------------
@@ -3801,18 +3907,18 @@ def _cdn_plan(plan, rng, intensity: float, sc=None) -> None:
     - HTTP 응답 지연·504 는 `_cdn_degradation`(http 계열) 그대로다 — 붙은 세션의 요청 쪽이다
 
     `plan.fade` 는 `_app_session_broken` 과 같게 등록한다 — 장애 창이 끝나면 이월 세션의 up 열화도 걷힌다.
+
+    **고른 세션은 모두 붙지 못하고, 붙지 못한 세션은 모두 다시 시도한다**(2026-11-23 사용자 「down 이 엄청 적거나 0
+    이고 연결 요청만 계속 증가 · 단말이 껐다 켰다 하며 요청만 쌓이는 모습」). 전에는 50%·I 만 `syn_fail` 이었고
+    대상 앱(3001 STREAMING)이 **UDP(QUIC)** 라 `syn_fail` 이 TCP 갈래에서만 효과가 있어 신호가 아예 없었다(F-547).
+    이제 UDP 세션의 `syn_fail` 은 `session` 의 「응답 없음」 갈래다 — up 은 연결 요청 1~3개(Initial ~1,200B ·
+    재전송 = 개수 − 1), down 은 전부 0. 재시도 개수 범위는 그대로(1~(1+3I))이고 재시도의 재시도는 없다(`_open`)
+    — 그래서 그 앱의 세션 수(연결 요청)가 쌓이고 down 은 거의 0 이 된다. 새 값 없음
     """
     if sc is not None and intensity > 0 and plan.fade is None:
         plan.fade = (sc, intensity, dict(plan.totals))
-    if rng.random() < 0.5 * intensity:
-        plan.syn_fail = True
-    else:
-        _congested_rtt(plan, rng, intensity, "Uplink")
-        pay = plan.get("Traffic_Total_Uplink_PayloadPacketCount")
-        rate = clip(rng.uniform(0.02, 0.04) + 0.12 * intensity, 0.0, 0.30)
-        plan.set("Traffic_Total_Uplink_RetransPacketCount", int(pay * rate))
-    if rng.random() < 0.6 * intensity:
-        plan.retries = rng.randint(1, 1 + int(3 * intensity))
+    plan.syn_fail = True
+    plan.retries = rng.randint(1, 1 + int(3 * intensity))
 
 
 @mutator("cdn_degradation")
@@ -4143,7 +4249,8 @@ def _ran_drop_surge(rec, sc, intensity, rng, cell) -> bool:
     if not _connected(rec) or rng.random() >= intensity * 0.60 * 0.30:
         return False
     from . import callflow
-    return callflow.drop(rec, 121, rng)
+    # 길이 0 인 연결 호도 끊는다 — 공통 스위치(`callflow.DROP_ZERO_LENGTH`)를 끄더라도 8번은 켠 채로 둔다
+    return callflow.drop(rec, 121, rng, fill_zero=True)
 
 
 # --------------------------------------------------------------------------
@@ -4480,6 +4587,7 @@ def _compound_causal_failure_plan(plan, sc, intensity, rng, cell) -> bool:
         return False
     if rng.random() >= intensity * 0.80:
         return False
+    _fade_on(plan, sc)
     _down_loss(plan, rng, intensity, 0.03, 0.03, 0.12)
     _congested_rtt(plan, rng, intensity)
     plan.scale("Traffic_Total_Dnlink_ThroughputTime", 1.0 + 1.9 * intensity)

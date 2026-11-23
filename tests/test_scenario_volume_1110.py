@@ -208,7 +208,8 @@ globalThis.fetch=async u=>({json:async()=>({ok:false,reason:'volume',volume:30})
 
 def test_page_has_no_volume_tab_but_the_detail_boxes():
     h = ui._HTML_SCEN
-    assert "id=vol>" not in h.replace('"', "") and "VOL_KEYS" in h and "function volBoxes(" in h and "function mergeVols(" in h
+    # 11-22 사용자 「그냥 표시하지 마」 — 생성량 칩·두 상자 구분(`VOL_KEYS`)을 뺐다. 목록과 같은 판정 한 벌만 보인다
+    assert "id=vol>" not in h.replace('"', "") and "VOL_KEYS" not in h and "function volBoxes(" in h and "function mergeVols(" in h
 
 
 def test_japanese_texts_of_the_tab_exist_in_the_page_dictionary():

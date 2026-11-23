@@ -218,6 +218,18 @@
   .tip i { width:8px; height:8px; border-radius:2px; display:inline-block; }
   .tip .t-sum { border-top:1px solid #2c3542; margin-top:4px; padding-top:4px; }
   .tip .t-f { color:#e5534b; margin-top:4px; }
+  .tip .t-fl { margin-top:2px; }
+  .tip .t-fl b { color:#e5534b; }
+  .tip .t-fl.daily b { color:#d29922; }
+  .tip .t-fl small { display:block; color:#8a94a3; font-size:11px; padding-left:10px; }
+  .bar .active-cnt { position:relative; cursor:pointer; }
+  .active-pop { position:absolute; top:calc(100% + 8px); left:0; z-index:20; min-width:340px;
+                background:#0f141b; border:1px solid #2c3542; border-radius:6px; padding:8px 10px;
+                font-size:12px; line-height:1.55; box-shadow:0 6px 20px rgba(0,0,0,.5); white-space:nowrap; }
+  .active-pop .t-fl { margin-top:4px; }
+  .active-pop .t-fl b { color:#e5534b; }
+  .active-pop .t-fl.daily b { color:#d29922; }
+  .active-pop .t-fl small { display:block; color:#8a94a3; font-size:11px; padding-left:10px; }
   .lg { display:flex; gap:12px; flex-wrap:wrap; font-size:12px; color:var(--dim);
         margin-top:6px; }
   .lg i { width:10px; height:10px; border-radius:2px; display:inline-block;
@@ -287,7 +299,9 @@
   <span class="st">생성량 <b id="st-pct">—</b>
     <small class="dim" id="st-rate"></small></span>
   <span class="st">직전 틱 <b id="st-last-n">—</b></span>
-  <span class="st active-cnt">활성 장애 <b id="active-cnt">0</b> 건</span>
+  <span class="st active-cnt" id="active-wrap" onclick="toggleActive(event)">활성 장애 <b id="active-cnt">0</b> 건
+    <small class="dim" id="active-sx"></small>
+    <div class="active-pop" id="active-pop" hidden></div></span>
   <!-- **"오늘"만 적혀 있었고 채우는 코드가 없었다** — 영원히 "—" 였고,
        무엇의 오늘인지도 알 수 없었다(2026-10-15). 뜻은 "오늘 생성한 분 수와
        건수"다. 그 값은 `/api/ingest` 의 `by_day` 가 이미 들고 있다. -->
@@ -362,7 +376,7 @@
     <!-- 추가 가입자 — **통화 기록(lte_call)만** 만드는 사람(2026-11-20 사용자 결정 · 최소 1만). 생성량 막대와
          별개다. U-Plane 은 기존 가입자에게서만 나온다(성능). 범위는 서버가 준다(`extra_lte_range`) -->
     <div style="margin-top:14px">
-      <label class="dim" style="font-size:12px; flex-direction:row; align-items:baseline; gap:4px; flex-wrap:wrap">추가 가입자(통화 기록만)
+      <label class="dim" style="font-size:12px; flex-direction:row; align-items:baseline; gap:4px; flex-wrap:wrap">추가 가입자(연결 유지 · 1~2분마다 TAU 1건)
         <b id="extra-label" style="color:var(--fg)">—</b> 명
         <span id="extra-msg" class="dim" style="margin-left:8px"></span>
       </label>
@@ -852,6 +866,10 @@ async function poll() {
       getJson("/api/status"), getJson("/api/faults" + q({limit:FAULT_MAX}))]);
     renderBar(st);
     $("active-cnt").textContent = st.active.length;
+    ACTIVE = st.active || [];
+    $("active-sx").textContent = dailySuffix(ACTIVE);
+    $("active-wrap").title = ACTIVE.length ? ACTIVE.map(f => `F-${f.fault_id} · ${faultName(f)}`).join("\n") : "";
+    if (!$("active-pop").hidden) renderActive();
     $("poll-err").textContent = "";
     // 날짜가 바뀌는 자리에 구분 행을 넣는다. 목록이 하루를 넘기면 "16:01" 만
     // 보고는 어제 것인지 오늘 것인지 알 수 없다.
@@ -874,7 +892,9 @@ let FAULTS = [], FPAGE = 0;
 // 이 화면은 `#N`, 지도는 `지도 · 시나리오 N`, API 로 넣는 시험 주입은 라벨 `noN-…`
 function faultScn(f) {
   const m = /^#(\d+)\b|시나리오 (\d+)|^no(\d+)-/.exec(f.note || "");
-  const no = m ? (m[1] || m[2] || m[3]) : null;
+  // 번호 칸(`SCENARIO_NO`)이 있으면 그것이 먼저다 — 룸 주입은 메모에 번호를 적지 않는다(2026-11-23 · F-557 「같은 지역 같은 시간
+  // 혼잡 발생」이 kind 로만 이어져 「매일 같은 시각 부하」로 보였다)
+  const no = f.scenario_no != null ? String(f.scenario_no) : (m ? (m[1] || m[2] || m[3]) : null);
   let s = no ? SCN.find(x => String(x.no) === no) : null;
   if (!s) {
     // 메모에 번호가 없는 것(외부 API·옛 주입)은 kind 로 잇는다. 같은 kind 를 여러 번호가 쓰면
@@ -886,15 +906,23 @@ function faultScn(f) {
   }
   return s;
 }
+//: 매일 같은 시각 부하(B 없는 `capacity_shift` · 대상 `DAILY:`) — 망 조작이라 **장애 목록에 보이지 않는다**(2026-11-22
+//: 사용자 「같은 시간 부하는 왜 자꾸 보이는거야? 목록에 안 나오게」). 자동 등록·취소된 것·손으로 넣은 것 모두. 목록 표시만
+//: 거르고 `FAULTS`(상세 찾기·지도 링크)·활성 수(`/api/status`)·DB 기록은 그대로다
+//: **자동으로 건 것만이다**(2026-11-23 사용자 「매일 같은 시간 서버부하는 넣은 적도 없는데 왜 11시 17분에」) — 손으로 넣은
+//: 「같은 지역 같은 시간 혼잡 발생」(`INJECT_MODE='manual'`)도 같은 kind·`DAILY:` 대상을 쓴다. 그것은 시나리오 이름으로 보이고
+//: 목록에도 남는다. 자동은 `daily`(옛 행은 `auto`)다
+const isDailyLoad = f => f.kind === "capacity_shift" && /^DAILY/i.test(f.target || "") && f.mode !== "manual";
 function faultName(f) {
   // 매일 같은 시각 부하(망 조작 · `DAILY` 대상) — 시나리오가 아니다. 메모의 「· 자리」를 이름에 붙인다
-  if (f.kind === "capacity_shift" && /^DAILY/i.test(f.target || "")) {
+  if (isDailyLoad(f)) {
     const m = /매일 같은 시각 부하 · ([^(]+?)\s*\(/.exec(f.note || "");
     return T("매일 같은 시각 부하") + (m ? " · " + m[1] : "");
   }
   const s = faultScn(f);
-  // 번호를 `[25]` 로 감싼다 — 바로 앞 칸이 장애 ID 라 `25.` 로 두면 둘이 섞여 읽혔다
-  return s ? `[${s.no}] ${T(s.name)}` : T(LABELS[f.kind] || f.kind);
+  // **화면 번호**(`rank` · 주입 칸의 「1. 퇴근길 역 앞 속도 저하」와 같은 모양)로 쓴다 — 내부 번호(`[27]`)는 쓰지 않는다
+  // (2026-11-22 사용자 「과거 시나리오 번호 쓰지 마」). 화면 번호가 없는 것(폐기)은 이름만
+  return s ? (s.rank != null ? `${s.rank}. ${T(s.name)}` : T(s.name)) : T(LABELS[f.kind] || f.kind);
 }
 
 // 사람이 적은 메모만 — 주입 경로가 붙인 시나리오 번호(`#25`)는 이름 칸이 이미 말한다
@@ -1102,7 +1130,7 @@ const mdhm = s => s ? String(s).replace("T", " ").slice(5, 16) : "—";
 function renderFaults() {
   renderHead();
   const col = FCOLS.find(c => c.k === FSORT.k);
-  const faults = FAULTS.slice().sort((a, b) => {
+  const faults = FAULTS.filter(f => !isDailyLoad(f)).sort((a, b) => {
     const x = col.v(a), y = col.v(b);
     const r = typeof x === "number" && typeof y === "number" ? x - y
             : String(x).localeCompare(String(y), undefined, {numeric: true});
@@ -1333,7 +1361,20 @@ function renderIngest(d) {
 // 데이터가 없는 슬롯은 비워 둔다 — 0 으로 그리면 "생성했는데 0건"과
 // "아직 안 돌았다"가 같아 보인다(불변규칙 17).
 const COLORS = { lte_call:"#4e9af1", transport:"#4caf7d",
-                 http:"#d8a22a", dns:"#a872e0" };
+                 http:"#d8a22a", dns:"#a872e0", lte_call_extra:"#9cc6f7" };
+// 추가 가입자 TAU(2026-11-23 사용자 「lte_call 과 비슷하지만 다르게」) — 같은 파랑 계열의 연한 색 + 빗금. 막대는 패턴,
+// 범례·툴팁 칩은 같은 빗금의 CSS 로 그린다. 기본 lte_call 바로 위에 쌓는다
+const SERIES_FILL = { lte_call_extra: "url(#xtraHatch)" };
+const SERIES_CHIP = { lte_call_extra: "background:repeating-linear-gradient(45deg,#9cc6f7 0 2px,#3d6a9e 2px 4px)" };
+const seriesLabel = n => n === "lte_call_extra" ? T("추가 가입자(TAU)") : n;
+const chipStyle = n => SERIES_CHIP[n] || `background:${COLORS[n] || "#6b7684"}`;
+//: 범례에서 끈 계열 — 브라우저에 남긴다
+const HIDDEN = new Set(JSON.parse(localStorage.getItem("gp-hidden-series") || "[]"));
+function toggleSeries(n) {
+  HIDDEN.has(n) ? HIDDEN.delete(n) : HIDDEN.add(n);
+  localStorage.setItem("gp-hidden-series", JSON.stringify([...HIDDEN]));
+  if (LAST_SERIES) renderChart(LAST_SERIES);
+}
 //: `W` 는 **레이아웃 전(폭 0)에만 쓰는 대비값**이다. 실제 폭은 그릴 때
 //: `clientWidth` 로 읽어 viewBox 를 1:1 로 세운다 — 창 크기가 바뀌어도 글자와
 //: 선이 늘어나지 않는다. `H` 는 CSS `.chart` 의 높이와 같아야 한다.
@@ -1360,15 +1401,63 @@ function callTarget() {
 // 장애 띠 라벨 — `▼ [22] 결제 앱…` 을 띠 폭(px)에 맞춰 자른다. 겹친 장애는 `+n`
 const _cv = document.createElement("canvas").getContext("2d");
 function segLabel(seg, w) {
-  const ids = seg.ids || [];
-  const f = (typeof FAULTS !== "undefined" ? FAULTS : []).find(x => String(x.fault_id) === String(ids[0]));
-  let t = "▼ " + (f ? faultName(f) : "#" + (ids[0] ?? "")) + (ids.length > 1 ? ` +${ids.length - 1}` : "");
+  const f = faultById(seg.id);
+  const name = seg.daily ? T("매일 같은 시각 부하 · 묶음 {n} (역 {k}곳)", {n: seg.daily, k: seg.ids.size})
+             : f ? faultName(f) : "#" + seg.id;
+  const tail = seg.n > 1 ? " · " + T("활성 {n}", {n: seg.n}) : "";
   _cv.font = "600 10px sans-serif";
-  const room = Math.max(w - 6, 28);
-  if (_cv.measureText(t).width <= room) return t;
+  const room = Math.max(w - 8, 28) - _cv.measureText(tail).width;
+  let t = "▼ " + name;
+  if (_cv.measureText(t).width <= room) return t + tail;
   while (t.length > 3 && _cv.measureText(t + "…").width > room) t = t.slice(0, -1);
-  return t + "…";
+  return t + "…" + tail;
 }
+
+// ── 겹친 장애를 모두 보인다 (2026-11-23 사용자 「실제 장애는 3개씩 주입하는데 하나만 나와 헷갈린다」) ──────────
+// 띠는 장애마다 줄을 나눠 쌓고, 툴팁·상단 「활성 장애」는 그 분(지금)의 장애를 전부 적는다.
+// 매일 같은 시각 부하(자동)는 주황, 손으로 넣은 장애는 빨강이다 — 목록에서 숨긴 매일 부하도 여기서는 보인다
+let ACTIVE = [];
+const FAULT_LANES = 4, LANE_H = 15;
+const faultById = id => (typeof FAULTS !== "undefined" ? FAULTS : []).find(x => String(x.fault_id) === String(id));
+const faultColor = f => f && isDailyLoad(f) ? "#d29922" : "#e5534b";
+const hmD = t => p2(t.getHours()) + ":" + p2(t.getMinutes());
+function faultLine(id) {
+  const f = faultById(id);
+  if (!f) return `<div class="t-fl"><b>F-${esc(id)}</b></div>`;
+  const st = new Date(f.start_ts), en = new Date(st.getTime() + (f.duration_min || 0) * 60000);
+  const how = isDailyLoad(f) ? T("매일 부하(자동)") : T("수동");
+  return `<div class="t-fl${isDailyLoad(f) ? " daily" : ""}"><b>F-${f.fault_id}</b> ${esc(faultName(f))}`
+    // 매일 부하는 이름에 역이 이미 있다 — 대상 원문(`DAILY:ST:좌표`)은 사람이 읽을 말이 아니다
+    + `<small>${isDailyLoad(f) ? "" : esc(targetShown(f)) + " · "}${hmD(st)}~${hmD(en)} · ${esc(how)}</small></div>`;
+}
+// 매일 부하 묶음 — 같은 묶음·같은 시작 시각이면 한 부하다(2026-11-23 사용자 「여전히 4개씩 나오는데?」). 띠는 한 줄로
+// 묶고 툴팁·팝오버는 장애(역)마다 그대로 적는다. 묶음 번호는 gen 이 메모에 적는 「(묶음 N · …)」(`cli._daily_load`)다
+function dailyGroup(f) {
+  if (!f || !isDailyLoad(f)) return null;
+  const m = /묶음 (\d+)/.exec(f.note || "");
+  const n = m ? m[1] : "?";
+  return { key: `daily:${n}:${f.start_ts}`, n };
+}
+// 활성 장애에 매일 부하가 있으면 「(매일 부하 묶음 N · 역 K곳)」 — 건수는 장애 수 그대로 센다
+function dailySuffix(list) {
+  const gs = new Map();
+  list.forEach(f => { const g = dailyGroup(f); if (g) gs.set(g.key, { n: g.n, k: ((gs.get(g.key) || {}).k || 0) + 1 }); });
+  return [...gs.values()].map(g => T("(매일 부하 묶음 {n} · 역 {k}곳)", g)).join(" ");
+}
+function renderActive() {
+  const sx = dailySuffix(ACTIVE);
+  $("active-pop").innerHTML = ACTIVE.length
+    ? `<div class="dim">${esc(T("지금 걸린 장애 {n}건", {n: ACTIVE.length}))}${sx ? " " + esc(sx) : ""}</div>`
+      + ACTIVE.map(f => faultLine(f.fault_id)).join("")
+    : `<div class="dim">${esc(T("지금 걸린 장애가 없습니다"))}</div>`;
+}
+function toggleActive(ev) {
+  ev.stopPropagation();
+  const pop = $("active-pop");
+  pop.hidden = !pop.hidden;
+  if (!pop.hidden) renderActive();
+}
+document.addEventListener("click", () => { const pop = $("active-pop"); if (pop) pop.hidden = true; });
 
 function renderChart(d) {
   LAST_SERIES = d;
@@ -1381,12 +1470,17 @@ function renderChart(d) {
     LAST_TICK_N = last && last.total != null ? last.total : null;
   }
   const svg = $("chart"), P = d.points || [];
-  const { H, PAD_B, PAD_T } = CHART;
+  const { PAD_B } = CHART;
   const W = Math.max(Math.round(svg.clientWidth || 0), 320);
-  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   // lte_call 을 **맨 아래**에 — 목표선(A1)과 바로 견주게
   const names = (d.series_names || []).slice()
-    .sort((a, b) => (a === "lte_call" ? -1 : b === "lte_call" ? 1 : a.localeCompare(b)));
+    .sort((a, b) => {
+      const r = n => n === "lte_call" ? 0 : n === "lte_call_extra" ? 1 : 2;
+      return r(a) - r(b) || a.localeCompare(b);
+    });
+  // 끈 계열은 막대에서 빼고 세로 축도 보이는 몫으로 잡는다
+  const shown = names.filter(n => !HIDDEN.has(n));
+  const vsum = p => shown.reduce((a, n) => a + ((p.series || {})[n] || 0), 0);
 
   // 슬롯 축을 **현재 분**에서 역산한다. 서버 응답이 비어 있어도 축은 선다 —
   // 축이 데이터에 의존하면 빈 화면에서 눈금이 사라져 "고장"처럼 보인다.
@@ -1403,13 +1497,47 @@ function renderChart(d) {
     if (i >= 0 && i < slots) byIdx.set(i, p);
   });
 
+  // 장애마다 연속 구간을 만들고 줄에 배치한다 — 앞 구간이 끝난 줄을 다시 쓴다.
+  // 매일 부하는 묶음(`dailyGroup`) 하나가 한 줄이다 — 그 분의 역들을 `ids` 에 모은다
+  const runs = new Map();
+  [...byIdx.keys()].sort((a, b) => a - b).forEach(i => {
+    const seen = new Set();
+    (byIdx.get(i).faults || []).forEach(id => {
+      const dg = dailyGroup(faultById(id)), key = dg ? dg.key : "f:" + id;
+      const r = runs.get(key) || [];
+      const last = r[r.length - 1];
+      if (seen.has(key)) { last.ids.add(String(id)); return; }
+      seen.add(key);
+      if (last && last.to === i - 1) { last.to = i; last.ids.add(String(id)); }
+      else r.push({ id, from: i, to: i, ids: new Set([String(id)]), daily: dg ? dg.n : null });
+      runs.set(key, r);
+    });
+  });
+  const fsegs = [...runs.values()].flat().sort((a, b) => a.from - b.from || String(a.id).localeCompare(String(b.id)));
+  const laneEnd = [];
+  fsegs.forEach(g => {
+    let k = laneEnd.findIndex(e => e < g.from);
+    if (k < 0) { k = laneEnd.length; laneEnd.push(-1); }
+    laneEnd[k] = g.to; g.lane = k;
+    g.n = ((byIdx.get(g.from) || {}).faults || []).length;   // 그 시각 활성 수
+  });
+  // 줄이 넘치면 맨 위에 「+N」 줄을 하나 더 둔다 — 넘친 장애도 툴팁에는 모두 나온다
+  const nLanes = Math.min(Math.max(laneEnd.length, 1), FAULT_LANES) + (laneEnd.length > FAULT_LANES ? 1 : 0);
+  const PAD_T = CHART.PAD_T + (nLanes - 1) * LANE_H;
+  const H = CHART.H + (nLanes - 1) * LANE_H;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.style.height = H + "px";
+
   const tgt0 = callTarget();
-  const max = Math.max(1, ...P.map(p => p.total || 0),
+  const max = Math.max(1, ...P.map(vsum),
                        tgt0 ? Math.max(...Array.from({length: 24}, (_, h) => tgt0(h))) : 0);
   const y = v => PAD_T + (H - PAD_B - PAD_T) * (1 - v / max);
   let out = `<defs><pattern id="gapHatch" width="6" height="6" patternUnits="userSpaceOnUse"
       patternTransform="rotate(45)"><rect width="6" height="6" fill="#8a94a3" opacity=".07"/>
-      <line x1="0" y1="0" x2="0" y2="6" stroke="#8a94a3" stroke-width="2" opacity=".45"/></pattern></defs>`;
+      <line x1="0" y1="0" x2="0" y2="6" stroke="#8a94a3" stroke-width="2" opacity=".45"/></pattern>
+      <pattern id="xtraHatch" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="4" height="4" fill="#9cc6f7" opacity=".55"/>
+      <line x1="0" y1="0" x2="0" y2="4" stroke="#4e9af1" stroke-width="1.6"/></pattern></defs>`;
 
   // ── 장애 구간 — **잘 보여야 한다** (2026-10-15) ────────────────────
   // 전에는 opacity .10 의 배경 띠 하나뿐이라 **막대에 묻혀 안 보였다.**
@@ -1435,40 +1563,51 @@ function renderChart(d) {
              fill="url(#gapHatch)"/>`;
   });
 
-  const fseg = [];               // 연속 구간으로 묶는다 — 칸마다 선을 그으면 숲이 된다
+  // 배경 — 장애가 하나라도 걸린 분을 이어서 한 번만 칠한다(겹쳐 칠하면 진해져 개수처럼 읽힌다)
+  const fseg = [];
   byIdx.forEach((p, i) => {
     const on = !!(p.faults && p.faults.length);
     const last = fseg[fseg.length - 1];
     if (on && last && last.to === i - 1) { last.to = i; }
-    else if (on) fseg.push({ from: i, to: i, ids: p.faults });
+    else if (on) fseg.push({ from: i, to: i });
   });
   fseg.forEach(seg => {
     const x = seg.from * bw, w = Math.max((seg.to - seg.from + 1) * bw, 2);
     out += `<rect x="${x.toFixed(2)}" y="${PAD_T}" width="${w.toFixed(2)}"
              height="${H-PAD_B-PAD_T}" fill="#e5534b" opacity=".18"/>`;
-    // 상단 막대 — 배경만으로는 막대 색에 묻힌다
-    out += `<rect x="${x.toFixed(2)}" y="${(PAD_T-5).toFixed(1)}"
-             width="${w.toFixed(2)}" height="4" fill="#e5534b"/>`;
-    // 시작 지점 — 세로 점선 + 라벨. "언제 주입했나"가 한눈에 보여야 한다
-    out += `<line x1="${x.toFixed(2)}" y1="${(PAD_T-5).toFixed(1)}"
-             x2="${x.toFixed(2)}" y2="${(H-PAD_B).toFixed(1)}"
-             stroke="#e5534b" stroke-width="1.5" stroke-dasharray="3 2"/>`;
-    // A3 — 번호 대신 **주입 칸과 같은 이름**(`faultName`). 띠 폭에 맞춰 자른다
-    out += `<text x="${(x+3).toFixed(2)}" y="${(PAD_T-9).toFixed(1)}"
-             fill="#e5534b" font-size="10" font-weight="600">${esc(segLabel(seg, w))}</text>`;
+  });
+  // 장애마다 한 줄 — 상단 막대 + 시작 세로선 + 「▼ 이름 · 활성 N」. 줄이 넘치면 그 자리에 「+N」만
+  const over = new Map();
+  fsegs.forEach((g, j) => {
+    const x = g.from * bw, w = Math.max((g.to - g.from + 1) * bw, 2);
+    const f = faultById(g.id), col = faultColor(f);
+    out += `<line x1="${x.toFixed(2)}" y1="${PAD_T}" x2="${x.toFixed(2)}" y2="${(H-PAD_B).toFixed(1)}"
+             stroke="${col}" stroke-width="1.2" stroke-dasharray="3 2" opacity=".8"/>`;
+    if (g.lane >= FAULT_LANES) { over.set(g.from, (over.get(g.from) || 0) + 1); return; }
+    const by = PAD_T - 5 - g.lane * LANE_H;
+    out += `<rect x="${x.toFixed(2)}" y="${by.toFixed(1)}" width="${w.toFixed(2)}" height="4" fill="${col}"/>`;
+    // 글자는 같은 줄 다음 구간 앞까지 쓴다 — 7분짜리 장애도 이름이 보이게
+    const nxt = fsegs.slice(j + 1).find(o => o.lane === g.lane);
+    const room = (nxt ? nxt.from * bw : W) - x;
+    out += `<text x="${(x+3).toFixed(2)}" y="${(by-4).toFixed(1)}" fill="${col}" font-size="10"
+             font-weight="600">${esc(segLabel(g, room))}</text>`;
+  });
+  over.forEach((n, from) => {
+    out += `<text x="${(from*bw+3).toFixed(2)}" y="${(PAD_T - 9 - FAULT_LANES * LANE_H).toFixed(1)}"
+             fill="#e5534b" font-size="10" font-weight="700">${esc(T("+{n}건 더 (툴팁)", {n}))}</text>`;
   });
 
   // 계열별 적층 막대. 폭이 1px 미만이면 틈이 생기지 않게 간격을 두지 않는다.
   const gap = bw > 3 ? 0.5 : 0;
   byIdx.forEach((p, i) => {
     let acc = 0;
-    names.forEach(n => {
+    shown.forEach(n => {
       const v = (p.series || {})[n] || 0; if (!v) return;
       const y0 = y(acc + v), y1 = y(acc);
       out += `<rect x="${(i*bw).toFixed(2)}" y="${y0.toFixed(1)}"
                width="${Math.max(bw-gap, 0.6).toFixed(2)}"
                height="${Math.max(y1-y0, 0.5).toFixed(1)}"
-               fill="${COLORS[n] || "#6b7684"}"/>`;
+               fill="${SERIES_FILL[n] || COLORS[n] || "#6b7684"}"/>`;
       acc += v;
     });
   });
@@ -1522,8 +1661,11 @@ function renderChart(d) {
   svg.innerHTML = out;
 
   CHART_SLOTS = { slots, t0, bw, byIdx, names };
+  // 계열 범례는 눌러서 끄고 켠다 — 끈 것은 흐리게 남긴다
   $("legend").innerHTML = names.map(n =>
-    `<span><i style="background:${COLORS[n] || "#6b7684"}"></i>${esc(n)}</span>`).join("")
+    `<span style="cursor:pointer;${HIDDEN.has(n) ? "opacity:.35;text-decoration:line-through" : ""}"`
+    + ` title="${esc(T("눌러서 보이기·숨기기"))}" onclick="toggleSeries('${n}')">`
+    + `<i style="${chipStyle(n)}"></i>${esc(seriesLabel(n))}</span>`).join("")
     + `<span><i style="background:#e5534b;opacity:.35"></i>${T("장애 주입 구간")}</span>`
     + (callTarget() ? `<span><i style="background:none;border-top:2px dashed #fff;height:0;border-radius:0"></i>${T("lte_call 목표 (현재 설정)")}</span>` : "")
     + `<span><i style="background:repeating-linear-gradient(45deg,#8a94a3 0 2px,transparent 2px 5px);opacity:.6"></i>${T("생성 없음")}</span>`;
@@ -1557,15 +1699,16 @@ function chartHover(ev) {
       // 바이트가 없는 계열(C-Plane)은 크기를 적지 않는다 — 0 으로 적으면
       // "안 흘렀다"로 읽힌다(불변규칙 17).
       const b = fmtBytes(bytes[n]);
-      html += `<div class="t-row"><span><i style="background:${COLORS[n]||"#6b7684"}"></i>`
-            + `${esc(n)}</span><span><b>${v.toLocaleString()}</b> ${T("건")}`
+      html += `<div class="t-row"><span><i style="${chipStyle(n)}"></i>`
+            + `${esc(seriesLabel(n))}</span><span><b>${v.toLocaleString()}</b> ${T("건")}`
             + (b ? ` · ${b}` : "") + `</span></div>`;
     });
     html += `<div class="t-row t-sum"><span>${T("합계")}</span><span><b>`
           + `${(p.total||0).toLocaleString()}</b> ${T("건")}`
           + (p.total_bytes ? ` · ${fmtBytes(p.total_bytes)}` : "") + `</span></div>`;
     if (p.faults && p.faults.length)
-      html += `<div class="t-f">${T("장애 주입 #{ids}", {ids: p.faults.join(", #")})}</div>`;
+      html += `<div class="t-f">${T("이 분에 걸린 장애 {n}건", {n: p.faults.length})}</div>`
+            + p.faults.map(faultLine).join("");
   }
   tip.innerHTML = html;
   tip.style.opacity = 1;
@@ -1755,7 +1898,12 @@ let DCURVE = [];
 let VO = 0;
 //: 시각별 특징 재료 — 서버 `_clock_bands`(그룹 비율 144칸 · 시간대 이름·문구)
 let CBANDS = null;
-function vNow() { return new Date(Date.now() + VO * 1000); }
+// **곡선이 꺼져 있으면 지금 시각이다**(2026-11-23 사용자 「곡선을 켰을 때만 시간 이동, 그 외에는 현재 시간」) — 데몬도
+// 같은 규칙이다(`cli._vo_effective`). 저장값 `VO` 는 곡선을 다시 켤 때 쓰려고 남는다
+function vNow() {
+  const on = $("diurnal") && $("diurnal").checked;
+  return new Date(Date.now() + (on ? VO : 0) * 1000);
+}
 async function postClock(v) {
   const r = await fetch("/api/settings", { method:"POST",
     headers:{"content-type":"application/json"}, body: JSON.stringify({ virtual_clock: v }) });
@@ -1849,15 +1997,19 @@ function renderDiurnal() {
   const m = PV != null ? 0 : vn.getMinutes();
   const c = DCURVE[h];
   const note = $("diurnal-note"), svg = $("dcurve");
-  // 가상 시각 줄 — 곡선을 껐으면 시간대를 안 보므로 흐리게 둔다
+  // 가상 시각 줄 — 곡선을 껐으면 쓰지 않으므로 흐리게 하고 조작도 막는다. 시각 칸은 지금 시각이다
   $("vclock-row").style.opacity = on ? "1" : ".45";
+  if (!on) PV = null;
+  document.querySelectorAll("#vclock-row .vspin button").forEach(b => { b.disabled = !on; });
   renderRush((curDur() || {}).hours);   // 가상 시각·곡선이 바뀌면 출퇴근 안내도 따라간다
   $("vclock-spin").textContent = String(h).padStart(2, "0") + ":" + String(m).padStart(2, "0");
   // 적용은 미리보기 시가 적용된 시와 다를 때만, 지금으로는 가상 시각이 걸려 있거나 미리보기 중일 때만 — 둘 다
   // 지금 그대로면 회색이다. 곡선을 꺼도 가상 시각은 남으므로 같은 규칙이다
-  $("vclock-set").disabled = !(PV != null && PV !== vn.getHours());
-  $("vclock-now").disabled = !(VO || PV != null);
-  $("vclock-label").textContent = !on ? T("곡선 꺼짐 — 시간대 안 봄")
+  $("vclock-set").disabled = !on || !(PV != null && PV !== vn.getHours());
+  $("vclock-now").disabled = !on || !(VO || PV != null);
+  const vm = Math.round(VO / 60), vtxt = vm % 60 ? (vm > 0 ? "+" : "") + vm + T("분") : (vm > 0 ? "+" : "") + vm / 60 + T("시간");
+  $("vclock-label").textContent = !on
+    ? (vm ? T("꺼짐 — 지금 시각 사용 · 저장된 {v}은 곡선을 켤 때 적용", {v: vtxt}) : T("꺼짐 — 지금 시각 사용"))
     : PV != null ? T("미리보기 — 적용 전")
     : VO ? T("가상 {t} (실제 대비 {m}분)", {t: vn.toTimeString().slice(0, 5), m: (VO >= 0 ? "+" : "") + Math.round(VO / 60)})
     : T("지금 시각");

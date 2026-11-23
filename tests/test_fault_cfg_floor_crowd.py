@@ -43,7 +43,9 @@ def test_repo_yaml_raises_only_the_mobility_floor_and_no_longer_event_crowd():
     """9번 16호만. 23번 120호는 11-21 오후에 걷었다 — 옛 업링크 혼잡용 하한이라 행사장 셀 사람을 평소 3배가 아니라 약 17배로
     부풀렸다(F-490·F-491 · 新宿区 U-15 조각의 뿌리). 크기는 「사람 3배」(`_event_crowd_load`) 하나다."""
     f = S.FaultCfg.from_cfg(_repo_fault_cfg())
-    assert f.floor_by_kind == {"mobility": 16.0}, "23번 전용 하한이 되살아나면 사람 배율이 정의(3배)를 넘는다"
+    # 8번 통화 끊김 증가(`ran_drop_surge`)는 하한 0 이다(2026-11-23 결정 15) — eNB 축 C-04 가 eNB 합으로 표본을 채우므로
+    # 하한 호가 셀의 사람을 늘릴 이유가 없다. 이 줄 말고 다른 시나리오 하한이 늘면 안 된다
+    assert f.floor_by_kind == {"mobility": 16.0, "ran_drop_surge": 0.0}, "23번 전용 하한이 되살아나면 사람 배율이 정의(3배)를 넘는다"
     assert "event_crowd" not in f.floor_by_kind
     assert f.floor_moved_kinds == ()
     assert f.floor_per_cell == S.FaultCfg().floor_per_cell, "다른 시나리오의 하한을 건드리면 안 된다"

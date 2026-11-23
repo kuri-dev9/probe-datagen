@@ -723,7 +723,10 @@ def test_peak_is_about_forty_times_normal_not_floor_times_peak(monkeypatch):
     s = _series(g, runs, sc)
     base = _mean(s[:START])
     peak = _mean(s[START + 1:START + 13])
-    assert 30 <= peak / base <= 60, f"정점 지역 호가 평소의 {peak / base:.1f}배 (기대 약 40배)"
+    # 폭주 배율이 셀 진도를 따른다(2026-11-23 사용자 결정 2 · `quake_surge_weight` — 진도 3 약 4배 ~ 5 이상 40배).
+    # 이 하니스의 셀 진도는 5 아래라 40배가 아니라 그 사이 값이다. 지켜야 하는 것은 「하한 × 정점 배율」 고정값이 아니라는 것 —
+    # 평소의 10배 이상 40배 이하
+    assert 10 <= peak / base <= 45, f"정점 지역 호가 평소의 {peak / base:.1f}배 (기대 10~40배 · 셀 진도 비례)"
     # 옛 결함(하한 × 6 = 고정 1,200)은 이 범위에도 들 수 있다 — 그것을 가르는 것은 "다운만" 국면 테스트다
 
 

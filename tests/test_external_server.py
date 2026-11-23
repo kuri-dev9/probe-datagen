@@ -75,14 +75,23 @@ def test_external_server_is_no_longer_in_the_auto_node_table():
     assert "external_server" not in faults._AUTO_NODE
 
 
-@pytest.mark.parametrize("kind,field", [("dns_degradation", "sgw_id"), ("cdn_degradation", "sgw_id"),
-                                        ("pay_dns_delay", "sgw_id")])
-def test_other_kinds_pick_a_node_axis_sgw_from_the_candidates(kind, field):
-    """5·21·22번도 노드 축 자동 선택이다(전국 축 하한 0.75). 이 마스터는 SGW 0038 이 압도적이라 후보가 하나다."""
+@pytest.mark.parametrize("kind,field", [("dns_degradation", "pgw_id"), ("cdn_degradation", "pgw_id")])
+def test_other_kinds_pick_a_node_axis_pgw_from_the_candidates(kind, field):
+    """5·16번은 외부망 관문(PGW) 축 자동 선택이다(2026-11-23 사용자 결정 1 · 전국 축 하한 0.75). 이 생성기는 SGW 번호 = PGW 번호라
+    걸리는 셀은 SGW 때와 같다."""
     assert faults._AUTO_NODE[kind] == field
     sc = _build(kind=kind)
-    assert sc is not None and sc.target.sgw_id == "0038", sc.target.sgw_id
-    assert sc.target.cell_keys == {c.cell_key for c in _master() if c.sgw_id == "0038"}
+    node = getattr(sc.target, field) if sc is not None else None
+    assert node, sc
+    assert sc.target.cell_keys == {c.cell_key for c in _master() if getattr(c, field) == node}
+    assert node == "0038" or not any(c.pgw_id == "0038" for c in _master()), node
+
+
+def test_pay_dns_delay_is_nationwide_without_a_node():
+    """6번 결제 앱 지연은 자동 선택이 전국이다(2026-11-23 사용자 결정 1) — 결제 도메인으로 거른다."""
+    assert "pay_dns_delay" not in faults._AUTO_NODE
+    sc = _build(kind="pay_dns_delay")
+    assert sc is not None and not (sc.target.sgw_id or sc.target.pgw_id or sc.target.mme_id) and sc.target.cell_keys == set()
 
 
 def test_sgw_target_narrows_to_that_sgw():

@@ -171,7 +171,11 @@ def test_phases_rise_split_and_switch_off(gen):
     # 시작 전·B 개통 전에는 B 에 호가 없다
     assert all(b == 0 for _, b, _ in got[:st + rise])
     # 혼잡 구간에 A 가 오른다
-    assert got[st + rise - 1][0] > got[st + 1][0] * 1.2
+    # 한 분 값끼리 견주지 않는다 — 혼잡이 세션 추첨에서 셀·분 단위로 바뀌어(2026-11-23 결정 12) 난수 순서가 달라졌고,
+    # 한 분 값(894 대 809)은 호 수가 포아송 흔들림만큼 오르내린다. 시작 전과 혼잡 끝 몇 분의 평균으로 본다(시작 직후는 이미 오르는 중이다)
+    early = sum(got[i][0] for i in range(st)) / st
+    late = sum(got[i][0] for i in range(st + rise - 3, st + rise)) / 3
+    assert late > early * 1.2, (early, late)
     # 개통 뒤 A 40 · B 60 (±8%p)
     a = sum(x for x, _, _ in got[st + rise + 1:st + total - 1])
     b = sum(y for _, y, _ in got[st + rise + 1:st + total - 1])

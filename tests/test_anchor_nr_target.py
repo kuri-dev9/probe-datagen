@@ -139,7 +139,8 @@ def test_without_nr_on_a_non_nr_enb_is_accepted():
     assert _build("ENB:600001", nr=None) is not None
 
 
-@pytest.mark.parametrize("kind", ["ran_congestion", "enb_s1_outage", "nsa_nr_leg"])
+# 23번 nsa_nr_leg 는 2026-11-23 결정 2 로 NR 가능 eNB 안에서만 고르는 군집이 됐다(12번과 같다) — 아래 별도 시험
+@pytest.mark.parametrize("kind", ["ran_congestion", "enb_s1_outage"])
 def test_other_kinds_are_not_narrowed_by_nr_on(kind):
     """16번이 아닌 kind 는 `nr_on` 이 주어져도 후보를 좁히지 않는다."""
     f = _fault("ENB:600001", kind=kind)
@@ -176,3 +177,10 @@ def test_batch_narrowing_keeps_other_scenarios_targets_and_the_random_stream():
     a, b = _batch(None, 5, sel), _batch(nr_on, 5, sel)
     other = lambda xs: sorted((s.id, tuple(sorted(s.target.cell_keys))) for s in xs if s.kind != KIND)
     assert other(a) and other(a) == other(b)
+
+
+def test_nsa_nr_leg_is_narrowed_to_nr_capable_enbs_like_16(kind="nsa_nr_leg"):
+    """23번 5G 접속 불량은 이제 5G 가능 eNB 안의 인접 군집이다(2026-11-23 결정 2) — NR 불가 eNB 지정은 거부된다."""
+    f = _fault("ENB:600001", kind=kind)
+    sc = faults.build(f, _master(), T0, faults.target_rng(7, 66), seed=7, nr_on=nr_on)
+    assert sc is None, "NR 불가 eNB(600001) 지정은 걸지 않는다"

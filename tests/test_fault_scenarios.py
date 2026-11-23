@@ -1375,6 +1375,12 @@ class _Cell:
 
 class _Sc:
     active_cells_cache = {"1234-5"}
+    # 12번 변형기가 걷힘을 등록하려고(`scenarios._fade_on` · 2026-11-23) kind·강도를 읽는다. 이 시험은 처리율만 보므로 강도 0 → 등록 없음
+    kind = "anchor_saturation"
+    start_minute = 0
+
+    def intensity_for(self, *_a):
+        return 0.0
 
 
 def test_anchor_saturation_drops_throughput_only():

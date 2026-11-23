@@ -63,6 +63,10 @@ def _row(target="LOCAL", kind="natural_disaster", start=START, dur=25):
 
 @pytest.fixture
 def make(monkeypatch):
+    # 폭주 배율은 셀 진도를 따른다(2026-11-23 사용자 결정 2 · `quake_surge_weight`). 이 파일은 **기준 호 × 39 · 포아송 · 평소 흔들림 비곱**
+    # 을 본다 — 진도 비례는 `test_quake_surge_weight_1123.py` 가 따로 본다. 합성 마스터의 셀 진도는 낮아 몫이 작으므로 1 로 고정한다
+    monkeypatch.setattr(S, "quake_surge_weight", lambda intensity: 1.0)
+
     def build(seed: int = 11):
         for f in ("pemdb1/_distributions.json", "profile.json"):
             if not (ROOT / "data" / f).exists():

@@ -1392,7 +1392,15 @@ def request_gap(cause: int, rng) -> float:
     return rng.uniform(g_lo, g_hi)
 
 
-def drop(rec, cause: int, rng: random.Random) -> bool:
+#: **길이 0 인 연결 호도 끊는다**(2026-11-23 · 8번 연결 끊김 증가 F-558 절단률 9.2% · 설계 18%). 호 길이는 실측
+#: 백분위에서 뽑아 연결 호의 약 1/3 이 0 이고(`generator` · 3번 66/198 · 4번 60/159), 예전에는 그 호를 건너뛰어
+#: 절단 변형의 실효 강도가 2/3 로 깎였다. 켜면 그 호를 「절차 직후 끊긴 호」로 만든다 — 길이는 `_close_call` 이
+#: 길이 0 인 호에 주는 0.01~0.05초 관례다(새 값 없음). **한 자리 스위치다** — 끄고 8번만 켜려면 이것을 False 로
+#: 두고 `scenarios._ran_drop_surge` 가 `fill_zero=True` 로 부른다
+DROP_ZERO_LENGTH = True
+
+
+def drop(rec, cause: int, rng: random.Random, fill_zero: bool | None = None) -> bool:
     """**연결된 호를 비정상 해제로 끊는다** — `spec.drop` 의 실측 모양.
 
     call flow 는 성공했으므로 단계를 다시 밟지 않는다. 바꾸는 것은 호의 끝 —
@@ -1410,10 +1418,12 @@ def drop(rec, cause: int, rng: random.Random) -> bool:
         return False
     t0 = rec.num("call_start_time")
     dur = rec.num("call_duration_time") / US
-    if not t0 or dur <= 0:
-        return False
     # 절차가 끝난 뒤여야 한다 — 단계 합보다 먼저 끊을 수 없다.
     floor = sum(rec.num(f"initial_{p}_duration") for p in PHASES) / US
+    if t0 and dur <= 0 and (DROP_ZERO_LENGTH if fill_zero is None else fill_zero):
+        dur = floor + rng.uniform(0.01, 0.05)          # `_close_call` 의 길이 0 관례(위 스위치 머리말)
+    if not t0 or dur <= 0:
+        return False
     lo, hi = (float(v) for v in d.get("duration_scale", (0.15, 0.6)))
     t_req = t0 + max(floor + 0.01, dur * rng.uniform(lo, hi))
     t_rel = t_req + request_gap(cause, rng)
