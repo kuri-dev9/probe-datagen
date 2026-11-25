@@ -20,6 +20,7 @@ clone 해 이미지를 직접 굽게 되어(2026-10-16) 그 전제가 없어졌�
 | `topo_api` | 마스터 토폴로지(`/topo`) |
 | `map_api` | 지도(`/map`) |
 | `scenarios_api` | 시나리오 현황(`/scenarios`) 자료 |
+| `replay_api` | 시연 리플레이(`/api/replay/*`) — 탐지 추적 · 장애 타임랩스 · 노선 흐름 |
 | `pages` · `static/` · `i18n_ja` | 화면 네 개 · 번역 사전 |
 """
 
@@ -31,14 +32,14 @@ import types
 
 from fastapi import FastAPI
 
-from . import common, faults_api, map_api, pages, scenarios_api, status_api, topo_api
+from . import common, faults_api, map_api, pages, replay_api, scenarios_api, status_api, topo_api
 
 app = FastAPI(title="probe-datagen 제어 UI")
-for _m in (status_api, faults_api, topo_api, pages, map_api, scenarios_api):
+for _m in (status_api, faults_api, topo_api, pages, map_api, scenarios_api, replay_api):
     app.include_router(_m.router)
 
 #: 나눈 모듈 — 아래 옛 이름 호환이 훑는다
-_PARTS = (common, status_api, faults_api, topo_api, map_api, pages, scenarios_api)
+_PARTS = (common, status_api, faults_api, topo_api, map_api, pages, scenarios_api, replay_api)
 
 # ── 옛 단일 모듈 이름 호환 ─────────────────────────────────────────────────
 #

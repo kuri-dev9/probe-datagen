@@ -47,12 +47,13 @@
     JS 가 칠하는 색(장애·코어·기지국·노선 채도)도 여기서 읽는다(`loadTheme`) */
  body,body[data-theme=dark]{
    --sea:#0d1a26; --land:#223040; --land-line:#4a5c72;
-   --allpt:#828d9c; --river:#2d5f7a; --park:#27402f; --water:#19354a;
+   --allpt:#828d9c; --river:var(--sea); --park:#27402f; --water:var(--sea);
    --chome:#3a4a5e;
    --rd-motorway:#5a6574; --rd-trunk:#4f5968; --rd-primary:#464f5d;
    --rd-secondary:#3e4654; --rd-tertiary:#38404d;
    --ymt:#9acd32; --pick:#ff9ec4;
-   --lb:#fff; --lb-halo:#0b0e12; --lb-a:#7d8fa6; --lb-s:#d6ecaa; --stb:#e2efc4;
+   --lb:#fff; --lb-halo:#0b0e12; --lb-a:#7d8fa6; --lb-o:#5a6678; --lb-s:#a6e04f; --stb:#e2efc4;
+   --lb-s2:#b3bdc9; --stbd:#5b6573;   /* 야마노테 밖 역 이름(지명보다 밝게)·역 띠(육지보다 밝은 회색) — 사용자 11-24 저녁 */
    --sb-off:#c9cdd4; --sb-off-line:#8a929e; --sb-on-line:#1f2937;
    --ft-line:#fff; --eg:#9ff0e4;
    --hq-body:#2c3644; --hq-line:#7fd1c7cc; --hq-pg:#7fd1c7; --hq-cap:#c6d0dc;
@@ -74,12 +75,13 @@
     흰 테두리로 뒤집는다. 도로는 바탕보다 밝은 흰 선이다(카카오맵과 같다) */
  body[data-theme=light]{
    --sea:#aad3f2; --land:#eeebe4; --land-line:#b4abc4;
-   --allpt:#9aa3ae; --river:#7db7e4; --park:#cde6bf; --water:#aad3f2;
+   --allpt:#9aa3ae; --river:var(--sea); --park:#cde6bf; --water:var(--sea);
    --chome:#d9d4ca;
    --rd-motorway:#f5b25c; --rd-trunk:#f8cd7a; --rd-primary:#ffffff;
    --rd-secondary:#ffffff; --rd-tertiary:#faf8f4;
    --ymt:#6aa317; --pick:#d63384;
-   --lb:#1f2933; --lb-halo:#ffffff; --lb-a:#6b7787; --lb-s:#3d6b0a; --stb:#bcd690;
+   --lb:#1f2933; --lb-halo:#ffffff; --lb-a:#6b7787; --lb-o:#9aa3ae; --lb-s:#3d6b0a; --stb:#bcd690;
+   --lb-s2:#7d8794; --stbd:#b9bcc2;   /* 밝은 화면 — 역 이름은 지명보다 진하게, 역 띠는 육지보다 어두운 회색 */
    --sb-off:#c3c8cf; --sb-off-line:#7c8592; --sb-on-line:#1f2937;
    --ft-line:#fff; --eg:#0ca678;
    --hq-body:#ffffff; --hq-line:#12b886cc; --hq-pg:#12b886; --hq-cap:#37414f;
@@ -111,8 +113,12 @@
     비었다(11-16 실측). 도는 것은 장애를 고른 뒤 잠깐뿐이다(`fxGate` · 아래 「도는 조건」) */
  .ovl{position:absolute;inset:0;pointer-events:none}
  svg{width:100%;height:100%;display:block}
- .adm{fill:var(--land);stroke:var(--land-line);stroke-width:1px;
-   vector-effect:non-scaling-stroke}
+ /* 구 경계만 **점선**으로(사용자 11-24 18:07 「丁目 등 얇은 선은 필요 없다, 구 경계 정도만 점선」) — 해안·강변 같은
+    **땅 끝은 실선**(사용자 11-24 18:37). 면(`.adm`)은 칠만 하고, 선은 두 구가 나눠 쓰는 선분(`.adm-in`)과 한 구에만
+    있는 선분(`.adm-out`)으로 갈라 따로 긋는다(`admEdges`) */
+ .adm{fill:var(--land);stroke:none}
+ .adm-in,.adm-out{fill:none;stroke:var(--land-line);stroke-width:1px;vector-effect:non-scaling-stroke;pointer-events:none}
+ .adm-in{stroke-dasharray:4 3}
  /* TA 묶음 히트맵 — `screen` 이라 **겹칠수록 밝아진다.** 어두운 바탕에서
     밀도를 읽는 방식이고, 두 묶음이 맞닿는 자리는 색이 섞여 경계가 보인다.
     볼록껍질이 바깥쪽 몇 점만 이어 안쪽을 비워 두던 것과 다르다 */
@@ -138,7 +144,7 @@
     장비를 이기지 않는다 */
  .rl{fill:none;stroke-width:1.4px;stroke-opacity:.85;
    stroke-linecap:round;vector-effect:non-scaling-stroke;pointer-events:none}
- .rv{fill:none;stroke:var(--river);stroke-width:1.6px;stroke-opacity:.8;
+ .rv{fill:none;stroke:var(--river);stroke-width:1.6px;stroke-opacity:1;
    stroke-linecap:round;vector-effect:non-scaling-stroke;pointer-events:none}
  /* 공원·수역 — **면이다.** 육지(`.adm` 의 #223040) 위에 색만 얹는다.
     테두리를 주면 작은 공원이 점처럼 보여 장비와 섞인다 */
@@ -198,17 +204,51 @@
  /* **두껍게를 푼다.** `.lb` 가 700 이라 장비 번호가 역 이름을 눌렀다 */
  .lb-n{font-size:12px;font-weight:400}
  /* 지명은 **배경이다** — 장비를 읽는 데 방해가 되면 안 된다 */
- .lb-a{font-size:12px;font-weight:500;color:var(--lb-a);letter-spacing:.04em}
+ .lb-a{font-size:12px;font-weight:500;color:var(--lb-a);letter-spacing:.04em;opacity:.6}   /* 투명 — 역 이름보다 뒤로(사용자 11-24 18:05) */
+ /* 외각 지명(셀이 없는 구·시) — 내부보다 한 단계 물린다(사용자 11-24 「외각 회색 더 어둡게, 내부는 지금 색, 역명만 녹색」) */
+ .lb-o{color:var(--lb-o)}
  /* 점은 SVG 가 찍는다 — 여기서는 글자만. 왼쪽 끝을 점에 맞춘다 */
  /* 역은 **어디인지 읽는 수단**이라 장비 다음으로 또렷해야 한다.
     11px 흐린 회색일 때는 장비 번호 상자에 묻혔다 */
  /* 역 이름도 야마노테선 계열이다 — 선(#9acd32)을 흰색 쪽으로 당겼다.
     흰색일 때는 지명·장비와 섞여 "이게 역인지" 가 색으로 안 갈렸다 */
- .lb-s{font-size:13px;font-weight:600;color:var(--lb-s);transform:translateY(-50%)}
+ /* **연하게**(사용자 2026-11-24 「녹색 지명이 진해 아무것도 안 보인다」) — 장애 표시와 장비를 가렸다.
+    굵기를 풀고 불투명도를 낮춰 배경 쪽으로 물렸다 */
+ /* **다시 진하게**(사용자 2026-11-24 저녁 「역사와 역 이름 색이 비슷해 안 보인다」) — 역 모양(OSM 승강장·건물)을
+    깔면서 글자가 같은 연녹색 면 위에 놓였다. 불투명으로 되돌린다. 굵기는 500 — 700 은 「두껍다」(사용자 같은 날 18:01) */
+ .lb-s{font-size:12px;font-weight:500;color:var(--lb-s);opacity:1;transform:translateY(-50%)}
+ /* 야마노테선 밖 역 이름 — 회색(사용자 11-24 저녁 「야마노테선만 녹색, 나머지 역은 회색」). 지명(.lb-a)보다 밝고 불투명 */
+ .lb-s2{font-size:12px;font-weight:500;color:var(--lb-s2);opacity:1;transform:translateY(-50%)}
  /* 역 건물 — **심볼이 아니라 실제 윤곽이다**(사람 결정 2026-10-28).
     집 모양을 그리던 때는 "알 수 없는 모양"으로 읽혔다. 면적 중앙값이
     한 변 34m 라 멀리서는 점만 하고, 당기면 역사 모양이 드러난다 */
  .stb{fill:var(--stb);fill-opacity:.92;stroke:none}
+ /* 역 승강장 선 — 국토수치정보 N02(2026-11-24). 철로와 같은 출처라 역 위치·
+    길이(승강장 약 140~390m)가 철로 위에 그대로 놓인다. 선을 따라 둥근 막대로
+    그리고, 같은 역의 여러 노선은 한 색이다(역 그룹 코드로 묶어 받는다) */
+ /* 역 모양 — OSM 승강장 면·역 구내·역 건물(2026-11-24 저녁 · 사용자 「역 위치에 선만 그은 것 같다」).
+    구내가 가장 옅고 건물이 가장 진하다. 면이라 굵기 계산이 없고, 마우스는 `stnTip` 이 맡는다 */
+ .stk{fill:var(--stb);stroke:none;pointer-events:none}
+ .stk-area{fill-opacity:.14}
+ /* 역사 덩어리 — 승강장을 넓혀 합친 면(사용자 11-24 「플랫폼을 묶어 역사처럼, 조금 더 키워서」). 실제 역사
+    건물을 모르는 역이 많아 이것이 역의 모양이 된다. 승강장(.5)이 그 위에서 갈리도록 그보다 옅게 */
+ .stk-hull{fill-opacity:.5}   /* 혼자 남는 층이라 승강장 자리(.5)로 올렸다(11-24) */
+ /* 역 띠 — 노선을 따라가는 띠(사용자 11-24 저녁 「라인을 따라, 꺾임 최소로」·「녹색 말고 투명도 없는 회색」).
+    불투명 단색이라 한 역의 여러 노선 띠가 겹쳐도 이음매 없이 한 건물로 보인다 */
+ .stk-band{fill:var(--stbd);fill-opacity:1}
+ .stk-platform{fill-opacity:.5}
+ .stk-bldg{fill-opacity:.8}
+ .stb{pointer-events:none}
+ /* OSM 에 모양이 없는 역의 N02 대체 선 — 대부분 지하철역(지하라 OSM 승강장 면이 없다). 모양이 아니라
+    위치 표시일 뿐이라 옅게 깐다 — 진하게 그리면 다시 「선만 그은 것」으로 읽힌다 */
+ .stn.stn-fb{stroke-opacity:.28}
+ .stn{fill:none;stroke:var(--stb);stroke-opacity:.85;
+   stroke-linecap:round;stroke-linejoin:round;pointer-events:none}
+ /* **굵기는 CSS 가 아니라 `gStn` 의 stroke-width 속성이다**(사용자 11-24 「지도가 엄청 느려졌다」).
+    `non-scaling-stroke` 는 화면 기준 굵기라 끌기·확대 중 CSS 변환이 바뀔 때마다 선마다 굵기를 다시
+    계산한다. 그린 축척에서 5px 이 되는 viewBox 단위 굵기를 그룹에 한 번 주고(`stnVis`), 움직이는
+    동안은 다른 배경처럼 그림째 밀고 키운다. 461역을 한 줄씩 따로 두지 않고 격자 칸마다 path 하나로
+    합친다(`tiled` 와 같은 방식) — 마우스 표시는 요소가 아니라 좌표 목록에서 찾는다(`stnTip`) */
  /* 장애 — **평시 색(연분홍)과 또렷이 갈려야 한다.** 심각도로 나누되
     셋 다 따뜻한 쪽이라 "이 장비에 뭔가 있다"가 먼저 읽힌다 */
  /* **토글이 아니라 숨쉬기다**(사람 결정 2026-10-28). 장비가 나타났다
@@ -308,7 +348,9 @@
     끊었다 켜서 라벨·효과·본사가 한 프레임에 사라졌다 나타났다 — 그게 깜빡임으로 보였다.
     `opacity` 는 합성만 하므로 무거운 프레임 사이에도 부드럽다(`#fx` 머리말). 0.18초는 초기값 */
  #hq,#fx,#labels{transition:opacity .18s ease}
- #hq.fly,#fx.fly,#labels.fly{opacity:0}
+ /* **사라질 때는 바로**(사용자 11-24 「움직임 뒤 지명·셀 표시가 잔상처럼 남는다」). 흐려지는 0.18초 동안 글자·효과가
+    옛 자리에 서 있는 채 지도만 확대돼 잔상으로 보였다. 다시 놓은 뒤 나타날 때만 흐려졌다 돌아온다 */
+ #hq.fly,#fx.fly,#labels.fly{opacity:0;transition:none}
  /* 바탕보다 먼저 뜨지 않게(`MAP_READY`) — 장애 창에서 넘어오면 빈 바다에 목록과 표시부터 떴다 */
  body:not(.mapready) #hq,body:not(.mapready) #flist,body:not(.mapready) #glob{visibility:hidden}
  /* 바다색은 `#wrap` 바탕이라 페이지가 열리자마자 칠해진다. 레이어를 받는
@@ -323,6 +365,95 @@
  #glob{position:absolute;inset:0;pointer-events:none;z-index:2;display:none;
    animation:fxHalo 3.2s ease-in-out infinite}
  #fx{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+ /* 재생(2026-11-24 사용자 「A·B·C 해 보자」) — C 탐지 추적 · B 장애 타임랩스(1분) · A 노선 흐름(3번).
+    점·줄기는 HTML 층(`#rpfx`)에 둔다 — `#fx` 밖이다(끌기·날기 때 지도 그림과 같은 변환을 받아야 해서, 11-24 사용자 「이동하면 위치가 달라」). — SVG 안에서 움직이면 드래그가 빈 화면이 된다(`#fx` 머리말).
+    움직임은 opacity·transform 만 쓴다. 재생 중에는 고른 장애의 셀 음영(노랑·빨강·정지·물결)을 가린다 — 두 벌이 겹치면
+    어느 쪽이 「그 분」인지 읽히지 않는다 */
+ body.rpon #gSevY,body.rpon #gSevR,body.rpon #downfx,body.rpon .ripfx{visibility:hidden}
+ #rpfx{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+ #rpfx>div.ly{position:absolute;inset:0;transform-origin:0 0;will-change:transform}
+ #rpfx i{position:absolute;transform:translate(-50%,-50%);border-radius:50%}
+ #rpfx i.c{width:14px;height:14px;opacity:.9;transition:background .25s}
+ #rpfx i.severe{background:#ff4d5e;box-shadow:0 0 12px 4px #ff4d5e88}
+ #rpfx i.degraded{background:#f2c230;box-shadow:0 0 10px 3px #f2c23077}
+ #rpfx i.silent{background:#9aa3ad;box-shadow:0 0 8px 2px #9aa3ad66}
+ #rpfx i.bl{width:22px;height:22px;border:2px solid #ff7a45;animation:rpBlink .45s ease-in-out infinite alternate}
+ #rpfx b{position:absolute;height:2px;transform-origin:0 50%;border-radius:1px;opacity:.5;
+   background:linear-gradient(90deg,#7dd3fc00,#7dd3fcaa)}
+ #rpfx b.st{height:3px;opacity:.9;background:linear-gradient(90deg,#ff7a4500,#ff7a45)}
+ #rpfx b u{position:absolute;left:0;top:-2px;width:6px;height:6px;border-radius:50%;background:#e0f2fe;
+   animation:rpRun 1s linear infinite}
+ #rpfx b.st u{background:#ffd2b8}
+ @keyframes rpRun{from{transform:translateX(0)}to{transform:translateX(var(--L))}}
+ @keyframes rpBlink{from{opacity:.15}to{opacity:1}}
+ /* 열차(2026-11-24 사용자 「지하철 모양으로 · 실제와 비슷한 대수로」) — 철로 고리(`track.ring`) 위를 운행 간격대로 돈다.
+    **열차는 데이터에 없다**(gen 은 탑승자만 움직인다) — 위치는 그림이고, 주황 깜빡임만 그 분의 실제 정체다 */
+ #rpfx .tr{position:absolute;left:0;top:0;width:30px;height:11px;transform-origin:0 0;will-change:transform}
+ /* E235계(사용자 11-24 「바퀴 빼고 야마노테선 열차 색으로」) — 은색 스테인리스 몸통 · ウグイス 띠 · 검은 앞 유리에 연두 테두리.
+    앞이 오른쪽(진행 방향)이다 */
+ #rpfx .tr .bd{position:absolute;left:0;top:0;width:30px;height:11px;border-radius:4px 6px 6px 4px;box-sizing:border-box;
+   background:linear-gradient(#e9edf1 0 18%,#80c241 18% 30%,#c4cad1 30% 62%,#80c241 62% 74%,#aab1b9 74%);
+   border:1px solid #5d646c;box-shadow:0 1px 3px #0009}
+ #rpfx .tr .ws{position:absolute;left:4px;top:3px;width:16px;height:3px;
+   background:repeating-linear-gradient(90deg,#26303a 0 3px,transparent 3px 5px)}
+ #rpfx .tr .fw{position:absolute;right:1px;top:1px;width:6px;height:9px;border-radius:1px 5px 5px 1px;box-sizing:border-box;
+   background:#111418;border:1.5px solid #80c241}
+ #rpfx .tr.st .bd{background:linear-gradient(#ffe8dc 0 18%,#ff7a45 18% 30%,#e8cfc2 30% 62%,#ff7a45 62% 74%,#cdb3a6 74%);
+   box-shadow:0 0 9px 3px #ff7a45aa}
+ #rpfx .tr.st .fw{border-color:#ff7a45}
+ /* 확대(축척 1km 이하) — 칸마다 따로 철로를 따라 휘는 편성. 은색 몸통 · 창 줄 · 창 아래 연두 띠 · 출입문 세로선 4개.
+    앞 칸(.hd)은 검은 앞 유리에 연두 테두리 · 앞 등 둘 · 행선 표시 띠, 끝 칸(.tl)은 꼬리 등 */
+ #rpfx .tr.cr{width:20px;height:9px}
+ #rpfx .tr.cr .bd{width:20px;height:9px;border-radius:1.5px;border:.8px solid #4f565e;
+   background:linear-gradient(#dfe4e9 0 14%,#b9c0c8 14% 54%,#80c241 54% 70%,#c4cad1 70%)}
+ #rpfx .tr.cr .ws{left:1.5px;top:2px;width:17px;height:2.6px;
+   background:repeating-linear-gradient(90deg,#28323c 0 2.6px,transparent 2.6px 3.4px)}
+ #rpfx .tr.cr .dr{position:absolute;left:2px;top:1.2px;width:16px;height:6.8px;
+   background:repeating-linear-gradient(90deg,transparent 0 3.2px,#5f6770 3.2px 3.8px,transparent 3.8px 4px)}
+ #rpfx .tr.cr .fw{right:0;top:0;width:5px;height:9px;border-radius:0 3px 3px 0;border:1px solid #80c241;background:#0d1013}
+ #rpfx .tr.cr .ds{position:absolute;right:1.2px;top:1.3px;width:3px;height:1.4px;background:#ffb020;border-radius:.5px}
+ #rpfx .tr.cr .hl{position:absolute;right:.4px;width:1.6px;height:1.6px;border-radius:50%;background:#fff6cc;box-shadow:0 0 3px 1px #fff3b0aa}
+ #rpfx .tr.cr .hl.a{top:5px} #rpfx .tr.cr .hl.b{top:6.8px}
+ #rpfx .tr.cr.tl .bd{border-radius:3px 1.5px 1.5px 3px}
+ #rpfx .tr.cr .tk{position:absolute;left:.4px;top:5.6px;width:1.4px;height:1.4px;border-radius:50%;background:#ff4040}
+ #rpfx .tr.cr.st .bd{background:linear-gradient(#ffe8dc 0 14%,#e8cfc2 14% 54%,#ff7a45 54% 70%,#e8cfc2 70%);box-shadow:0 0 7px 2px #ff7a45aa}
+ /* 재생 중에는 장비 번호를 숨기고(라벨 배치에서도 뺀다 · placeLabels) 지역 이름·떠 있는 이름 상자를 얇게 — 사용자 11-24 */
+ body.rpon .lb-a{font-weight:400}
+ body.rpon #tip{background:none;border:none;font-weight:400;text-shadow:0 0 3px var(--lb-halo),0 0 3px var(--lb-halo)}
+ #rpfx .tr.st{animation:rpBlink .45s ease-in-out infinite alternate}
+ @media (prefers-reduced-motion:reduce){#rpfx *{animation:none!important}}
+ #fbar button.rpb{margin-left:6px;border-color:#ffb86b}
+ #rp{position:absolute;left:calc(50% - 170px);transform:translateX(-50%);bottom:14px;z-index:5;display:none;
+   width:min(760px,calc(100% - 420px));background:#0b0e12f2;border:1px solid #ffb86b80;border-radius:8px;
+   padding:8px 12px 10px;font-size:12px;line-height:1.5}
+ #rp .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+ #rp input[type=range]{flex:1;min-width:160px;accent-color:#ffb86b}
+ #rp .t{font-variant-numeric:tabular-nums;font-weight:600}
+ #rp .ph{padding:0 6px;border-radius:4px;background:#2a313a} #rp .ph.on{background:#b4532a;color:#fff}
+ #rp .cnt b{font-variant-numeric:tabular-nums} #rp .cnt s{display:inline-block;width:9px;height:9px;border-radius:50%;margin:0 3px 0 8px}
+ #rp .lead{font-size:18px;font-weight:700;color:#ffb86b;margin:4px 0 2px}
+ #rp .lead small{font-size:12px;font-weight:400;color:#d8dee9;opacity:.85;margin-left:10px}
+ #rp .trk{position:relative;height:56px;margin:2px 6px 0}
+ #rp .trk .ln{position:absolute;left:0;right:0;top:12px;height:2px;background:#39414c}
+ #rp .trk .fz{position:absolute;top:10px;height:6px;background:#b4532a66;border-radius:3px}
+ /* 한 창에 주입 장애가 여럿이면(11-24 F-586·F-587 사용자 「잘못 묶인 것처럼 보여」) 장애마다 줄·색을 나눈다 */
+ #rp .trk .fz.k{height:4px;opacity:.85}
+ #rp .fl{display:flex;flex-wrap:wrap;gap:2px 12px;font-size:11px;margin:0 6px 2px}
+ #rp .fl s{display:inline-block;width:14px;height:4px;border-radius:2px;margin-right:4px;vertical-align:middle}
+ #rp .fl .me{font-weight:700}
+ #rp .ph.ot{background:#3b4f8a;color:#fff}
+ #rp .cnt .oc{display:inline-block;width:9px;height:9px;border-radius:50%;border:2px solid #9aa3ad;margin:0 3px 0 8px;box-sizing:border-box}
+ /* 다른 주입 장애 때 처음 켜진 셀 — 속을 비운 고리 */
+ #rpfx i.c.ot{background:none!important;border:2.5px solid;box-sizing:border-box;box-shadow:none}
+ #rpfx i.c.ot.severe{border-color:#ff4d5e} #rpfx i.c.ot.degraded{border-color:#f2c230} #rpfx i.c.ot.silent{border-color:#9aa3ad}
+ #rp .trk .cur{position:absolute;top:2px;width:2px;height:22px;background:#e5e7eb;transition:left .25s linear}
+ #rp .trk .dt{position:absolute;top:7px;width:12px;height:12px;margin-left:-6px;border-radius:50%;
+   background:#1b2129;border:2px solid #5b6572;transition:background .2s,border-color .2s}
+ #rp .trk .dt.mn.lit{background:#ffb86b;border-color:#ffb86b} #rp .trk .dt.lit{background:#7b8796;border-color:#9aa3ad}
+ #rp .trk .dt em{position:absolute;top:15px;left:50%;transform:translateX(-50%);white-space:nowrap;font-style:normal;
+   font-size:10.5px;opacity:.45} #rp .trk .dt.lit em{opacity:1} #rp .trk .dt.sub em,#rp .trk .dt.nl em{display:none}
+ #rp .trk .dt.lo em{top:29px} #rp .trk .dt.l0 em{left:0;transform:none} #rp .trk .dt.r0 em{left:auto;right:0;transform:none}
+ #rp .dim{opacity:.6;font-size:11px}
  #fxin{position:absolute;inset:0}   /* 옮길 때 이것만 민다 — 잘라내기는 바깥 #fx 가 한다 */
  /* **애니메이션은 층 둘에만 건다** — 후광 층(`#fxh`)과 숨쉬기 층(`#fxb`).
     장애가 모두 같은 박자로 숨쉬므로 요소마다 걸 이유가 없다. 장애 eNB 가
@@ -603,19 +734,22 @@
            "셀 이벤트랑 겹치는 부분은 셀 이벤트 안 보이게"). 좌표는 지도와 같은 도 단위다 -->
       <mask id=downMask maskUnits=userSpaceOnUse x="100" y="-70" width="80" height="60"><rect x="100" y="-70" width="80" height="60" fill="#fff"></rect><g id=downMaskG fill="#000"></g></mask>
     </defs>
-    <g id=gAdm></g><g id=gGreen></g><g id=gChome></g><g id=gRoad></g><g id=gRiv></g><g id=gRail></g><g id=gYmt></g><g id=gAll></g><g id=gKde></g><g id=gImpact></g><g id=gSevY></g><g id=gSevR></g><g id=gGeo></g><g id=gCell></g>
-    <g id=gPick></g><g id=gStn></g><g id=gNode></g></svg>
+    <!-- 역 띠(gStn)는 철로·야마노테선 위·셀 아래다(18:54 셀 안 가리게 · 19:10 선이 역 위로 보임) — 셀·장애 표시를 가리지 않게(사용자 11-24 18:54) -->
+    <g id=gAdm></g><g id=gGreen></g><g id=gChome></g><g id=gRoad></g><g id=gRiv></g><g id=gRail></g><g id=gYmt></g><g id=gStn></g><g id=gAll></g><g id=gKde></g><g id=gImpact></g><g id=gSevY></g><g id=gSevR></g><g id=gGeo></g><g id=gCell></g>
+    <g id=gPick></g><g id=gNode></g></svg>
   <svg id=geofx></svg>
   <svg id=downfx class=ovl><g id=gDown></g></svg>
   <svg id=ripfx0 class="ovl ripfx"><g></g></svg><svg id=ripfx1 class="ovl ripfx"><g></g></svg><svg id=ripfx2 class="ovl ripfx"><g></g></svg>
   <svg id=truthfx class=ovl><g id=gDownT></g></svg>
   <div id=fx><div id=fxin><div id=fxh></div><div id=fxb></div></div><div id=fxe><svg></svg><svg></svg><svg></svg></div></div>
+  <div id=rpfx><div class=ly></div></div>
   <div id=glob></div>
   <div id=hq title="NTT docomo 본사 (千代田区永田町2-11-1)&#10;PGW 16대를 한 점으로 — 실제 PGW 위치가 아닙니다&#10;누르면 SGW 에서 모이는 선이 나옵니다">
     <div class=rg></div><div class=bd><span class=pg></span></div>
     <div class=cap><b>NTT docomo</b><br>본사</div><div class=msg></div></div>
   <div id=boxsel></div>
   <div id=fbar></div>
+  <div id=rp></div>
   <div id=sel></div>
   <div id=incs></div>
   <div id=flist class=fold><div class=hd><b>장애 이력</b><span id=fcnt></span><em id=ffold>펼치기</em></div>
@@ -673,6 +807,7 @@ function gestShow(pan){
       ({k,tx,ty}=gestXform()); }
     const tr=`translate(${tx}px,${ty}px) scale(${k})`;
     svg.style.transform=tr; ovlTr(tr);
+    if(RP) rpXf();   // 재생 층도 그림과 같은 변환으로(끌기·휠·날기)
     // 끌기(축척 그대로)면 화면 좌표의 겉층(라벨·효과·본사)도 같이 민다 — 숨기지 않아 깜빡이지 않는다
     for(const id of ['labels','fx','hq']) document.getElementById(id).style.translate=GEST.pan&&Math.abs(k-1)<1e-6?`${tx}px ${ty}px`:'';
     drawScale(); });
@@ -686,6 +821,7 @@ function gestEnd(){
 }
 let VB=null, HOME=null, D=null, GEO=null, ALL=null, RAIL=null, RIV=null;
 let ROAD=null, GREEN=null, STBL=null, WATER=null, CHOME=null;
+const SHOW_CHOME=false;   // 丁目 경계 그리기 — 끔(사용자 11-24 18:07)
 
 // ── 색상셋 — CSS 변수(`body[data-theme]`)가 정본이다 ─────────────────────
 //
@@ -793,6 +929,7 @@ function buildFx(){
 // 축척이 바뀌었으면 크기가 달라지므로 새로 깐다
 function placeFx(){
   placeEvtWave();
+  rpPlace();
   const box=document.getElementById('fxin'); if(!box) return;
   const m=svg.getScreenCTM();
   if(!FX_AT||!m||Math.abs(m.a-FX_AT.a)>1e-9*Math.abs(FX_AT.a)+1e-12){ buildFx(); return; }
@@ -1819,6 +1956,7 @@ function renderList(){
 // 이력에서 하나를 누른다 — 같은 것을 다시 누르면 푼다
 async function focusInc(id){
   PART=null;
+  if(RP) rpStop();   // 다른 장애로 넘어가면 재생을 닫는다 — 재생은 그 장애의 것이다
   if(FOCUS===id){ FOCUS=null; renderList(); draw(); pollQuake(); return; }
   let h=histOf(id); if(!h) return;
   // 계통을 물린 세기와 보기별 요소는 `draw` 만 되돌린다 — 그때만 통째로 다시 그린다
@@ -1949,8 +2087,8 @@ let FLY=null;
 //: `opt.at` — 이 점([x, y], viewBox 좌표)을 **화면에서 고정한 채** 확대한다.
 //:   휠이 쓴다. 가운데를 따로 보간하면 도중에 커서 아래 지점이 흘렀다가
 //:   끝에서 돌아온다
-//: `opt.near` — 거의 다 왔을 때(`FLY_NEAR`) 한 번 부른다. 휠이 다음 칸을
-//:   **앞 이동이 끝나기 직전에** 이어 붙이는 자리다(`wheelStep`)
+//: `opt.done` — 도착해 다시 그리기(`draw`)까지 마친 뒤 한 번 부른다. 끼어든 이동에 끊기면 부르지 않는다.
+//:   휠이 「끝나야 다음 칸」을 아는 자리다(사용자 11-24 · 아래 휠 머리말 ④)
 //: `opt.settle` — 도착한 화면을 한 번 보인 뒤에 다시 그린다. 끝의 `draw` 가 도착을 가리지 않게
 const EASE_INOUT=t=>-(Math.cos(Math.PI*t)-1)/2;   // 사인 — 출발·도착 모두 부드럽게
 //: 3차 — 2차 곡선은 300ms 에서 처음·끝 10% 가 84·67ms 로 짧아 감속이 약했다(3차 100·83ms)
@@ -1958,7 +2096,6 @@ const EASE_INOUT=t=>-(Math.cos(Math.PI*t)-1)/2;   // 사인 — 출발·도착 �
 const EASE_FOCUS=x=>{ const t=Math.pow(x,.8); return t<.5 ? 4*t*t*t : 1-Math.pow(-2*t+2,3)/2; };
 //: 날던 중에 새 이동이 끼어들면 처음부터 다시 가속하지 않는다 — 0 에서 출발하면 그 자리에서 한 번 멈춘다
 const EASE_OUT=t=>Math.sin(Math.max(0,t)*Math.PI/2);
-const FLY_NEAR=.8;
 //: 한 프레임이 이동 시간에서 쓸 수 있는 최대(ms) — 느린 기계의 보통 프레임(~130ms)은 거의 그대로 세고 0.6초 넘는 막힘만 자른다. 초기값
 const FLY_DT_MAX=120, FLY_DT_FRAMES=3;
 //: 장애를 눌렀을 때의 이동 시간 — 가까우면 짧게, 멀면 길게. 값은 초기값이다(사용자 11-06).
@@ -1982,7 +2119,7 @@ function flyTo(v, ms=700, opt={}){
   // 축척 단계는 도착점에서 `setVB` 가 지킨다 — 여기서 미리 맞춰
   // 둬야 마지막 프레임에서 튀지 않는다. 장애 맞추기(`opt.free`)는 단계에 맞추지 않는다
   if(!opt.free) v=snapVB(v);
-  const id={}, moving=!!FLY && !opt.at;   // 휠은 자기 방식으로 이어 붙인다(`wheelStep`)
+  const id={}, moving=!!FLY && !opt.at;   // 휠(`opt.at`)은 앞 이동이 끝난 뒤에만 오므로 끼어들기가 없다
   // 끼어들 때는 한 프레임 앞에서 출발한다 — 첫 프레임이 제자리면 그만큼 멈춰 보인다
   //: 시간은 **프레임 간격을 더해** 잰다 — 한 간격은 `FLY_DT_MAX` 까지만 센다(사용자 11-09). 누른
   //: 직후 장애 표시를 새로 그리는 프레임이 0.6~1초씩 걸려(실측 654·1000ms), 시계로 재면 이동 시간이
@@ -2008,14 +2145,17 @@ function flyTo(v, ms=700, opt={}){
       VB={x:cx-w/2, y:cy-h/2, w, h};
     }
     gestShow(false);
-    if(opt.near && t>=FLY_NEAR){ const f=opt.near; opt.near=null; f(); if(FLY!==id) return; }
     if(t<1){ requestAnimationFrame(step); return; }
     if(opt.settle){ opt.settle=false; requestAnimationFrame(step); return; }
     FLY=null; fx.classList.remove('fly'); lb.classList.remove('fly');
     document.getElementById('hq').classList.remove('fly');
     gestEnd();
     // 단계가 바뀌면 `setVB` 가 이미 그렸다 — 또 그리지 않는다
-    const lod=LOD; setVB(v, {free:!!opt.free}); if(LOD===lod) draw();
+    // 그리기가 예외로 끊겨도 글자는 새 자리에 놓고 휠 잠금은 푼다(사용자 11-24 — 역 층 예외로 `placeLabels`
+    // 에 닿지 못해 넓은 화면의 글자가 100m 지도 위에 박혀 남았다)
+    try{ const lod=LOD; setVB(v, {free:!!opt.free}); if(LOD===lod) draw(); }
+    catch(err){ try{ placeLabels(); }catch(_){} console.error(err); }
+    finally{ if(opt.done) opt.done(); }
   };
   requestAnimationFrame(step);
   return id;
@@ -2026,7 +2166,7 @@ function drawFocus(){
   const glob=document.getElementById('glob');
   glob.style.display='none';
   const fbar=document.getElementById('fbar');
-  if(!fs){ geofx.replaceChildren(); clearEvtWave(); fbar.style.display='none'; placeBars();
+  if(!fs){ geofx.replaceChildren(); clearEvtWave(); fbar.style.display='none'; placeBars(); rpStop();
     if(FOCUS){ FOCUS=null; renderList(); } return; }
   hqHot(null);
   const h=fs.h, base=fs.base;
@@ -2086,7 +2226,7 @@ function drawFocus(){
       : `<button data-part="" class="on" title="${esc((base.trigger_kpi||'')+' '+(base.title||''))}">${esc(formTag(pieceForm(base), formCount(base, null)))}</button>`)
     + `</span>`;
   bar.innerHTML=`<b>${unitTag(base)}${sevTag(base.severity)} · ${esc(headOf(base))}${confOf(base)}</b>`
-    + `<button id=unfocus>${T('해제')}</button><i></i>`
+    + `<button id=unfocus>${T('해제')}</button><button id=rpbtn class=rpb disabled>${T('▶ 재생')}</button><i></i>`
     + chips
     // 무엇이 감지됐나 · 어디서 — 사건이면(구성 조각을 받았으면) 쉬운 문장으로. 코드와 원래 제목은 툴팁에 남긴다
     + (plain?`<span class=plain title="${esc((h.trigger_kpi||'')+'\n'+plain.titles.join('\n'))}">`
@@ -2143,6 +2283,7 @@ function drawFocus(){
     // `#sel button` 규칙(해제 단추 자리 — 오른쪽 위)을 받지 않고 맨 끝에 선다
     ;
   document.getElementById('unfocus').onclick=()=>focusInc(FOCUS);
+  rpBind(h);
   for(const b of bar.querySelectorAll('.parts button')) b.onclick=()=>{
     const k=b.dataset.part==='' ? PART : +b.dataset.part;
     if(k!==PART){ PART=k; applyFaults(); drawPick(); drawFocus(); drawDown(); }
@@ -2154,6 +2295,407 @@ function drawFocus(){
     if(p2.length) flyFocus(fitFor(hh, p2)); else document.getElementById('reset').onclick();
   };
   placeBars();
+}
+// ── 재생 — 장애 하나를 시간축으로 다시 본다(2026-11-24 사용자 「A·B·C 해 보자」) ────────────────
+// C 탐지 추적(`/api/replay/{id}/timeline`) · B 장애 타임랩스 1분(`…/timelapse`) · A 노선 흐름(`…/route`, 3번만).
+// 이력의 항목은 graphio 사건이고 재생은 **주입한 장애** 단위다 — 사건이 열린 시각이 장애 구간(시작~끝+여유) 안에
+// 드는 장애 가운데 가장 늦게 시작한 것을 잇는다. 장애 목록에서 넘어왔으면(`?fault=`) 그 번호를 쓴다.
+// 이어지는 장애가 없으면 단추를 끈다 — 지어 붙이지 않는다
+//: 사건이 장애 끝 뒤 몇 분까지 열리면 그 장애 것으로 보나 — 판정 예약(끝+10분)과 같은 폭. **초기값이다**
+const RP_SLACK_MIN=10;
+//: 1분이 화면에서 넘어가는 간격(ms) — 사용자 「1분 단위로 변하는 모습」. **초기값이다**
+const RP_STEP_MS=1000;
+//: 한 분에 그리는 이동 줄기 상한 — 분당 셀 쌍이 200개 안팎이라 다 그리면 노선이 덮인다. 정체가 있는 줄기는 늘 그린다
+const RP_FLOW_MAX=90;
+const RP_LBL_JOIN=3, RP_LBL_GAP=16;
+//: 열차가 셀 「근처」라고 보는 거리(m) — 노선 셀 88칸이 고리 34.5km 에 있어 칸 간격이 약 390m, 그 절반쯤. 그림 범위일 뿐 판정 문턱이 아니다
+const RP_TRAIN_NEAR=200;
+//: 열차 모양 — 한 칸 캡슐(가로 30px)
+const RP_TRAIN_W=30, RP_TRAIN_H=11;
+//: 확대 화면의 칸 — 가로·세로(px)와 칸 사이 틈(px), 편성 칸 수
+const RP_CAR_W=20, RP_CAR_H=9, RP_CAR_GAP=1.5, RP_CARS=4;
+//: 축척(축척 막대 값, m)에 따라 그리는 방식 — 사용자 결정 11-24 「5km 이상 지도에서는 지하철 보여주지 말자 · 1km 이하는 반대편도」.
+//: 그림 규칙이지 판정 문턱이 아니다. 막대 값은 `drawScale` 과 같은 눈금(`scaleNiceM`)
+const RP_TRAIN_HIDE_M=5000, RP_TRAIN_DETAIL_M=1000;
+//: 역 사이 속도 — 모든 구간을 같은 가속도·같은 최고 속도로(사다리꼴: 가속 → 등속 → 감속). 사용자 11-24 「가운데가 어디는
+//: 엄청 느리고 어디는 엄청 빠르다」 — 구간 길이(0.5~2.2km)가 달라도 같은 시간에 가게 해서였다. 최고 속도는 가장 긴 구간이
+//: 정차 뒤 남은 시간 안에 들어가도록 정하고, 일찍 닿은 구간은 남는 만큼 역에 더 서 있다. 최고 속도까지 RP_ACC_SEC 초
+const RP_ACC_SEC=27;
+//: 「내선도 보기」 때 진행 방향 왼쪽으로 비키는 거리(m, 일본은 좌측 통행) — 픽셀로 두면 축소 화면에서 철로를 100m 넘게
+//: 벗어났다(맥스 11-24). 미터라 축척과 함께 줄어든다. 그림 범위일 뿐이다
+const RP_TRAIN_SIDE_M=10;
+//: **열차는 상징 그림이다**(사용자 결정 11-24 「한 역당 3분 잡고, 3분마다 역 하나씩」). 실제 운행 간격으로 48대를 돌리니
+//: 징그럽고 확대하면 너무 빨랐다. 한 역에 RP_ST_SEC — 처음 RP_DWELL_SEC 는 역에 서고 나머지 동안 다음 역까지 가고 선다.
+//: 열차는 RP_ST_GAP 역 간격으로 둔다(30역 → 외선 10대).
+//: 역 정차는 짧게 15초(재생 0.25초)만 — 사용자 11-24 「역에는 잠깐만, 천천히 출발해 빨라졌다 천천히 도착, 도착하고 곧 출발」
+const RP_ST_SEC=180, RP_DWELL_SEC=15, RP_ST_GAP=3;
+//: 출발 뒤 t초에 간 거리(m) — 구간 길이 d, 최고 속도 v, 가속도 a. 짧아 최고 속도에 못 닿으면 삼각형
+function rpRunDist(d, t, v, a){
+  if(t<=0) return 0;
+  const ta=v/a, full=d>=v*ta, tp=full?ta:Math.sqrt(d/a), tc=full?(d-v*ta)/v:0, tot=2*tp+tc, vp=a*tp;
+  if(t>=tot) return d;
+  if(t<tp) return .5*a*t*t;
+  if(t<tp+tc) return .5*vp*tp+vp*(t-tp);
+  const r=tot-t; return d-.5*a*r*r;
+}
+//: 역 이름(일본어) — track.stations[].name 은 한국어라 id(JY01~30)로 옮긴다
+const RP_YMT_JA={JY01:'東京',JY02:'神田',JY03:'秋葉原',JY04:'御徒町',JY05:'上野',JY06:'鶯谷',JY07:'日暮里',JY08:'西日暮里',JY09:'田端',JY10:'駒込',JY11:'巣鴨',JY12:'大塚',JY13:'池袋',JY14:'目白',JY15:'高田馬場',JY16:'新大久保',JY17:'新宿',JY18:'代々木',JY19:'原宿',JY20:'渋谷',JY21:'恵比寿',JY22:'目黒',JY23:'五反田',JY24:'大崎',JY25:'品川',JY26:'高輪ゲートウェイ',JY27:'田町',JY28:'浜松町',JY29:'新橋',JY30:'有楽町'};
+const RP_YMT_SET=new Set(Object.values(RP_YMT_JA));   // 역 이름 색(야마노테만 녹색)이 같이 쓴다
+const rpStName=s=>LANG==='ja'&&RP_YMT_JA[s.id]||s.name;   // 시간축 % — 이보다 가까운 큰 점은 글자 합침 · 엇갈림
+//: 시간축 점 — 큰 점(주 단계)과 작은 점. 글자는 서버 문구가 아니라 여기서 정한다(일본어판 때문)
+const RP_STEP={fault_start:'장애 시작', first_anomaly:'첫 이상징후', 'open:L2_EVENT':'통합장애 열림',
+  'verdict:L2_EVENT':'원인 판정', fault_end:'장애 끝', inject:'주입 등록', 'open:L1_BUNDLE':'L1 묶음 열림',
+  'verdict:L1_BUNDLE':'L1 원인 판정', 'open:PIECE':'조각 열림', 'verdict:PIECE':'조각 원인 판정'};
+const RP_MAIN=new Set(['fault_start','first_anomaly','open:L2_EVENT','verdict:L2_EVENT','fault_end']);
+const RP_MISSING={active:'활성 시각', ai_ask:'AI 질의'};
+RP_STEP.other_start='다른 장애 시작'; RP_STEP.other_end='다른 장애 끝';
+//: 시간만 겹친 다른 장애의 사건 — 작은 점만(이 장애의 첫 이상징후·판정·셀 칠하기에서는 API 가 뺐다)
+RP_STEP.other_event='다른 장애 사건';
+//: 장애마다 띠 색 — 0번이 재생을 시작한 장애(기존 주황), 나머지는 겹치는 다른 장애 차례대로
+const RP_FCOL=['#e07a3f','#5b8def','#b77ce8','#2bb3a3','#d9a441'];
+//: 장애 이름 — 화면 시나리오 이름(`/api/scenarios` 의 rank·name)으로. 내부 번호(scenario_no)는 화면에 쓰지 않는다
+function rpFaultName(f){
+  const L=Array.isArray(SCN)?SCN:[];
+  const s=(f.scenario_no!=null&&L.find(x=>x.no===f.scenario_no))||L.find(x=>x.kind===f.kind&&x.rank!=null)||L.find(x=>x.kind===f.kind);
+  return s?(s.rank!=null?`${s.rank}. ${T(s.name)}`:T(s.name)):(f.kind||'');
+}
+const rpFid=f=>+(f.id??f.fault_id);
+let RP=null, RP_FAULTS=null, RP_FAULTS_AT=0, RP_AT=null;
+async function rpFaultList(){
+  if(!RP_FAULTS||Date.now()-RP_FAULTS_AT>60000){
+    try{ RP_FAULTS=await (await fetch('/api/faults?limit=300')).json(); RP_FAULTS_AT=Date.now(); }
+    catch(e){ RP_FAULTS=RP_FAULTS||[]; } }
+  return Array.isArray(RP_FAULTS)?RP_FAULTS:[];
+}
+function rpFaultOf(h, list){
+  if(LINK&&LINK.fault&&LINK.ids.has(h.incident_id)) return +LINK.fault;
+  const o=rpT(h.opened_ts); if(!isFinite(o)) return null;
+  let best=null, bs=-Infinity;
+  for(const f of list){
+    if(f.status==='cancelled') continue;
+    const s=rpT(f.start_ts), e=s+(f.duration_min||0)*60000;
+    if(!isFinite(s)||o<s-60000||o>e+RP_SLACK_MIN*60000) continue;
+    if(s>bs){ best=f; bs=s; } }
+  return best?best.fault_id:null;
+}
+async function rpBind(h){
+  const id=h.incident_id, fid=rpFaultOf(h, await rpFaultList());
+  // 통합장애 항목은 incident_id 뒤에 「#구성 목록」이 붙는다 — FOCUS 는 앞쪽 대표 ID 만 갖는다
+  const b=document.getElementById('rpbtn'); if(!b||FOCUS!==String(id).split('#')[0]) return;
+  if(fid==null){ b.disabled=true; b.title=T('이 장애에 이어지는 주입 기록이 없습니다'); return; }
+  b.disabled=false;
+  const on=RP&&RP.fid===fid;
+  b.textContent=on?T('■ 재생 닫기'):T('▶ 재생 · F-{id}',{id:fid});
+  b.title=T('주입 장애 F-{id} 를 1분씩 다시 봅니다',{id:fid});
+  b.onclick=()=>{ if(RP&&RP.fid===fid) rpStop(); else rpStart(fid); };
+}
+function rpStop(){
+  if(!RP) return;
+  clearInterval(RP.timer); cancelAnimationFrame(RP.raf); RP=null; RP_AT=null; placeLabels();
+  document.body.classList.remove('rpon');
+  rpLegend();
+  const p=document.getElementById('rp'); if(p){ p.style.display='none'; p.replaceChildren(); }
+  const x=rpLayer(); if(x){ x.replaceChildren(); x.style.transform=''; }
+  const b=document.getElementById('rpbtn'); if(b&&FOCUS){ const h=histOf(FOCUS); if(h) rpBind(h); }
+}
+async function rpStart(fid){
+  rpStop();
+  const st={fid, i:0, timer:null, playing:false};
+  RP=st; document.body.classList.add('rpon');
+  const p=document.getElementById('rp'); p.style.display='block';
+  p.innerHTML=`<div class=dim>${esc(T('재생 자료를 받는 중…'))}</div>`;
+  const get=u=>fetch(u).then(r=>r.json()).catch(e=>({error:String(e)}));
+  const [tl, tlp]=await Promise.all([get(`/api/replay/${fid}/timeline`), get(`/api/replay/${fid}/timelapse?pre=5&post=10`)]);
+  if(RP!==st) return;
+  if(tlp.error||!(tlp.frames||[]).length){
+    p.innerHTML=`<div class=row><b>${esc(T('재생할 수 없습니다'))}</b><span class=dim>${esc(tlp.error||tl.error||T('분별 자료가 없습니다'))}</span><button id=rpx>✕</button></div>`;
+    document.getElementById('rpx').onclick=rpStop; return; }
+  if(!SCN) await loadScenarios(); if(RP!==st) return;
+  st.tl=tl; st.tlp=tlp; st.co={};
+  // 겹치는 주입 장애 — 재생을 시작한 장애를 맨 앞(색 0번)에. 옛 응답(faults 없음)이면 그 하나만
+  const fl=(tlp.faults&&tlp.faults.length?tlp.faults:[{...(tlp.fault||{}), id:fid}]);
+  st.faults=[...fl].sort((a,b)=>(rpFid(b)===+fid)-(rpFid(a)===+fid)||rpT(a.start)-rpT(b.start));
+  st.fcol={}; st.faults.forEach((x,k)=>{ st.fcol[rpFid(x)]=RP_FCOL[k%RP_FCOL.length]; });
+  // 셀이 처음 켜진 분에 진행 중이던 장애에 재생 장애가 없으면 「다른 장애 때 켜진 셀」 — 시각 대조이지 정답이 아니다
+  st.other={};
+  for(const c of tlp.cells||[]) if(Array.isArray(c.first_fault)&&c.first_fault.length&&!c.first_fault.includes(+fid)) st.other[c.key]=c.first_fault;
+  for(const c of tlp.cells||[]) st.co[c.key]=[c.lon,c.lat];
+  // A 는 노선 장애(3번 `ho_interruption`)일 때만 — 다른 장애에 노선 흐름을 띄우면 원인처럼 읽힌다. 응답이 커서 한 번만 받는다
+  if((tlp.fault||{}).kind==='ho_interruption'){
+    const rt=await get(`/api/replay/${fid}/route?pre=5&post=10`); if(RP!==st) return;
+    if(!rt.error&&(rt.routes||[]).length){ st.rt=rt; st.rtAt={};
+      for(const f of rt.frames||[]) st.rtAt[f.t]=f;
+      for(const [k,v] of Object.entries(rt.coords||{})) st.co[k]=v;
+      if(rt.track&&(rt.track.ring||[]).length>1) st.trk=rpTrack(rt.track); } }
+  rpPanel(); rpFrame(0); rpPlay(true); placeLabels();
+  const b=document.getElementById('rpbtn'); if(b&&FOCUS){ const h=histOf(FOCUS); if(h) rpBind(h); }
+}
+function rpPlay(on){
+  const st=RP; if(!st) return;
+  clearInterval(st.timer); st.playing=on;
+  if(on){ if(st.i>=st.tlp.frames.length-1) rpFrame(0);
+    st.timer=setInterval(()=>{ if(RP!==st) return;
+      if(st.i>=st.tlp.frames.length-1){ rpPlay(false); return; } rpFrame(st.i+1); }, RP_STEP_MS); }
+  const b=document.getElementById('rpplay'); if(b) b.textContent=on?'❚❚':'▶';
+  st.t0=performance.now()-st.i*RP_STEP_MS; cancelAnimationFrame(st.raf); if(st.trk&&st.trk.px) rpTrainTick();
+}
+//: graphio 시각은 「2026-11-24 15:10:00」(공백) — Safari 는 공백 ISO 를 못 읽어 T 로 바꾼다
+const rpT=v=>Date.parse(String(v||'').replace(' ','T'));
+const rpHm=v=>String(v||'').slice(11,16);
+function rpPanel(){
+  const st=RP, p=document.getElementById('rp'), tl=st.tl||{}, sm=tl.summary||{}, F=st.tlp.frames, f=st.tlp.fault||{};
+  const t0=rpT(F[0].t), t1=rpT(F[F.length-1].t)+60000, pos=t=>Math.max(0,Math.min(100,(rpT(t)-t0)/(t1-t0)*100));
+  const lead = sm.first_anomaly_min!=null
+    ? T('장애 시작 후 {n}분 만에 탐지',{n:sm.first_anomaly_min})
+      + (sm.l2_verdict_min!=null?`<small>${T('{n}분 만에 원인 판정',{n:sm.l2_verdict_min})} · ${causeTag(sm.l2_root_code, null)}</small>`:'')
+    : T('이 구간에 이상징후 기록이 없습니다');
+  const steps=(tl.steps||[]).filter(s=>s.at&&RP_STEP[s.step]);
+  // **가까운 큰 점은 글자를 한 줄로 합친다.** 같은 분에 첫 이상징후와 통합장애 열림이 함께
+  // 오면(F-604 14:42) 글자가 포개져 둘 다 못 읽는다. 합친 묶음끼리도 가까우면 아래 줄로 엇갈린다
+  const lab={}, grp=[];
+  steps.map((s,k)=>({s,k,x:pos(s.at)})).filter(o=>RP_MAIN.has(o.s.step)).sort((a,b)=>a.x-b.x).forEach(o=>{
+    const g=grp[grp.length-1];
+    if(g&&o.x-g.x1<RP_LBL_JOIN){ g.ks.push(o.k); g.x1=o.x; } else grp.push({ks:[o.k],x0:o.x,x1:o.x}); });
+  let prev=null, low=false;
+  grp.forEach(g=>{ const txt=g.ks.map(k=>T(RP_STEP[steps[k].step])).join(' · ');
+    low=prev!=null&&g.x0-prev<RP_LBL_GAP&&!low; prev=g.x1;
+    const edge=g.x0<8?' l0':g.x0>92?' r0':'';
+    g.ks.forEach((k,i)=>{ lab[k]=i?{cls:' nl',txt:''}:{cls:(low?' lo':'')+edge,txt}; }); });
+  const dots=steps.map((s,k)=>{ const main=RP_MAIN.has(s.step), L=lab[k]||{cls:'',txt:T(RP_STEP[s.step])};
+    const tip=[T(RP_STEP[s.step])+(s.fault_id!=null?` F-${s.fault_id}`:''), rpHm(s.at), s.lead_min!=null?`+${s.lead_min}${T('분')}`:'', s.root_code?`${s.root_code}${s.confidence!=null?' '+Math.round(s.confidence*100)+'%':''}`:'', s.event_id||''].filter(Boolean).join(' · ');
+    const oc=s.fault_id!=null&&st.fcol[s.fault_id]?`;border-color:${st.fcol[s.fault_id]}`:'';
+    return `<span class="dt${main?' mn':' sub'}${L.cls}" data-k="${k}" style="left:${pos(s.at)}%${oc}" title="${esc(tip)}"><em>${esc(L.txt)}</em></span>`; }).join('');
+  // 장애 띠 — 하나면 예전 그대로, 여럿이면 장애마다 한 줄씩(색은 아래 장애 목록과 같다)
+  const many=st.faults.length>1;
+  const fz=st.faults.map((x,k)=>x.start&&x.end
+    ? `<span class="fz${many?' k':''}" style="left:${pos(x.start)}%;width:${Math.max(.5,pos(x.end)-pos(x.start))}%`
+      + (many?`;top:${4+k*5}px;background:${st.fcol[rpFid(x)]}`:'')+`" title="F-${rpFid(x)} ${esc(rpFaultName(x))}"></span>`:'').join('');
+  const flist=many?`<div class=fl>${st.faults.map(x=>`<span class="${rpFid(x)===+st.fid?'me':''}"><s style="background:${st.fcol[rpFid(x)]}"></s>`
+      + `F-${rpFid(x)} ${esc(rpFaultName(x))} <span class=dim>${rpHm(x.start)}~${rpHm(x.end)}</span></span>`).join('')}</div>`:'';
+  const miss=(tl.missing||[]).map(m=>T(RP_MISSING[String(m).split(' ')[0]]||String(m).split(' ')[0]));
+  st.steps=steps;
+  p.innerHTML=`<div class=row><button id=rpplay>❚❚</button><input id=rpsl type=range min=0 max=${F.length-1} step=1 value=0>`
+    + `<span class=t id=rpt></span><span class=ph id=rpph></span><span class=cnt id=rpcnt></span>`
+    + `<button id=rpx title="${esc(T('재생 닫기'))}">✕</button></div>`
+    + `<div class=lead>${lead}</div>`
+    + `<div class=trk><span class=ln></span>${fz}${dots}<span class=cur id=rpcur></span></div>${flist}`
+    + (st.rt?`<div class=row id=rprt></div>`:'')
+    + (st.trk?`<div class=dim><label style="margin-right:10px;cursor:pointer"><input type=checkbox id=rpinner${st.inner?' checked':''}> ${esc(T('내선도 보기'))}</label>`
+      + `${esc(T('열차는 3분에 한 역씩 가는 그림입니다(실제 출퇴근은 2~3분 간격 · 약 48대). 주황 깜빡임은 실제 정체 데이터입니다'))}</div>`:'')
+    + `<div class=dim>${esc(T('F-{id} · 색이 없는 셀은 판정 없음입니다(정상 확인이 아닙니다)',{id:st.fid}))}`
+    + (miss.length?` · ${esc(T('기록 없음: {list}',{list:miss.join(', ')}))}`:'')+`</div>`;
+  document.getElementById('rpplay').onclick=()=>rpPlay(!RP.playing);
+  document.getElementById('rpx').onclick=rpStop;
+  const ib=document.getElementById('rpinner'); if(ib) ib.onchange=e=>{ st.inner=e.target.checked; rpFrame(st.i); };
+  document.getElementById('rpsl').oninput=e=>{ rpPlay(false); rpFrame(+e.target.value); };
+  st.pos=pos;
+  rpLegend();
+}
+// 재생 패널이 범례(왼쪽 아래)를 덮으면 범례를 패널 위로 올린다 — 재생을 닫으면 제자리
+function rpLegend(){
+  const L=document.getElementById('legend'), p=document.getElementById('rp'); if(!L) return;
+  L.style.bottom='';
+  if(!RP||!p||p.style.display==='none') return;
+  const a=L.getBoundingClientRect(), b=p.getBoundingClientRect();
+  if(a.right>b.left&&a.left<b.right&&a.bottom>b.top)
+    L.style.bottom=`${Math.round(b.bottom-b.top)+22}px`;
+}
+function rpFrame(i){
+  const st=RP; if(!st) return;
+  const F=st.tlp.frames, fr=F[i]; st.i=i;
+  // 열차 시계 — 재생 타이머가 넘긴 분은 시계를 그대로 두고(분 경계에서 튀지 않게), 슬라이더로 옮긴 분이면 맞춘다
+  const now=performance.now(), want=st.t0!=null?(now-st.t0)/RP_STEP_MS:null;
+  if(want==null||Math.abs(want-i)>1.5) st.t0=now-i*RP_STEP_MS;
+  const sl=document.getElementById('rpsl'); if(sl) sl.value=i;
+  const f=st.tlp.fault||{}, vo=+f.virtual_offset_sec||0, tt=rpT(fr.t);
+  const vt=vo?new Date(tt+vo*1000):null;
+  document.getElementById('rpt').textContent=rpHm(fr.t)+(vt?T(' (가상 {t})',{t:String(vt.getHours()).padStart(2,'0')+':'+String(vt.getMinutes()).padStart(2,'0')}):'');
+  const ph=document.getElementById('rpph');
+  // 그 분 진행 중인 주입 장애를 그대로 — 「장애 뒤」 하나로 접으면 다음 장애의 셀이 이 장애 것처럼 읽힌다
+  if(Array.isArray(fr.active)){
+    const act=fr.active.map(Number), byId=Object.fromEntries(st.faults.map(x=>[rpFid(x),x]));
+    ph.className='ph'+(act.includes(+st.fid)?' on':act.length?' ot':'');
+    ph.textContent=act.length
+      ? T('진행 중: {list}',{list:act.map(id=>`F-${id}`+(byId[id]?' '+rpFaultName(byId[id]):'')).join(' · ')})
+      : T('주입 장애 없음');
+  } else {
+    ph.className='ph'+(fr.in_fault?' on':'');
+    ph.textContent=fr.in_fault?T('장애 진행 중'):(tt<rpT(f.start)?T('장애 전'):T('장애 뒤')); }
+  const n={severe:0, degraded:0, silent:0};
+  for(const c of Object.values(fr.cells||{})) if(n[c.state]!=null) n[c.state]++;
+  document.getElementById('rpcnt').innerHTML=`<s style="background:#ff4d5e"></s>${esc(T('심하게'))} <b>${n.severe}</b>`
+    + `<s style="background:#f2c230"></s>${esc(T('나빠짐'))} <b>${n.degraded}</b>`
+    + (n.silent?`<s style="background:#9aa3ad"></s>${esc(T('통화 끊김'))} <b>${n.silent}</b>`:'')
+    + (fr.others?` · <span class=dim>${esc(T('장애 셀 밖 이상징후 {n}',{n:fr.others}))}</span>`:'');
+  // 다른 장애 때 켜진 셀 — 지도에서는 속 빈 고리로 그린다(rpDraw)
+  const oth=Object.keys(fr.cells||{}).filter(k=>st.other[k]);
+  if(oth.length){ const ids=[...new Set(oth.flatMap(k=>st.other[k]))].map(i=>`F-${i}`).join('·');
+    document.getElementById('rpcnt').innerHTML+=`<span class=oc></span>${esc(T('다른 장애({ids}) 때 켜진 셀',{ids}))} <b>${oth.length}</b>`; }
+  document.getElementById('rpcur').style.left=st.pos(fr.t)+'%';
+  const lim=tt+59999;
+  document.querySelectorAll('#rp .trk .dt').forEach(d=>{ const s=st.steps[+d.dataset.k]; d.classList.toggle('lit', rpT(s.at)<=lim); });
+  if(st.rt){ const rf=st.rtAt[fr.t], r=st.rt.routes[0], el2=document.getElementById('rprt');
+    const nm=r.id==='YMT'?T('야마노테선'):r.name;
+    if(!rf||!rf.flows) el2.innerHTML=`<span>${esc(nm)}</span><span class=dim>${esc(T('이 분 이동 기록 없음'))}</span>`;
+    else { let mv=0, sv=0; for(const x of rf.flows){ mv+=x[2]; sv+=x[3]; }
+      el2.innerHTML=`<span>${esc(nm)}</span><span>${esc(T('셀을 넘어간 사람 {n}명',{n:mv.toLocaleString()}))}</span>`
+        + `<span style="color:${sv?'#ff7a45':'inherit'}">${esc(T('넘어간 직후 멈춤 {n}명',{n:sv.toLocaleString()}))}</span>`
+        + (st.trk?rpTrainNote(st.trk, rf):''); } }
+  rpDraw();
+}
+const rpLayer=()=>document.querySelector('#rpfx>.ly');
+//: 화면 좌표 — 셀 음영(`downShape`)과 같은 투영(x=lon, y=-merc(lat))을 **그려 둔 viewBox(`VBC`)** 로 화면에 놓는다.
+//: `getScreenCTM` 을 쓰지 않는다 — 끌기 중에는 svg 에 CSS 변환이 걸려 있어 그 값을 따라 그리면 층이 두 번 밀렸다.
+//: 움직이는 동안(VB≠VBC)은 `gestXform` 과 같은 변환을 층에 걸어 그림과 함께 밀고 키운다(`rpXf`)
+function rpBase(v){
+  const r=document.getElementById('wrap'), W=r.clientWidth, H=r.clientHeight, s=Math.min(W/v.w, H/v.h);
+  const ox=(W-v.w*s)/2-v.x*s, oy=(H-v.h*s)/2-v.y*s;
+  return (lon,lat)=>[ox+mx(lon)*s, oy-my(lat)*s];
+}
+//: 그려 둔 층(RP_AT.vb)을 지금 보여야 할 화면(VB)으로 — `gestXform` 과 같은 식(meet·가운데)
+function rpXf(){
+  const box=rpLayer(); if(!box||!RP_AT||!VB) return 1;
+  const r=document.getElementById('wrap'), W=r.clientWidth, H=r.clientHeight, A=RP_AT.vb, V=VB;
+  const sA=Math.min(W/A.w, H/A.h), sV=Math.min(W/V.w, H/V.h), k=sV/sA;
+  const oxA=(W-A.w*sA)/2, oyA=(H-A.h*sA)/2, oxV=(W-V.w*sV)/2, oyV=(H-V.h*sV)/2;
+  const tx=oxV-V.x*sV-k*oxA+A.x*sV, ty=oyV-V.y*sV-k*oyA+A.y*sV;
+  box.style.transform=Math.abs(k-1)<1e-9&&Math.abs(tx)<.01&&Math.abs(ty)<.01?'':`translate(${tx}px,${ty}px) scale(${k})`;
+  return k;
+}
+function rpDraw(){
+  const st=RP, box=rpLayer(); if(!st||!box) return;
+  const vb=VBC||VB; if(!vb){ box.replaceChildren(); return; }
+  const P=rpBase(vb);
+  const xy=k=>{ const c=st.co[k]; return c?P(c[0],c[1]):null; };
+  const fr=st.tlp.frames[st.i], out=[];
+  // A — 그 분에 실제로 셀을 넘어간 쌍. 많은 쌍부터, 정체가 있는 쌍은 늘 그린다
+  const rf=st.rt&&st.rtAt[fr.t];
+  if(rf&&rf.flows&&!st.trk){
+    const fl=[...rf.flows].sort((a,b)=>(b[3]-a[3])||(b[2]-a[2]));
+    const pick=fl.filter((x,k)=>x[3]>0||k<RP_FLOW_MAX);
+    for(const [a,b,nn,sv] of pick){ const p=xy(a), q=xy(b); if(!p||!q) continue;
+      const L=Math.hypot(q[0]-p[0], q[1]-p[1]); if(L<2) continue;
+      const e=document.createElement('b'); if(sv>0) e.className='st';
+      e.style.cssText=`left:${p[0]}px;top:${p[1]}px;width:${L}px;transform:rotate(${Math.atan2(q[1]-p[1],q[0]-p[0])}rad);--L:${L}px`;
+      e.title=`${a} → ${b} · ${nn}`;
+      e.appendChild(document.createElement('u')); out.push(e); }
+  }
+  if(rf&&rf.cells){
+    for(const [k,v] of Object.entries(rf.cells||{})) if(v&&v[2]>0){ const p=xy(k); if(!p) continue;
+      const e=document.createElement('i'); e.className='bl'; e.style.cssText=`left:${p[0]}px;top:${p[1]}px`; out.push(e); } }
+  // B — 그 분에 graphio 가 판정한 셀만 칠한다. 없는 셀은 판정 없음이라 칠하지 않는다(정상이 아니다)
+  for(const [k,c] of Object.entries(fr.cells||{})){ const p=xy(k); if(!p) continue;
+    const e=document.createElement('i'); e.className='c '+c.state+(st.other[k]?' ot':''); e.style.cssText=`left:${p[0]}px;top:${p[1]}px`; out.push(e); }
+  // 열차 — 고리 점을 지금 화면 좌표로 한 번 바꿔 두고, 움직임은 rpTrainTick 이 transform 만 고친다
+  if(st.trk){ const K=st.trk;
+    K.px=K.ring.map(c=>P(c[0],c[1]));
+    // 필요한 수만 만든다 — 숨긴 요소를 남겨 두면 세는 사람마다 대수가 달라진다(케이 실측 60개)
+    const n=Math.ceil(K.sts.length/RP_ST_GAP); K.n=n;
+    // 화면 1px 이 몇 m 인가 — 「내선도 보기」 비킴(m)을 픽셀로 바꾼다. 위도는 고리 첫 점
+    const q0=P(K.ring[0][0], K.ring[0][1]), q1=P(K.ring[0][0]+.01, K.ring[0][1]);
+    K.pxm=Math.hypot(q1[0]-q0[0], q1[1]-q0[1])/(.01*111320*Math.cos(K.ring[0][1]*Math.PI/180));
+    // 축척으로 그리는 방식 — 넓으면(5km 이상) 숨김, 좁으면(1km 이하) 칸 편성에 반대편(내선)까지
+    const sm=scaleNiceM(mppOf(vb));
+    K.mode=sm>=RP_TRAIN_HIDE_M?'off':sm<=RP_TRAIN_DETAIL_M?'det':'cap';
+    K.both=K.mode==='det'||!!st.inner;
+    K.el=[]; if(K.mode!=='off') for(let k=0;k<n*(K.both?2:1);k++){
+      if(K.mode==='cap'){ const e=document.createElement('div'); e.className='tr';
+        e.innerHTML='<span class=bd></span><span class=ws></span><span class=fw></span>';
+        K.el.push([e]); out.push(e); continue; }
+      const cars=[]; for(let c=0;c<RP_CARS;c++){ const e=document.createElement('div');
+        e.className='tr cr'+(c===0?' hd':c===RP_CARS-1?' tl':'');
+        e.innerHTML='<span class=bd></span><span class=ws></span><span class=dr></span>'
+          + (c===0?'<span class=fw></span><span class=ds></span><span class="hl a"></span><span class="hl b"></span>':'')
+          + (c===RP_CARS-1?'<span class=tk></span>':'');
+        cars.push(e); out.push(e); }
+      K.el.push(cars); } }
+  box.replaceChildren(...out); RP_AT={vb:{...vb}}; rpXf();
+  if(st.trk){ cancelAnimationFrame(st.raf); rpTrainTick(); }
+}
+// ── 열차 ────────────────────────────────────────────────────────────────
+// 위치는 「3분에 한 역씩」 가는 상징 그림이다(사용자 11-24) — 실제 열차 시각표가 아니다.
+// 외선은 고리 거리(pos_m)가 느는 방향, 내선은 주는 방향. 깜빡임은 그 분 `cells[key][2]`(떠나며 멈춘 사람) > 0 인
+// 셀 근처를 지나는 열차뿐이다 — 데이터가 없는 분(`cells` null)에는 깜빡이지 않는다
+function rpTrack(t){
+  const R=t.ring, cum=[0];
+  for(let k=1;k<R.length;k++){ const [a,b]=R[k-1], [c,d]=R[k], y=(b+d)/2*Math.PI/180;
+    cum.push(cum[k-1]+Math.hypot((c-a)*Math.cos(y), d-b)*111320); }
+  // 고리를 닫는 마지막 칸
+  const [a,b]=R[R.length-1], [c,d]=R[0], y=(b+d)/2*Math.PI/180;
+  const L0=cum[cum.length-1]+Math.hypot((c-a)*Math.cos(y), d-b)*111320;
+  // 셀의 pos_m 은 도구가 잰 길이(length_m) 기준이라 화면 누적 거리와 비율을 맞춘다
+  const sc=t.length_m?L0/t.length_m:1;
+  const cells=Object.entries(t.cells||{}).map(([k,v])=>({k, p:v.pos_m*sc})).sort((x,y)=>x.p-y.p);
+  const sts=(t.stations||[]).map(s=>({...s, p:s.pos_m*sc})).sort((x,y)=>x.p-y.p);
+  // 구간 길이(외선 i→i+1) · 최고 속도 v · 가속도 a — 가장 긴 구간이 정차 뒤 남은 시간에 꼭 들어가게
+  const N=sts.length, seg=sts.map((x,i)=>N?((sts[(i+1)%N].p-x.p)%L0+L0)%L0:0);
+  const run=RP_ST_SEC-RP_DWELL_SEC, vmax=Math.max(1,...seg)/(run-RP_ACC_SEC);
+  return {ring:R, cum, L:L0, cells, sts, seg, v:vmax, a:vmax/RP_ACC_SEC, px:null, el:[]};
+}
+//: 고리 거리 s(m) → [화면 x, y, 진행 각]
+function rpTrackAt(K, s){
+  const C=K.cum, n=C.length; s=((s%K.L)+K.L)%K.L;
+  let lo=0, hi=n-1; while(lo<hi){ const md=(lo+hi+1)>>1; if(C[md]<=s) lo=md; else hi=md-1; }
+  const j=(lo+1)%n, seg=(j?C[j]:K.L)-C[lo], f=seg>0?(s-C[lo])/seg:0, p=K.px[lo], q=K.px[j];
+  return [p[0]+(q[0]-p[0])*f, p[1]+(q[1]-p[1])*f, Math.atan2(q[1]-p[1], q[0]-p[0])];
+}
+//: 고리 거리 s 에서 RP_TRAIN_NEAR 안의 셀 — 칸이 88개라 그냥 훑는다
+function rpNearCells(K, s){
+  const out=[]; for(const c of K.cells){ let d=Math.abs(c.p-s); d=Math.min(d, K.L-d); if(d<=RP_TRAIN_NEAR) out.push(c.k); } return out;
+}
+function rpTrainTick(){
+  const st=RP; if(!st||!st.trk||!st.trk.px) return;
+  const K=st.trk, still=matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // 재생 시각(초) — 분 경계에서 이어지도록 「분 번호×60 + 그 분 안에서 흐른 몫」. 멈춤·움직임 줄이기는 분 시작에 둔다
+  // 재생 시각(초) — 연속 시계를 그 분 안(i~i+1)으로만 묶는다. 멈춤·움직임 줄이기는 분 시작에 둔다
+  const cl=st.playing&&!still?Math.min(st.i+1, Math.max(st.i, (performance.now()-st.t0)/RP_STEP_MS)):st.i;
+  const tau=cl*60, n=K.n||0, S=K.sts, N=S.length; if(!N) return;
+  // 몇 번째 역 차례인가와 그 3분 안의 몫 — 처음 1분은 서 있고, 나머지 2분은 가속·감속으로 다음 역까지
+  const step=Math.floor(tau/RP_ST_SEC), u=tau-step*RP_ST_SEC-RP_DWELL_SEC;
+  const rf=st.rt&&st.rtAt[st.tlp.frames[st.i].t], cs=rf&&rf.cells;
+  // 두 방향을 함께 보일 때만 진행 방향 왼쪽으로 비킨다(좌측 통행) — 한 방향이면 철로 위 그대로
+  const side=K.both?RP_TRAIN_SIDE_M*(K.pxm||0):0;
+  // 칸 사이 간격(m) — 화면 px 를 철로 위 거리로. 칸마다 철로를 따라 놓아 굽은 곳에서 편성이 휜다
+  const det=K.mode==='det', pitch=det?(RP_CAR_W+RP_CAR_GAP)/(K.pxm||1):0;
+  const W=det?RP_CAR_W:RP_TRAIN_W, H=det?RP_CAR_H:RP_TRAIN_H;
+  K.el.forEach((cars,k)=>{
+    const dir=k<n?1:-1, j=k%n;
+    // 외선은 역 순서(pos_m 오름차순)대로, 내선은 거꾸로. 내선은 한 역 엇갈려 둔다 — 같은 역에 겹쳐 서지 않게
+    const i0=(((dir>0 ? j*RP_ST_GAP+step : j*RP_ST_GAP+1-step)%N)+N)%N;
+    const d=dir>0 ? K.seg[i0] : K.seg[(i0-1+N)%N];
+    const s=S[i0].p+dir*rpRunDist(d, u, K.v, K.a);
+    const hot=!!cs&&rpNearCells(K, s).some(c=>cs[c]&&cs[c][2]>0);
+    cars.forEach((e,c)=>{
+      // 앞 칸이 진행 방향 앞에 — 편성 가운데가 s
+      const sc=s+dir*((cars.length-1)/2-c)*pitch;
+      // 방향은 진행 방향으로 1m 앞을 본다(서 있을 때도 다음 역 쪽)
+      const [x,y]=rpTrackAt(K, sc), [x2,y2]=rpTrackAt(K, sc+dir), ang=Math.atan2(y2-y, x2-x);
+      e.classList.toggle('st', hot);
+      // 서쪽으로 갈 때 뒤집히지 않게 세로로 접는다
+      const fl=Math.cos(ang)<0?-1:1;
+      e.style.transform=`translate(${x}px,${y}px) rotate(${ang}rad) translate(0,${-side}px) scale(1,${fl}) translate(${-W/2}px,${-H/2}px)`;
+    });
+  });
+  if(st.playing&&!still) st.raf=requestAnimationFrame(rpTrainTick);
+}
+//: 노선 줄 끝 — 열차 대수(그림)와, 그 분 정체가 난 셀의 가까운 역(실제 데이터)
+function rpTrainNote(K, rf){
+  const n=K.n||0, hot=new Set();
+  for(const c of K.cells){ const v=(rf.cells||{})[c.k]; if(!(v&&v[2]>0)) continue;
+    let best=null, bd=Infinity; for(const s of K.sts){ let d=Math.abs(s.p-c.p); d=Math.min(d, K.L-d); if(d<bd){ bd=d; best=s; } }
+    if(best) hot.add(rpStName(best)); }
+  // 기본은 외선만(사용자 11-24 「너무 꾸물꾸물」)
+  if(K.mode==='off') return `<span class=dim>${esc(T('열차는 5km보다 좁게 확대하면 보입니다'))}</span>`;
+  return `<span class=dim>${esc(K.both ? T('열차 외선·내선 {m}대',{m:n*2}) : T('열차 외선 {n}대',{n}))}</span>`
+    + (hot.size?`<span style="color:#ff7a45">${esc(T('멈춘 곳 {list}',{list:[...hot].slice(0,4).join('·')+(hot.size>4?' …':'')}))}</span>`:'');
+}
+//: 지도를 옮기기만 했으면 층을 민다 — 축척이 바뀌었으면 새로 깐다(`placeFx` 와 같은 규칙)
+function rpPlace(){
+  if(!RP) return;
+  rpLegend();
+  // 움직이는 중이면 층에 변환만 건다. 멈춘 뒤 축척·자리가 달라졌으면 새 좌표로 다시 깐다
+  const k=rpXf();
+  if(!GEST&&(!RP_AT||Math.abs(k-1)>1e-6||rpLayer().style.transform)) rpDraw();
 }
 // 장애 바가 위, 선택 바가 그 아래, 장애 내역(`#incs`)이 맨 아래
 function placeBars(){
@@ -2314,12 +2856,12 @@ function setVB(v, opt={}){
   VB=v; VBC={...v}; svg.setAttribute('viewBox',`${v.x} ${v.y} ${v.w} ${v.h}`);
   ovlVB(v);   // 구역·지진 겉층도 같이
   svg.style.transform=''; ovlTr('');
-  drawScale(); syncKs(); miniView();
+  drawScale(); syncKs(); miniView(); stnVis();
   // **단계가 바뀌면 draw 가 placeLabels 까지 한다** — 여기서 또 부르면 두 번이다
   if(D && MAP_READY && lodOf()!==LOD){ draw(); return; }
   // 같은 단계 안에서도 배경 선을 그린 축척에서 많이 멀어지면 그 층만 다시 솎는다(`drawBase`)
   if(D && MAP_READY && !GEST && BASE_MPP){ const r=mppOf(VB)/BASE_MPP;
-    if(r>BASE_REDRAW||r<1/BASE_REDRAW) drawBase(); }
+    if(r>BASE_REDRAW||r<1/BASE_REDRAW||!inBaseBox(VB)) drawBase(); }
   placeLabels();}
 
 // ── 도코모 본사 · PGW ────────────────────────────────────────────────
@@ -2357,6 +2899,8 @@ function egressLines(g, ids){
 // `getScreenCTM()` 으로 변환한다. viewBox 를 직접 나누면 틀린다 —
 // preserveAspectRatio 기본값이 `xMidYMid meet` 이라 남는 축에 여백이 붙는다.
 let LABELS=[];
+//: 역 이름 등급별로 보이는 축척(m, 축척 막대 값) — 2등급(환승역)·3등급(나머지). 1등급(야마노테)은 늘 보인다. **초기값이다**
+const ST_T2_M=2000, ST_T3_M=1000;
 function placeLabels(){
   const box=document.getElementById('labels'); if(!box||GEST) return;   // 움직이는 중이면 멈춘 뒤에 놓는다
   const m=svg.getScreenCTM(); if(!m){ box.replaceChildren(); return; }
@@ -2372,20 +2916,29 @@ function placeLabels(){
                       lgb.right-r.left+6, lgb.bottom-r.top+6],
                      [flb.left-r.left-6, flb.top-r.top-6,
                       flb.right-r.left+6, flb.bottom-r.top+6]];
+  // 역 이름은 축척에 따라 등급별로 보인다(사용자 11-24 「역 이름이 너무 많다 — 주요 역부터, 1km 로 확대하면 나머지도」)
+  const sc=scaleNiceM(mppOf(VB));
   for(const L of LABELS){
+    if(RP&&L.cls==='lb-n') continue;
+    if(L.tier===2&&sc>ST_T2_M || L.tier===3&&sc>ST_T3_M) continue;   // 재생 중에는 장비 번호를 빼고 그 자리를 지명·역에 준다(사용자 11-24)
     // 작아진 묶음은 라벨을 접는다 — 줌아웃하면 겹쳐서 못 읽는다
     if(L.w!==undefined && L.w*m.a < 46) continue;
     const x=L.x*m.a+m.e-r.left, y=L.y*m.d+m.f-r.top;
     if(x<-80||y<-40||x>r.width+80||y>r.height+40) continue;
     const fs=L.cls==='lb-h'?13:11, bw=L.t.length*fs*.62+10, bh=fs+8;
     // `dx` 가 있으면 왼쪽 정렬이다(역 이름) — 상자가 점 오른쪽에 선다
-    const left=L.dx!==undefined, x0=left?x+L.dx*m.a+5:x-bw/2;
-    const b=[x0, y-bh/2, x0+bw, y+bh/2];
-    if(put.some(o=>b[0]<o[2]&&b[2]>o[0]&&b[1]<o[3]&&b[3]>o[1])) continue;
-    put.push(b);
+    const left=L.dx!==undefined, hit=b=>put.some(o=>b[0]<o[2]&&b[2]>o[0]&&b[1]<o[3]&&b[3]>o[1]);
+    // 역 이름(`dx`)은 오른쪽 자리가 막히면 왼쪽·위·아래로 옮겨 본다(사용자 11-24 「역 이름이 안 나온다」 — 장비
+    // 번호에 밀려 빠졌다). 장비 번호가 먼저라는 순서는 그대로 두고 남은 자리를 찾는다
+    const dxp=left?L.dx*m.a+5:0;
+    const cand=left ? [[x+dxp, y], [x-dxp-bw, y], [x-bw/2, y-bh], [x-bw/2, y+bh]] : [[x-bw/2, y]];
+    let x0=null, y0=y;
+    for(const [cx,cy] of cand){ if(!hit([cx, cy-bh/2, cx+bw, cy+bh/2])){ x0=cx; y0=cy; break; } }
+    if(x0===null) continue;
+    put.push([x0, y0-bh/2, x0+bw, y0+bh/2]);
     const d=document.createElement('div');
     d.className='lb '+L.cls;
-    d.style.left=(left?x0:x)+'px'; d.style.top=y+'px';
+    d.style.left=(left?x0:x)+'px'; d.style.top=y0+'px';
     d.textContent=L.t; out.push(d);
   }
   box.replaceChildren(...out);
@@ -2407,6 +2960,13 @@ function lineColor(name){
 // 가로 1px 이 몇 m 인가로 센다. viewBox 의 x 는 **경도 그대로**라
 // (`mx` 가 항등 함수다) 도쿄 위도에서 1도 ≈ 90.4km 를 곱하면 된다.
 // 세로는 메르카토르라 늘어나 있지만, 축척 막대는 가로로만 읽는다.
+//: 축척 막대 값(m) — `SCALE_PX` 를 넘지 않는 가장 큰 눈금. 재생 열차도 이 값으로 그리는 방식을 정한다(`RP_TRAIN_HIDE_M`)
+function scaleNiceM(mpp){
+  const nice=[10,20,50,100,150,250,500,700,1000,1500,2500,5000,7000,10000,20000,50000];
+  let m=nice[0];
+  for(const v of nice) if(v/mpp<=SCALE_PX*1.01) m=v;
+  return m;
+}
 function drawScale(){
   const box=document.getElementById('scale');
   if(!VB||!box) return;
@@ -2415,9 +2975,7 @@ function drawScale(){
   const mpp=mppOf(VB);
   // 아래 목록에서 **`SCALE_PX` 를 넘지 않는** 가장 큰 눈금. 목록이 `ZOOM_MPP` 의 눈금을 모두 담아 단계에
   // 서 있으면 막대가 늘 `SCALE_PX` 다. 길이가 달라지는 것은 날아가는 도중과 장애 맞추기(연속 축척)뿐이다
-  const nice=[10,20,50,100,150,250,500,700,1000,1500,2500,5000,7000,10000,20000,50000];
-  let m=nice[0];
-  for(const v of nice) if(v/mpp<=SCALE_PX*1.01) m=v;
+  const m=scaleNiceM(mpp);
   box.innerHTML=`<i style="width:${(m/mpp).toFixed(1)}px"></i>`
     +`<b>${m>=1000?(m/1000)+' km':m+' m'}</b>`;
 }
@@ -2526,12 +3084,55 @@ let MAP_READY=false;
 //: 점이 크게 준다. 그린 축척에서 `BASE_REDRAW` 배 넘게 확대·축소하면 이 층만 다시 그린다(`setVB`)
 //: 값은 모두 초기값이다
 const BASE_CELL=0.02, BASE_TOL_PX=0.8, BASE_REDRAW=2.5;
-let BASE_MPP=0;
+//: **③ 화면 둘레만 그린다**(2026-11-24 사용자 「축척이 작아질수록 느려진다, 100m 에서 3초」). ②로 점을 덜 솎는
+//: 좁은 축척에서 도쿄 전체를 그려 path 글자가 12MB(100m · 도로 4.4MB)였다. 화면 사방으로 `BASE_PAD` 화면폭만큼
+//: 더한 상자(`BASE_BOX`)에 걸치는 줄만 그리고, 화면이 상자를 벗어나면 다시 그린다(`setVB`). **초기값이다**
+const BASE_PAD=1;
+let BASE_MPP=0, BASE_BOX=null;
+//: 줄마다 SVG 좌표 상자 — 한 번 재고 줄 배열에 붙여 둔다(배경 자료는 받은 뒤 바뀌지 않는다)
+const BASE_BB=new WeakMap();
+function lineBox(sg){
+  let b=BASE_BB.get(sg); if(b) return b;
+  let x0=Infinity,y0=Infinity,x1=-Infinity,y1=-Infinity;
+  for(const p of sg){ const x=mx(p[0]), y=-my(p[1]); if(x<x0)x0=x; if(x>x1)x1=x; if(y<y0)y0=y; if(y>y1)y1=y; }
+  b=[x0,y0,x1,y1]; BASE_BB.set(sg,b); return b;
+}
+//: **실제로 보이는 범위** — `preserveAspectRatio` 가 meet(가운데)라 viewBox 비율이 화면과 다르면 남는 축으로 더
+//: 보인다. 처음 화면(`HOME`)은 셀 범위 비율 그대로라 viewBox 0.55 · 화면 1.35 에서 **보이는 폭이 VB 의 2.4배**였고,
+//: VB 로 상자를 잡아 가장자리가 잘렸다(사용자 11-24 「지도 끝쪽(왼쪽 아래) 렌더링이 이상하다」)
+function visRect(v){
+  const r=document.getElementById('wrap').getBoundingClientRect();
+  if(!r.width||!r.height) return v;
+  const w=Math.max(v.w, v.h*r.width/r.height), h=Math.max(v.h, v.w*r.height/r.width);
+  return {x:v.x+(v.w-w)/2, y:v.y+(v.h-h)/2, w, h};
+}
+//: 지금 화면이 그린 상자 안에 있나 — 끌어서 벗어나면 `setVB` 가 배경을 다시 그린다
+const inBaseBox=v=>{ if(!BASE_BOX) return false; const s=visRect(v);
+  return s.x>=BASE_BOX[0]&&s.y>=BASE_BOX[1]&&s.x+s.w<=BASE_BOX[2]&&s.y+s.h<=BASE_BOX[3]; };
 function drawBase(){
   if(!D || !MAP_READY || !VB) return;
   for(const id of ['gGreen','gChome','gRoad','gRiv','gRail','gYmt'])
     document.getElementById(id).replaceChildren();
   BASE_MPP=mppOf(VB);
+  { const s=visRect(VB);
+    BASE_BOX=[s.x-s.w*BASE_PAD, s.y-s.h*BASE_PAD, s.x+s.w*(1+BASE_PAD), s.y+s.h*(1+BASE_PAD)]; }
+  const outBox=sg=>{ const b=lineBox(sg); return b[2]<BASE_BOX[0]||b[0]>BASE_BOX[2]||b[3]<BASE_BOX[1]||b[1]>BASE_BOX[3]; };
+  // 구 경계선(`admEdges` 의 `runs`) — 상자에 걸치는 **선분만** 이어 긋는다. 점선은 경로 전체 길이를 화면 픽셀로
+  // 쪼개 찍어서, 도쿄 전체를 두면 확대할수록 느려졌다
+  { const gA=document.getElementById('gAdm');
+    gA.querySelectorAll('.adm-in,.adm-out').forEach(e=>e.remove());
+    if(ADM_EDGES&&ADM_EDGES.runs){
+      const [bx0,by0,bx1,by1]=BASE_BOX, acc={in:[],out:[]};
+      for(const r of ADM_EDGES.runs){ let cur=null; const P=r.pts;
+        for(let i=1;i<P.length;i++){ const a=P[i-1], b=P[i];
+          const hit=!(Math.max(a[0],b[0])<bx0||Math.min(a[0],b[0])>bx1||Math.max(a[1],b[1])<by0||Math.min(a[1],b[1])>by1);
+          if(!hit){ cur=null; continue; }
+          if(!cur){ cur=[a]; acc[r.cls].push(cur); }
+          cur.push(b); } }
+      for(const [cls,k] of [['adm-out','out'],['adm-in','in']]){
+        const q=el('path'); q.setAttribute('class',cls);
+        q.setAttribute('d',acc[k].map(p=>'M'+p.map(c=>c[0]+' '+c[1]).join('L')).join(''));
+        gA.appendChild(q); } } }
   const r0=document.getElementById('wrap').getBoundingClientRect();
   const tol=r0.width&&r0.height ? Math.max(VB.w/r0.width, VB.h/r0.height)*BASE_TOL_PX : 0;
   //: 한 줄(점 목록)을 화면 좌표로 옮기며 솎는다 — 처음·끝 점은 늘 남긴다
@@ -2552,7 +3153,7 @@ function drawBase(){
     if(!lines||!lines.length) return;
     const by=new Map();
     for(const sg of lines){
-      if(!sg||!sg.length) continue;
+      if(!sg||!sg.length||outBox(sg)) continue;
       const k=Math.floor(mx(sg[0][0])/BASE_CELL)+':'+Math.floor(-my(sg[0][1])/BASE_CELL);
       const d=proj(sg, close); if(!d) continue;
       (by.get(k)||by.set(k,[]).get(k)).push(d);
@@ -2569,7 +3170,8 @@ function drawBase(){
   // 丁目 경계 — **확대했을 때만**(LOD 2 이상 = 화면 폭 7km 이하). 멀리서 2,969개를 그리면 구 경계가
   // 묻히고 회색 그물이 된다. 이름은 그리지 않는다. **배경일 뿐이다** — 읍면동 장애 칸은 이 배경이 아니라
   // graphio `geo-chome` 이 넓은 범위에서 이어 붙인 모양(`geo_dong_shapes`)으로 따로 그린다(2026-11-14)
-  if(CHOME && LOD>=2) tiled('gChome','ch', CHOME.flatMap(c=>c.r), true);
+  // 丁目 경계는 그리지 않는다(사용자 11-24 18:07) — 데이터·`.ch` 는 남겨 `SHOW_CHOME` 한 줄로 되돌린다
+  if(SHOW_CHOME && CHOME && LOD>=2) tiled('gChome','ch', CHOME.flatMap(c=>c.r), true);
   // 도로 — 등급마다 보이기 시작하는 축척이 다르다(`ROAD_LOD`)
   const km=kmSpan();
   for(const r of (ROAD||[])){
@@ -2588,6 +3190,114 @@ function drawBase(){
   }
   tiled('gYmt','rl rl-ymt', (RAIL||[]).flatMap(r=>r.ymtSegs||[]));
 }
+// ── 역 표시 (N02 승강장 선 · 옛 OSM 건물 윤곽) ─────────────────────────────
+//: 축척 막대가 이 값 이상이면 역을 그리지 않는다 — **사용자 결정(11-24)** 「1.5km 이상에서는 안 보이는 게
+//: 맞다」. 그림 규칙이지 판정 문턱이 아니다. 축척은 열차(`RP_TRAIN_HIDE_M`)와 같은 `scaleNiceM` 으로 센다
+const STN_HIDE_M=1500;
+//: 화면에서 승강장 막대 굵기(px) — 그린 축척에서 이만큼이 되도록 viewBox 단위로 바꿔 그룹에 준다
+const STN_PX=5;
+//: 마우스 표시용 좌표 목록 — [x, y, 글] (viewBox 좌표, 승강장 선의 꼭짓점)
+let STN_PTS=[], STN_MPP=0;
+const stnShown=()=>!!VB && scaleNiceM(mppOf(VB))<STN_HIDE_M;
+//: 보이기·숨기기와 굵기 맞추기. **숨길 때는 그룹째 `display:none`** — 투명도 0 은 여전히 그리기 비용이 든다.
+//: 처음 보일 때 한 번 짓고(`draw` 가 비우면 다시), 축척이 바뀌면 굵기 속성 하나만 고친다
+function stnVis(){
+  const g=document.getElementById('gStn'); if(!g) return;
+  const on=stnShown(), v=on?'':'none';
+  if(g.style.display!==v) g.style.display=v;
+  if(!on) return;
+  const mpp=mppOf(VB);
+  if(!g.childElementCount && STBL && STBL.length) stnBuild(g);
+  if(mpp && Math.abs(mpp/(STN_MPP||1)-1)>1e-3){ STN_MPP=mpp; g.setAttribute('stroke-width', STN_PX*mpp/90400); }
+}
+function stnBuild(g){
+  STN_PTS=[];
+  // 칸·종류마다 path 하나 — 종류 순서가 곧 칠하는 순서다(구내 → 승강장 → 건물 → N02 선)
+  // **역사 덩어리 하나만 그린다**(사용자 11-24 「건물이 3겹이다. 하나로 묶어, 큰 거 하나로」). 승강장·건물·구내·N02 대체 선은
+  // 데이터에 남아 있고(`kind`), 여기 목록에 넣으면 다시 그려진다 — 되돌리는 길이다. `stb`·`stn` 은 다른 레이어(`station_bldg`·`station_n02`)용
+  const ORDER=['stk stk-band','stb','stn'];
+  const by=new Map(ORDER.map(c=>[c,new Map()]));
+  const put=(cls,pts,close)=>{
+    const m=by.get(cls); if(!m) return;   // 그리지 않기로 한 종류 — 모르는 종류가 와도 죽지 않는다(11-24 멈춤 사고)
+    const k=Math.floor(mx(pts[0][0])/BASE_CELL)+':'+Math.floor(-my(pts[0][1])/BASE_CELL);
+    (m.get(k)||m.set(k,[]).get(k)).push('M'+pts.map(p=>`${mx(p[0])} ${-my(p[1])}`).join('L')+(close?'Z':''));
+  };
+  for(const b of STBL){
+    if(b.segs){
+      // N02 승강장 선 — `station_n02` 레이어이거나, `station_osm` 에서 OSM 모양이 하나도 없는 역(`kind: n02`)
+      const t=b.name+(b.lines&&b.lines.length?`\n${b.lines.join(' · ')}`:'');
+      const cls=b.kind==='n02'?'stn stn-fb':'stn';
+      if(!by.has(cls)) continue;          // 그리지 않는 종류는 마우스 표시에도 넣지 않는다
+      for(const sg of b.segs){
+        if(!sg||sg.length<2) continue;
+        put(cls, sg, false);
+        for(const p of sg) STN_PTS.push([mx(p[0]), -my(p[1]), t]);
+      }
+      continue;
+    }
+    if(!b.ring||b.ring.length<4) continue;
+    // OSM 역 모양(`station_osm`: 승강장 면·구내·건물) · 옛 건물 윤곽(`station_bldg`, kind 없음)
+    const cls=b.kind?'stk stk-'+b.kind:'stb';
+    if(!by.has(cls)) continue;
+    put(cls, b.ring, true);
+    // 이름 없는 승강장 면이 많다 — 이름 있는 것만 마우스 표시에 쓴다
+    if(b.name) for(const p of b.ring) STN_PTS.push([mx(p[0]), -my(p[1]), b.name]);
+  }
+  for(const cls of ORDER) for(const ds of by.get(cls).values()){
+    const q=el('path'); q.setAttribute('class',cls); q.setAttribute('d', ds.join('')); g.appendChild(q);
+  }
+  STN_MPP=0;
+}
+//: 마우스 아래 승강장 — 화면 10px 안의 가장 가까운 꼭짓점. 보일 때만 찾는다
+function stnTip(e){
+  if(!STN_PTS.length || !stnShown()) return '';
+  const m=svg.getScreenCTM(); if(!m) return '';
+  const q=new DOMPoint(e.clientX, e.clientY).matrixTransform(m.inverse());
+  const r=10*mppOf(VB)/90400; let best='', bd=r*r;
+  for(const p of STN_PTS){ const dx=p[0]-q.x, dy=p[1]-q.y, d=dx*dx+dy*dy; if(d<bd){ bd=d; best=p[2]; } }
+  return best;
+}
+//: 구 경계선 — 다른 구의 경계가 `ADM_SHARE_M` 안에 붙어 있는 선분은 「구 사이」(점선), 아니면 「땅 끝」(해안·강변,
+//: 실선). 꼭짓점이 같은지로 가르면 안 된다 — `N03_map` 은 구마다 따로 단순화돼 이웃 구의 꼭짓점이 어긋나, 23구 안에서도
+//: 선분 1,413개 중 649개(126km)가 실선으로 나왔다(실측 11-24). 그래서 선분 가운데 점과 이웃 구 선분의 **거리**로 본다.
+//: 구 사이 선은 두 구에 다 있으므로 번호가 앞선 구만 긋는다. 이어지는 선분은 path 하나에 묶는다
+//: 같은 경계로 보는 거리(m) — 이웃 구 단순화 어긋남을 덮는 폭. 이보다 좁은 수로를 낀 구 사이는 점선이 된다. **초기값이다**
+const ADM_SHARE_M=30;
+let ADM_EDGES=null;
+function admEdges(geo){
+  const C=.002, cx=Math.cos(35.68*Math.PI/180), lim=ADM_SHARE_M/111320;
+  const grid=new Map(), segs=[];
+  geo.features.forEach((f,fi)=>f.rings.forEach(ring=>{
+    for(let i=0;i<ring.length;i++){ const a=ring[i], b=ring[(i+1)%ring.length];
+      if(a[0]===b[0]&&a[1]===b[1]) continue;
+      const sg=[fi,a,b]; segs.push(sg);
+      for(let gx=Math.floor(Math.min(a[0],b[0])/C); gx<=Math.floor(Math.max(a[0],b[0])/C); gx++)
+        for(let gy=Math.floor(Math.min(a[1],b[1])/C); gy<=Math.floor(Math.max(a[1],b[1])/C); gy++){
+          const key=gx+','+gy; if(!grid.has(key)) grid.set(key,[]); grid.get(key).push(sg); }
+    }}));
+  const d=(p,a,b)=>{ const ax=(b[0]-a[0])*cx, ay=b[1]-a[1], px=(p[0]-a[0])*cx, py=p[1]-a[1], L=ax*ax+ay*ay;
+    const t=L?Math.max(0,Math.min(1,(px*ax+py*ay)/L)):0; return Math.hypot(px-t*ax, py-t*ay); };
+  // 가운데 점에서 가장 가까운 다른 구(없으면 -1)
+  const near=(fi,p)=>{ let best=-1, bd=lim; const gx=Math.floor(p[0]/C), gy=Math.floor(p[1]/C);
+    for(let x=gx-1;x<=gx+1;x++) for(let y=gy-1;y<=gy+1;y++) for(const o of (grid.get(x+','+y)||[])){
+      if(o[0]===fi) continue; const dd=d(p,o[1],o[2]); if(dd<bd){ bd=dd; best=o[0]; } }
+    return best; };
+  const out=[], inn=[], pt=c=>`${mx(c[0])} ${-my(c[1])}`;
+  let run=null, runCls=null, last=null;
+  // `runs` — 이어진 선분을 SVG 좌표 점 목록으로도 둔다. 그리기는 `drawBase` 가 화면 둘레(`BASE_BOX`)만 자른다
+  const runs=[];
+  const flush=()=>{ if(run&&run.length>1){ (runCls==='in'?inn:out).push('M'+run.map(pt).join('L'));
+    runs.push({cls:runCls, pts:run.map(c=>[mx(c[0]), -my(c[1])])}); } run=null; runCls=null; };
+  for(const [fi,a,b] of segs){
+    if(last!==a) flush(); last=b;
+    const o=near(fi,[(a[0]+b[0])/2,(a[1]+b[1])/2]);
+    if(o>=0&&o<fi){ flush(); continue; }   // 이웃 구(앞 번호)가 긋는다
+    const cls=o>=0?'in':'out';
+    if(run&&runCls===cls) run.push(b); else { flush(); run=[a,b]; runCls=cls; }
+  }
+  flush();
+  return {in:inn.join(''), out:out.join(''), nIn:inn.length, nOut:out.length, runs};
+}
 function draw(){
   if(!D || !MAP_READY) return;
   LOD=lodOf();                       // 이 단계로 그린다 — `setVB` 가 비교한다
@@ -2600,6 +3310,8 @@ function draw(){
     q.setAttribute('d','M'+ring.map(c=>`${mx(c[0])} ${-my(c[1])}`).join('L')+'Z');
     q.dataset.t=f.name; document.getElementById('gAdm').appendChild(q);
   }
+  // 경계선 — 구 사이는 점선, 땅 끝은 실선(`admEdges` · 경계를 받을 때 한 번 계산). **그리기는 `drawBase`** 가
+  // 화면 둘레만 한다 — 도쿄 전체 점선을 두면 100m 축척에서 끌기 한 프레임이 256ms 였다(점선만 끄면 33ms · 11-24)
   // 하천·철도 — **국토수치정보 실측 선형.** 수가 많아 레이어마다
   // path 하나로 합친다(셀 2만 개를 노드 하나로 그리는 것과 같은 이유)
   drawBase();
@@ -2693,33 +3405,62 @@ function draw(){
   // **장비가 먼저, 지명·역은 남은 자리에.** 이 화면의 주인공은 장비고
   // 역·구 이름은 "거기가 어디냐"를 알려주는 배경이다. 반대로 했더니
   // 역 이름이 SGW 31개 중 26개를 밀어냈다
+  // **같은 역이 두 이름으로 온다**(사용자 11-24 「도쿄」 옆 「東京」) — 야마노테 30역은 노선 자료(`data/lines`)가
+  // 한글 이름(셀 중심)으로, N02·OSM 쪽은 원문 이름(실제 역 가운데 `at`)으로 준다. `LB_DUP_M` 안에서 원문 이름이
+  // 같거나 옮긴 표기(`JA`)가 같으면 한 역으로 보고, 실제 역 자리(`at`)가 있는 쪽 글자만 남긴다
+  //: 같은 역으로 보는 거리(m) — **초기값이다**
+  const LB_DUP_M=400;
+  const stDup=new Set(), SL=D.stations||[];
+  const JA_KO=(typeof JA!=='undefined')?Object.fromEntries(Object.entries(JA).map(([k,v])=>[v,k])):{};
+  const stLabel=s=>LANG==='ja'?T(s.name):(s.ko||JA_KO[s.name]||s.name);
+  // 야마노테 30역(`RP_YMT_JA` · 노선 자료) — N02 의 「山手線」은 品川~田端 구간 이름이라 東京·上野 등 13역이 빠진다(`ymt`)
+  const stYmt=s=>!!s.ymt||RP_YMT_SET.has(s.name)||RP_YMT_SET.has(JA[s.name]);
+  const stKeys=s=>[s.name, (typeof JA!=='undefined'&&JA[s.name])||s.name];
+  const stNear=(a,b,m)=>{ const [ao,aa]=a.at||[a.lon,a.lat], [bo,ba]=b.at||[b.lon,b.lat];
+    return Math.hypot((ao-bo)*Math.cos(aa*Math.PI/180), aa-ba)*111320<m; };
   {
     // 역 건물 — **OSM 윤곽 그대로**. 이름이 없는 것도 그린다(380개 중
     // 이름 있는 것은 169개). 이름은 화면이 `D.stations`(셀 기반 30역)로
     // 이미 들고 있고, 여기서 맞추려 들면 역 하나가 두 번 이름을 얻는다
-    for(const b of (STBL||[])){
-      const q=el('path'); q.setAttribute('class','stb');
-      q.setAttribute('d','M'+b.ring.map(p=>`${mx(p[0])} ${-my(p[1])}`)
-        .join('L')+'Z');
-      if(b.name) q.dataset.t=b.name;
-      document.getElementById('gStn').appendChild(q);
+    // 역 표시는 축척을 탄다 — 1.5km 이상이면 그리지 않는다(`stnVis`)
+    stnVis();
+    for(let i=0;i<SL.length;i++) for(let j=i+1;j<SL.length;j++){
+      const a=SL[i], b=SL[j]; if(stDup.has(a)||stDup.has(b)) continue;
+      const ka=stKeys(a), kb=stKeys(b);
+      if(!ka.some(x=>kb.includes(x))||!stNear(a,b,LB_DUP_M)) continue;
+      stDup.add(!a.at&&b.at ? a : b);
     }
-    for(const st of (D.stations||[])){
+    for(const st of SL){
+      if(stDup.has(st)) continue;
       // **점은 SVG 에 찍는다.** 전에는 HTML 라벨의 ::before 로 찍었는데,
       // 라벨 상자가 `translate(-50%,-50%)` 로 중앙정렬이라 **글자가 길수록
       // 점이 왼쪽으로 밀렸다** — 좌표가 틀린 것처럼 보인 원인이다
       // 점·심볼을 그리지 않는다 — 건물 윤곽은 아래에서 통째로 깐다
       // 글자는 점 **오른쪽**에 — 왼쪽 끝을 점에 맞춘다
-      LABELS.push({x:mx(st.lon), y:-my(st.lat), t:T(st.name), cls:'lb-s',
-                   dx:11*k});
+      // 글자는 실제 역 모양의 가운데(`at` · graphio `station_label.json`) — 없으면 셀 중심
+      const [alo,ala]=st.at||[st.lon,st.lat];
+      // 이름 — 한국어 화면은 OSM 한글 이름(`ko`) → 번역표 역방향(야마노테 등) → 원문. 일본어 화면은 원문(사용자 11-24 저녁)
+      // 색 — 야마노테선 역만 녹색(`lb-s`), 나머지는 회색(`lb-s2`)
+      // 등급 — 1 야마노테(항상) · 2 환승역(`ST_T2_M` 이하) · 3 나머지(`ST_T3_M` 이하). 거르기는 `placeLabels` 가 축척으로 한다
+      LABELS.push({x:mx(alo), y:-my(ala), t:stLabel(st), cls:stYmt(st)?'lb-s':'lb-s2',
+                   dx:11*k, tier:stYmt(st)?1:(st.tier||3)});
     }
   }
   if(GEO){
+    // 안·밖 — 셀이 있는 구·시(셀의 `gu` = 경계 `code`)가 「내부」, 나머지는 「외각」으로 한 단계 어둡게(사용자 11-24)
+    const inGu=new Set((D.cells||[]).map(c=>String(c.gu)));
+    // 같은 장소의 역 이름이 `AREA_DUP_M` 안에 있으면 지명은 빼고 역 이름만 둔다 — 원문이 같거나 옮긴 표기(`JA`)가 같으면 같은 장소
+    //: 같은 장소로 보는 거리(m) — **초기값이다**
+    const AREA_DUP_M=400;
+    const stShown=(D.stations||[]).filter(s=>!stDup.has(s));
+    const areaDup=f=>{ const ks=stKeys({name:f.name});
+      return stShown.some(s=>stKeys(s).some(x=>ks.includes(x)) && stNear(s,{lon:f.at[0],lat:f.at[1]},AREA_DUP_M)); };
     for(const f of GEO.features){
       if(!f.name || !f.at) continue;
+      if(areaDup(f)) continue;
       LABELS.push({x:mx(f.at[0]), y:-my(f.at[1]),
                    t:(f.city && f.city!==f.name ? f.city+' '+f.name : f.name),
-                   cls:'lb-a'});
+                   cls:inGu.has(String(f.code))?'lb-a':'lb-a lb-o'});
     }
   }
   // 다시 그리면 새 요소라 장애 표시가 없다 — 지금 응답으로 되살린다
@@ -2730,6 +3471,18 @@ function draw(){
 
 async function load(){
   if(!SCN) loadScenarios().then(()=>{ INJ_EL=null; if(PICK) drawPick(); });
+  // **기다릴 필요 없는 것은 처음부터 함께 부른다**(사용자 11-24 「전체 지도 로딩이 시간 좀 걸린다」). 전에는
+  // `/api/map` → `/api/map/all` → 레이어 순으로 줄을 서 첫 화면이 1.9초였다. 레이어·마스터는 셀을 몰라도 된다 —
+  // 경계(`geo`)만 그 범위로 묻는다. 바탕은 처음 한 번만 받는다(`HOME`)
+  const first=!HOME;
+  const LAYERS=first ? [['rail',v=>RAIL=v],['rivers',v=>RIV=v],
+                ['roads',v=>ROAD=v],['green',v=>GREEN=v],
+                ['station',v=>STBL=v],
+                ['water',v=>WATER=v],
+                // 丁目 경계는 그리지 않으면 받지 않는다(1.4MB · `SHOW_CHOME`)
+                ...(SHOW_CHOME?[['chome',v=>CHOME=v]]:[])] : [];
+  const layerP=LAYERS.map(([nm])=>fetch(`/api/map/layer/${nm}`).then(r=>r.json()).catch(e=>({error:`${nm}: ${e}`})));
+  const allP=first ? fetch('/api/map/all').then(r=>r.json()) : null;
   D=await (await fetch('/api/map')).json();
   ENB=null;                           // 셀이 바뀌면 eNB 묶음도 다시 만든다
   const c=D.counts;
@@ -2751,7 +3504,7 @@ async function load(){
     try{
     // **마스터를 먼저 받아 그 범위로 경계를 받는다.** 생성 범위로만 받으면
     // `전체 보기` 에서 도쿄 바깥이 경계 없는 검은 바다로 남는다
-    ALL=await (await fetch('/api/map/all')).json();
+    ALL=await allP;
     // **경계와 레이어를 한꺼번에 받는다**(2026-11-03 실측). 땅은 레이어가 덮는
     // 범위까지 깔려야 하는데(간토 전역의 철도가 바다 위에 떴다), 그 범위를
     // 화면이 레이어를 다 받은 뒤 재서 다시 물었더니 경계가 뒤에 줄을 서
@@ -2763,13 +3516,10 @@ async function load(){
     for(const p of (ALL.pts||[])) put(p[0], p[1]);
     const geoP=fetch(`/api/map/geo?cover=1&bbox=${la0-.15},${lo0-.15},${la1+.15},${lo1+.15}`)
       .then(r=>r.json()).catch(e=>({error:`geo: ${e}`, features:[]}));
-    const LAYERS=[['rail',v=>RAIL=v],['rivers',v=>RIV=v],
-                  ['roads',v=>ROAD=v],['green',v=>GREEN=v],
-                  ['station_bldg',v=>STBL=v],
-                  ['water',v=>WATER=v],['chome',v=>CHOME=v]];
-    const [g, ...got]=await Promise.all([geoP, ...LAYERS.map(([nm])=>
-      fetch(`/api/map/layer/${nm}`).then(r=>r.json()).catch(e=>({error:`${nm}: ${e}`})))]);
+    const [g, ...got]=await Promise.all([geoP, ...layerP]);
     GEO=g.features?g:null;
+    // 경계선 분류(`admEdges` · 약 0.2초)는 **첫 화면 뒤에** 한다 — 아래 `draw` 뒤 `setTimeout`. 그 사이 선만 늦게 뜬다
+    ADM_EDGES=null;
     if(g.error) document.getElementById('note').textContent=g.error;
     // 출처 표기 순서 — 경계가 맨 앞
     const src=[g.source||g.error||''];
@@ -2795,6 +3545,8 @@ async function load(){
   document.body.classList.add('mapready');
   draw();
   applyLink();
+  // 구 경계선 — 첫 화면을 먼저 보이고 분류한다. 그리기는 `drawBase` 가 한다(화면 둘레만)
+  if(GEO && !ADM_EDGES) setTimeout(()=>{ ADM_EDGES=admEdges(GEO); drawBase(); }, 0);
 }
 
 // ── 고르면 계통을 잇는다 ────────────────────────────────────────────────
@@ -3118,14 +3870,20 @@ wrap.addEventListener('mousedown',e=>{
   const mode=document.getElementById('mode').value;
   if(e.shiftKey && (mode==='enb'||mode==='ta') && D){
     BOXSEL={x:e.clientX, y:e.clientY}; e.preventDefault(); return; }
+  // 휠 한 칸이 도착해 다시 그리기까지는 끌기를 받지 않는다(사용자 11-24 · 휠 머리말 ④)
+  if(wheelBusy()){ e.preventDefault(); return; }
   // 날던 중에 잡으면 그 자리에서 멈춘다 — 이동이 손 아래에서 계속 흐르지 않게
-  if(FLY){ FLY=null; for(const id of ['fx','labels','hq']) document.getElementById(id).classList.remove('fly'); }
+  // 숨김(`fly`)은 그대로 둔다 — 여기서 풀면 날기 **전** 자리에 놓인 글자·효과가 날던 도중 화면 위에 다시 떠
+  // 잔상이 됐다(사용자 11-24). 놓을 때(mouseup) 새 자리에 다시 놓은 뒤 푼다
+  if(FLY){ FLY=null; }
   drag={x:e.clientX,y:e.clientY,vb:{...VB}};
   moved=0; wrap.classList.add('drag');});
 addEventListener('mouseup',e=>{
   if(BOXSEL){ finishBox(e); return; }
   const was=drag; drag=null; wrap.classList.remove('drag');
   if(was&&GEST){ gestEnd(); setVB(VB); }   // 끌기는 축척이 그대로라 viewBox 만 바꾸면 된다(단계가 바뀌면 setVB 가 그린다)
+  // 날던 중에 잡았으면 숨겨 둔 층을 새 자리에 놓은 뒤(setVB → placeLabels·placeFx) 보인다
+  if(was&&!FLY) for(const id of ['fx','labels','hq']) document.getElementById(id).classList.remove('fly');
   if(was&&EW_LAST) drawEvtWave(EW_LAST);});
 addEventListener('mousemove',e=>{
   if(BOXSEL){ const [x,y,w,h]=boxRect(e), bx=document.getElementById('boxsel');
@@ -3135,7 +3893,7 @@ addEventListener('mousemove',e=>{
     VB={...drag.vb, x:drag.vb.x-(e.clientX-drag.x)*drag.vb.w/r.width,
                     y:drag.vb.y-(e.clientY-drag.y)*drag.vb.h/r.height};
     gestShow(true); return; }
-  const t=e.target.dataset&&e.target.dataset.t;
+  const t=(e.target.dataset&&e.target.dataset.t) || (wrap.contains(e.target) ? stnTip(e) : '');
   // `#tip` 은 지도 틀(`#wrap`) 안의 absolute 다 — 화면 좌표(clientX)를 그대로 쓰면 왼쪽 레일·위쪽
   // 머리만큼 오른쪽 아래로 밀려 떴다(사용자 11-09 "SGW 위에 올렸는데 툴팁이 멀리"). 틀 기준으로 바꾼다
   if(t){ const r=wrap.getBoundingClientRect(); tip.style.display='block'; tip.textContent=t;
@@ -3154,49 +3912,44 @@ for(const id of ['sel','fbar','incs','flist','mini']){
 //:   ① 한 칸 = 한 단계 **순간 이동** + 입력 모으기·쉬기 → "딱딱하다"
 //:   ② 굴리는 동안 연속, 멈추면 단계로 맞춤 → "커졌다 돌아오는 게 이상하다"
 //:   ③ 도중에 또 굴리면 그 자리에서 끊고 새로 출발 → 연속 2회부터 "이상하다"
-//: 지금은 **줄을 세운다.** 굴린 칸 수는 목표 단계(`WHEEL_TGT`)에 쌓기만 하고,
-//: 앞 이동이 80% 왔을 때(`FLY_NEAR`) 다음 칸을 **앞 이동의 도착점에서** 이어
-//: 붙인다. 다시 그리기(`draw`)는 줄의 마지막 칸이 끝났을 때 한 번이다.
-//: 고정점(커서)은 줄이 시작될 때 하나로 묶는다 — 칸마다 바꾸면 이어 붙인
-//: 이동의 도착점이 앞 이동의 궤적에서 벗어나 끝에서 튄다
-const WHEEL_MS=280, WHEEL_STEP=50;
-let WHEEL_TGT=0, WHEEL_AT=null, WHEEL_RUN=null, WHEEL_ACC=0, WHEEL_LAST=0;
+//:   ④ 줄 세우기(굴린 칸을 쌓고 80% 지점에서 이어 붙임) → 맥 트랙패드·매직 마우스는 한 번 쓸어도 휠 신호가
+//:      수십 번, 손을 뗀 뒤에도 관성으로 이어져 한 손길에 여러 단계가 쌓였다. 확대가 길게 이어지고, 다시
+//:      그리는 도중 끌기가 끼어들어 잔상이 남았다
+//: 지금은 **첫 신호 하나 = 한 단계, 500ms 잠금**(사용자 결정 2026-11-24 17:54). 받은 휠 신호부터
+//: `WHEEL_LOCK_MS` 동안 오는 신호는 모두 버리고, 그 뒤 처음 오는 신호를 다음 칸으로 받는다. 한 칸 이동이
+//: 아직 끝나지 않았으면(도착해 다시 그리기까지) 끝난 뒤에 받는다. 그동안은 끌기도 받지 않는다(mousedown).
+//: 「전체 보기」·장애 맞추기 이동(`flyTo`)은 그대로다
+//:   ⑤ ④·⑤안(공백 200ms · 마우스 한 칸 판정)은 연속 휠이 먹통이었다 — 마우스 휠을 연달아 굴리면 공백이
+//:      생기지 않아 다음 칸을 받지 못했다. 사용자 결정(2026-11-24 17:54)으로 공백·한 칸 판정·누적을 모두 걷고
+//:      **첫 신호 하나 처리 후 500ms 잠금**으로 바꿨다. 대가: 트랙패드 관성이
+//:      500ms 넘게 이어지면 다음 칸이 될 수 있다
+const WHEEL_MS=280;
+//: 한 칸을 받은 뒤 다음 신호를 버리는 시간(ms) — 사용자 결정 값이다
+const WHEEL_LOCK_MS=500;
+//: 한 칸으로 받는 신호의 최소 크기(px) — 트랙패드의 아주 작은 떨림 하나가 한 칸이 되지 않게. **초기값이다**
+const WHEEL_MIN_DY=4;
+//: WHEEL_RUN — 진행 중인 휠 이동(`flyTo` id). WHEEL_AT — 마지막으로 한 칸을 받은 시각
+let WHEEL_RUN=null, WHEEL_AT=-1e9;
 const nearestLevel=mpp=>{ let i=0;
   ZOOM_MPP.forEach((s,k)=>{ if(Math.abs(Math.log(s/mpp))<Math.abs(Math.log(ZOOM_MPP[i]/mpp))) i=k; });
   return i; };
-//: 줄의 다음 칸을 띄운다 — 진행 중이면 그 **도착점**에서, 아니면 지금 화면에서
-function wheelStep(){
-  const base=WHEEL_RUN ? WHEEL_RUN.v : VB;
-  const from=WHEEL_RUN ? WHEEL_RUN.i : nearestLevel(mppOf(VB));
-  if(from===WHEEL_TGT) return;
-  const i=from+(WHEEL_TGT>from?1:-1);
-  const v=zoomAbout(base, ZOOM_MPP[i]/mppOf(base), WHEEL_AT[0], WHEEL_AT[1]);
-  const run={i, v, near:false};
-  WHEEL_RUN=run;
-  run.id=flyTo(v, WHEEL_MS, {at:WHEEL_AT, near:()=>{ run.near=true; wheelStep(); }});
-}
+//: 휠 이동이 진행 중인가 — 다른 이동(장애 맞추기·전체 보기)이 끼어들었으면 아니다
+const wheelBusy=()=>!!WHEEL_RUN&&FLY===WHEEL_RUN;
 wrap.addEventListener('wheel',e=>{
   e.preventDefault(); if(!VB) return;
-  const now=performance.now();
-  if(now-WHEEL_LAST>300) WHEEL_ACC=0;   // 지난 손길의 찌꺼기는 버린다
-  WHEEL_LAST=now;
-  // 줄 단위(파이어폭스)는 픽셀로 바꾼다. 마우스 한 칸은 보통 ±100 이다
+  if(wheelBusy()||performance.now()-WHEEL_AT<WHEEL_LOCK_MS) return;
+  // 줄 단위(파이어폭스)는 픽셀로 바꾼다
   const dy=e.deltaY*(e.deltaMode===1?33:1);
-  let dir=0;
-  if(Math.abs(dy)>=WHEEL_STEP) dir=dy>0?1:-1;
-  else { WHEEL_ACC+=dy; if(Math.abs(WHEEL_ACC)>=WHEEL_STEP){ dir=WHEEL_ACC>0?1:-1; WHEEL_ACC=0; } }
-  if(!dir) return;
-  // 줄이 끝났거나 다른 이동(장애 맞추기·전체 보기)이 끼어들었으면 새 줄이다
-  if(WHEEL_RUN && FLY!==WHEEL_RUN.id) WHEEL_RUN=null;
-  if(!WHEEL_RUN){
-    const r=wrap.getBoundingClientRect();
-    WHEEL_AT=[VB.x+VB.w*(e.clientX-r.left)/r.width, VB.y+VB.h*(e.clientY-r.top)/r.height];
-    WHEEL_TGT=nearestLevel(mppOf(VB));
-  }
-  WHEEL_TGT=Math.min(Math.max(WHEEL_TGT+dir, 0), ZOOM_MPP.length-1);
-  // 진행 중이면 쌓기만 한다 — 80% 지점에서 앞 이동이 이어 붙인다.
-  // **이미 그 지점을 지났으면** 이어 붙일 기회가 지나갔으니 여기서 띄운다
-  if(!WHEEL_RUN || WHEEL_RUN.near) wheelStep();
+  if(Math.abs(dy)<WHEEL_MIN_DY) return;
+  const from=nearestLevel(mppOf(VB)), i=Math.min(Math.max(from+(dy>0?1:-1), 0), ZOOM_MPP.length-1);
+  if(i===from) return;
+  WHEEL_AT=performance.now();
+  // 고정점은 커서 — 그 점을 화면에서 고정한 채 한 단계
+  const r=wrap.getBoundingClientRect();
+  const at=[VB.x+VB.w*(e.clientX-r.left)/r.width, VB.y+VB.h*(e.clientY-r.top)/r.height];
+  const v=zoomAbout(VB, ZOOM_MPP[i]/mppOf(VB), at[0], at[1]);
+  const id=flyTo(v, WHEEL_MS, {at, done:()=>{ if(WHEEL_RUN===id) WHEEL_RUN=null; }});
+  WHEEL_RUN=id;
 },{passive:false});
 //: 창 크기가 바뀌면 같은 viewBox 라도 1px 의 거리가 달라진다 — 단계로 되돌린다
 window.addEventListener('resize',()=>{ if(VB){ VB_FREE=false; setVB(VB); } });   // 연속 축척도 단계로 되돌린다

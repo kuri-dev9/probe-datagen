@@ -122,7 +122,10 @@ def api_map():
     if sc.get("route"):
         parts.append(str(sc["route"]))
     stations, lines = _map_stations(cells)
-    return {
+    stations = _station_labels(stations)
+    # **바이트로 내보낸다**(2026-11-24 사용자 「전체 지도 로딩이 시간 좀 걸린다」) — 1.1MB 를 FastAPI 기본
+    # 직렬화(`jsonable_encoder`)로 내면 135ms, `json.dumps` 는 16ms 다. 첫 화면은 이 응답을 기다린다
+    doc = {
         "scope": " + ".join(parts) or "전량",
         "cells": cells,
         "stations": stations,
@@ -138,6 +141,8 @@ def api_map():
             "mme": len({c["mme"] for c in cells if c["mme"]}),
         },
     }
+    return Response(json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode(),
+                    media_type="application/json")
 
 
 #: 노선 색 — JR 공식 라인컬러. 화면은 `.rl-ymt` 가 같은 값을 들고 있다
@@ -224,6 +229,10 @@ _LAYER = {
     "roads":  ("geo_roads",  "© OpenStreetMap contributors"),
     "green":  ("geo_green",  "© OpenStreetMap contributors"),
     "station_bldg": ("geo_station_bldg", "© OpenStreetMap contributors"),
+    # 역 승강장 선 (2026-11-24) — 철도와 같은 N02 라 역 위치·길이가 철로와 맞는다
+    "station_n02": ("geo_station_n02", "国土数値情報 (国土交通省) · 鉄道 N02"),
+    # 역 모양 (2026-11-24 저녁) — OSM 승강장 면·구내·건물, 없는 역만 N02 승강장 선
+    "station_osm": ("geo_station_osm", "© OpenStreetMap contributors"),
     # 상세 배경 (2026-10-30) — 굽는 자리는 graphio `tools/build_jp_geo_layers.py`
     "water":  ("geo_water",  "© OpenStreetMap contributors"),
     "chome":  ("geo_chome",  "e-Stat 境界データ (令和2年国勢調査 小地域)"),
@@ -249,6 +258,14 @@ def api_map_layer(name: str):
     화면이 `© OpenStreetMap contributors` 를 함께 적는다. 받는 것은 빌드
     시점 한 번이고 **런타임이 외부를 부르지 않는 원칙은 그대로다.**
     """
+    if name == "station":
+        # **화면은 이 이름 하나로 받는다** — 어느 역 레이어를 그릴지는 설정
+        # 한 줄(`pemdb1.map_station_layer`)이 정한다(2026-11-24). OSM 건물
+        # 윤곽은 東京·上野·品川 본 역사가 빠져 N02 로 바꿨고, 되돌릴 길로 남긴다
+        # 기본은 OSM 역 모양이다 — N02 승강장 선은 「역 위치에 선만 그은 것」이었다(사용자 11-24)
+        name = str(_pem_cfg().get("map_station_layer") or "station_osm")
+        if name not in ("station_osm", "station_n02", "station_bldg"):
+            raise HTTPException(404, f"역 레이어는 station_osm · station_n02 · station_bldg 중 하나입니다: {name}")
     hit = _LAYER.get(name)
     if not hit:
         raise HTTPException(404, f"그런 레이어가 없습니다: {name}")
@@ -264,6 +281,80 @@ def api_map_layer(name: str):
     body = b'{"items":' + _file_bytes(src) + b',"source":' \
         + json.dumps(source, ensure_ascii=False).encode() + b'}'
     return Response(body, media_type="application/json")
+
+
+#: 역 글자를 이 안의 같은 이름 글자 자리로 옮긴다(m). 셀 중심은 실제 역에서 최대 약 700m(浜松町) 떨어져 있었다
+_LABEL_MATCH_M = 1500.0
+
+
+def _label_extra(lb: dict) -> dict:
+    """글자 자리에서 함께 싣는 것 — 한글 이름(`ko` · OSM `name:ko`)과 야마노테선 여부(`ymt` · 글자 색).
+
+    2026-11-24 사용자 「역명이 한글로 안 나온다」·「야마노테선만 녹색, 나머지 역은 회색」. 없으면 싣지 않는다."""
+    ex = {}
+    if lb.get("ko"):
+        ex["ko"] = lb["ko"]
+    if "山手線" in (lb.get("lines") or ()):
+        ex["ymt"] = True
+    # 등급(`tier`) — 축척에 따라 역 이름을 나눠 보인다(사용자 11-24 「역 이름이 너무 많다, 중요도로 3등분」).
+    # 1 = 야마노테(화면이 노선 자료의 30역으로도 1로 올린다) · 2 = 서로 다른 노선 `_TIER2_LINES` 개 이상 · 3 = 나머지
+    nl = len(_line_names(lb.get("lines") or ()))
+    ex["tier"] = 1 if ex.get("ymt") else 2 if nl >= _TIER2_LINES else 3
+    return ex
+
+
+#: 2등급(환승역)으로 보는 서로 다른 노선 수. **초기값이다**
+_TIER2_LINES = 3
+
+
+def _line_names(lines) -> set[str]:
+    """노선 이름 정리 — N02 는 같은 노선의 갈래를 「…分岐線」으로 따로 적는다(丸ノ内線·丸ノ内線分岐線). 한 노선으로 센다."""
+    return {str(x).removesuffix("分岐線") for x in lines if x}
+
+
+def _station_labels(stations: list[dict]) -> list[dict]:
+    """역 이름 **글자 자리**(`at`)를 붙인다 — 실제 역 모양의 가운데 (2026-11-24).
+
+    `lat`·`lon` 은 그 역을 덮는 셀들의 중심 그대로 둔다 — 노선 선(`lines`)과 야마노테 집기가
+    그 값을 쓴다. 글자만 graphio `station_label.json`(N02 역 + OSM 모양 면적 중심)으로 옮긴다.
+
+    **목록에 없는 역**(셀이 안 붙은 야마노테 6역, 생성 범위 밖의 역)은 글자만
+    더한다(`label_only`). 노선 파일·셀 귀속과는 무관한 화면용 항목이다. 파일이 없으면 그대로 돌려준다.
+    """
+    src, err = _layer_path("geo_station_label")
+    if err:
+        return stations
+    labels = _cached(src, "json", lambda p: json.loads(p.read_text(encoding="utf-8")))
+    by: dict[str, list] = collections.defaultdict(list)
+    for lb in labels:
+        by[lb["name"]].append(lb)
+
+    def dm(a, b):
+        return math.hypot((a[0] - b[0]) * 90400, (a[1] - b[1]) * 111000)
+
+    out = []
+    for st in stations:
+        st = dict(st)
+        c = [(dm((lb["lon"], lb["lat"]), (st["lon"], st["lat"])), lb) for lb in by.get(st["name"], ())]
+        c = [x for x in c if x[0] <= _LABEL_MATCH_M]
+        if c:
+            lb = min(c, key=lambda x: x[0])[1]
+            st["at"] = [lb["lon"], lb["lat"]]
+            st.update(_label_extra(lb))
+        out.append(st)
+    # 목록에 없는 역은 **모두** 글자만 더한다(2026-11-24 — 생성 범위 밖 江戸川·中野 등은 역 모양만 있고 이름이
+    # 없었다). 같은 이름이 `_LABEL_MATCH_M` 안에 이미 있으면 같은 역이라 더하지 않는다 — 멀리 떨어진 동명 역은 더한다
+    have: dict[str, list] = collections.defaultdict(list)
+    for st in out:
+        have[st["name"]].append((st["lon"], st["lat"]))
+    for lb in labels:
+        p = (lb["lon"], lb["lat"])
+        if any(dm(p, q) <= _LABEL_MATCH_M for q in have.get(lb["name"], ())):
+            continue
+        out.append({"name": lb["name"], "lat": lb["lat"], "lon": lb["lon"], "cells": 0,
+                    "at": [lb["lon"], lb["lat"]], "label_only": True, **_label_extra(lb)})
+        have[lb["name"]].append(p)
+    return out
 
 
 def _layer_path(key: str):
@@ -1047,6 +1138,28 @@ def api_map_geo(bbox: str = "", cover: int = 0):
         # 다른 사실이고, 전자로 보이면 지도가 왜 비었는지 알 수 없다
         return {"error": f"경계 파일이 없습니다: {src}", "features": []}
 
+    # **응답 바이트를 만들어 둔다**(2026-11-24 사용자 「전체 지도 로딩이 시간 좀 걸린다」). 같은 인자면 결과가
+    # 같다 — 고리 거르기 + FastAPI 기본 직렬화(1.7MB)가 혼자서 0.2초, 화면이 레이어 7개와 동시에 부르면
+    # GIL 을 다퉈 0.88초였다. 경계 파일·레이어 파일이 다시 구워지면(mtime) 새로 만든다
+    key = (str(src), src.stat().st_mtime, bbox, int(cover),
+           tuple(sorted((k, p.stat().st_mtime) for k, p in
+                        ((k, _layer_path(k)[0]) for k, _ in _LAYER.values()) if p)) if cover else ())
+    body = _GEO_BODY.get(key)
+    if body is None:
+        body = json.dumps(_geo_body(src, bbox, cover), ensure_ascii=False, separators=(",", ":")).encode()
+        if len(_GEO_BODY) >= _GEO_BODY_MAX:
+            _GEO_BODY.pop(next(iter(_GEO_BODY)))
+        _GEO_BODY[key] = body
+    return Response(body, media_type="application/json")
+
+
+#: `/api/map/geo` 응답 바이트 — 인자·파일 시각별. 화면은 bbox 하나로 부르므로 몇 개면 된다. **초기값이다**
+_GEO_BODY: dict = {}
+_GEO_BODY_MAX = 8
+
+
+def _geo_body(src: Path, bbox: str, cover: int) -> dict:
+    """`/api/map/geo` 의 본문 — 머리말은 그 함수에 있다."""
     lo_la = lo_lo = -1e9
     hi_la = hi_lo = 1e9
     if bbox:

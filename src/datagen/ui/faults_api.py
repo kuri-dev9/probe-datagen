@@ -287,16 +287,46 @@ def api_add_fault(req: FaultReq):
     conn = _connect()
     try:
         _ensure_once(conn)  # 새 DB 에 UI 만 먼저 떠도 동작하도록
+        warn, warn_ja = _rush_warnings(conn, req.kind, start)
+        # 메모에도 남긴다 — 응답은 주입한 사람만 보고, 판정하는 사람은 메모를 본다
+        note = " ".join(x for x in [req.note or "", *(f"⚠ {w}" for w in warn)] if x) or None
         try:
             fid = add_fault(conn, req.kind, target, start,
                             duration_min=req.duration_min, intensity=req.intensity,
-                            mode="manual", note=req.note, scenario_no=req.scenario_no)
+                            mode="manual", note=note, scenario_no=req.scenario_no)
         except ValueError as e:
             # `LIKE:` 원본 검사(`control._check_like`) — 500 이 아니라 사유를 돌려준다
             raise HTTPException(400, str(e))
     finally:
         conn.close()
-    return {"fault_id": fid}
+    return {"fault_id": fid, "warnings": warn, "warnings_ja": warn_ja}
+
+
+def _rush_warnings(conn, kind: str, start: datetime) -> tuple[list[str], list[str]]:
+    """출퇴근 시간대에만 서는 시나리오(`rush_hours`)를 곡선 끔·가상 시각 구간 밖에 넣으면 경고한다.
+
+    11-24 아침 3번(F-595)이 곡선 끔으로 들어가 무효가 됐다 — 균등 모드에서는 노선 탑승자가
+    움직이지 않아 전환이 없고, 효과가 날 세션이 없다. **막지 않는다**(사용자 2026-11-24 「그래」 —
+    경고만). 곡선·오프셋은 데몬과 같은 자리(`status_api.api_status`)에서 읽고, 시간대는 시작
+    시각 + 가상 오프셋으로 본다(가상 시각이 곡선을 정한다 · `virtual-time-rush-hours`).
+    """
+    from ..scenarios import KIND_SPECS
+    from .status_api import _clock_defaults
+
+    rush = [(int(a), int(b)) for a, b in (KIND_SPECS.get(kind) or {}).get("rush_hours") or ()]
+    if not rush:
+        return [], []
+    span = "·".join(f"{a:02d}~{b:02d}" for a, b in rush)
+    di_d, vo_d = _clock_defaults()
+    if str(get_config(conn, "diurnal", di_d)).lower() == "false":
+        return ([f"시간대 곡선이 꺼져 있습니다 — 출퇴근 시간대({span}시)에만 서는 시나리오라 효과가 나지 않을 수 있습니다"],
+                [f"時間帯曲線が切れています — 通勤時間帯({span.replace('~', '〜')}時)にだけ立つシナリオなので効果が出ないことがあります"])
+    v = start + timedelta(seconds=float(get_config(conn, "virtual_offset_sec", vo_d) or 0))
+    h = v.hour + v.minute / 60
+    if any((a <= h < b) if a < b else (h >= a or h < b) for a, b in rush):
+        return [], []
+    return ([f"시작 가상 시각 {v:%H:%M} 이 출퇴근 시간대({span}시) 밖입니다 — 효과가 나지 않을 수 있습니다"],
+            [f"開始の仮想時刻 {v:%H:%M} が通勤時間帯({span.replace('~', '〜')}時)の外です — 効果が出ないことがあります"])
 
 
 @router.post("/api/faults/{fault_id}/cancel")

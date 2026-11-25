@@ -281,7 +281,7 @@
   .st-cancelled { color:var(--dim); }
   tr.cancelled td { text-decoration:line-through; color:var(--dim); }
   #msg { margin-top:8px; font-size:12px; color:var(--green); min-height:18px; }
-  #msg.err { color:var(--red); }
+  #msg.err { color:var(--red); } #msg.warn { color:var(--yellow); }
   .dim { color:var(--dim); }
 </style>
 </head>
@@ -1240,6 +1240,9 @@ async function inject(ev) {
     m.className = ""; m.textContent = at
       ? T("예약됨 — fault #{id} ({t}에 시작)", {id: j.fault_id, t: at.replace("T", " ").slice(0, 16)})
       : T("주입됨 — fault #{id} (다음 틱부터 반영)", {id: j.fault_id});
+    // 출퇴근 시나리오를 곡선 끔·구간 밖에 넣었을 때의 경고(`faults_api._rush_warnings`) — 막지 않고 알린다
+    const w = (LANG === "ja" && j.warnings_ja) || j.warnings || [];
+    if (w.length) { m.className = "warn"; m.textContent += " · ⚠ " + w.join(" · "); }
     $("note").value = "";
     poll();
   } catch (e) {

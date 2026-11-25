@@ -716,8 +716,10 @@ def test_down_shading_is_one_dark_blinking_layer_without_hatch_distinct_from_the
     assert "#gDown .df ellipse{fill:var(--dn-base)}" in css
     code = re.sub(r"/\*.*?\*/", "", MAP_HTML, flags=re.S)                                       # 이유를 적은 주석은 뺀다
     code = "\n".join(l for l in code.splitlines() if not l.lstrip().startswith("//"))
-    for gone in ("downHatch", "hatchFit", "#gDown .dh", "--dn-hatch", "repeating-linear-gradient", "<pattern"):
+    for gone in ("downHatch", "hatchFit", "#gDown .dh", "--dn-hatch", "<pattern"):
         assert gone not in code, gone                                                           # 빗금은 완전히 걷었다
+    # `repeating-linear-gradient` 는 재생 열차의 창문 줄(`#rpfx .tr`, 2026-11-24)이 쓴다 — 정지 음영 블록(`css`)에서만 금지한다
+    assert "repeating-linear-gradient" not in css
     assert "ff" not in css.split("--dn-base:")[1][:8].lower()                                   # 주황(폭주)과 다른 색
 
 
@@ -1167,7 +1169,8 @@ def test_no_function_defined_in_the_last_commit_was_lost():
     if r.returncode != 0:
         pytest.skip("git 이력을 읽을 수 없다")
     # 11-16 사용자 "빗금 치지 말고" — 빗금 칸 맞춤 함수는 일부러 걷었다(`test_down_shading…` 이 소스에 없음을 고정한다)
-    lost = _defs(r.stdout) - _defs(MAP_HTML) - {"hatchFit"}
+    # 11-24 사용자 「첫 신호 하나만 받고 0.5초 잠금」 — 휠 줄 세우기(`wheelStep`)는 일부러 걷었다(`test_station_osm_labels_wheel_1124` 가 옛 상수가 없음을 고정한다)
+    lost = _defs(r.stdout) - _defs(MAP_HTML) - {"hatchFit", "wheelStep"}
     assert lost == set(), f"직전 커밋에 있던 함수가 사라졌다: {sorted(lost)}"
 
 

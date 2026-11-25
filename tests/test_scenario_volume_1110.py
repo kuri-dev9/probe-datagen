@@ -209,7 +209,20 @@ globalThis.fetch=async u=>({json:async()=>({ok:false,reason:'volume',volume:30})
 def test_page_has_no_volume_tab_but_the_detail_boxes():
     h = ui._HTML_SCEN
     # 11-22 사용자 「그냥 표시하지 마」 — 생성량 칩·두 상자 구분(`VOL_KEYS`)을 뺐다. 목록과 같은 판정 한 벌만 보인다
-    assert "id=vol>" not in h.replace('"', "") and "VOL_KEYS" not in h and "function volBoxes(" in h and "function mergeVols(" in h
+    assert "id=vol>" not in h.replace('"', "") and "VOL_KEYS" not in h and "function mergeVols(" in h
+
+
+def test_detail_has_no_verdict_card_and_no_found_card_but_the_paragraph():
+    """11-24 사용자 「판정 카드와 최근 회차에서 시스템이 찾은 것을 카드로 놓지 말고 아래 상세 내용에 추가」.
+
+    판정 칸(`volBoxes`)은 상세에서 부르지 않는다(정의만 남아 있다) — 판정은 아래 `volResult` 가 같은 값을 보인다.
+    찾은 것은 별도 칸이 아니라 시나리오 설명 구역 안의 단락(`foundBox`)이다.
+    """
+    h = ui._HTML_SCEN
+    assert h.count("volBoxes(") == 1, "판정 칸을 상세에서 다시 부르면 카드가 돌아온다(정의 한 번만 남아야 한다)"
+    assert "sec(esc(T('시나리오 설명')),desc+foundBox(s))" in h.replace(" ", "") or "desc+foundBox(s)" in h
+    assert h.count("foundBox(") == 2, "정의 1 + 시나리오 설명 구역 안 호출 1"
+    assert "function volResult(" in h and "volResult(" in h.split("function volResult(", 1)[1]
 
 
 def test_japanese_texts_of_the_tab_exist_in_the_page_dictionary():
