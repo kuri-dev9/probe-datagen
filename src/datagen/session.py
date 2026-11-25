@@ -552,6 +552,11 @@ class Session:
     #: 핸드오버 직후 정체 **길이(초)**. `0` 은 없음. 첫 전환에서 `freeze` 로
     #: 바뀌고 0 이 된다 — 한 세션에 한 번이다.
     ho_stall_s: float = 0.0
+    #: 정체를 걸 **전환 도착 셀** 키(`Plan.ho_stall_cells`). `None` 이면 어느 셀로 넘어가도 건다(옛 동작)
+    ho_stall_cells: object = None
+    #: 3번 정체를 이미 정했나(열 때 장애가 있었거나 · 장애 중 구간 셀을 한 번 만났다). 한 세션에 한 번만 정한다 —
+    #: 열 때 정한 몫(`HO_STALL_SHARE`)을 전환마다 다시 굴리면 같은 세션이 몫보다 자주 멈춘다
+    ho_decided: bool = False
     #: **노드 다운으로 끊기는 시각**(epoch · 2026-11-04). `-1` 은 끊기지 않는다. 세운 분의
     #: 레코드가 그 세션의 마지막이다 — `End` 를 그 시각에 내고 남은 양은 흐르지 않는다
     #: (`SessionEngine.cut` · `pemdb1._node_down_cuts`)
@@ -657,6 +662,8 @@ class SessionEngine:
         #: 이번 분의 시나리오 분 번호 — `pemdb1` 이 분마다 넣는다. 걷히는 망가짐(`Session.fade_sc`)이
         #: 그 분의 강도를 묻는 데 쓴다. `None` 이면 걷지 않는다(옛 동작)
         self.fade_minute = None
+        #: 이 분 활성 3번 장애의 (구간 셀, 멈출 몫) — `pemdb1` 이 분마다 넣는다(`scenarios.ho_fault_cells`). None 이면 없다
+        self.ho_fault = None
 
         #: Call Type 가중 — 설정이 있으면 기본표 위에 덮는다(키만 바꿀 수 있게).
         self._ctw = dict(CT_SESSION_W)
@@ -1119,6 +1126,8 @@ class SessionEngine:
         const[_C["RstDirection"]] = "0" if const[_C["RstCount"]] in ("0", "") else ""
         freeze: tuple[float, float] | None = None
         ho_stall_s = 0.0
+        ho_stall_cells = None
+        ho_stall_here = False
         reset = syn_fail = tls_fail = v4_retry = dn_stall = False
         retries = 0
         fade_sc, fade_i0 = None, 0.0
@@ -1159,6 +1168,8 @@ class SessionEngine:
                 freeze = (k / span, (k + 1) / span)
             if pl.ho_stall and call.outcome != OUT_STALL:
                 ho_stall_s = rng.uniform(3.0, 8.0)
+                ho_stall_cells = pl.ho_stall_cells
+                ho_stall_here = pl.ho_stall_here
             reset, syn_fail, retries = pl.reset, pl.syn_fail, pl.retries
             tls_fail, v4_retry = pl.tls_fail, pl.v4_retry
             dn_stall = pl.dn_stall and call.outcome != OUT_STALL
@@ -1183,7 +1194,9 @@ class SessionEngine:
             # ACK 이 안 왔다 → `TCP_OK` 가 세어지지 않아 `U-01` 이 내려간다
             const[_C["AckTime"]] = "0.0"
             const[_C["DnlinkWindowCloseCount"]] = str(rng.randint(1, 4))
-        elif freeze is not None or ho_stall_s > 0 or dn_stall:
+        elif freeze is not None or dn_stall or ho_stall_here:
+            # 전환 직후 정체는 **코리도 셀에서 연 세션**만 여기서 단다 — 그 셀에서 NR 레그를 붙이는 순간이 전환이다
+            # (`scenarios._ho_interruption`). 다른 셀에서 넘어오는 세션은 넘어온 뒤 레코드부터 단다(`_emit` 전환 분기)
             # 수신 창이 닫혔다 — 정체(bad_mask 16)의 증거 필드다. `AckTime`
             # 은 그대로 둔다: 연결은 섰고(`U-01` 정상) 도중에 막힌 것이다.
             # `dn_stall`(23번 · 2026-11-21)은 세션 내내 down 이 오지 않는다 — 양은 변형기가 0 으로 두었다
@@ -1282,7 +1295,9 @@ class SessionEngine:
             span=span, i=0, outcome=call.outcome, ho_at=ho, http_left=m,
             domain=(host if host is not None
                     else smp.domain() if smp is not None else ""),
-            freeze=freeze, ho_stall_s=ho_stall_s, app=app, app_ip=app_ip,
+            freeze=freeze, ho_stall_s=ho_stall_s, ho_stall_cells=ho_stall_cells,
+            # 열 때 3번 장애가 있었으면 `plan_mutate` 가 이미 몫을 굴렸다(`PLAN_ANY_START` — 시작 셀과 무관)
+            ho_decided=self.ho_fault is not None and plan_mutate is not None, app=app, app_ip=app_ip,
             retries=retries, v4_retry=v4_retry, dn_stall=dn_stall,
             fade_sc=fade_sc, fade_i0=fade_i0,
             norm_traffic=tuple(norm_traffic) if fade_sc is not None else (),
@@ -1478,12 +1493,34 @@ class SessionEngine:
             #
             # **마지막 분이면 걸지 않는다** — 밀린 양을 받을 뒤 구간이 없어
             # `Total` 이 모자란 채 끝난다(`b < 1` 이 `_freeze_frac` 의 전제)
+            #
+            # **장애 셀이 낀 전환에만 건다**(2026-11-24 · 3번 야마노테선 5G 불안정). 장애는 그 구간 셀의 전환 처리에
+            # 있다 — 구간 밖끼리의 전환에는 정체가 없고, 요청(`ho_stall_s`)은 남겨 두었다가 구간 셀이 낀 전환에 쓴다.
+            # **떠나는 쪽도 낀다**(같은 날 F-604) — 전환은 떠나는 셀이 명령을 내리고 밀린 down 을 넘겨야 끝난다. 들어올
+            # 때만 걸자 구간 셀을 떠나는 전환(graphio EV-04g 분모의 41%)이 늘 멀쩡해 전환 가입자 정체율이 F-600 17.8%
+            # → 7.1% 로 묽어졌다(EV-04g 는 전환을 떠난 셀에 귀속한다).
+            # 창 닫힘은 **구간 셀로 들어갈 때만** 단다 — 정체가 난 **뒤** 레코드부터이고 앞 줄(떠난 셀)은 위에서 이미 0 으로
+            # 냈다. 떠나며 멈춘 세션은 밖 셀에서 레코드가 끝나 그 셀 U-07 을 올린다(장애가 없는 셀). down 공백 자체는
+            # 새 SGW 레코드의 첫 down 시각(`base_t_dn`)으로 남는다. UDP 는 창이 없다
             stall_end = None
-            if s.ho_stall_s > 0 and s.freeze is None and now < 1.0:
+            hf = self.ho_fault
+            if hf is not None and not s.ho_decided and (before.cell_key in hf[0] or after.cell_key in hf[0]):
+                # **장애 전에 연 세션** — 장애 중 구간 셀을 처음 만나는 전환에서 열 때와 같은 몫으로 정한다
+                s.ho_decided = True
+                if s.ho_stall_s <= 0 and s.outcome != OUT_STALL and rng.random() < hf[1]:
+                    s.ho_stall_s = rng.uniform(3.0, 8.0)
+                    s.ho_stall_cells = hf[0]
+            in_c = s.ho_stall_cells is None or after.cell_key in s.ho_stall_cells
+            if (s.ho_stall_s > 0 and s.freeze is None and now < 1.0
+                    and (in_c or before.cell_key in s.ho_stall_cells)):
                 left = max(1e-6, t - t_ho)
                 s.freeze = (mid, mid + (now - mid) * min(1.0, s.ho_stall_s / left))
                 stall_end = t_ho + min(s.ho_stall_s, left)
                 s.ho_stall_s = 0.0
+                if in_c and (s.app is None or s.app.protocol != "17"):
+                    const = list(s.const)
+                    const[_C["DnlinkWindowCloseCount"]] = str(rng.randint(1, 4))
+                    s.const = tuple(const)
 
             # ② 새 셀로 이어진다.
             s.core = core
@@ -1497,6 +1534,15 @@ class SessionEngine:
                 s.base_t_dn = stall_end if stall_end is not None else t_ho
                 # 새 레코드는 TCP 악수를 보지 못했다(`_new_record_const`)
                 s.const = self._new_record_const(s, mid)
+                if stall_end is not None and not in_c:
+                    # **떠나며 멈춘 정체는 창 닫힘을 새 레코드로 들고 가지 않는다**(F-604 다음 · 에스터 시험 6.2%).
+                    # `_new_record_const` 는 구간에 정체(`freeze`)가 있으면 세션 상수의 창 닫힘을 남기는데, 코리도에서
+                    # 연 세션(`ho_stall_here`)은 상수에 이미 창 닫힘이 있어 밖 셀 레코드에 실렸다. 이 수정 전에는
+                    # 떠나는 전환에 정체가 없어 여기서 0 이 됐다 — 그 동작으로 되돌린다
+                    const = list(s.const)
+                    for f in self.WINDOW_CLOSE:
+                        const[_C[f]] = "0"
+                    s.const = tuple(const)
                 flag2 = F_SINGLE if last else F_START
             else:
                 flag2 = F_END if last else F_INTERIM

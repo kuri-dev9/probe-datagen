@@ -102,6 +102,10 @@ class FaultCfg:
     #: 봐야 확정하는데 λ 1.5 면 약 14분이다 — 권장 길이 20분 안에 서야 한다. **초기값**
     outage_min_cells: int = 3
     outage_min_rate: float = 1.5
+    #: 8번 연결 끊김 증가 자동 대상 — **판정할 수 있는 eNB** 의 C-04 분모율(호 유형 3·4 분당 성공 중 큰 쪽)
+    #: 하한(2026-11-24). 새 기준이 아니다 — graphio 최소 표본(`ingest.min_sample` 20건)을 확대 창 5분으로
+    #: 나눈 값이다. 이보다 한산한 eNB 는 걸어도 판정 대상이 아니다(F-603 · 군집 13셀 중 이웃 eNB 8셀)
+    drop_enb_min_rate: float = 4.0
     #: 16번 자동 대상 후보 — 1km 메시의 평소 15분 VIDEO 인원 하한과 그 안 NR 가능 셀 수 하한. 평소 사람이
     #: 없는 칸은 걸어도 LTE 표본이 없고, 셀이 적으면 하한 호로 SA 를 채우지 못한다. **초기값**
     anchor_min_people: int = 40
@@ -236,7 +240,7 @@ class FaultCfg:
                      "congestion_load", "daily_load_congestion", "congestion_user_share", "crowd_user_share",
                      "anchor_min_people", "anchor_min_cells", "congestion_meshes",
                      "floor_moved_share", "auto_node_min_share", "auto_wide_min_share",
-                     "outage_min_cells", "outage_min_rate", "quake_jitter_deg",
+                     "outage_min_cells", "outage_min_rate", "drop_enb_min_rate", "quake_jitter_deg",
                      "quake_jitter_depth_km", "quake_surge_intensity", "quake_down_intensity",
                      "quake_down_pct"):
                 setattr(f, k, type(getattr(f, k))(v))
@@ -343,7 +347,7 @@ class Plan:
 
     __slots__ = ("totals", "const", "outcome", "span", "stall", "ho_stall",
                  "reset", "syn_fail", "retries", "net_mode", "imsi", "fade",
-                 "tls_fail", "v4_retry", "dn_stall", "retry")
+                 "tls_fail", "v4_retry", "dn_stall", "retry", "ho_stall_cells", "ho_stall_here")
 
     def __init__(self, totals: dict[str, float], const: dict[str, str],
                  outcome: str, span: int):
@@ -363,6 +367,10 @@ class Plan:
         #: **핸드오버 직후 3–8초 정체** 요청(`j-sc-15`). 세션이 전환할 때
         #: 비로소 구간이 정해진다 — 전환이 없는 세션에는 아무 일도 없다.
         self.ho_stall = False
+        #: 정체를 걸 **전환 도착 셀** 키 집합(`j-sc-15`). `None` 이면 어느 셀로 넘어가도 건다
+        self.ho_stall_cells = None
+        #: 세션을 **코리도 셀에서 연다**(`j-sc-15`) — 그 셀에서 NR 레그를 붙이는 4G↔5G 전환이 곧 정체다
+        self.ho_stall_here = False
         #: **연결이 끊긴다**(RST) — 세션 도중 서버·망이 끊었다. TCP 만
         self.reset = False
         #: **연결이 서지 않는다** — SYN 재전송 끝에 ACK 없음(`U-01` 실패).
@@ -1174,6 +1182,9 @@ MUTATORS: dict[str, Mutator] = {}
 
 PlanMutator = Callable[[Plan, Scenario, float, random.Random, Cell], bool]
 PLAN_MUTATORS: dict[str, PlanMutator] = {}
+#: **세션 시작 셀로 거르지 않는** plan mutator 종류(`pemdb1._plan_mutator`). 효과가 시작 셀이 아니라 그 뒤
+#: 사건(전환 도착 셀)에서 정해지는 종류다 — 거르기는 mutator 와 세션이 한다(2026-11-24 · 15번 `ho_interruption`)
+PLAN_ANY_START: frozenset[str] = frozenset({"ho_interruption"})
 
 Suppressor = Callable[[Scenario, Cell, float, random.Random], bool]
 SUPPRESSORS: dict[str, Suppressor] = {}
@@ -2748,9 +2759,42 @@ def _congest(plan, rng, intensity: float) -> None:
 # --------------------------------------------------------------------------
 
 
+#: 3번 — 구간 셀을 만난 세션 가운데 전환에서 멈추는 몫(× 강도). 세션을 열 때(`_ho_interruption`)와 **장애 전에 열려
+#: 타고 있던 세션이 장애 중 구간 셀을 처음 만날 때**(`ho_fault_cells` · `session._emit`) 같은 몫을 쓴다
+HO_STALL_SHARE = 0.9
+
+
+def ho_fault_cells(active: list, minute: int) -> tuple[frozenset, float] | None:
+    """이 분 활성 `ho_interruption` 의 (구간 셀, 멈출 몫) — 없으면 None. 둘 이상이면 셀을 합치고 몫은 큰 쪽이다.
+
+    **장애 전에 연 세션도 구간에서 멈춘다**(2026-11-24 · 3번 F-606). 정체를 세션을 열 때만 정하자 장애 시작 시점에
+    이미 타고 있던 세션은 끝까지 멈추지 않았다 — 전환 가입자 정체율 h 가 장애 첫 2분 6.5%·14% 로 묽었고(평탄 구간
+    약 20%), graphio 가 진행 중 판정에서 R-40 대신 R-33(NR 레그)을 세워 큰 조각이 다른 결론으로 남았다. 장애는 구간
+    eNB 의 전환 처리에 있으므로 세션이 언제 열렸는지와 무관하다."""
+    cells: set = set()
+    share = 0.0
+    for sc in active:
+        if sc.kind != "ho_interruption" or "transport" not in sc.series or not sc.active_cells_cache:
+            continue
+        cells |= set(sc.active_cells_cache)
+        share = max(share, sc.intensity_for("transport", minute) * HO_STALL_SHARE)
+    return (frozenset(cells), share) if cells and share > 0 else None
+
+
 @plan_mutator("ho_interruption")
 def _ho_interruption(plan, sc, intensity, rng, cell) -> bool:
-    """코리도 셀에서 시작한 세션이 **전환하면 직후 3–8초 down 이 멈춘다.**
+    """**코리도 셀에서 4G↔5G 전환을 겪는 세션**의 down 이 3–8초 멈춘다. 전환은 두 가지다.
+
+    * **코리도 셀에서 연 세션**(`ho_stall_here`) — 그 셀에서 NR 레그를 붙이는 순간이 전환이다. 세션을 열 때
+      창 닫힘을 단다(그 셀에서 끝나는 세션이 대부분이다).
+    * **다른 셀에서 코리도 셀로 넘어오는 세션**(`ho_stall_cells` · `session._emit`) — 넘어온 순간(LTE 전환과
+      함께 NR 레그를 다시 붙인다)에 정체를 걸고 그 뒤 레코드부터 창 닫힘을 단다.
+
+    **둘 다여야 한다**(2026-11-24 두 번). U-07 은 **종료 레코드만** 센다(graphio `uplane_agg` §3.1.3) — 그 셀에서
+    끝나는 세션은 실측으로 81.8% 가 그 셀에서 열렸고 52.0% 가 넘어왔다(겹침 포함 합 100% · 13:46~13:55 원시).
+    전에는 앞의 것만이라 넘어온 세션이 표시 없이 섞여 구간 끝 칸이 묽었고(F-598·F-600 놓친 셀 대부분이 끝 칸),
+    뒤의 것만 남기자 정점이 25.8% → 7.9% 로 꺼졌다(F-602 · 탐지 실패). 시작 셀로 거르지 않는 것은
+    `PLAN_ANY_START` 이고, 코리도 밖에서 열고 코리도로 넘어오지 않는 세션에는 아무 일도 없다.
 
     확정대장 §7.0 의 "H/O 직후 3–8초 정체" 다. 여기서는 **요청만** 한다 —
     구간은 실제 전환 시각에 `session._emit` 이 정한다. 전환하지 않는
@@ -2762,9 +2806,11 @@ def _ho_interruption(plan, sc, intensity, rng, cell) -> bool:
     """
     if plan.outcome == "stall":
         return False                        # 겹침 방지 (V3 §7.2)
-    if rng.random() >= intensity * 0.9:
+    if rng.random() >= intensity * HO_STALL_SHARE:
         return False
     plan.ho_stall = True
+    plan.ho_stall_cells = sc.active_cells_cache
+    plan.ho_stall_here = cell is not None and cell.cell_key in sc.active_cells_cache
     return True
 
 
@@ -4847,6 +4893,24 @@ def _split(total: int, k: int, lo: int, hi: int | None, rng: random.Random) -> l
     return out
 
 
+def _route_enterable(rt) -> set[str]:
+    """노선에서 **다른 셀에서 넘어올 수 있는** 셀 키 — 어느 칸이든 앞이나 뒤 칸이 다른 셀이면 그렇다.
+
+    순환선은 끝과 처음이 이어지고, 순환이 아니면 양 끝 칸은 한쪽 이웃만 본다(되돌아 오므로 그 이웃에서 들어온다)
+    """
+    n = len(rt.cells)
+    out: set[str] = set()
+    for i, c in enumerate(rt.cells):
+        nb = []
+        if i > 0 or rt.loop:
+            nb.append(rt.cells[(i - 1) % n])
+        if i < n - 1 or rt.loop:
+            nb.append(rt.cells[(i + 1) % n])
+        if any(x.cell_key != c.cell_key for x in nb):
+            out.add(c.cell_key)
+    return out
+
+
 def route_spread(routes: list, rng: random.Random, pct: int = ROUTE_RANGE_DEFAULT,
                  ) -> tuple[list[Cell], list[tuple[str, str]], dict] | None:
     """15번 대상 — 노선 하나에서 **범위(%)만큼의 셀을 떨어진 조각 여러 개**로 고른다(2026-11-09).
@@ -4941,11 +5005,17 @@ def route_spread(routes: list, rng: random.Random, pct: int = ROUTE_RANGE_DEFAUL
             rng.shuffle(idx)
             if not any(grow(i) for i in idx):
                 break
+    # **다른 셀에서 넘어올 수 없는 칸은 정답에서 뺀다**(2026-11-24 사용자 결정 · 3번). 이 장애는 그 셀로
+    # 넘어가는 전환에서만 나므로(`_ho_interruption`) 그런 칸은 증상이 날 수 없다 — 노선에서 그 셀의 어느 칸도
+    # 앞뒤 칸이 다른 셀이 아닌 경우다(같은 셀이 이어진 칸 안쪽). 야마노테선은 지금 해당 셀이 없다
+    enterable = _route_enterable(rt)
     cells: list[Cell] = []
     pairs: list[tuple[str, str]] = []
     info_pieces = []
     for pb in pieces_b:
-        mine = [seq[i] for b in pb for i in blocks[b]]
+        mine = [seq[i] for b in pb for i in blocks[b] if seq[i].cell_key in enterable]
+        if not mine:
+            continue
         cells += mine
         pairs += [(a.cell_key, b.cell_key) for a, b in zip(mine, mine[1:])]
         if whole and loop and len(mine) > 1:

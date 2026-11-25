@@ -52,7 +52,8 @@ class _Conn:
         return _Cur(self)
 
     def pm_queries(self):
-        return [s for s, _ in self.log if "CM_DATAGEN_FAULT" not in s]
+        # C-04 분모율 질의(호 유형 3·4 성공 · `GROUP BY ENB_ID, CALL_TYPE` · 2026-11-24 8번 군집 선택)는 평균·λ 질의가 아니다 — 센다면 이 시험이 보려는 「뺄 분 질의」가 가려진다
+        return [s for s, _ in self.log if "CM_DATAGEN_FAULT" not in s and "GROUP BY ENB_ID, CALL_TYPE" not in s]
 
 
 def _fault(start, minutes):

@@ -70,6 +70,7 @@ from .scenarios import (
     RELOCATORS,
     PACKET_DENOM_KPIS,
     MUTATORS,
+    PLAN_ANY_START,
     PLAN_MUTATORS,
     SUPPRESSORS,
     Scenario,
@@ -2650,7 +2651,9 @@ class PemdbGen:
 
         def plan_mutate(cell, plan) -> None:
             for sc in sel:
-                if sc.target.cell_keys and cell.cell_key not in sc.active_cells_cache:
+                # 시작 셀로 거르지 않는 종류가 있다 — 효과가 전환 도착 셀에서 정해진다(`PLAN_ANY_START`)
+                if (sc.target.cell_keys and sc.kind not in PLAN_ANY_START
+                        and cell.cell_key not in sc.active_cells_cache):
                     continue
                 sc._minute = minute
                 PLAN_MUTATORS[sc.kind](
@@ -3958,6 +3961,8 @@ class PemdbGen:
             for sc in active if sc.kind in APP_BOOSTERS] if book else []
         # 걷히는 망가짐(`Session.fade_sc`)이 이 분의 장애 강도를 묻는다(2026-11-19 · 22번 꼬리)
         self.sessions.fade_minute = minute
+        # 3번 — 장애 전에 연 세션도 구간 셀을 처음 만나는 전환에서 멈춘다(`scenarios.ho_fault_cells`)
+        self.sessions.ho_fault = _scenarios.ho_fault_cells(active, minute)
         got = self.sessions.minute(ts, self._calls,
                                    self._mutator(minute, active),
                                    self._plan_mutator(minute, active))
@@ -4553,6 +4558,30 @@ def enb_call_rate(conn, end: datetime, minutes: int = 60) -> dict[str, float]:
         lam = -math.log(idle) if idle > 0 else mean
         out[str(enb)] = min(mean, lam)
         out.mean[str(enb)] = mean
+    # 8번 연결 끊김 증가 자동 대상이 보는 **C-04 분모율**(2026-11-24 사용자 결정 1 · `faults._drop_surge_target`). 같은 창·같은
+    # 뺄 분이다. C-04 는 호 유형 3·4 를 따로 판정하므로(graphio `detection.call_type_kpis`) 유형별 분당 성공 평균 중 큰 쪽이다
+    try:
+        out.success = _enb_success_rate(conn, lo, end, skip, span)
+    except Exception as e:  # noqa: BLE001 — 못 읽으면 8번은 예전 군집 추첨으로 간다
+        print(f"  ! eNB C-04 분모율 조회 실패 — {e}", flush=True)
+    return out
+
+
+def _enb_success_rate(conn, lo: datetime, end: datetime, skip: set[datetime], span: int) -> dict[str, float]:
+    """eNB → 호 유형 3·4 의 **분당 성공 평균 중 큰 쪽**(C-04 분모 · `kpi.py` C-04 `success`). 뺄 분(`skip`)은 뺀다"""
+    cond, args = "", [lo, end]
+    if skip:
+        cond = f" AND EVENT_TIME NOT IN ({', '.join(['%s'] * len(skip))})"
+        args += sorted(skip)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT ENB_ID, CALL_TYPE, SUM(SUCCESS_CNT) FROM {PM_ENB} WHERE EVENT_TIME >= %s AND EVENT_TIME < %s "
+            f"AND CALL_TYPE IN ('3', '4'){cond} GROUP BY ENB_ID, CALL_TYPE", tuple(args))
+        rows = cur.fetchall()
+    out: dict[str, float] = {}
+    for enb, _ct, suc in rows:
+        v = float(suc or 0) / max(1, span)
+        out[str(enb)] = max(out.get(str(enb), 0.0), v)
     return out
 
 
@@ -4640,6 +4669,8 @@ class EnbRate(dict):
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.mean: dict[str, float] = {}
+        #: eNB → C-04 분모율(호 유형 3·4 분당 성공 평균 중 큰 쪽 · `_enb_success_rate`). 못 읽었으면 비어 있다
+        self.success: dict[str, float] = {}
 
 
 class PemdbWriter:

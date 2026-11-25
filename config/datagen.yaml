@@ -226,6 +226,13 @@ pemdb1:
       geo_roads: ../graphio-probe-rca/data/geo/jp/roads.json        # 도로 OSM (배경)
       geo_green: ../graphio-probe-rca/data/geo/jp/green.json        # 공원·수역 OSM (배경)
       geo_station_bldg: ../graphio-probe-rca/data/geo/jp/station_bldg.json  # 역 건물 OSM (배경)
+      geo_station_n02: ../graphio-probe-rca/data/geo/jp/station_n02.json    # 역 승강장 선 N02 (배경)
+      geo_station_osm: ../graphio-probe-rca/data/geo/jp/station_osm.json    # 역 모양 OSM 승강장 면·구내·건물 (배경)
+      geo_station_label: ../graphio-probe-rca/data/geo/jp/station_label.json  # 역 이름 글자 자리 N02+OSM (화면용)
+      # 지도가 그리는 역 레이어 — station_osm(기본) · station_n02 · station_bldg(옛 OSM 건물 윤곽).
+      # 11-24 낮: OSM 건물 윤곽은 東京·上野·品川 본 역사가 빠져 N02 로 바꿨다.
+      # 11-24 저녁: N02 는 승강장 중심선뿐이라(「선만 그은 것」) OSM 승강장 면·구내·건물로 바꿨다
+      map_station_layer: station_osm
       # 상세 배경 (2026-10-30) — graphio `tools/build_jp_geo_layers.py --only-detail` 가 굽는다.
       # `geo_boundary_map` 은 **지도 전용**이다. `geo_boundary` 는 graphio 의 셀 귀속과
       # 같은 파일이라 그대로 두고, 지도만 상세본을 읽는다 — 비우면 `geo_boundary` 로 간다
@@ -517,6 +524,9 @@ pemdb1:
     # eNB 정지 자동 대상 — 셀 수와 평소 호율(λ · 분당) 하한. 초기값
     outage_min_cells: 3
     outage_min_rate: 1.5
+    # 8번 연결 끊김 증가 자동 대상 — 판정할 수 있는 eNB 의 C-04 분모율(분당) 하한. graphio 최소 표본 20건 ÷
+    # 확대 창 5분 — 새 기준이 아니라 표본 규칙을 분당으로 옮긴 값이다. graphio 쪽을 바꾸면 함께 바꾼다
+    drop_enb_min_rate: 4.0
     # 16번 자동 대상 후보 — 메시 평소 15분 VIDEO 인원과 그 안 NR 가능 셀 수 하한. 초기값
     anchor_min_people: 40
     anchor_min_cells: 8
@@ -898,11 +908,15 @@ pemdb1:
     # 전에는 `{from: 17, to: 41}` 하나였고 **전원이 시나가와에 서서 같은
     # 순간에 출발했다** — 2,500명이 한 칸에 타고 1분에 한 칸씩 함께 움직여
     # eNB 하나가 전체 호의 25% 를 받았고, 신주쿠에 함께 내려 쌓였다.
+    #
+    # **더 오래 탄다**(2026-11-24 사용자 결정 · 3번 야마노테선 5G 불안정). 2~10역·하차 5~30분이면 탑승자의 약
+    # 절반만 움직이고 있었다. 4~15역·5~15분으로 약 74% 가 움직이고 노선 셀 전환이 약 1.45배다 — 호 수(생성량)는
+    # 그대로다. 대가: 역에 머무는 사람이 줄어 1번 퇴근길 역 앞 속도 저하(역세권 혼잡)가 약해질 수 있다
     journeys:
-      - {route: YMT-OUTER, stations: [2, 10], share: 0.25}
-      - {route: YMT-INNER, stations: [2, 10], share: 0.25}
+      - {route: YMT-OUTER, stations: [4, 15], share: 0.25}
+      - {route: YMT-INNER, stations: [4, 15], share: 0.25}
     off_sec_min: 300          # 하차 후 머무는 시간(초)
-    off_sec_max: 1800
+    off_sec_max: 900
 
     # ── 거주 지역성 — **경로와 다른 축이다** ────────────────────────────
     #

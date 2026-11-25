@@ -904,6 +904,61 @@ def _anchor_target(cells: list[Cell], rng: random.Random, fault: dict, load,
                   sgg_codes={first.adm_sgg_cd})
 
 
+def _drop_surge_target(cells: list[Cell], rate, used: dict[str, int] | None = None) -> Target | None:
+    """8번 연결 끊김 증가 자동 대상 — **판정할 수 있는 eNB 끼리** 군집을 짓는다(2026-11-24 사용자 결정 1 · 두 번째).
+
+    * 첫 판은 앵커만 바쁜 eNB 로 고르고 군집은 `enb_cluster`(가까운 eNB 순)로 지었다. F-603 은 앵커 132433
+      (C-04 분모 분당 약 234 · 셀 하나에 몰림)만 서고 붙은 이웃 eNB 두 곳(셀 8개 · 분당 0.2~1.8)은 표본이
+      없어 5/13 에 멈췄다. 8번은 셀당 하한 호가 0 이라(11-23 결정 15) 원래 있던 호만큼만 분모가 나온다.
+    * 그래서 군집 후보를 **C-04 분모율이 `FAULT.drop_enb_min_rate` 이상인 eNB** 로 좁힌다. 그 값은 graphio 최소
+      표본 20건을 확대 창 5분으로 나눈 것이다 — 그보다 한산한 eNB 는 걸어도 판정 대상이 아니다. 판정은 eNB
+      축으로 합해 한다(graphio `detection.enb_axis` · 결정 14) — 그래서 셀이 아니라 eNB 로 거른다.
+    * 군집은 그 후보 셀만 넘긴 `enb_cluster`(10~15셀 · eNB 를 자르지 않음)다 — 크기 규칙은 다른 무선 kind 와 같다.
+    * 앵커는 분모율이 큰 eNB 부터, 돌리기는 `_rotating` 과 같은 규칙(안 쓴 것 중 맨 앞 · 다 썼으면 가장 오래전).
+      안 쓴 군집을 찾으면 멈춘다(군집을 다 지으면 한 번에 약 8초였다).
+    * 분모율을 못 읽었거나 하한을 넘는 eNB 가 없으면(새벽) 하한 없이 분모율이 있는 eNB 전부를 후보로 한다 —
+      그때 정답 셀 일부는 표본이 모자라 서지 않을 수 있다(설명의 「한산한 셀」).
+    * 9번(`ran_radio`)·23번(`nsa_nr_leg`)은 바꾸지 않는다 — 그 판정이 흔들린다(케이 11-24).
+    """
+    succ = getattr(rate, "success", None) if rate else None
+    if not succ:
+        return None
+    mapped = [c for c in cells if c.geo_status == "MAPPED"]
+    floor = S.FAULT.drop_enb_min_rate
+    pool = [c for c in mapped if succ.get(str(c.enb_id), 0.0) >= floor]
+    note = f"C-04 분모 분당 {floor:g}건 이상 eNB"
+    if not pool:
+        pool = [c for c in mapped if succ.get(str(c.enb_id), 0.0) > 0.0]
+        note = f"분당 {floor:g}건 넘는 eNB 가 없어 하한 없이"
+    first: dict[str, Cell] = {}
+    for c in sorted(pool, key=lambda c: c.cell_key):
+        first.setdefault(str(c.enb_id), c)
+    seen: list = []
+    keys: set[str] = set()
+    got = None
+    for rank, enb in enumerate(sorted(first, key=lambda e: (-succ.get(e, 0.0), e)), 1):
+        grp = enb_cluster(pool, first[enb])
+        key = target_key(c.cell_key for c in grp)
+        if not grp or key in keys:
+            continue
+        keys.add(key)
+        seen.append((rank, key, grp))
+        if not used or key not in used:
+            got = seen[-1]
+            break
+    if got is None and seen:
+        got = min(seen, key=lambda x: used[x[1]])
+    if got is None:
+        print("  ! 8번 연결 끊김 증가 — C-04 분모율이 있는 eNB 가 없다 · 예전 군집 추첨으로 간다", flush=True)
+        return None
+    rank, _, grp = got
+    enbs = sorted({str(c.enb_id) for c in grp})
+    per = " · ".join(f"{e} {succ.get(e, 0.0):.1f}" for e in enbs)
+    print(f"  · 8번 대상 eNB {len(enbs)}곳 셀 {len(grp)} ({note} · 앵커 호 많은 순 {rank}번째) — "
+          f"eNB별 C-04 분모 분당 {per}", flush=True)
+    return Target(cell_keys={c.cell_key for c in grp})
+
+
 def _outage_target(cells: list[Cell], rng: random.Random, rate,
                    used: dict[str, int] | None = None) -> Target | None:
     """eNB 정지 자동 대상 — 셀과 평소 호가 충분한 eNB 를 주입마다 돌려 고른다(2026-11-07).
@@ -1239,6 +1294,8 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
                               or _venue_target(pick, rng, fault, mesh_load, used))
                 elif fault["kind"] == "enb_s1_outage":
                     target = _outage_target(pick, rng, _rate_at(enb_rate, fault), used)
+                elif fault["kind"] == "ran_drop_surge":
+                    target = _drop_surge_target(pick, _rate_at(enb_rate, fault), used)
                 elif fault["kind"] in _CROWD_KINDS or fault["kind"] == "sa_fallback":
                     target = _congestion_target(pick, rng, fault, mesh_load, used)
                 elif fault["kind"] in ROUTE_RANGE_KINDS:
