@@ -427,8 +427,8 @@
  .r3d{position:absolute;inset:0;z-index:40;background:#0d1117;cursor:default}
  /* 3D 전환(사용자 11-25 「지도에서 다른 창 끄고 바로 3D 로 · 화면의 이어짐」) — 지도 위 창들을 서서히 숨기고 되살린다.
     글자(#labels)는 3D 가 같은 자리에 같은 글자를 띄우는 순간(교차 페이드)에 따로 끈다 */
- body.r3d-tr :is(#fbar,#rp,#sel,#incs,#flist,#legend,#scale,#src,#mini,#hq,#tip,#boxsel,#glob,#fx,#rpfx,#labels){transition:opacity .4s}
- body.r3d-on :is(#fbar,#rp,#sel,#incs,#flist,#legend,#scale,#src,#mini,#hq,#tip,#boxsel,#glob,#fx,#rpfx){opacity:0;pointer-events:none}
+ body.r3d-tr :is(#fbar,#rp,#sel,#incs,#flist,#legend,#scale,#src,#hq,#tip,#boxsel,#glob,#fx,#rpfx,#labels){transition:opacity .4s}
+ body.r3d-on :is(#fbar,#rp,#sel,#incs,#flist,#legend,#scale,#src,#hq,#tip,#boxsel,#glob,#fx,#rpfx){opacity:0;pointer-events:none}
  body.r3d-lab #labels{opacity:0}
  .r3d canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
  .r3d-hud{position:absolute;left:12px;right:12px;top:10px;display:flex;align-items:center;gap:12px;padding:8px 12px;
@@ -602,17 +602,18 @@
  #flist .na{opacity:.5;font-style:italic}
  #flist .empty{padding:10px;opacity:.6}
  #src{position:absolute;right:8px;bottom:6px;font-size:11px;opacity:.45;color:var(--map-fg)}
- /* 미니 지도 · 관동과 앞바다(27번 진앙 · 2026-11-15 사용자) — 축척 막대 위 오른쪽 아래에 고정. 확대·끌기를 받지 않는다.
-    장애 이력(#flist · 오른쪽 위)과 범례(#legend · 왼쪽 아래)를 피한 자리다 */
- #mini{position:absolute;right:10px;bottom:46px;z-index:3;width:190px;display:none;cursor:default;
+ /* 미니 지도 · 관동과 앞바다(27번 진앙 · 2026-11-15 사용자) — **왼쪽 아래**에 고정(11-26 사용자 「기본 2d지도 왼쪽 아래 도쿄 축소 모형」).
+    확대·끌기를 받지 않는다. 떠 있는 동안 범례(#legend · 왼쪽 아래)는 그 오른쪽으로 비킨다. 3D 재생에서도 숨기지 않는다(아래 body.r3d-on) */
+ #mini{position:absolute;left:10px;bottom:10px;z-index:3;width:190px;display:none;cursor:default;
    background:color-mix(in srgb,var(--sea) 88%,transparent);border:1px solid var(--land-line);border-radius:6px;
    padding:4px;user-select:none}
  #mini svg{display:block;width:100%;height:auto;overflow:hidden}
  /* 진앙 ★·물결·규모는 해안선 위 **별도 svg** 에(11-16 실측) — 같은 svg 에서 물결을 키우면 매 프레임 관동 해안선
     전체를 다시 칠했다. 같은 viewBox 를 같은 칸에 겹친다 */
  #mini #miniFx{position:absolute;left:4px;top:4px;width:calc(100% - 8px);height:calc(100% - 8px);pointer-events:none}
- /* 미니 지도가 떠 있으면 장애 이력이 그 위에서 멈춘다 — 이력(z 4)이 길게 펼쳐지면 미니 지도를 덮었다 */
- #wrap.mini-on #flist{max-height:calc(100% - 330px)}
+ #wrap.mini-on #legend{left:210px}
+ /* 3D 재생 — 3D 화면(z 40) 위, 이상 셀 수 그래프(왼쪽 아래) 바로 위 */
+ body.r3d-on #mini{z-index:41;left:14px;bottom:150px}
  #mini .ml{fill:var(--land);stroke:var(--land-line);stroke-width:.6px;vector-effect:non-scaling-stroke}
  #mini .mv{fill:none;stroke:var(--map-fg);stroke-width:1px;vector-effect:non-scaling-stroke;opacity:.8}
  /* ★ 에서 퍼지는 물결 — 사용자 "너무 과하지 않게". 얇은 선 셋이 3s 에 한 번씩 시차로 번지며 옅어진다.
@@ -678,6 +679,8 @@
  body[data-theme=light] #gSevY{opacity:.45} body[data-theme=light] #gSevR{opacity:.45}
  #legend s.ssevy{background:#f2c23099;border:1px solid #f2c230;border-radius:2px}
  #legend s.ssevr{background:#ff4d5e77;border:1px solid #ff4d5e;border-radius:2px}
+ #legend svg.spwr{width:13px;height:13px;flex:none}
+ svg.qpic{display:inline-block;width:16px;height:16px;vertical-align:-3px;margin-right:4px}
  #legend s.sdownt{background:none;border:2px solid #22c55e;border-radius:50%}
  body[data-theme=light] #legend s.sdownt{border-color:#15803d}
  /* 정답(비교용) — 점선 테두리만. 칠하지 않아 주 음영(탐지)을 가리지 않는다 */
@@ -765,7 +768,10 @@
   <svg id=geofx></svg>
   <svg id=downfx class=ovl><g id=gDown></g></svg>
   <svg id=ripfx0 class="ovl ripfx"><g></g></svg><svg id=ripfx1 class="ovl ripfx"><g></g></svg><svg id=ripfx2 class="ovl ripfx"><g></g></svg>
-  <svg id=truthfx class=ovl><g id=gDownT></g></svg>
+  <svg id=truthfx class=ovl><defs><symbol id=pwrIco viewBox="0 0 24 24"><circle cx=12 cy=12 r=11.5 fill="#0b0e12" fill-opacity=".72"/>
+    <path d="M7.4 6.6A8 8 0 1 0 16.6 6.6" fill="none" stroke="#b18cff" stroke-width="2.6" stroke-linecap="round"/>
+    <path d="M12 3V12" stroke="#b18cff" stroke-width="2.6" stroke-linecap="round"/><path d="M4 21L20 3" stroke="#fff" stroke-width="2" stroke-linecap="round"/></symbol></defs>
+    <g id=gDownT></g><g id=gPwr></g></svg>
   <div id=fx><div id=fxin><div id=fxh></div><div id=fxb></div></div><div id=fxe><svg></svg><svg></svg><svg></svg></div></div>
   <div id=rpfx><div class=ly></div></div>
   <div id=glob></div>
@@ -1121,6 +1127,11 @@ async function pollQuake(){
 //: 통합 장애 바 「지진」 줄 (2026-11-16 사용자 "왼쪽 위 통합장애 표시에 지진 정보도 함께"). 생성기가 `CM_QUAKE_EVENT`
 //: 에 적은 진원 지명·규모·깊이·진앙 진도·발생 시각만 옮긴다 — 모르는 칸은 비운다(불변규칙 17). 꺼진 셀·eNB 수는
 //: **정답지라 넣지 않는다** — 정답은 「정답 표시」를 켰을 때만 보인다(같은 날 사용자)
+//: 지진 그림 — 집 아래 땅이 흔들리는 모양(11-26 사용자). 3D 재생(`replay3d.js` PIC_QUAKE)과 같은 그림이다
+const PIC_QUAKE_2D='<svg class=qpic viewBox="0 0 24 24" aria-hidden=true><path d="M7 13V7L12 3L17 7V13Z" fill="#ff4d4d"/><path d="M11 13V10H13V13Z" fill="#fff"/>'
+  +'<path d="M1 17L4 15L7 18L10 15L13 18L16 15L19 18L22 15" fill="none" stroke="#ff4d4d" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>'
+  +'<path d="M12 18L11 20.5L13 23" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>'
+  +'<path d="M3 6Q2 9 3 12M21 6Q22 9 21 12" fill="none" stroke="#ff4d4d" stroke-width="1.6" stroke-linecap="round"/></svg>';
 function quakeLine(){
   const q=MINI_Q;
   if(!q||QFOR!==FOCUS) return '';
@@ -1130,7 +1141,7 @@ function quakeLine(){
   if(q.depth_km!=null) bits.push(T('깊이 {d}km',{d:Math.round(q.depth_km)}));
   if(q.intensity!=null) bits.push(T('진앙 진도 {i}',{i:q.intensity.toFixed(1)}));
   if(q.origin_time) bits.push(T('{t} 발생',{t:esc(hm(q.origin_time))}));
-  return bits.length?`<span class=plain><b>${T('지진')}</b> ${bits.join(' · ')}</span>`:'';
+  return bits.length?`<span class=plain>${PIC_QUAKE_2D}<b>${T('지진')}</b> ${bits.join(' · ')}</span>`:'';
 }
 //: 효과가 도는 조건 — **어느 장애든** 고른 뒤 `FX_SEC` 초 동안만(2026-11-17 사용자 "다른 애들도 다 움직여야 해 ·
 //: 이벤트 켜지면 30초만"). 전에는 지진(`MINI_Q`)이 붙은 장애만 돌아 셀 물결·정지 깜박임이 다른 장애에선 늘 멈춰 있었다.
@@ -1204,7 +1215,7 @@ function drawMini(){
 //: 「정답 표시」 체크 — 기본 꺼짐 · 기억하지 않는다(새로 열면 늘 꺼진 화면)
 let TRUTH_ON=false;
 let SIL={}, SIL_WAIT={}, DOWN_TOFF=false, DOWN_T_N=0, DOWN_E=0, DOWN_TE=0, IMPACT={}, IMPACT_WAIT={}, IMPACT_N=0,
-    SEV_N={gray:0, red:0, yellow:0};
+    SEV_N={gray:0, red:0, yellow:0}, PWR_N=0;
 //: 흔들림(추정 진도) 영향 층 — **기본 꺼짐**(2026-11-15 사용자 "XDR 로 흔들림을 감지한다는 게 말이 안 된다. 셀
 //: 기준으로 판단"). 진도는 지진 정보로 계산한 추정이라 탐지 화면의 사실이 아니다. 코드·API(`/impact`)는 남기고
 //: 켜는 곳은 여기 하나다 — 끄면 그리지도 묻지도 않고 범례 줄도 없다
@@ -1301,6 +1312,13 @@ function drawDown(){
   // 정답은 시험 판정용이지 탐지 화면의 사실이 아니다. 켜면 점선이라 탐지가 놓친 곳은 점선만 남는다
   const t=draw1(q&&TRUTH_ON&&D&&DOWN?DOWN.cells:[], gt);
   DOWN_T_N=t.n; DOWN_TE=t.e; DOWN_TOFF=!(q&&TRUTH_ON);
+  // 꺼진 셀에 전원 차단 그림(11-26 사용자) — 통화 끊김(셀 정지 의심)으로 판정된 셀, 「정답 표시」를 켰으면 실제 정지 셀도.
+  // 그림 지름은 그 셀의 추정 커버리지 지름이다(좌표·반경 없는 셀은 그리지 않는다)
+  const gp=document.getElementById('gPwr'); PWR_N=0; if(gp){ gp.replaceChildren(); const seen=new Set();
+    for(const d of [...(sil&&sil.gray||[]), ...(q&&TRUTH_ON&&D&&DOWN?DOWN.cells:[])]){ const c=at[d.key]; if(!c||!(d.r_m>0)||seen.has(d.key)) continue; seen.add(d.key);
+      const k=d.r_m/(111320*Math.cos(c.lat*Math.PI/180))/12, u=el('use');
+      u.setAttribute('href','#pwrIco'); u.setAttribute('transform',`translate(${mx(c.lon)-12*k} ${-my(c.lat)-12*k}) scale(${k})`); u.setAttribute('width',24); u.setAttribute('height',24);
+      gp.appendChild(u); PWR_N++; } }
   legendDown();
 }
 function legendDown(){
@@ -1311,6 +1329,7 @@ function legendDown(){
   // 지진을 골랐으면 0곳도 적는다 — 아직 못 잡은 것과 "없음"이 구분돼야 한다(불변규칙 17). 셀 수는 그려진 원
   // (좌표·반경이 있는 셀)이다. 정답이 없으면 「?」
   if(on) rows.push(`<s class="sdown"></s>${T('통화 끊김(셀 정지 의심)')}<b>${T('셀 {c}',{c:SEV_N.gray})}</b>`,
+    ...(PWR_N?[`<svg class="spwr" viewBox="0 0 24 24"><use href="#pwrIco"/></svg>${T('전원 차단 = 꺼진 셀')}<b>${T('셀 {c}',{c:PWR_N})}</b>`]:[]),
     `<s class="ssevr"></s>${T('심하게 나빠짐')}<b>${T('셀 {c}',{c:SEV_N.red})}</b>`,
     `<s class="ssevy"></s>${T('나빠짐')}<b>${T('셀 {c}',{c:SEV_N.yellow})}</b>`,
     ...(DOWN_TOFF?[]:[`<s class="sdownt"></s>${T('실제 정지(정답)')}<b>${DOWN_T_N?T('셀 {c} · eNB ID {n}',{c:DOWN_T_N, n:DOWN_TE}):'?'}</b>`]));

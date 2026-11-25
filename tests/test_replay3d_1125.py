@@ -114,7 +114,7 @@ def test_three_is_vendored_with_license_and_version():
 
 def test_only_existing_replay_api_endpoints_are_used():
     assert re.findall(r"/api/[^\s`'\"]*", JS) and set(re.findall(r"/api/[a-z]+/", JS)) == {"/api/replay/", "/api/map/"}
-    assert set(re.findall(r"/api/map/[a-z]+", JS)) == {"/api/map/layer", "/api/map/bldg"}   # 지도 레이어(높은 건물·역 띠)와 낮은 건물 칸만 — 새 API 는 없다
+    assert set(re.findall(r"/api/map/[a-z]+", JS)) == {"/api/map/layer", "/api/map/bldg", "/api/map/quake"}   # 지도 레이어·낮은 건물 칸에 더해 지진(4번만 묻는다 · 11-26)이 하나 늘었다 — 새로 만든 API 는 아니다
     got = set(re.findall(r"get\('([a-z]+)'\)", JS)) | set(re.findall(r"\bget\(\s*'([a-z]+)'", JS))
     assert got <= {"timeline", "timelapse", "route"} and got                              # 새 API 를 만들지 않았다
     from datagen.ui import replay_api as R
@@ -271,7 +271,7 @@ def test_the_end_caption_says_no_more_judgements_never_recovered():
 def test_a_lit_column_that_goes_out_falls_slowly_and_rises_fast():
     m = re.search(r"const FALL_MS = (\d+);", CODE)
     assert m and int(m.group(1)) >= 3000                                                  # 몇 초에 걸쳐
-    assert "const b = c.hT < c.h ? fall : a;" in CODE                                     # 내려갈 때만 느린 계수
+    assert "const b = hT < c.h ? fall : a;" in CODE                                     # 내려갈 때만 느린 계수
     assert "fall = 1 - Math.exp(-dt / (FALL_MS / 3))" in CODE
     assert "const a = 1 - Math.exp(-dt / 180)" in CODE                                    # 켜질 때는 지금처럼 빠르게
     assert "초기값" in JS[JS.index("const FALL_MS") - 400:JS.index("const FALL_MS")]
@@ -307,8 +307,10 @@ def test_panels_hide_on_open_and_come_back_on_close_through_the_map_helper():
     assert "b.add('r3d-tr','r3d-on')" in fn and "if(st==='lab') b.add('r3d-lab')" in fn
     assert "b.remove('r3d-on','r3d-lab')" in fn                                          # 되살림
     css = HTML[HTML.index("body.r3d-tr :is("):][:700]
-    for panel in ("#fbar", "#rp", "#sel", "#incs", "#flist", "#legend", "#scale", "#mini"):
+    for panel in ("#fbar", "#rp", "#sel", "#incs", "#flist", "#legend", "#scale"):
         assert panel in css, panel                                                        # 지도 위 창 목록
+    # 11-26 — 지진 미니 지도(#mini · 진앙 ★)는 3D 에서도 숨기지 않는다(사용자 지시). 숨기는 목록에 들어 있으면 안 된다
+    assert "#mini" not in css[:css.index("opacity:0;pointer-events:none")] and "body.r3d-on #mini{" in HTML
     assert "opacity:0;pointer-events:none" in css and "body.r3d-lab #labels{opacity:0}" in css
     # 3D 쪽 호출 순서 — 열 때 on → 첫 그림 뒤 lab → 닫을 때 off(교차 페이드 뒤 finish 에서도 off)
     assert CODE.index("panels('on')") < CODE.index("panels('lab')")
@@ -654,8 +656,8 @@ def test_marker_kind_follows_the_injection_kind_for_the_users_examples():
 
 def test_every_kind_the_generator_can_inject_gets_a_marker_and_a_translated_name():
     from datagen.scenarios import KIND_SPECS
-    names = {"drop": "통화 끊김", "data": "데이터 안 됨", "radio": "전파 약함", "crowd": "혼잡", "storm": "단말 동시 재접속", "nx": "장애"}
-    assert "const mName = { drop: '통화 끊김', data: '데이터 안 됨', radio: '전파 약함', crowd: '혼잡', storm: '단말 동시 재접속', nx: '장애' }[mType] || '';" in CODE
+    names = {"quake": "지진", "drop": "통화 끊김", "data": "데이터 안 됨", "radio": "전파 약함", "crowd": "혼잡", "storm": "단말 동시 재접속", "nx": "장애"}
+    assert "const mName = { quake: '지진', drop: '통화 끊김', data: '데이터 안 됨', radio: '전파 약함', crowd: '혼잡', storm: '단말 동시 재접속', nx: '장애' }[mType] || '';" in CODE   # 11-26 지진 추가
     assert "warn" not in CODE[CODE.index("const mType"):CODE.index("const mName")]            # 시나리오 카드에 없는 경고 삼각형은 쓰지 않는다
     for kind in KIND_SPECS:
         assert _mark_of(kind) in names, kind
@@ -823,9 +825,11 @@ def test_grid_constants_are_initial_values():
 
 def test_grid_is_on_only_when_the_center_scale_is_within_the_1km_bar_and_radius_is_bar_times_five():
     assert "const close = grid.bar <= (opt.stScale && opt.stScale.t3 || 1000);" in CODE                    # 2D 와 같은 경계(ST_T3_M)
-    assert "const r = grid.bar * BLDG_VIEW_K, want = close ? cellsAround(ctl.target.x, ctl.target.z, r)" in CODE   # 가운데에서 막대 값 × 5
+    # 11-26 — 카메라를 눕히면 가운데가 먼 곳을 봐 낮은 건물이 사라지던 것을 고쳤다: 기준은 「카메라 발밑」 축척, 칸은 발밑에서 시선 방향 앞
+    assert "const r = grid.bar * BLDG_VIEW_K, cx = grid.fx + grid.dx * r * .5, cz = grid.fz + grid.dz * r * .5;" in CODE
+    assert "cellsAround(cx, cz, r)" in CODE and ".filter(c => c.b > -750).sort((a, b) => a.d - b.d)" in CODE
     assert ".filter(c => grid.idx.cells[c.code])" in CODE                                                   # 색인에 있는 칸만 묻는다
-    assert "grid.bar = SC ? SC.nice(mppC) : mppC * 100;" in CODE                                           # 막대 값은 가운데 축척(역 이름과 같은 값)
+    assert "grid.bar = SC ? SC.nice(mppF) : mppF * 100;" in CODE and "mppC = gnd(ctl.target" in CODE      # 11-26 — 막대 값은 카메라 발밑 축척(가운데 축척 mppC 는 역 이름용으로 남는다)
     assert "return out.sort((a, b) => a.d - b.d);" in CODE                                                  # 가까운 칸부터
     assert ".slice(0, BLDG_BATCH)" in CODE and "fetch(`/api/map/bldg?cells=${need.join(',')}`)" in CODE
 

@@ -1444,7 +1444,9 @@ def api_map_quake(at: str = "", outline: int = 0):
     try:
         with conn.cursor() as cur:
             if ts is not None:
-                cur.execute(sel + "WHERE f.START_TIME <= %s "
+                # 장애 시각은 **분 단위**(06:51:00)이고 주입은 분 가운데(06:51:11)에 선다 — 그 분 안의 시작도 품는다.
+                # 전에는 `START_TIME <= at` 이라 첫 분에 열린 장애(F-641)에서 지진을 못 찾아 미니 지도·진앙이 통째로 빠졌다(11-26 사용자)
+                cur.execute(sel + "WHERE f.START_TIME < %s + INTERVAL 1 MINUTE "
                             "AND f.START_TIME + INTERVAL f.DURATION_MIN MINUTE >= %s "
                             "ORDER BY q.ORIGIN_TIME DESC LIMIT 1", [ts, ts])
             else:
@@ -1486,7 +1488,9 @@ def _quake_down(fault_id: int) -> dict | None:
         return None
     enbs = sorted({str(e) for e in t.get("down_enbs") or ()})
     keys = [str(k) for k in t.get("down_cells") or ()]
-    out = {"enbs": enbs, "cells": [], "source": "ground_truth"}
+    # 꺼진 시각·eNB 별 다시 켜진 시각(epoch 초) — 3D 재생이 그 분부터 그 분까지만 「꺼짐」 기둥을 세운다. 정답지 값 그대로, 없으면 None
+    out = {"enbs": enbs, "cells": [], "source": "ground_truth",
+           "at_ts": t.get("down_at_ts"), "up_ts": t.get("down_up_ts") or {}}
     if not enbs:
         return out
     radius: dict[str, float | None] = {}

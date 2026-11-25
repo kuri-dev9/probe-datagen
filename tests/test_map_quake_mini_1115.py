@@ -524,7 +524,8 @@ def test_down_with_zero_enbs_is_an_empty_list_not_none(monkeypatch):
     """F-348 — 정지 0곳. None(모름)이 아니라 빈 목록이다. 질의 없이 돌려준다."""
     c = _down(monkeypatch, {"down_enbs": []})
     out = map_api._quake_down(348)
-    assert out == {"enbs": [], "cells": [], "source": "ground_truth"} and c.log == []
+    # 11-26 — 꺼진 시각(`at_ts`·`up_ts`)이 응답에 더해졌다. 0곳이면 둘 다 비어 있다
+    assert out["enbs"] == [] and out["cells"] == [] and out["source"] == "ground_truth" and not out.get("at_ts") and not out.get("up_ts") and c.log == []
 
 
 def test_down_uses_down_cells_when_the_sheet_has_them(monkeypatch):
@@ -812,7 +813,7 @@ def test_layers_are_ordered_kde_then_detected_down_then_truth_then_geo_and_draw_
     # 11-16 v6 — 지도 svg 에는 흔들림·노랑·빨강·지리만, 정지 음영·셀 물결·정답은 합성 층(별도 svg)으로 위에 겹친다
     assert "<g id=gKde></g><g id=gImpact></g><g id=gSevY></g><g id=gSevR></g><g id=gGeo></g>" in MAP_HTML
     order = [MAP_HTML.index(x) for x in ("<svg id=geofx>", "<svg id=downfx class=ovl><g id=gDown></g></svg>", "<svg id=ripfx0 ",
-                                          "<svg id=ripfx2 ", "<svg id=truthfx class=ovl><g id=gDownT></g></svg>")]
+                                          "<svg id=ripfx2 ", "<svg id=truthfx class=ovl>")]    # 11-26 — truthfx 안에 전원 차단 그림 정의(<defs>)가 들어가 닫는 꼴이 달라졌다
     assert order == sorted(order)                                   # 지리 효과 < 정지 < 물결 셋 < 정답
     draw = MAP_HTML[MAP_HTML.index("function draw()"):][:3500]
     assert "drawDown();" in draw and all(x not in draw for x in ("gDown", "gImpact", "gSev", "gRip"))

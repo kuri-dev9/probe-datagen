@@ -84,6 +84,10 @@ const RMIN = 1500, HALO_MAX = 400;
 const GLOW_N = 150;
 //: 열차 — 대수·한 바퀴 시간(ms, 화면 시간)·꼬리 길이(점 수·간격 m). 실제 운행이 아니라 「열차가 지나며 전환한다」를 보이는 그림. **초기값이다**
 const TRAINS = 8, LAP_MS = 90000, TAIL_N = 12, TAIL_GAP = 70;
+//: 지진 파장 — 진앙 쪽에서 장면을 가로질러 퍼지는 붉은 고리(11-26 사용자). 한 번 훑는 시간·고리 사이 간격·고리 수·띠 폭(장면 반경 비). **초기값이다**
+const WAVE_MS = 4000, WAVE_GAP_MS = 650, WAVE_N = 3, WAVE_W_K = .03, WAVE_SEG = 256;
+//: 꺼진 기지국 표식 최대 개수(eNB 단위) — 수십 곳이 꺼지면 표식이 화면을 덮는다. **초기값이다**
+const DOWN_MK_MAX = 8;
 //: 열차가 이 거리(m) 안을 지나면 판정이 켜진 기둥이 잠깐 밝아진다. **초기값이다**
 const FLASH_M = 350;
 //: 바닥 그림 해상도(px, 긴 변) — 넓은 바닥 · 지금 보기(화면의 2배까지). **초기값이다**
@@ -105,6 +109,15 @@ const MY = lat => (180 / Math.PI) * Math.log(Math.tan(Math.PI / 4 + lat * Math.P
 //: 재생 속도 고르기 · 누르기로 보는 움직임 한계(px) — 이보다 많이 움직이면 끌기다. **초기값이다**
 const SPEEDS = [.5, 1, 2, 4], CLICK_PX = 5;
 
+// 픽토그램(SVG · 24×24) — 이모지를 쓰지 않고 직접 그린다(11-26 사용자). 지진 = **집 아래 땅이 흔들리는 모양**(같은 날 사용자 「집 아래 땅이
+// 흔들리는 모양으로」 — 집은 위쪽 절반, 폭을 꽉 채운 지그재그 땅 선과 그 가운데 갈라짐, 양옆 흔들림 괄호). 전원 차단 = 전원 기호에 사선.
+// 3D 표식(`iconOf` quake·power)과 지도(`map.html` 통합 장애 바 「지진」 줄)도 같은 그림이다
+const PIC_QUAKE = '<svg class=pic viewBox="0 0 24 24" aria-hidden=true><path d="M7 13V7L12 3L17 7V13Z" fill="#ff4d4d"/><path d="M11 13V10H13V13Z" fill="#fff"/>'
+  + '<path d="M1 17L4 15L7 18L10 15L13 18L16 15L19 18L22 15" fill="none" stroke="#ff4d4d" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>'
+  + '<path d="M12 18L11 20.5L13 23" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>'
+  + '<path d="M3 6Q2 9 3 12M21 6Q22 9 21 12" fill="none" stroke="#ff4d4d" stroke-width="1.6" stroke-linecap="round"/></svg>';
+const PIC_POWER = '<svg class=pic viewBox="0 0 24 24" aria-hidden=true><path d="M7.4 6.6A8 8 0 1 0 16.6 6.6" fill="none" stroke="#b18cff" stroke-width="2.6" stroke-linecap="round"/>'
+  + '<path d="M12 3V12" stroke="#b18cff" stroke-width="2.6" stroke-linecap="round"/><path d="M4 21L20 3" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>';
 // 3D 화면 전용 모양 — 지도 CSS(`.r3d*`)에 얹는다. 열 때 넣고 닫을 때 걷는다. 상자 색은 배색 변수로
 const CSS = `
 .r3d{--bx:rgba(10,14,20,.82);--bd:#263142;--fg:#d7dee7;--fg2:#aab6c5;--cap:rgba(5,8,13,.72);--sh:#000;
@@ -132,6 +145,10 @@ const CSS = `
 .r3d.lt .r3d-leg .sv{background:#dc2626;box-shadow:none}.r3d.lt .r3d-leg .dg{background:#d97706;box-shadow:none}
 .r3d-leg .pt{width:4px;height:4px;border-radius:50%;background:#7d8ea6;margin:0 10px 0 3px}
 .r3d-leg .n{color:#f59e0b;margin-top:2px}
+.r3d-leg .wv{width:14px;height:10px;border-radius:50%;border:2px solid #ff2d40;box-sizing:border-box}
+.r3d-leg .dn{width:4px;height:15px;border-radius:2px;background:linear-gradient(#b18cff00,#b18cff)}
+.r3d.lt .r3d-leg .dn{background:linear-gradient(#6d28d933,#6d28d9)}
+.r3d svg.pic{display:inline-block;width:15px;height:15px;vertical-align:-3px;margin-right:4px}
 .r3d-leg .tr{width:14px;height:4px;border-radius:2px;background:linear-gradient(90deg,#b6ff7a00,#d9ffb0)}
 .r3d.lt .r3d-leg .tr{background:linear-gradient(90deg,#3f7a1000,#3f7a10)}
 .r3d-chart{position:absolute;left:14px;bottom:14px;width:300px;background:var(--bx);border:1px solid var(--bd);border-radius:8px;
@@ -260,6 +277,11 @@ export async function open(opt) {
     if (alive) showMsg(T('3D 재생 자료를 받지 못했습니다') + ` — ${e.message || e}`);
     return st;
   }
+  if (!alive) return st;
+  // 지진(4번 자연재해) — 진앙·발생 시각·꺼진 기지국(`/api/map/quake` · CM_QUAKE_EVENT · 정답지). 다른 장애는 묻지 않는다
+  const fK = String((data.ta.fault && data.ta.fault.kind) || '');
+  const qd = /^(natural_disaster|earthquake)/.test(fK) && data.ta.fault.start
+    ? await fetch(`/api/map/quake?at=${encodeURIComponent(data.ta.fault.start)}`).then(r => r.json()).catch(() => null) : null;
   if (!alive) return st;
   // 셀 판정이 한 분도 없는 장애 — 노선 주입이면 노선·열차·주입 구간을 그대로 보여 주고 「잡히지 않음」을 알린다(사용자 11-25
   // 「야마노테선 장애는 전부 보여야」). 노선이 아니면(DNS·APN 처럼 셀이 아닌 축) 그릴 것이 없다고 말하고 끝낸다.
@@ -397,6 +419,46 @@ export async function open(opt) {
     return { key: c.key, x, z, core, halo, glow, state: null, h: 0, hT: 0, i: 0, iT: 0, col: new THREE.Color(), colT: new THREE.Color(), flash: 0 };
   });
   const cellOf = new Map(cells.map(c => [c.key, c]));
+
+  // ── 지진 파장 — 진앙에서 퍼져 오는 붉은 고리. 고리가 셀에 닿은 뒤에야 그 셀 기둥이 선다(파장 → 나빠짐 순서 · 11-26 사용자) ─────
+  // 진앙·발생 시각은 생성기가 적은 값 그대로다. 고리는 진앙 둘레 원이고 장면 앞(가장 가까운 셀 − R)부터 뒤(가장 먼 셀 + R)까지만 훑는다
+  const QK = qd && qd.quake && qd.quake.lat != null && qd.quake.lon != null ? qd.quake : null;
+  const wave = QK ? (() => {
+    const [ex, ez] = P(QK.lon, QK.lat), ds = cells.map(c => Math.hypot(c.x - ex, c.z - ez));
+    const dc = Math.hypot(ex, ez), d0 = Math.max(0, (ds.length ? Math.min(...ds) : dc) - R), d1 = (ds.length ? Math.max(...ds) : dc) + R;
+    const o = ms(QK.origin_time), fi0 = frames.findIndex(f => ms(f.t) + 60000 > o);
+    const rings = Array.from({ length: WAVE_N }, () => {
+      const g = keep(new THREE.BufferGeometry()), idx = [];
+      g.setAttribute('position', new THREE.BufferAttribute(new Float32Array((WAVE_SEG + 1) * 6), 3));
+      for (let i = 0; i < WAVE_SEG; i++) { const a = 2 * i; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+      g.setIndex(idx);
+      const m = new THREE.Mesh(g, keep(new THREE.MeshBasicMaterial({ color: light ? 0xdc2626 : 0xff2d40, transparent: true, opacity: 0, depthWrite: false,
+        side: THREE.DoubleSide, blending: light ? THREE.NormalBlending : THREE.AdditiveBlending })));
+      m.frustumCulled = false; m.visible = false; m.renderOrder = 2; scene.add(m); return m;
+    });
+    return { ex, ez, d0, d1, o, fi: fi0 < 0 ? -1 : fi0, rings, t0: -1, w: Math.max(120, R * WAVE_W_K) };
+  })() : null;
+  const setRing = (m, r) => {
+    const p = m.geometry.attributes.position.array, ri = Math.max(0, r - wave.w);
+    for (let i = 0; i <= WAVE_SEG; i++) { const t = i / WAVE_SEG * Math.PI * 2, c = Math.cos(t), sn = Math.sin(t);
+      p[i * 6] = wave.ex + c * ri; p[i * 6 + 1] = 9; p[i * 6 + 2] = wave.ez + sn * ri;
+      p[i * 6 + 3] = wave.ex + c * r; p[i * 6 + 4] = 9; p[i * 6 + 5] = wave.ez + sn * r; }
+    m.geometry.attributes.position.needsUpdate = true;
+  };
+  // 고리가 그 셀에 닿는 시각(화면 시계) — 파장이 돌기 전·끝난 뒤에는 막지 않는다
+  const startWave = now => { if (!wave) return; wave.t0 = now;
+    for (const c of cells) c.arr = now + Math.max(0, Math.hypot(c.x - wave.ex, c.z - wave.ez) - wave.d0) / Math.max(1, wave.d1 - wave.d0) * WAVE_MS; };
+
+  // ── 꺼진 기지국 — 정답지의 꺼진 셀(`down` · 생성기가 실제로 끈 셀)에 다른 색 기둥 + 전원 차단 표식. 꺼진 분부터 다시 켜진 분까지만 ─────
+  const DN = qd && qd.down && qd.down.cells && qd.down.cells.length ? qd.down : null;
+  const DOWNC = new THREE.Color(light ? 0x6d28d9 : 0xb18cff);
+  const llOf = new Map([...(ta.cells || []), ...(opt.cells || [])].filter(c => c && c.lon != null).map(c => [c.key, c]));
+  const downs = DN ? DN.cells.map(d => { const c = llOf.get(d.key); if (!c) return null;
+    const [x, z] = P(c.lon, c.lat), core = new THREE.Mesh(coreGeo, beamMat()), halo = new THREE.Mesh(haloGeo, beamMat());
+    for (const m of [core, halo]) { m.position.set(x, 0, z); m.visible = false; scene.add(m); }
+    const enb = String(d.key).split('-')[0], up = DN.up_ts && DN.up_ts[enb];
+    return { key: d.key, enb, x, z, core, halo, h: 0, on: false, from: DN.at_ts ? DN.at_ts * 1000 : -Infinity, to: up ? up * 1000 : Infinity }; }).filter(Boolean) : [];
+  const downNow = new Set();
 
   // ── 열차 — 빛 덩어리 + 꼬리(뒤로 갈수록 작고 옅은 점) ──────────────────────────
   const rpts = ring.map(([lon, lat]) => P(lon, lat));
@@ -540,7 +602,7 @@ export async function open(opt) {
     .then(([bl, sl]) => alive ? buildTall(bl || [], sl || []) : null).catch(() => {});
 
   // ② 낮은 건물 칸
-  const grid = { idx: null, cells: new Map(), q: [], busy: false, fetching: false, at: 0, bar: Infinity, ms: 0, n: 0 };
+  const grid = { idx: null, cells: new Map(), q: [], busy: false, fetching: false, at: 0, bar: Infinity, ms: 0, n: 0, fx: 0, fz: 0, dx: 0, dz: 0 };
   bldgIndex().then(ix => { if (alive && ix) tallP.then(() => { grid.idx = ix; }); });
   const unP = (x, z) => [lon0 + x / KX, (360 / Math.PI) * Math.atan(Math.exp((my0 - z / KX) * Math.PI / 180)) - 90];
   const C_LAT = 30 / 3600, C_LON = 45 / 3600;
@@ -549,7 +611,7 @@ export async function open(opt) {
     for (let iy = Math.floor((lat - dLat) / C_LAT); iy <= Math.floor((lat + dLat) / C_LAT); iy++)
       for (let ix = Math.floor((lon - 100 - dLon) / C_LON); ix <= Math.floor((lon - 100 + dLon) / C_LON); ix++) {
         const cl = (iy + .5) * C_LAT, co = 100 + (ix + .5) * C_LON, [cx, cz] = P(co, cl), d = Math.hypot(cx - x, cz - z);
-        if (d <= r + 750) out.push({ code: meshCode(co, cl), d });   // 750 ≈ 칸 반대각선 — 원에 걸치는 칸까지
+        if (d <= r + 750) out.push({ code: meshCode(co, cl), d, x: cx, z: cz });   // 750 ≈ 칸 반대각선 — 원에 걸치는 칸까지
       }
     return out.sort((a, b) => a.d - b.d);
   };
@@ -591,7 +653,11 @@ export async function open(opt) {
     if (!grid.idx || now - grid.at < BLDG_TICK_MS) return; grid.at = now;
     wrap.dataset.grid = `${nr}/${nb}/${nv}/${grid.ms}/${Math.round(maxS)}`;   // 잰 값(화면에 안 보임) — 칸/동/꼭짓점/마지막 받기 ms/가장 길게 막은 ms
     const close = grid.bar <= (opt.stScale && opt.stScale.t3 || 1000);
-    const r = grid.bar * BLDG_VIEW_K, want = close ? cellsAround(ctl.target.x, ctl.target.z, r).filter(c => grid.idx.cells[c.code]) : [];
+    // 발밑에서 시선 방향으로 반경 r 만큼 앞을 가운데로 잡고(뒤쪽은 반 칸만), 발밑에서 가까운 칸부터 받는다
+    const r = grid.bar * BLDG_VIEW_K, cx = grid.fx + grid.dx * r * .5, cz = grid.fz + grid.dz * r * .5;
+    const want = close ? cellsAround(cx, cz, r).filter(c => grid.idx.cells[c.code])
+      .map(c => ({ code: c.code, d: Math.hypot(c.x - grid.fx, c.z - grid.fz), b: (c.x - grid.fx) * grid.dx + (c.z - grid.fz) * grid.dz }))
+      .filter(c => c.b > -750).sort((a, b) => a.d - b.d) : [];
     const ws = new Set(want.map(c => c.code));
     for (const [k, c] of grid.cells) if (!ws.has(k)) c.leave = true; else c.leave = false;
     if (grid.fetching) return;
@@ -683,6 +749,10 @@ export async function open(opt) {
   // 「장애 시작」이라 하지 않는다 — 주입 시각은 탐지가 아니라 정답이다(실제 운영에서는 알 수 없다). 판정은 그 뒤에 따로 온다(사용자 11-25)
   if (fStart) caps.push({ at: ms(fStart.at), main: T('{t} 장애 주입 (정답 시각)', { t: hhmm(fStart.at) }),
     sub: [T('실제 운영에서는 알 수 없는 시각입니다'), opt.what || ''].filter(Boolean).join(' — ') });
+  // 지진 발생 — 생성기가 적은 진원 지명·규모·발생 시각 그대로(모르는 칸은 뺀다). 주입 자막 바로 뒤에 선다
+  if (QK && isFinite(ms(QK.origin_time))) caps.push({ at: ms(QK.origin_time) + 1,
+    main: [T('{t} 지진 발생', { t: hhmm(QK.origin_time) }), QK.hypo_name || '', QK.magnitude != null ? `M${(+QK.magnitude).toFixed(1)}` : ''].filter(Boolean).join(' · '),
+    sub: T('진앙에서 흔들림이 퍼져 옵니다') + (downs.length ? ' — ' + T('꺼진 기지국 {n}곳', { n: new Set(downs.map(d => d.enb)).size }) : '') });
   const mK = MS ? (opt.kpi ? opt.kpi(MS.kpi) : MS.kpi) || MS.kpi : '';
   const fmtP = v => (Math.round(v * 10) / 10).toString();
   if (noCell && mPk >= 0) {
@@ -753,12 +823,13 @@ export async function open(opt) {
   // 기본 도형과 돌출(ExtrudeGeometry)만 쓴다(외부 모델·CDN 없음). 노선 장애에는 띄우지 않는다(그 장면은 열차가 말한다)
   const kind = String((ta.fault && ta.fault.kind) || '');
   const mType = onRoute || noCell ? null
+    : /^(natural_disaster|earthquake)/.test(kind) ? 'quake'
     : /^(ran_drop|mobility|ims_)/.test(kind) ? 'drop'
     : /^(transport_|apn_|gw_|dns|ipv6|cdn|external)/.test(kind) ? 'data'
     : /^ran_radio/.test(kind) ? 'radio'
     : /^(ran_congestion|event_crowd|capacity_shift)/.test(kind) ? 'crowd'
     : /^signaling_storm/.test(kind) ? 'storm' : 'nx';
-  const mName = { drop: '통화 끊김', data: '데이터 안 됨', radio: '전파 약함', crowd: '혼잡', storm: '단말 동시 재접속', nx: '장애' }[mType] || '';
+  const mName = { quake: '지진', drop: '통화 끊김', data: '데이터 안 됨', radio: '전파 약함', crowd: '혼잡', storm: '단말 동시 재접속', nx: '장애' }[mType] || '';
   const MS3 = MARK_K * R, mSize = Math.min(MARK_M[1], Math.max(MARK_M[0], MS3));
   const mkShape = pts => { const sh = new THREE.Shape(); pts.forEach(([x, y], i) => i ? sh.lineTo(x, y) : sh.moveTo(x, y)); sh.closePath(); return sh; };
   const ex = (shapes, depth) => keep(new THREE.ExtrudeGeometry(shapes, { depth, bevelEnabled: false, curveSegments: 12 }));
@@ -799,6 +870,16 @@ export async function open(opt) {
   // 종류별 그림 — **시나리오 카드(`scenarios.html`)의 그림만** 쓴다. 바탕판 없이 그림 하나(body, 심각도 색) + 상태 표시 하나(mark, 흰색·밝은 배색이면 검정).
   // mk2 는 표시 뒤에 까는 body 색 테두리. 카드에 맞는 그림이 없는 종류는 카드의 ✕ 배지(`#nx`) 하나로
   const iconOf = t => {
+    // 지진 — 집 아래 땅이 흔들리는 모양(PIC_QUAKE 와 같은 그림): 집 · 지그재그 땅 선 · 양옆 흔들림(심각도 색), 문 · 땅 갈라짐은 흰 표시
+    if (t === 'quake') { const T2 = (x, y) => [(x - 12) / 9, -(y - 12) / 9], L = (a, b, c, d, w) => seg(...T2(a, b), ...T2(c, d), w / 9);
+      const zz = [[1, 17], [4, 15], [7, 18], [10, 15], [13, 18], [16, 15], [19, 18], [22, 15]];
+      return { body: [pathShape('M7 13V7L12 3L17 7V13Z', T2), ...zz.slice(1).map(([x, y], i) => L(...zz[i], x, y, 2.2)),
+          L(3, 6, 2.3, 9, 1.6), L(2.3, 9, 3, 12, 1.6), L(21, 6, 21.7, 9, 1.6), L(21.7, 9, 21, 12, 1.6)],
+        mark: [pathShape('M11 13V10H13V13Z', T2), L(12, 18, 11, 20.5, 1.4), L(11, 20.5, 13, 23, 1.4)] }; }
+    // 전원 차단 — 전원 기호(위가 열린 고리 + 세로 막대) 위에 사선
+    if (t === 'power') { const ar = new THREE.Shape(), a0 = Math.PI / 2 + .62, a1 = Math.PI * 2.5 - .62;
+      ar.absarc(0, 0, .82, a0, a1, false); ar.absarc(0, 0, .56, a1, a0, true); ar.closePath();
+      return { body: [ar, box(.26, .9, 0, .45, 0)], mark: slash(.2), mk2: slash(.42) }; }
     // 「이동 중 통화 끊김」 카드의 수화기(24×24) + 끊김 사선
     if (t === 'drop') return { body: [pathShape(HANDSET, (x, y) => [(x - 12) / 9, -(y - 12) / 9])], mark: slash(.2), mk2: slash(.42) };
     // 공용 `#bs` 기지국 — M-22 34L0-32l22 66 M-13 9h26 + 꼭대기 원(r4). 9번 무선 품질 저하 카드가 쓴다
@@ -816,10 +897,12 @@ export async function open(opt) {
   };
   const icon = mType ? iconOf(mType) : null;
   // 두께를 줘서 돌 때 입체로 보이게 — 앞면은 심각도 색, 옆면은 어둡게(그룹 0 앞뒤면 · 1 옆면)
-  const iGeo = icon ? Object.fromEntries(Object.entries(icon).map(([k, v]) => {
+  const geoOf = ic => ic ? Object.fromEntries(Object.entries(ic).map(([k, v]) => {
     const d = k === 'body' || k === 'faint' ? .32 : .08, g = ex(v, d); g.translate(0, 0, k === 'mark' ? .36 : k === 'mk2' ? .3 : -d / 2); return [k, g]; })) : {};
+  const iGeo = geoOf(icon);
   const MARKC = light ? 0x111827 : 0xffffff;
-  const markOf = () => {
+  geoOf.main = iGeo;
+  const markOf = (iGeo = geoOf.main) => {
     const g = new THREE.Group(), mats = [], body = [];
     const mat = (c, op) => { const m = keep(new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity: 0, depthWrite: false })); m.userData.op = op; mats.push(m); return m; };
     const two = (geo, op) => { const f = mat(0xff4d4d, op), sd = mat(0x7f1d1d, op); body.push([f, sd]); return new THREE.Mesh(geo, [f, sd]); };
@@ -831,7 +914,16 @@ export async function open(opt) {
     scene.add(g);
     return { g, mats, body, a: 0 };
   };
-  if (mType) { const d = document.createElement('div'); d.innerHTML = `<i class=mk></i>${esc(T('표식 = 장애 종류: {k}', { k: T(mName) }))}`; $('.r3d-leg').insertBefore(d, $('.r3d-leg').children[2] || null); }
+  // 꺼진 기지국 표식 — eNB 마다 하나(그 셀들 가운데), 많으면 DOWN_MK_MAX 곳까지
+  const downMk = [];
+  if (downs.length) { const pGeo = geoOf(iconOf('power')), by = new Map();
+    for (const d of downs) { if (!by.has(d.enb)) by.set(d.enb, []); by.get(d.enb).push(d); }
+    for (const ds of [...by.values()].slice(0, DOWN_MK_MAX)) { const m = markOf(pGeo);
+      downMk.push(Object.assign(m, { ds, x: ds.reduce((v, d) => v + d.x, 0) / ds.length, z: ds.reduce((v, d) => v + d.z, 0) / ds.length })); } }
+  if (wave) { const d = document.createElement('div'); d.innerHTML = `<i class=wv></i>${esc(T('붉은 물결 = 진앙에서 퍼져 오는 흔들림'))}`; $('.r3d-leg').insertBefore(d, $('.r3d-leg').children[2] || null); }
+  if (downs.length) { const d = document.createElement('div'); d.innerHTML = `<i class=dn></i>${esc(T('보라 기둥 = 기지국 꺼짐(정답)'))}`; const d2 = document.createElement('div'); d2.innerHTML = `${PIC_POWER}${esc(T('표식 = 전원 차단'))}`;
+    $('.r3d-leg').insertBefore(d2, $('.r3d-leg').children[2] || null); $('.r3d-leg').insertBefore(d, d2); }
+  if (mType) { const d = document.createElement('div'); d.innerHTML = `${mType === 'quake' ? PIC_QUAKE : '<i class=mk></i>'}${esc(T('표식 = 장애 종류: {k}', { k: T(mName) }))}`; $('.r3d-leg').insertBefore(d, $('.r3d-leg').children[2] || null); }
   // 자리(slot) 4개 — 한 번 뜬 이름표는 TAG_MIN_MS 는 둔다. 같은 장소가 계속 상위면 다시 띄우지 않고 값만 바꾼다.
   // 바꿀 때는 최소 시간이 지난 것부터 TAG_SWAP_MS 마다 하나씩 — 천천히 사라지고(1초) 천천히 나타난다(0.8초)
   const keyOf = c => c.place ? c.place.name : c.key;
@@ -843,7 +935,7 @@ export async function open(opt) {
   const tagText = (t, r) => {
     const k = (r.v.kpis && r.v.kpis[0]) || r.v.kpi;
     t.cell = r.c; t.k = keyOf(r.c); t.sev = r.sev;
-    t.el.innerHTML = `<b>${esc(placeTxt(r.c.place) || r.c.key)}</b> · ${esc(kpiNm(k))} ${fmtV(r.v.value)}`
+    t.el.innerHTML = (mType === 'quake' ? PIC_QUAKE : '') + (downNow.has(r.c.key) ? PIC_POWER : '') + `<b>${esc(placeTxt(r.c.place) || r.c.key)}</b> · ${esc(kpiNm(k))} ${fmtV(r.v.value)}`
       + (r.v.baseline != null ? ` <span style="opacity:.7">(${esc(T('판정 기준'))} ${fmtB(r.v.baseline)})</span>` : '');
     t.w = 0; tagCls(t);
   };
@@ -882,6 +974,7 @@ export async function open(opt) {
     const waiting = tagWant.filter(r => !shownK.has(keyOf(r.c)));
     // 빈 자리에 새 이름표
     for (const r of waiting) {
+      if (r.c.arr && now < r.c.arr) continue;   // 지진 파장이 아직 닿지 않은 셀은 이름표도 기다린다
       const t = cellTags.find(x => !x.k && !x.leave); if (!t) break;
       tagText(t, r); t.on = true; t.since = now; t.inAt = now; t.a = 0; t.slot = -1; t.slideAt = 0; if (t.mk) t.mk.a = 0; tagCls(t); shownK.add(t.k);
     }
@@ -942,6 +1035,10 @@ export async function open(opt) {
   // instant — 끌어서 옮길 때는 기둥을 보간 없이 그 분 모양으로 바로 둔다
   const applyFrame = (i, instant) => {
     const f = frames[i];
+    // 꺼진 기지국 — 그 분이 꺼진 시각~다시 켜진 시각 안이면 꺼짐(그 셀의 이상 기둥 대신 보라 기둥)
+    downNow.clear(); { const t0 = ms(f.t); for (const d of downs) { d.on = t0 + 60000 > d.from && t0 < d.to; if (d.on) downNow.add(d.key); if (instant) d.h = d.on ? H_DEG * hkH : 0; } }
+    // 지진 파장 — 발생 시각을 품은 분에 들어설 때 한 번(끌어서 옮길 때는 돌리지 않는다)
+    if (wave && i === wave.fi && !instant) startWave(performance.now());
     for (const c of cells) {
       const v = f.cells && f.cells[c.key], s = v ? v.state : null;
       c.state = s;
@@ -1220,7 +1317,12 @@ export async function open(opt) {
     // 비스듬히 보면 앞뒤 방향 땅이 sin(내려다보는 각)만큼 눌린다 — 지도 1px 이 덮는 땅은 그 방향이 더 길다. 그 긴 쪽으로 축척을 잰다(기하, 새 값 아님)
     const gnd = (p, d) => d / Math.max(.05, Math.abs(cam.position.y - p.y) / Math.max(1, cam.position.distanceTo(p)));
     const mppC = gnd(ctl.target, 2 * cam.position.distanceTo(ctl.target) * tanH / H);
-    grid.bar = SC ? SC.nice(mppC) : mppC * 100;   // 낮은 건물 칸도 같은 가운데 축척(막대 값)으로 고른다
+    // 낮은 건물 칸은 **카메라 발밑**의 축척으로 고른다(11-26 사용자 「각도만 달리 했을 뿐인데 건물이 사라진다」). 가운데 축척은 눕힐수록
+    // 커져(먼 땅을 본다) 1km 를 넘는 순간 낮은 건물이 모두 빠졌다. 발밑 축척 = 카메라 높이로 바로 내려다볼 때의 막대 값 — 기준(1km)·반경 배율은 그대로
+    const mppF = 2 * Math.max(1, cam.position.y) * tanH / H;
+    grid.bar = SC ? SC.nice(mppF) : mppF * 100;
+    grid.fx = cam.position.x; grid.fz = cam.position.z;
+    { const dx = ctl.target.x - cam.position.x, dz = ctl.target.z - cam.position.z, L = Math.hypot(dx, dz); grid.dx = L > 1 ? dx / L : 0; grid.dz = L > 1 ? dz / L : 0; }
     const allSt = SC ? SC.nice(mppC) <= SC.t3 : mppC <= T3_MPP;
     let nb = 0;
     for (const l of lbs) {
@@ -1321,8 +1423,10 @@ export async function open(opt) {
       let e = 0;
       if (c.state) for (const tr of trains) { const d = Math.hypot(tr.x - c.x, tr.z - c.z); if (d < FLASH_M) e = Math.max(e, 1 - d / FLASH_M); }
       c.flash = Math.max(e, c.flash - dt / 600);
-      const b = c.hT < c.h ? fall : a;   // 내려갈 때는 천천히
-      c.h += (c.hT - c.h) * b; c.i += (c.iT - c.i) * b; c.col.lerp(c.colT, a);
+      // 파장이 아직 닿지 않은 셀은 서지 않는다 · 꺼진 셀은 보라 기둥이 대신 선다
+      const hT = (c.arr && now < c.arr) || downNow.has(c.key) ? 0 : c.hT;
+      const b = hT < c.h ? fall : a;   // 내려갈 때는 천천히
+      c.h += (hT - c.h) * b; c.i += (c.iT - c.i) * b; c.col.lerp(c.colT, a);
       const on = c.h > 8 && c.i > .02 && fadeAll > 0;
       c.core.visible = c.halo.visible = c.glow.visible = on;
       if (!on) continue;
@@ -1335,6 +1439,30 @@ export async function open(opt) {
       const gs = gw * (.6 + .4 * c.i) * (1 + c.flash * .35);
       c.glow.scale.set(gs, 1, gs); c.glow.material.color.copy(c.col);
       c.glow.material.opacity = Math.min(1, (.75 * c.i + c.flash * .3) * gk * (light ? .45 : 1) * fadeAll);
+    }
+    // 지진 파장 — 고리 WAVE_N 개가 시차로 장면을 가로지른다. 지나간 뒤 옅어진다
+    if (wave) wave.rings.forEach((m, k) => {
+      const tk = wave.t0 < 0 ? -1 : now - wave.t0 - k * WAVE_GAP_MS, on = tk >= 0 && tk <= WAVE_MS && fadeAll > 0;
+      m.visible = on; if (!on) return;
+      setRing(m, wave.d0 + (wave.d1 - wave.d0) * tk / WAVE_MS);
+      m.material.opacity = (light ? .45 : .6) * (1 - .6 * tk / WAVE_MS) * fadeAll;
+    });
+    // 꺼진 기지국 기둥 — 파장이 닿은 뒤 선다(꺼짐은 흔들림 뒤에 온다). 색은 보라 하나, 꺼진 동안 그대로
+    for (const d of downs) {
+      const arr = wave && wave.t0 >= 0 ? wave.t0 + Math.max(0, Math.hypot(d.x - wave.ex, d.z - wave.ez) - wave.d0) / Math.max(1, wave.d1 - wave.d0) * WAVE_MS : 0;
+      const hT = d.on && now >= arr ? H_DEG * hkH : 0;
+      d.h += (hT - d.h) * (hT < d.h ? fall : a);
+      d.core.visible = d.halo.visible = d.h > 8 && fadeAll > 0; if (!d.core.visible) continue;
+      const I = fadeAll * Math.min(1, d.h / (H_DEG * hkH));
+      for (const [m, k] of [[d.core, 1], [d.halo, light ? .22 : .4]]) { m.scale.y = d.h; m.material.uniforms.uColor.value.copy(DOWNC); m.material.uniforms.uI.value = I * k; }
+    }
+    for (const m of downMk) {
+      const ds = m.ds.filter(d => d.core.visible); m.g.visible = ds.length > 0 && phase !== 'back'; if (!m.g.visible) continue;
+      const hy = Math.max(...ds.map(d => d.h)) * BEAM_VIS[light ? 1 : 0];
+      m.g.position.set(m.x, hy + mSize * 1.2, m.z); m.g.scale.setScalar(mSize * .9);
+      m.g.quaternion.copy(cam.quaternion);
+      for (const [f, sd] of m.body) { f.color.copy(DOWNC); sd.color.copy(DOWNC).multiplyScalar(.5); }
+      const k = Math.min(1, hy / (H_DEG * hkH * BEAM_VIS[light ? 1 : 0])); for (const x of m.mats) x.opacity = x.userData.op * k;
     }
     // 카메라
     if (phase === 'top') {
