@@ -5725,4 +5725,49 @@ def write_truth(path: Path, start: datetime, minutes: int,
         doc["cell_selection"] = dict(cell_selection)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
+    archive_truth(path.parent / TRUTH_BY_FAULT_FILE, start, doc["scenarios"])
     return doc
+
+
+#: 주입별 정답 원장 — `ground_truth.json` 은 **그때 걸린 주입만** 담고 매번 덮어써서, 지난 주입의 정답 셀이
+#: 사라졌다. 지도 재생(gen-ui `replay_api`)이 한 통합장애에 묶인 두 주입(2026-11-25 · 9번 F-612·8번 F-613)을
+#: 정답 셀로 가르려면 지난 주입 것이 남아 있어야 한다. 채점은 이 파일을 읽지 않는다(형식·동작 그대로)
+TRUTH_BY_FAULT_FILE = "truth_by_fault.json"
+#: 원장에 남길 주입 수 — 번호가 큰(최근) 것부터. 한 건 수 KB 라 500건이면 수 MB 다. **초기값이다**
+TRUTH_BY_FAULT_KEEP = 500
+
+
+def archive_truth(path: Path, start: datetime, scenarios: list[dict]) -> None:
+    """정답 항목을 `scenario_id`(`F-<번호>`)별로 원장에 쌓는다 — 같은 번호는 새 것으로 덮는다.
+
+    시작 시각은 상대 분(`start_minute`)이라 절대 시각(`start_ts`)을 함께 적는다. 임시 파일에 쓴 뒤 rename —
+    gen-ui 가 읽는 도중에 반쪽 파일을 보지 않게. **실패해도 정답 기록을 막지 않는다**(경고만)."""
+    rows = [sc for sc in scenarios if str(sc.get("scenario_id") or "").startswith("F-")]
+    if not rows:
+        return
+    try:
+        try:
+            book = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except ValueError:
+            book = {}
+        faults = book.get("faults") if isinstance(book.get("faults"), dict) else {}
+        for sc in rows:
+            faults[sc["scenario_id"]] = {
+                **sc, "start_ts": (start + timedelta(minutes=int(sc.get("start_minute") or 0))).isoformat(),
+                "archived_at": datetime.now().isoformat(timespec="seconds")}
+        keep = sorted(faults, key=_fault_num, reverse=True)[:TRUTH_BY_FAULT_KEEP]
+        out = {"note": "주입별 정답 원장 — pemdb1.archive_truth. 채점은 ground_truth.json 을 본다",
+               "faults": {k: faults[k] for k in sorted(keep, key=_fault_num)}}
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+    except OSError as e:
+        print(f"  ! 주입별 정답 원장을 못 썼다 — 정답 기록은 그대로다({e})", flush=True)
+
+
+def _fault_num(key: str) -> int:
+    """`F-612` → 612. 모양이 다르면 -1(맨 뒤로 밀려 먼저 떨어진다)"""
+    try:
+        return int(str(key).split("-", 1)[1])
+    except (IndexError, ValueError):
+        return -1

@@ -83,7 +83,8 @@ def test_map_warns_only_after_two_consecutive_graphio_failures():
     assert re.search(r"\+\+FAULT_FAILS>=2", body)                       # 두 번째 연속 실패부터 경고
     assert "note.textContent=doc.error" in body.split("++FAULT_FAILS>=2", 1)[1].split("\n", 1)[0]
     ok_part = body.split("if(doc.error)", 1)[1].split("\n", 1)[1]        # 오류 분기 뒤 = 성공 경로
-    assert ok_part.lstrip().startswith("FAULT_FAILS=0;")                 # 성공하면 0 으로
+    # 성공하면 0 으로 — 앞에 첫 목록 전 실패 이유를 지우는 줄(`FAULT_ERR='';` · 2026-11-25 「불러오는 중」)이 올 수 있다
+    assert re.match(r"(FAULT_ERR='';\s*)?FAULT_FAILS=0;", ok_part.lstrip())
     assert "graphio/.test(note.textContent)" in ok_part                  # 성공하면 남은 경고도 지운다
     assert body.index("++FAULT_FAILS>=2") < body.index("FAULT_FAILS=0;")  # 오류 분기가 앞이다
 

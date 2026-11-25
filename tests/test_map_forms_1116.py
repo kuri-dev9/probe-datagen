@@ -234,7 +234,7 @@ def test_bar_has_no_all_button_one_tab_per_form_and_codes_stay_in_tooltips():
     f = _focus_src()
     assert "T('전체')" not in f and "data-part=\"\" class=\"on\"" in f                         # 「전체」 단추는 없다(조각 하나일 때의 한 탭만)
     assert "formTag(g.form, formCount(base, g))" in f and "formTag(pieceForm(base), formCount(base, null))" in f
-    assert "title=\"${esc(list.map(m=>(m.trigger_kpi||'')+' '+(m.title||'')).join('\\n'))}\"" in f     # 코드와 원래 제목은 툴팁
+    assert "title=\"${esc(list.map(m=>(m.trigger_kpi||'')+' '+(titleName(m.title)||'')).join('\\n'))}\"" in f     # 코드와 원래 제목은 툴팁(일본어 화면은 제목을 일본어로 — `titleName`, 11-25)
     assert "const ck=curPart(base), cg=ck!=null?gs[ck]:null;" in f and "formPlain(base, cg)" in f
     assert "<b>${T('무엇')}</b> ${esc(plain.what)}" in f and "<b>${T('어디서')}</b> ${esc(plain.where)}" in f
     assert "T('eNB ID {n}',{n:plain.enb.toLocaleString()})" in f                                  # eNB 가 아니라 eNB ID

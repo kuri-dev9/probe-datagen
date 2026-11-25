@@ -229,6 +229,8 @@ pemdb1:
       geo_station_n02: ../graphio-probe-rca/data/geo/jp/station_n02.json    # 역 승강장 선 N02 (배경)
       geo_station_osm: ../graphio-probe-rca/data/geo/jp/station_osm.json    # 역 모양 OSM 승강장 면·구내·건물 (배경)
       geo_station_label: ../graphio-probe-rca/data/geo/jp/station_label.json  # 역 이름 글자 자리 N02+OSM (화면용)
+      geo_building_tall: ../graphio-probe-rca/data/geo/jp/building_tall.json  # 높은 건물 OSM (3D 재생 전용)
+      geo_bldg_dir: ../graphio-probe-rca/data/geo/jp/bldg   # 낮은 건물까지 1km 칸 파일 OSM (3D 재생 전용)
       # 지도가 그리는 역 레이어 — station_osm(기본) · station_n02 · station_bldg(옛 OSM 건물 윤곽).
       # 11-24 낮: OSM 건물 윤곽은 東京·上野·品川 본 역사가 빠져 N02 로 바꿨다.
       # 11-24 저녁: N02 는 승강장 중심선뿐이라(「선만 그은 것」) OSM 승강장 면·구내·건물로 바꿨다

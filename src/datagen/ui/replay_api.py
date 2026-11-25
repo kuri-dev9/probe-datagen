@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -35,7 +36,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 
 from ..control import FAULT_SELECT, T_FAULT
-from .common import HERE, _connect, _pem_cfg
+from .common import HERE, _connect, _pem_cfg, truth_codes
 from .faults_api import _truth_of
 from .map_api import _map_cells
 
@@ -54,6 +55,37 @@ OWN_GRACE_MIN = 1
 _RANK = {"CRITICAL": 4, "MAJOR": 3, "MINOR": 2, "WARNING": 2, "WARN": 2, "INFO": 1}
 #: 통화 끊김(무호) 지표 — 지도 셀 음영의 회색이다(`map.html` 셀 상태 규칙)
 SILENT_KPI = "C-01"
+#: 이상 판정 표의 가장 이른 기록을 다시 묻는 간격(초) — 보관(graphio `partitions.retain_days`)은 하루 칸 단위로 떨어진다. **초기값이다**
+EARLIEST_TTL_SEC = 600
+#: 첫 이상징후를 고를 때 지표로 거르는 경우 훑는 판정 행 수 상한 — 걸러질 행(앞 조각 지표)이 이보다 많으면 못 찾는다. **초기값이다**
+FIRST_SCAN_ROWS = 2000
+_EARLIEST: dict = {"at": None, "t": 0.0}
+#: 노선 주입의 **실제 지표 곡선**(노선 셀 합산 분별 값) — 종류 → (KPI, graphio 임계 키, 계열, 분자 열, 분모 열).
+#: 산식은 graphio `kpi.py` U-07(`100 × zerowin_dn / sessions_tp`)과 셀 탐지 스펙(transport 계열 · 임계 `zerowin_down`)을
+#: 옮긴 것이다. 임계값은 여기 두지 않고 graphio `/api/settings/thresholds` 에서 읽는다(2026-11-25 · F-595 최고 11.3%)
+MEASURED_KPI = {"ho_interruption": ("U-07", "zerowin_down", "transport", "ZEROWIN_DN", "SESSIONS")}
+
+
+#: 주입별 정답 원장(생성기 `pemdb1.archive_truth`) — 지금 정답 파일과 같은 폴더. 파일이 바뀔 때만 다시 읽는다
+_TBF: dict = {"mtime": None, "faults": {}}
+
+
+def _truth_any(fault_id: int) -> dict:
+    """그 장애의 정답 — 지금 정답 파일(`faults_api._truth_of` · 그때 걸린 주입만)에 없으면 주입별 원장에서 찾는다
+    (2026-11-25 · 지난 주입 F-612·F-613 을 정답 셀로 가르려고). 원장이 없거나 그 번호가 없으면 빈 값 — 지금처럼"""
+    t = _truth_of(fault_id)
+    if t:
+        return t
+    from ..pemdb1 import TRUTH_BY_FAULT_FILE
+    q = Path(str(_pem_cfg().get("truth_out") or "data/truth/ground_truth.json"))
+    p = (q if q.is_absolute() else HERE / q).with_name(TRUTH_BY_FAULT_FILE)
+    try:
+        mt = p.stat().st_mtime
+        if mt != _TBF["mtime"]:
+            _TBF.update(mtime=mt, faults=(json.loads(p.read_text(encoding="utf-8")).get("faults") or {}))
+    except (OSError, ValueError):
+        return {}
+    return _TBF["faults"].get(f"F-{fault_id}") or {}
 
 
 def _state(sev: str, kpi: str) -> str:
@@ -118,13 +150,50 @@ def _ev_cells(e: dict) -> set[str]:
     return e["_cells"]
 
 
+def _ev_doc(e: dict) -> dict:
+    """graphio 사건 한 건(`/api/events/{id}`) — 축과 구성 조각을 둘 다 여기서 읽는다. 한 번 물은 것은 사건 행에 얹는다"""
+    if "_doc" not in e:
+        doc, _ = _graphio(f"/api/events/{urllib.parse.quote(str(e.get('event_id') or ''))}", timeout=6)
+        e["_doc"] = doc or {}
+    return e["_doc"]
+
+
 def _ev_axis(e: dict) -> dict[str, set]:
     """사건의 축(`DETAIL.axis_ids` · 예 `{"NODE": {"PGW-3"}}`) — 축 장애(DNS·APN 노드)가 같은 노드인지 보는 재료"""
     if "_axis" not in e:
-        doc, _ = _graphio(f"/api/events/{urllib.parse.quote(str(e.get('event_id') or ''))}", timeout=6)
-        ax = ((doc or {}).get("detail") or {}).get("axis_ids") or {}
+        ax = (_ev_doc(e).get("detail") or {}).get("axis_ids") or {}
         e["_axis"] = {str(t): {str(x) for x in v or ()} for t, v in ax.items()}
     return e["_axis"]
+
+
+def _members_in(e: dict, lo: datetime, hi: datetime) -> dict | None:
+    """사건이 창 **앞에서 열렸지만** 구간이 창과 겹칠 때 — 창 안에서 열린 구성 조각만으로 본 사건(2026-11-25 · 3번 F-598).
+
+    07:52 출퇴근 통화 집중(C-24) 조각이 먼저 연 통합장애에 08:05 주입의 U-07 조각 둘이 합쳐졌다. 열린 시각만 보면
+    「주입 전 사건」으로 걸러지고, 사건을 통째로 받으면 대표 조각(C-24) 셀 340개를 칠한다. 그래서 창 안 조각이
+    있으면 그 조각들의 셀만 `_cells` 로 얹고, 열린 시각은 첫 조각 시각으로 · 사건이 원래 열린 시각은
+    `event_opened_time` 으로 따로 둔다. 창 안 조각이 없으면 None — 지금처럼 시각으로 거른다."""
+    t, u = _at(e.get("opened_time")), _at(e.get("updated_time") or e.get("closed_time"))
+    if t is None or t >= lo or u is None or u < lo or t > hi:
+        return None
+    ms = [(m, _at(m.get("opened"))) for m in _ev_doc(e).get("members") or ()]
+    ins = sorted(((m, mt) for m, mt in ms if mt is not None and lo <= mt <= hi), key=lambda x: x[1])
+    if not ins:
+        return None
+    cells: set[str] = set()
+    kpis: set[str] = set()
+    for m, _mt in ins[:EVENT_CELL_LOOKUPS]:
+        iid = urllib.parse.quote(str(m.get("incident_id")))
+        doc, _ = _graphio(f"/api/incidents/{iid}/map?cells_only=true", timeout=6)
+        cells |= {str(c["key"]) for c in (doc or {}).get("cells") or () if c.get("key")}
+        # 조각의 트리거 지표 — 같은 셀에 앞 조각(C-24 통화 몰림) 판정도 서 있어, 셀만 좁히면 주입 전 07:58 부터
+        # 노랗게 켜졌다(동구 11-25). 사건 문서 `members` 에는 지표가 없어 조각 문서에서 읽는다
+        inc, _ = _graphio(f"/api/incidents/{iid}", timeout=6)
+        kpis |= {x.strip() for x in str(((inc or {}).get("incident") or {}).get("trigger_kpi") or "").split(",")
+                 if x.strip()}
+    return {**e, "_cells": cells, "_kpis": kpis, "opened_time": _iso(ins[0][1]),
+            "event_opened_time": e.get("opened_time"), "kpis_in": sorted(kpis),
+            "members_in": [str(m.get("incident_id")) for m, _mt in ins]}
 
 
 def _scope_hit(f: dict, truth: dict, e: dict) -> str | None:
@@ -157,23 +226,84 @@ def _scope_hit(f: dict, truth: dict, e: dict) -> str | None:
     return "time_only"
 
 
+def _claims(g: dict, e: dict) -> bool:
+    """주입 `g` 도 사건 `e`(graphio 가 준 원래 행)를 시각·범위로 잡나 — `_own_events` 의 앞 두 조건과 같은 규칙"""
+    lo = g["start_ts"].replace(second=0, microsecond=0) - timedelta(minutes=PAD_BEFORE_MIN)
+    hi = g["end_ts"] + timedelta(minutes=OWN_GRACE_MIN)
+    t = _at(e.get("opened_time"))
+    if t is None or not lo <= t <= hi:
+        e = _members_in(e, lo, hi)
+        if e is None:
+            return False
+    return bool(_scope_hit(g, _truth_any(int(g["fault_id"])), e))
+
+
+def _split_shared(f: dict, truth: dict, e: dict, sharers: list[dict]) -> dict:
+    """한 사건을 이 장애와 **다른 주입도** 잡을 때 셀을 가른다(2026-11-25 · 9번 F-612 와 8번 F-613).
+
+    graphio 가 두 주입을 한 통합장애로 묶으면(대표 조각 하나에 두 주입 셀이 다 있다) 양쪽 재생이 서로의 셀을 칠했다.
+    둘 다 원인 코드가 같아(`RAN_RADIO_QUALITY`) 종류로도 못 가른다. 가르는 근거는 **주입 범위**뿐이다 —
+    이 장애 정답 셀(또는 지정 eNB)이 있으면 그것과 겹치는 셀만, 없으면 같이 잡은 주입의 정답 셀을 뺀다.
+    둘 다 모르면 그대로 둔다(옛 주입 — 정답 파일은 최근 장애만 남는다). 조각 조합으로 짐작하지 않는다."""
+    if not sharers:
+        return e
+    cells = set(_ev_cells(e))
+    mine = {str(c) for c in truth.get("cells") or ()}
+    target = str(f.get("target") or "")
+    if target.upper().startswith("ENB:"):
+        enbs = {x.strip() for x in target.split(":", 1)[1].split(",") if x.strip() and x.strip() != "+"}
+        mine |= {c for c in cells if c.split("-", 1)[0] in enbs}
+    if mine:
+        keep, how = cells & mine, "own_scope"
+    else:
+        theirs = {str(c) for g in sharers for c in _truth_any(int(g["fault_id"])).get("cells") or ()}
+        if not theirs:
+            return {**e, "shared_with": [int(g["fault_id"]) for g in sharers], "shared_split": None}
+        keep, how = cells - theirs, "minus_others"
+    return {**e, "_cells": keep, "shared_with": [int(g["fault_id"]) for g in sharers], "shared_split": how}
+
+
 def _own_events(f: dict, evs: list[dict]) -> tuple[list[dict], list[dict]]:
     """시간이 겹친 graphio 사건을 **이 장애 것**과 **다른 장애**로 가른다(2026-11-24 F-597 사용자 「누가 봐도 다른 게 묶였다」).
 
     이 장애 것 = 열린 시각이 [장애 시작 − `PAD_BEFORE_MIN`, 장애 끝 + `OWN_GRACE_MIN`] 안이고 범위가 겹친다
     (`_scope_hit`). 그중 L2 통합장애가 있으면 **그 L2 만** 남긴다 — L2 에 들지 않은 조각·L1 은 따로 떨어진 다른
-    판정 단위다. 다른 장애는 `why`(time·scope·not_in_l2)를 달아 돌려준다 — 숨기지 않고 따로 보인다.
+    판정 단위다. 다른 장애는 `why`(time·scope·kind·not_in_l2)를 달아 돌려준다 — 숨기지 않고 따로 보인다.
+
+    **경쟁 주입 사이에서만 종류로 가른다**(2026-11-25 케이 · 3번 F-595 와 F-596 이 같은 07:00:06 에 시작해 F-595 가
+    F-596 의 이동성 사건을 자기 것으로 잡았다). 같은 사건을 시각·범위로 다른 주입도 잡고, 사건 원인이 그쪽
+    종류(`common.truth_codes`)에는 맞는데 이 장애 종류에는 안 맞으면 그쪽에 준다(`why=kind`). 잡는 주입이
+    이 장애 하나뿐이면 원인이 달라도 이 장애 것이다 — graphio 가 원인을 틀린 사건도 재생에서 보여야 한다.
     """
     lo = f["start_ts"].replace(second=0, microsecond=0) - timedelta(minutes=PAD_BEFORE_MIN)
     hi = f["end_ts"] + timedelta(minutes=OWN_GRACE_MIN)
-    truth = _truth_of(int(f["fault_id"]))
+    truth = _truth_any(int(f["fault_id"]))
+    mine = truth_codes(str(f.get("kind") or ""))
+    rivals = None   # 처음 필요할 때 한 번 묻는다
     own, other = [], []
-    for e in evs:
+    for raw in evs:
+        e = raw
         t = _at(e.get("opened_time"))
         if t is None or not lo <= t <= hi:
-            other.append({**e, "why": "time"})
-            continue
+            part = _members_in(e, lo, hi) if len(own) < EVENT_CELL_LOOKUPS else None
+            if part is None:
+                other.append({**e, "why": "time"})
+                continue
+            e = part   # 창 안 조각으로만 본 사건 — 셀도 그 조각들 것
         why = _scope_hit(f, truth, e) if len(own) < EVENT_CELL_LOOKUPS else None
+        code = str(e.get("root_code") or "")
+        if why and mine and code and code != "UNDETERMINED" and code not in mine:
+            if rivals is None:
+                rivals = [g for g in _overlapping(lo, hi)
+                          if int(g["fault_id"]) != int(f["fault_id"]) and g.get("status") != "cancelled"]
+            if any(code in truth_codes(str(g.get("kind") or "")) and _claims(g, raw) for g in rivals):
+                other.append({**e, "why": "kind"})
+                continue
+        if why:
+            if rivals is None:
+                rivals = [g for g in _overlapping(lo, hi)
+                          if int(g["fault_id"]) != int(f["fault_id"]) and g.get("status") != "cancelled"]
+            e = _split_shared(f, truth, e, [g for g in rivals if _claims(g, raw)])
         (own if why else other).append({**e, "why": why or "scope"})
     if any(e.get("unit") == "L2_EVENT" for e in own):
         other += [{**e, "why": "not_in_l2"} for e in own if e.get("unit") != "L2_EVENT"]
@@ -186,12 +316,27 @@ def _fault_cells(fid: int, evs: list[dict]) -> tuple[list[str], dict]:
 
     `evs` 는 **이 장애 것으로 고른 사건**(`_own_events`)이다 — 다른 장애 사건의 셀을 칠하지 않는다."""
     src: dict[str, set] = {}
-    for k in _truth_of(fid).get("cells") or ():
+    for k in _truth_any(fid).get("cells") or ():
         src.setdefault(str(k), set()).add("truth")
     for e in evs[:EVENT_CELL_LOOKUPS]:
         for k in _ev_cells(e):
             src.setdefault(k, set()).add("event")
     return sorted(src), {k: sorted(v) for k, v in src.items()}
+
+
+def _kpi_filter(fid: int, evs: list[dict]) -> dict[str, set]:
+    """셀 → 칠해도 되는 지표. **사건 일부만 인정한 셀**(`_members_in`)만 걸린다 — 그 조각들의 트리거 지표만 칠한다.
+    정답 셀이거나 사건 전체를 인정한 사건의 셀이면 거르지 않는다(키가 없다 · 지금까지의 동작 그대로)"""
+    free = {str(k) for k in _truth_any(fid).get("cells") or ()}
+    for e in evs[:EVENT_CELL_LOOKUPS]:
+        if "_kpis" not in e:
+            free |= _ev_cells(e)
+    out: dict[str, set] = {}
+    for e in evs[:EVENT_CELL_LOOKUPS]:
+        if "_kpis" in e:
+            for k in e["_cells"] - free:
+                out.setdefault(k, set()).update(e["_kpis"])
+    return out
 
 
 def _ev_out(e: dict) -> dict:
@@ -257,7 +402,7 @@ def _truth_owner(fs: list[dict]) -> dict[str, int]:
     """셀 → 그 셀을 정답으로 가진 장애. 정답 파일은 **가장 최근 장애만** 남아 지난 장애는 비어 있다 — 없으면 키가 없다"""
     own: dict[str, int] = {}
     for f in fs:
-        for k in _truth_of(int(f["fault_id"])).get("cells") or ():
+        for k in _truth_any(int(f["fault_id"])).get("cells") or ():
             own.setdefault(str(k), int(f["fault_id"]))
     return own
 
@@ -276,6 +421,7 @@ def api_replay_timeline(fault_id: int):
     all_evs, err = _events(fault_id)
     evs, others = _own_events(f, all_evs)
     keys, _src = _fault_cells(fault_id, evs)
+    kf = _kpi_filter(fault_id, evs)
     # 첫 이상징후 = 이 장애 셀(CELL) 또는 이 장애 사건의 축(노드·APN …)에 선 가장 이른 이상 판정. 전국 합(GLOBAL)은
     # 어느 장애 것인지 가를 수 없어 뺀다. 장애 끝 + 유예 뒤의 판정은 「첫 탐지」가 아니다(F-597 07:45 무관 조각이 15분으로 잡혔다)
     pairs = [("CELL", k) for k in keys] + sorted({(t, x) for e in evs for t, v in _ev_axis(e).items()
@@ -290,8 +436,11 @@ def api_replay_timeline(fault_id: int):
                 cur.execute("SELECT EVENT_TIME, SCOPE_TYPE, SCOPE_ID, KPI, SEVERITY FROM AI_ANOMALY_EVENT "
                             "WHERE COALESCE(CANCELLED, 0) = 0 AND EVENT_TIME >= %s AND EVENT_TIME <= %s "
                             "AND (SCOPE_TYPE, SCOPE_ID) IN (" + ",".join(["(%s, %s)"] * len(pairs))
-                            + ") ORDER BY EVENT_TIME LIMIT 1", [lo, hi, *(x for pr in pairs for x in pr)])
-                row = cur.fetchone()
+                            + ") ORDER BY EVENT_TIME LIMIT %s", [lo, hi, *(x for pr in pairs for x in pr),
+                                                                  FIRST_SCAN_ROWS if kf else 1])
+                # 일부만 인정한 셀은 그 조각 지표의 판정만 첫 이상징후다(`_kpi_filter`)
+                row = next((r for r in cur.fetchall()
+                            if not (r[1] == "CELL" and r[2] in kf and r[3] not in kf[r[2]])), None)
         finally:
             conn.close()
         if row:
@@ -313,6 +462,8 @@ def api_replay_timeline(fault_id: int):
         u = str(e.get("unit") or "")
         steps.append({"step": f"open:{u}", "at": e.get("opened_time"), "label": f"{unit_label.get(u, u)} 열림",
                       "event_id": e.get("event_id"), "rep": e.get("rep_incident_id"),
+                      # 창 앞에서 열린 사건을 창 안 조각으로 받았으면(`_members_in`) 사건이 원래 열린 시각
+                      "event_opened_at": e.get("event_opened_time"),
                       "lead_min": lead(e.get("opened_time"))})
         if e.get("verdict_time"):
             steps.append({"step": f"verdict:{u}", "at": e.get("verdict_time"),
@@ -356,6 +507,61 @@ def api_replay_timeline(fault_id: int):
 # ── B. 장애 타임랩스 ─────────────────────────────────────────────────────────
 
 
+def _anomaly_earliest() -> datetime | None:
+    """`AI_ANOMALY_EVENT` 의 가장 이른 분 — 기본 키 첫 열이 `EVENT_TIME` 이라 인덱스 끝 한 번이다. 캐시한다"""
+    if _EARLIEST["at"] is None or time.time() - _EARLIEST["t"] > EARLIEST_TTL_SEC:
+        conn = _connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT MIN(EVENT_TIME) FROM AI_ANOMALY_EVENT")
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        _EARLIEST.update(at=row[0] if row else None, t=time.time())
+    return _EARLIEST["at"]
+
+
+def _measured(f: dict, lo: datetime, hi: datetime) -> dict | None:
+    """노선 주입이면 노선 셀 합산 지표의 분별 값과 graphio 판정 기준 — 「올랐지만 기준 아래라 못 잡았다」를 보이는 재료.
+
+    합산은 분자·분모를 더한 뒤 나눈다(graphio 불변규칙 2). 행이 없거나 분모가 0 인 분은 `value: None` 이다 — 0 으로
+    채우지 않는다(불변규칙 4). 판정 기준은 셀 하나의 판정 문턱이라 합산 곡선에 대는 것은 **눈금**이지 판정이 아니다"""
+    spec, line = MEASURED_KPI.get(str(f.get("kind") or "")), _injected_line(f)
+    if not spec or not line:
+        return None
+    kpi, tkey, series, num, den = spec
+    cells = [k for r in _rp_route_cells() if r["id"].upper() == line for k in r["cells"]]
+    pairs = [tuple(k.split("-", 1)) for k in cells if "-" in k]
+    if not pairs:
+        return None
+    rows: dict = {}
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            # 열 이름은 위 상수에서만 온다(사용자 입력이 아니다)
+            cur.execute(f"SELECT EVENT_TIME, SUM({num}), SUM({den}) FROM PM_COR_UPLANE_CELL_1M "
+                        "WHERE SERIES = %s AND EVENT_TIME >= %s AND EVENT_TIME <= %s AND (ENB_ID, CELLNUM) IN ("
+                        + ",".join(["(%s, %s)"] * len(pairs)) + ") GROUP BY EVENT_TIME",
+                        [series, lo, hi, *(x for pr in pairs for x in pr)])
+            rows = {t.replace(second=0, microsecond=0): (n, d) for t, n, d in cur.fetchall()}
+    finally:
+        conn.close()
+    pts = []
+    m = lo
+    while m <= hi:
+        n, d = rows.get(m, (None, None))
+        pts.append({"t": _iso(m), "num": int(n) if n is not None else None, "den": int(d) if d is not None else None,
+                    "value": round(100.0 * float(n) / float(d), 2) if n is not None and d else None})
+        m += timedelta(minutes=1)
+    doc, terr = _graphio("/api/settings/thresholds", timeout=6)
+    th = ((doc or {}).get("static") or {}).get(tkey) or {}
+    # `rows` 0 = 그 창의 1분 집계가 남아 있지 않다(집계 보관이 지났다) — 곡선이 비는 것이 「값이 낮았다」가 아니다
+    return {"kpi": kpi, "route": line, "cells": len(pairs), "series": series, "rows": len(rows),
+            "threshold": {sev: v.get("above") for sev, v in th.items() if isinstance(v, dict) and "above" in v},
+            "threshold_src": f"graphio /api/settings/thresholds static.{tkey}", "threshold_error": terr,
+            "points": pts}
+
+
 @router.get("/api/replay/{fault_id}/timelapse")
 def api_replay_timelapse(fault_id: int, pre: int = PAD_BEFORE_MIN, post: int = PAD_AFTER_MIN):
     """매 분의 셀 상태 — graphio 가 그 분에 그 셀을 이상으로 본 등급(가장 높은 것)과 그 값.
@@ -368,6 +574,7 @@ def api_replay_timelapse(fault_id: int, pre: int = PAD_BEFORE_MIN, post: int = P
     all_evs, err = _events(fault_id)
     evs, _others = _own_events(f, all_evs)
     keys, src = _fault_cells(fault_id, evs)
+    kf = _kpi_filter(fault_id, evs)
     lo, hi = _rp_window(f, pre, post)
     # 창 끝 = 장애 끝 + post 와 **이 장애 사건**의 마지막 판정 가운데 늦은 쪽 — 판정까지 보이게. 다른 장애 판정으로 늘지 않는다
     last_v = max((t for t in (_at(e.get("verdict_time")) for e in evs) if t), default=None)
@@ -386,7 +593,7 @@ def api_replay_timelapse(fault_id: int, pre: int = PAD_BEFORE_MIN, post: int = P
                             + ",".join(["%s"] * len(keys)) + ")", [lo, hi, *keys])
                 for t, k, kpi, sev, val, base, den in cur.fetchall():
                     m = t.replace(second=0, microsecond=0)
-                    if m not in per:
+                    if m not in per or (k in kf and kpi not in kf[k]):
                         continue
                     sev = str(sev or "").upper()
                     cur_c = per[m].get(k)
@@ -435,6 +642,7 @@ def api_replay_timelapse(fault_id: int, pre: int = PAD_BEFORE_MIN, post: int = P
         frames.append({"t": _iso(m), "in_fault": f["start_ts"].replace(second=0) <= m < f["end_ts"],
                        "active": _active_at(fs, m),
                        "cells": cells, "kpi_counts": kc, "others": others[m]})
+    earliest = _anomaly_earliest()
     pos = _coords(keys)
 
     def cell_row(k: str) -> dict:
@@ -451,10 +659,35 @@ def api_replay_timelapse(fault_id: int, pre: int = PAD_BEFORE_MIN, post: int = P
             "cells": [cell_row(k) for k in keys],
             "cells_src": sorted({s for v in src.values() for s in v}),
             "frames": frames, "error": err,
+            # 판정 기록 보관이 지난 장애 — 셀이 비는 것이 「놓쳤다」가 아니라 「기록이 지워졌다」임을 알린다
+            "expired": bool(earliest and f["start_ts"] < earliest), "anomaly_earliest": _iso(earliest) if earliest else None,
+            "measured": _measured(f, lo, hi),
             "note": "cells 에 없는 셀·분은 이상 판정 없음(정상 확인이 아니다). 등급은 graphio 탐지 그대로"}
 
 
 # ── A. 전철을 따라 번지는 장애 ───────────────────────────────────────────────
+
+
+def _injected_line(f: dict) -> str:
+    """노선 주입 장애가 건 노선 id(외선·내선 꼬리 뗀 것 · 예 `YMT`) — 노선 주입이 아니거나 모르면 ``""``.
+
+    생성기는 `ROUTE%:…` 를 설정 `mobility.routes_file` 의 노선에서 고른다(`faults.route_range_of` ·
+    `scenarios.route_spread`). 그 파일의 노선이 하나로 접힐 때만 답한다 — 여럿이면 어느 것인지 모르므로 짓지 않는다."""
+    from ..faults import ROUTE_RANGE_HEAD
+    if not str(f.get("target") or "").upper().startswith(ROUTE_RANGE_HEAD + ":"):
+        return ""
+    p = Path(str((_pem_cfg().get("mobility") or {}).get("routes_file") or ""))
+    if not str(p) or str(p) == ".":
+        return ""
+    if not p.is_absolute():
+        p = (HERE / p).resolve()
+    try:
+        ids = {re.sub(r"-(OUTER|INNER)$", "", str(r.get("id") or "")).upper()
+               for r in json.loads(p.read_text(encoding="utf-8"))}
+    except (OSError, ValueError):
+        return ""
+    ids.discard("")
+    return ids.pop() if len(ids) == 1 else ""
 
 
 def _rp_route_cells() -> list[dict]:
@@ -532,7 +765,10 @@ def api_replay_route(fault_id: int, pre: int = PAD_BEFORE_MIN, post: int = PAD_A
     fk = set(keys)
     cand = sorted(({"id": r["id"], "name": r["name"], "overlap": len(set(r["cells"]) & fk), "cells": len(r["cells"])}
                    for r in allr if set(r["cells"]) & fk), key=lambda x: (-x["overlap"], -x["cells"]))
-    pick = line.upper() if line else (cand[0]["id"].upper() if cand else "")
+    # 노선 주입(`ROUTE%:…`)이면 **주입한 노선**이다(2026-11-25 케이 · 3번 F-595 가 셀 겹침으로 浅草線 을 골랐다).
+    # 셀 겹침으로 고르는 것은 노선 주입이 아닌 장애뿐이다
+    inj = _injected_line(f)
+    pick = line.upper() if line else inj or (cand[0]["id"].upper() if cand else "")
     routes = [r for r in allr if r["id"].upper() == pick]
     route_keys = {k for r in routes for k in r["cells"]}
     want = set(keys) | route_keys

@@ -659,6 +659,74 @@ STATION_CELLS: dict[str, set[str]] = {}
 STATION_NAMES: dict[str, str] = {}
 
 
+#: 역 표시 이름 대응표(`STATION_ID → {ja, ko, …}`) — 화면 `/api/stations` 가 이 이름으로 역을 한 칸에 묶는다.
+#: 매일 부하도 같은 이름으로 묶어야 「화면의 역 한 칸 = 장애 1건」이 된다(2026-11-25 · 渋谷 ID 3개가 장애 3건)
+STATION_NAMES_FILE = Path(__file__).resolve().parents[2] / "config" / "station_names.json"
+
+
+def station_display_names() -> dict:
+    """대응표 전체. 파일이 없거나 깨졌으면 빈 표 — 이름은 DB 이름으로 남는다"""
+    try:
+        return json.loads(STATION_NAMES_FILE.read_text(encoding="utf-8")).get("stations", {})
+    except (OSError, ValueError):
+        return {}
+
+
+def station_label(sid: str, db_name: str | None, names: dict) -> str:
+    """역 하나의 표시 이름(일본어) — **화면(`status_api.api_stations`)과 매일 부하가 함께 쓰는 묶음 기준**"""
+    return (names.get(sid) or {}).get("ja") or db_name or sid
+
+
+def daily_groups(tokens: list[str]) -> list[list[str]]:
+    """매일 부하 대상 토큰 → 장애 하나씩의 묶음. `ST:` 는 표시 이름(`STATION_NAMES`)이 같으면 한 묶음, 나머지는 하나씩.
+
+    순서는 처음 나온 자리 그대로. 역 표를 아직 못 읽었으면(`STATION_NAMES` 빈 표) 이름을 몰라 ID 마다 하나다"""
+    out: list[list[str]] = []
+    by: dict[str, list[str]] = {}
+    for tok in tokens:
+        if tok.upper().startswith("ST:"):
+            k = station_key(tok[3:])
+            name = STATION_NAMES.get(k) or k
+            if name in by:
+                if tok not in by[name]:
+                    by[name].append(tok)
+                continue
+            by[name] = [tok]
+            out.append(by[name])
+        else:
+            out.append([tok])
+    return out
+
+
+def station_group(sid: str) -> list[str]:
+    """역 ID → 표시 이름이 같은 역 ID 전부(화면의 역 한 칸). 역 표를 못 읽었거나 이름을 모르면 그 ID 하나"""
+    k = station_key(sid)
+    name = STATION_NAMES.get(k)
+    return sorted(i for i, n in STATION_NAMES.items() if n == name) if name else [k]
+
+
+def daily_token(group: list[str]) -> str:
+    """묶음 → 대상 토큰 하나. 역 ID 가 여럿이면 `SG:<첫 ID>`(그 ID 와 표시 이름이 같은 역 전부), 하나면 예전 `ST:<id>`.
+
+    ID 를 다 늘어놓지 않는 것은 칸 폭 때문이다 — `CM_DATAGEN_FAULT.TARGET` 이 `varchar(64)` 인데 渋谷 셋이면 74자다"""
+    if len(group) > 1 and all(t.upper().startswith("ST:") for t in group):
+        return "SG:" + station_key(group[0][3:])
+    return group[0]
+
+
+def daily_parts(text: str) -> set[str]:
+    """대상(`DAILY:SG:a` · `DAILY:ST:a` · `ENB:…`) → 낱개 토큰 집합(`ST:a`, `ST:b`) — 겹침 검사용"""
+    t = (text or "").strip()
+    if t.upper().startswith("DAILY"):
+        t = t[len("DAILY"):].lstrip(":").strip()
+    head, _, val = t.partition(":")
+    if head.upper() == "SG":
+        return {"ST:" + i for i in station_group(val)}
+    if head.upper() == "ST":
+        return {"ST:" + station_key(val)}
+    return {t} if t else set()
+
+
 def station_key(sid: str) -> str:
     """`STN-35.68968-139.70035` · `35.68968-139.70035` → 짧은 꼴(설정·대상 칸에 적는 꼴)"""
     s = str(sid or "").strip()
@@ -689,10 +757,12 @@ def load_stations(conn) -> int:
         rows = cur.fetchall()
     cells: dict[str, set[str]] = {}
     names: dict[str, str] = {}
+    disp = station_display_names()
     for sid, name, key in rows:
         k = station_key(sid)
         cells.setdefault(k, set()).add(str(key))
-        names[k] = name or k
+        # 화면과 같은 표시 이름 — 장애 메모와 매일 부하 묶음(`daily_groups`)이 이것을 쓴다
+        names[k] = station_label(sid, name, disp) or k
     STATION_CELLS.clear(); STATION_CELLS.update(cells)
     STATION_NAMES.clear(); STATION_NAMES.update(names)
     return len(cells)
@@ -709,9 +779,10 @@ def daily_cancel_note(raw: str | None) -> str | None:
     if not text.upper().startswith("DAILY"):
         return None
     head, _, val = text[len("DAILY"):].lstrip(":").strip().partition(":")
-    if head.upper() != "ST":
+    if head.upper() not in ("ST", "SG"):
         return None
-    if STATION_CELLS.get(station_key(val)):
+    ids = station_group(val) if head.upper() == "SG" else [station_key(val)]
+    if any(STATION_CELLS.get(i) for i in ids):
         return "생성 범위 밖 역(셀 0개) — 이 역의 셀은 생성기가 데이터를 만들지 않습니다"
     return "역 매핑에 없는 역 — CM_CELL_STATION_MAP 에 그 역 ID 가 없다"
 
@@ -723,6 +794,9 @@ def _daily_cells(text: str, cells: list[Cell]) -> set[str]:
     have = {c.cell_key for c in cells}
     if head == "ST":
         return STATION_CELLS.get(station_key(val), set()) & have
+    if head == "SG":
+        # 역 묶음(화면의 역 한 칸 · 2026-11-25) — 표시 이름이 같은 역 ID 들의 셀을 합친다
+        return set().union(*(STATION_CELLS.get(i, set()) for i in station_group(val))) & have
     if head == "ENB":
         return {c.cell_key for c in cells if str(c.enb_id) == val}
     if head == "CELL":
@@ -746,7 +820,7 @@ def _shift_target(raw: str | None, start_ts: datetime,
     daily = text.upper().startswith("DAILY")
     if daily:
         text = text[len("DAILY"):].lstrip(":").strip()
-        if text.split(":", 1)[0].upper() in ("ST", "ENB", "CELL"):
+        if text.split(":", 1)[0].upper() in ("ST", "SG", "ENB", "CELL"):
             # 줄마다 정한 대상(2026-11-21 · 망 조작 「매일 같은 시각 부하」) — 24번 자리(A)가 아니어도 받는다.
             # 셀이 0개면 걸지 않는다(호출부가 해석 실패로 취소하고 사유를 남긴다)
             mine = _daily_cells(text, cells)

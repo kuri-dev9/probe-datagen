@@ -82,9 +82,9 @@ class _Conn:
         if s.startswith("SELECT CONFIG_KEY, CONFIG_VALUE"):
             self._rows = [(k, v) for k, v in self.cfg.items() if k.startswith("daily_load.")]
         elif "STATUS IN ('pending','active')" in s:
-            t = params[0]
-            n = sum(1 for x in self.existing if x == t) + sum(1 for f in self.faults if f["target"] == t)
-            self._rows = [(n,)]
+            # 대기·진행 중인 매일 부하 대상 전체를 한 번 읽는다(역 ID 가 겹치는지는 호출부가 `faults.daily_parts` 로 본다 · 2026-11-25)
+            assert "TARGET LIKE 'DAILY%'" in s and params in (None, []), s
+            self._rows = [(t,) for t in self.existing] + [(f["target"],) for f in self.faults]
         elif s.startswith("INSERT INTO"):
             kind, target, start, dur, inten, mode, note, no = params[:8]
             self.faults.append(dict(kind=kind, target=target, mode=mode, note=note, scenario_no=no, dur=dur))
@@ -106,6 +106,7 @@ class _Conn:
 def _stations(monkeypatch):
     """역 표 읽기는 DB 가 필요하다 — 채워진 것으로 둔다(`_daily_load` 가 비었을 때만 읽는다)"""
     monkeypatch.setattr(faults, "STATION_CELLS", {"35.68968-139.70035": {"1-0"}}, raising=False)
+    monkeypatch.setattr(faults, "STATION_NAMES", {}, raising=False)        # 이름을 모르면 ID 마다 한 칸(묶지 않는다) — 다른 시험이 채운 표가 새지 않게
     monkeypatch.setattr(faults, "load_stations", lambda conn: None, raising=False)
 
 
@@ -119,7 +120,7 @@ def test_no_lines_means_nothing_fires_and_the_old_switch_is_not_read():
     assert cli._daily_load(c, _at(8), 0) is None and c.faults == []
 
 
-def test_a_due_line_fires_one_fault_per_station_with_the_hour_length():
+def test_a_due_line_fires_one_fault_per_station_name_with_the_hour_length():
     c = _Conn([f"on|08|{ST1},{ST2},{ST3}"])
     fid = cli._daily_load(c, _at(8), 0)
     assert fid is not None and len(c.faults) == 3

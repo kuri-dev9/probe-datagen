@@ -6,12 +6,14 @@ HTML·JS·CSS 는 2026-11-10 까지 이 모듈 안 문자열이었다. 시작할
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 
 from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+from fastapi import HTTPException
+from fastapi.responses import FileResponse, HTMLResponse
 
 from .common import KIND_LABELS
 from . import scx_ja
@@ -195,6 +197,8 @@ def _with_base(html: str) -> str:
 
 _HTML = _page(_with_base(_HTML), "main", {**_JA_MAP, **_JA_MAIN})
 _HTML_MAP = _page(_HTML_MAP, "map", _JA_MAP)
+# 3D 재생 모듈 버전 — 내용 해시를 import 주소에 붙인다. 고친 3D 파일을 브라우저가 옛 캐시로 쓰지 않게(사용자 11-25 「필터링이 안 된다」)
+_HTML_MAP = _HTML_MAP.replace("__R3D_V__", hashlib.sha1((_STATIC / "replay3d.js").read_bytes()).hexdigest()[:10])
 _HTML_TOPO = _page(_with_base(_HTML_TOPO), "topo", {})
 _HTML_SCEN = _page(scx_ja.with_ja(_HTML_SCEN), "scen", _JA_SCEN)
 
@@ -212,3 +216,25 @@ def topo_page():
 @router.get("/scenarios", response_class=HTMLResponse)
 def scenarios_page():
     return _HTML_SCEN
+
+
+# ── 3D 재생 자원 (`/ui3d/…`, 2026-11-25) ────────────────────────────────────
+#
+# 3D 재생(`static/replay3d.js`)과 three.js 는 **3D 버튼을 누를 때만** 브라우저가 받는다(동적 `import`). 평소 지도
+# 페이지(`/map`)에 싣지 않아 첫 로딩에 들지 않는다. 정적 디렉터리를 통째로 열지 않고 **이름을 정해 둔 파일만**
+# 내보낸다 — `static/` 에는 화면 원문(HTML)도 있다. three.js 는 CDN 이 아니라 저장소에 둔다(현장 폐쇄망 대비)
+_UI3D = {
+    "replay3d.js": "application/javascript",
+    "vendor/three/three.module.js": "application/javascript",
+    "vendor/three/three.core.js": "application/javascript",
+    # 자유 카메라(끌기 회전·이동·휠 확대) — 사용자 2026-11-25
+    "vendor/three/addons/OrbitControls.js": "application/javascript",
+    "vendor/three/LICENSE": "text/plain; charset=utf-8",
+}
+
+
+@router.get("/ui3d/{name:path}")
+def ui3d(name: str):
+    if name not in _UI3D:
+        raise HTTPException(404)
+    return FileResponse(_STATIC / name, media_type=_UI3D[name])

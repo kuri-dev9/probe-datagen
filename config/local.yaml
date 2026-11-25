@@ -78,6 +78,8 @@ pemdb1:
   geo_station_n02: /app/data/geo/jp/station_n02.json    # 역 승강장 선 N02 (배경)
   geo_station_osm: /app/data/geo/jp/station_osm.json    # 역 모양 OSM (배경)
   geo_station_label: /app/data/geo/jp/station_label.json  # 역 이름 글자 자리 (화면용)
+  geo_building_tall: /app/data/geo/jp/building_tall.json  # 높은 건물 OSM (3D 재생 전용)
+  geo_bldg_dir: /app/data/geo/jp/bldg   # 낮은 건물까지 1km 칸 파일 OSM (3D 재생 전용)
   geo_boundary_map: /app/data/geo/jp/N03_map.json   # 행정경계 상세 (지도 전용)
   geo_water: /app/data/geo/jp/water.json            # 수역 relation OSM
   geo_chome: /app/data/geo/jp/chome.json            # 丁目 경계 e-Stat

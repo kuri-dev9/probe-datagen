@@ -71,6 +71,17 @@ from ..control import KIND_SHOWN  # noqa: E402
 
 KIND_LABELS.update({k: v for k, v in KIND_SHOWN.items() if k in KIND_LABELS})
 
+
+def truth_codes(kind: str) -> list[str]:
+    """이 종류가 내야 할 원인 코드 — 정답 + 예상 경쟁 후보(`expect_alternatives`). 판정 보류는 뺀다.
+
+    정본은 `scenarios.KIND_SPECS` 다. 지도 재생이 사건과 주입을 이을 때(`/api/scenarios` → 화면 `rpMatch`,
+    `replay_api._own_events`) **같은 이 함수**를 본다 — 두 벌이면 화면과 재생이 다른 주입을 고른다(2026-11-25)."""
+    from ..scenarios import KIND_SPECS
+    spec = KIND_SPECS.get(kind or "") or {}
+    codes = [spec.get("truth_code") or "", *(spec.get("expect_alternatives") or {}).values()]
+    return list(dict.fromkeys(c for c in codes if c and c != "UNDETERMINED"))
+
 #: **주입 메뉴는 `CM_ERROR_SCENARIO` 를 읽는다** (2026-10-28). 전에는 여기
 #: `FAULT_MENU` 상수였는데, 지도·다른 화면도 같은 목록과 발생 장비를 봐야
 #: 해서 DB 로 옮겼다. 정본은 `control.SCENARIOS` 다.

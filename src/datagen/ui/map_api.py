@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pymysql
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 
 from ..control import T_FAULT
@@ -238,6 +238,78 @@ _LAYER = {
     "chome":  ("geo_chome",  "e-Stat 境界データ (令和2年国勢調査 小地域)"),
 }
 
+#: 3D 재생만 받는 레이어 (2026-11-25) — 지도 첫 로딩의 `LAYERS` 에도, `/api/map/geo` 의 범위·캐시 키에도
+#: 넣지 않는다. 높은 건물은 셀 장애 범위 둘레를 세울 때만 쓴다
+_LAYER_3D = {
+    "building_tall": ("geo_building_tall", "© OpenStreetMap contributors"),
+}
+
+
+#: 낮은 건물 칸 — 한 번에 받을 수 있는 칸 수 상한. 1km 축척 × 반경 5km 면 약 120칸이다. **초기값이다**
+_BLDG_MAX_CELLS = 400
+_BLDG_CODE = re.compile(r"^\d{8}$")
+
+
+def _bldg_dir():
+    """`pemdb1.geo_bldg_dir` → (디렉터리, 오류). 굽는 자리는 graphio `tools/build_jp_geo_layers.py --only-building-grid`"""
+    raw = str(_pem_cfg().get("geo_bldg_dir") or "")
+    if not raw:
+        return None, "`pemdb1.geo_bldg_dir` 가 비어 있다"
+    d = Path(raw)
+    if not d.is_absolute():
+        d = (HERE / d).resolve()
+    if not (d / "index.json").exists():
+        return None, f"건물 칸 색인이 없다: {d / 'index.json'}"
+    return d, None
+
+
+def _gz(request: Request, body: bytes) -> Response:
+    """받는 쪽이 gzip 을 받으면 눌러 보낸다 — 칸 파일은 정수 좌표라 약 1/4 로 준다. 1단계 압축(빠르다)"""
+    import gzip
+    if "gzip" in (request.headers.get("accept-encoding") or ""):
+        return Response(gzip.compress(body, 1), media_type="application/json",
+                        headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"})
+    return Response(body, media_type="application/json")
+
+
+@router.get("/api/map/bldg/index")
+def api_map_bldg_index(request: Request):
+    """낮은 건물 칸 색인 — `{mesh, min_m, min_levels, q, total, cells: {메시: [건물 수, 높은 건물 수]}}` (2026-11-25).
+
+    3D 재생 전용이다(`_LAYER_3D` 와 같은 결 — 지도 첫 로딩에 넣지 않는다). 3D 가 보이는 범위의 칸 코드를 정하고
+    `/api/map/bldg?cells=` 로 그 칸만 받는다. 칸 = JIS 3차 메시(약 1km)"""
+    d, err = _bldg_dir()
+    if err:
+        return {"error": err, "cells": {}}
+    return _gz(request, _file_bytes(d / "index.json"))
+
+
+@router.get("/api/map/bldg")
+def api_map_bldg(request: Request, cells: str = ""):
+    """낮은 건물 — 고른 칸 파일들을 한 응답으로 `{"cells": {메시: 칸 파일}, "missing": [...], "source"}`.
+
+    칸 파일 모양은 graphio `_build_building_grid` 머리말(남서 모서리 `o` + 정수 좌표). 건물이 없는 칸(물·공원)은
+    파일이 없어 `missing` 에 든다 — 오류가 아니다. 파일을 파싱하지 않고 그대로 이어 붙인다(`/api/map/layer` 와 같은 까닭)"""
+    d, err = _bldg_dir()
+    if err:
+        return {"error": err, "cells": {}}
+    codes = [c for c in dict.fromkeys(x.strip() for x in cells.split(",")) if c]
+    bad = [c for c in codes if not _BLDG_CODE.match(c)]
+    if bad:
+        raise HTTPException(400, f"칸은 JIS 3차 메시 8자리입니다: {bad[:5]}")
+    if len(codes) > _BLDG_MAX_CELLS:
+        raise HTTPException(400, f"한 번에 {_BLDG_MAX_CELLS}칸까지입니다: {len(codes)}")
+    parts, missing = [], []
+    for c in codes:
+        f = d / f"{c}.json"
+        if f.exists():
+            parts.append(json.dumps(c).encode() + b":" + _file_bytes(f))
+        else:
+            missing.append(c)
+    body = (b'{"cells":{' + b",".join(parts) + b'},"missing":' + json.dumps(missing).encode()
+            + b',"source":' + json.dumps("© OpenStreetMap contributors", ensure_ascii=False).encode() + b'}')
+    return _gz(request, body)
+
 
 @router.get("/api/map/layer/{name}")
 def api_map_layer(name: str):
@@ -266,7 +338,7 @@ def api_map_layer(name: str):
         name = str(_pem_cfg().get("map_station_layer") or "station_osm")
         if name not in ("station_osm", "station_n02", "station_bldg"):
             raise HTTPException(404, f"역 레이어는 station_osm · station_n02 · station_bldg 중 하나입니다: {name}")
-    hit = _LAYER.get(name)
+    hit = _LAYER.get(name) or _LAYER_3D.get(name)
     if not hit:
         raise HTTPException(404, f"그런 레이어가 없습니다: {name}")
     key, source = hit
@@ -300,6 +372,9 @@ def _label_extra(lb: dict) -> dict:
     # 1 = 야마노테(화면이 노선 자료의 30역으로도 1로 올린다) · 2 = 서로 다른 노선 `_TIER2_LINES` 개 이상 · 3 = 나머지
     nl = len(_line_names(lb.get("lines") or ()))
     ex["tier"] = 1 if ex.get("ymt") else 2 if nl >= _TIER2_LINES else 3
+    # 노선 수만으로 본 등급 — 야마노테 역도 환승역(2)인지 아닌지(3). 3D 재생이 「1km 축척 안에서는 전부, 그 밖은 주요 역만」을
+    # 야마노테 역에도 건다(사용자 11-25). 2D 지도는 `tier` 만 본다
+    ex["tl"] = 2 if nl >= _TIER2_LINES else 3
     return ex
 
 

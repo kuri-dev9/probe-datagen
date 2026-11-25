@@ -423,6 +423,31 @@
  #rpfx .tr.st{animation:rpBlink .45s ease-in-out infinite alternate}
  @media (prefers-reduced-motion:reduce){#rpfx *{animation:none!important}}
  #fbar button.rpb{margin-left:6px;border-color:#ffb86b}
+ /* 3D 재생(`replay3d.js`, 사용자 2026-11-25) — 지도 틀(`#wrap`)을 덮는 화면. 열 때만 만든다 */
+ .r3d{position:absolute;inset:0;z-index:40;background:#0d1117;cursor:default}
+ /* 3D 전환(사용자 11-25 「지도에서 다른 창 끄고 바로 3D 로 · 화면의 이어짐」) — 지도 위 창들을 서서히 숨기고 되살린다.
+    글자(#labels)는 3D 가 같은 자리에 같은 글자를 띄우는 순간(교차 페이드)에 따로 끈다 */
+ body.r3d-tr :is(#fbar,#rp,#sel,#incs,#flist,#legend,#scale,#src,#mini,#hq,#tip,#boxsel,#glob,#fx,#rpfx,#labels){transition:opacity .4s}
+ body.r3d-on :is(#fbar,#rp,#sel,#incs,#flist,#legend,#scale,#src,#mini,#hq,#tip,#boxsel,#glob,#fx,#rpfx){opacity:0;pointer-events:none}
+ body.r3d-lab #labels{opacity:0}
+ .r3d canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+ .r3d-hud{position:absolute;left:12px;right:12px;top:10px;display:flex;align-items:center;gap:12px;padding:8px 12px;
+   background:rgba(13,17,23,.82);border:1px solid #2b3442;border-radius:10px;color:#e6edf3;font-size:13px}
+ .r3d-hud b{font-weight:700}.r3d-hud i{flex:1}
+ .r3d-hud .r3d-name{color:#ffb86b}.r3d-hud .r3d-t{font-variant-numeric:tabular-nums}
+ .r3d-cnt b{font-weight:600}.r3d-cnt .s{color:#ef4444}.r3d-cnt .d{color:#f5c84b}
+ .r3d-hud button{background:#1c2330;color:#e6edf3;border:1px solid #3a4658;border-radius:6px;padding:3px 10px;cursor:pointer}
+ .r3d-bar{position:absolute;left:12px;right:12px;top:52px;height:3px;background:#2b3442;border-radius:2px}
+ .r3d-bar i{display:block;height:100%;width:0;background:#ffb86b;border-radius:2px;transition:width .3s}
+ .r3d-cards{position:absolute;left:12px;top:66px;width:360px;display:flex;flex-direction:column;gap:6px;pointer-events:none}
+ .r3d-card{background:rgba(255,184,107,.95);color:#1b1206;padding:7px 10px;border-radius:8px;font-size:13px;font-weight:600;
+   box-shadow:0 4px 14px rgba(0,0,0,.35);transition:opacity .6s,background .6s}
+ .r3d-card i{font-style:normal;font-weight:700;margin-right:8px;opacity:.75}
+ .r3d-card.old{background:rgba(22,27,34,.85);color:#c9d1d9;font-weight:500}
+ .r3d-pins{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+ .r3d-pin{position:absolute;left:0;top:0;background:#fff;color:#111;font-size:12px;font-weight:700;padding:3px 8px;border-radius:6px;
+   white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.4)}
+ .r3d-msg{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);color:#c9d1d9;font-size:14px}
  #rp{position:absolute;left:calc(50% - 170px);transform:translateX(-50%);bottom:14px;z-index:5;display:none;
    width:min(760px,calc(100% - 420px));background:#0b0e12f2;border:1px solid #ffb86b80;border-radius:8px;
    padding:8px 12px 10px;font-size:12px;line-height:1.5}
@@ -1304,13 +1329,17 @@ function miniView(){
 // graphio 를 **연달아** 못 받은 횟수 — 한 번은 web 재시작·순간 지연일 수 있다(2026-11-24 · 사용자 「자주 뜬다」).
 // 두 번 연속(약 20초)일 때만 경고를 띄우고, 받으면 0 으로 돌린다. 못 받는 동안 장애 표시는 마지막 받은 것을 둔다
 let FAULT_FAILS=0;
+// 첫 목록을 받기 전의 실패 이유 — 목록 칸이 「불러오는 중」인지 「못 받았다」인지 가른다(`renderList`)
+let FAULT_ERR='';
 async function pollFaults(){
   let doc;
   // 한 번 못 받아도 조용히 넘긴다 — 10초 뒤에 다시 묻는다
   // 장애에서 넘어왔으면 며칠 지난 회차도 목록에 있어야 고를 수 있다(`/api/faults/{id}/incidents` 와 같은 범위)
-  try{ doc=await (await fetch('/api/map/faults?minutes='+LIVE_WINDOW_MIN+(LINK?'&recent=1':''))).json(); }catch(e){ return; }
+  try{ doc=await (await fetch('/api/map/faults?minutes='+LIVE_WINDOW_MIN+(LINK?'&recent=1':''))).json(); }
+  catch(e){ FAULT_ERR=String(e); if(!FAULT) renderList(); return; }
   const note=document.getElementById('note');
-  if(doc.error){ if(note && ++FAULT_FAILS>=2) note.textContent=doc.error; return; }
+  if(doc.error){ FAULT_ERR=doc.error; if(!FAULT) renderList(); if(note && ++FAULT_FAILS>=2) note.textContent=doc.error; return; }
+  FAULT_ERR='';
   FAULT_FAILS=0;
   if(note && /graphio/.test(note.textContent)) note.textContent='';
   // **받아서 반영한 시각** — 바뀐 것이 없어도 갱신한다. 멈춰 있으면 "장애가
@@ -1907,8 +1936,21 @@ function formPlain(h, g){
   return {what, where:wherePlain(titles), titles, enb};
 }
 //: 원인 — graphio 가 준 이름(`root_label`)을 먼저, 코드는 툴팁. 이름이 없으면 코드다
-const causeTag=(code,label)=>`<span title="${esc(code||'')}">${esc(label||code||'?')}</span>`;
-const headOf=h=>isEvent(h)&&h.root_label&&h.root_code!=='UNDETERMINED' ? h.root_label : h.title;
+//: 일본어 화면은 **원인 코드**로 일본어 이름을 찾는다(`i18n_ja._JA_CAUSE` · graphio `CAUSE_LABELS_JA` 와 같은 값).
+//: graphio 이름(`root_label`)은 한국어라 그대로 내면 일본어 화면에 한글이 남았다(사용자 11-25)
+const causeName=(code,label)=>(LANG==='ja'&&code&&JA['cause:'+code])||label||code;
+const causeTag=(code,label)=>`<span title="${esc(code||'')}">${esc(causeName(code,label)||'?')}</span>`;
+//: 조각 제목(graphio `title_for` · 한국어) — 일본어 화면은 조각을 옮긴다(`i18n_ja._JA_TITLE_PARTS` · 긴 것부터)
+const TITLE_JA=LANG==='ja' ? Object.entries(JA).filter(([k])=>k.startsWith('title:'))
+  .map(([k,v])=>[k.slice(6),v]).sort((a,b)=>b[0].length-a[0].length) : [];
+function titleName(t){
+  if(LANG!=='ja'||!t) return t;
+  let s=String(t).replace(/\(시군구 (\d+)곳, 셀 (\d+)개\)/g,'(市区町村$1か所、セル$2個)')
+    .replace(/ 외 (\d+)곳/g,' ほか$1か所').replace(/ 외 (\d+)대/g,' ほか$1台');
+  for(const [k,v] of TITLE_JA) s=s.split(k).join(v);
+  return s;
+}
+const headOf=h=>isEvent(h)&&h.root_label&&h.root_code!=='UNDETERMINED' ? causeName(h.root_code,h.root_label) : titleName(h.title);
 const pieces=h=>(h.event_members_cnt||1)>1 ? T('이상징후 {n}건',{n:h.event_members_cnt}) : '';
 const confOf=h=>isEvent(h)&&h.confidence!=null&&h.root_code&&h.root_code!=='UNDETERMINED' ? ` · ${Math.round(h.confidence*100)}%` : '';
 // 판정 단위별 탭 — L2 사건 · L1 묶음 · 일반(조각·판정 단위 없음). 고른 탭은 브라우저에 남긴다
@@ -1924,6 +1966,15 @@ function renderTabs(H){
 }
 function renderList(){
   const body=document.getElementById('fbody'); if(!body) return;
+  // **첫 목록이 오기 전에는 「없다」고 말하지 않는다**(2026-11-25 사용자 「장애 목록 불러오는데 왜 이리 오래 걸려?」).
+  // 용어집 응답(`renderList` 를 부른다)이 먼저 오면 graphio 를 기다리는 동안 「연 장애가 없습니다」가 떠 0건처럼 보였다
+  if(!FAULT){
+    document.getElementById('fcnt').textContent='';
+    body.innerHTML='<div class=empty>'+(FAULT_ERR
+      ? T('graphio 에서 장애 목록을 받지 못했습니다 — 10초 뒤 다시 묻습니다')+'<br><small>'+esc(FAULT_ERR)+'</small>'
+      : T('graphio 에 묻는 중'))+'</div>';
+    return;
+  }
   const H=(FAULT&&FAULT.history)||[];
   const live=H.filter(h=>h.live).length;
   document.getElementById('fcnt').textContent=H.length ? T('{n}건 · 지금 {live}',{n:H.length,live}) : '';
@@ -2221,12 +2272,12 @@ function drawFocus(){
   const plain=formPlain(base, cg);
   const chips=`<span class=parts>`
     + (gs.length?gs.map((g,k)=>{ const list=g.idx.map(i=>ms[i]);
-        return `<button data-part="${k}" class="${ck===k?'on':''}" title="${esc(list.map(m=>(m.trigger_kpi||'')+' '+(m.title||'')).join('\n'))}">`
+        return `<button data-part="${k}" class="${ck===k?'on':''}" title="${esc(list.map(m=>(m.trigger_kpi||'')+' '+(titleName(m.title)||'')).join('\n'))}">`
           + `${esc(formTag(g.form, formCount(base, g)))}</button>`; }).join('')
-      : `<button data-part="" class="on" title="${esc((base.trigger_kpi||'')+' '+(base.title||''))}">${esc(formTag(pieceForm(base), formCount(base, null)))}</button>`)
+      : `<button data-part="" class="on" title="${esc((base.trigger_kpi||'')+' '+(titleName(base.title)||''))}">${esc(formTag(pieceForm(base), formCount(base, null)))}</button>`)
     + `</span>`;
   bar.innerHTML=`<b>${unitTag(base)}${sevTag(base.severity)} · ${esc(headOf(base))}${confOf(base)}</b>`
-    + `<button id=unfocus>${T('해제')}</button><button id=rpbtn class=rpb disabled>${T('▶ 재생')}</button><i></i>`
+    + `<button id=unfocus>${T('해제')}</button><button id=rpbtn class=rpb disabled>${T('▶ 재생')}</button><button id=rp3dbtn class=rpb disabled>${T('▶ 3D 재생')}</button><i></i>`
     + chips
     // 무엇이 감지됐나 · 어디서 — 사건이면(구성 조각을 받았으면) 쉬운 문장으로. 코드와 원래 제목은 툴팁에 남긴다
     + (plain?`<span class=plain title="${esc((h.trigger_kpi||'')+'\n'+plain.titles.join('\n'))}">`
@@ -2367,27 +2418,122 @@ async function rpFaultList(){
     catch(e){ RP_FAULTS=RP_FAULTS||[]; } }
   return Array.isArray(RP_FAULTS)?RP_FAULTS:[];
 }
-function rpFaultOf(h, list){
-  if(LINK&&LINK.fault&&LINK.ids.has(h.incident_id)) return +LINK.fault;
-  const o=rpT(h.opened_ts); if(!isFinite(o)) return null;
-  let best=null, bs=-Infinity;
-  for(const f of list){
-    if(f.status==='cancelled') continue;
-    const s=rpT(f.start_ts), e=s+(f.duration_min||0)*60000;
-    if(!isFinite(s)||o<s-60000||o>e+RP_SLACK_MIN*60000) continue;
-    if(s>bs){ best=f; bs=s; } }
-  return best?best.fault_id:null;
+//: 주입 종류가 내야 할 원인 코드(`/api/scenarios` truth_codes — 정답 + 예상 경쟁 후보). 모르면 null — 종류로 거르지 않는다
+function rpCodesOf(kind){
+  const s=Array.isArray(SCN)&&SCN.find(x=>x.kind===kind);
+  return s&&Array.isArray(s.truth_codes)&&s.truth_codes.length?s.truth_codes:null;
 }
+//: 사건 [열림~갱신] 이 장애 창 [시작−1분, 끝+여유] 과 겹치는 장애를 잇는다(2026-11-25). 열린 시각만 보면 앞 조각
+//: (출퇴근 통화 집중 등)이 먼저 연 통합장애에 끝난 지 몇 분 된 다른 종류(DNS)가 붙었다.
+//: 1) 원인이 그 종류의 것(truth_codes)인 장애가 있으면 그것 2) 없으면 종류를 보지 않고 고르되 `miss` 를 단다 —
+//: graphio 가 원인을 틀린 사건일수록 재생으로 봐야 한다(케이 11-25). 사건 원인이 보류·없음이면 종류로 가르지 않는다.
+//: 고르는 차례는 둘 다 같다 — 열린 시각이 창 안인 것 중 가장 늦게 시작한 것(전과 같다), 없으면 사건 중에 들어온 것 중 가장 먼저
+function rpMatch(h, list){
+  if(LINK&&LINK.fault&&LINK.ids.has(h.incident_id)) return {fid:+LINK.fault, miss:null};
+  const o=rpT(h.opened_ts); if(!isFinite(o)) return {fid:null, miss:null};
+  const u=Math.max(o, rpT(h.updated_ts)||o);
+  const code=h.root_code&&h.root_code!=='UNDETERMINED'?h.root_code:null;
+  const ok=f=>{ const cs=code&&rpCodesOf(f.kind); return !cs||cs.includes(code); };
+  const pick=keep=>{
+    let inn=null, out=null;
+    for(const f of list){
+      if(f.status==='cancelled'||!keep(f)) continue;
+      const s=rpT(f.start_ts), e=s+(f.duration_min||0)*60000;
+      if(!isFinite(s)||u<s-60000||o>e+RP_SLACK_MIN*60000) continue;
+      if(o>=s-60000){ if(!inn||s>rpT(inn.start_ts)) inn=f; }
+      else if(!out||s<rpT(out.start_ts)) out=f; }
+    return inn||out; };
+  const hit=pick(ok); if(hit) return {fid:hit.fault_id, miss:null};
+  const any=pick(()=>true);
+  return {fid:any?any.fault_id:null, miss:any?{code, f:any}:null};
+}
+function rpFaultOf(h, list){ return rpMatch(h, list).fid; }
 async function rpBind(h){
-  const id=h.incident_id, fid=rpFaultOf(h, await rpFaultList());
+  if(!SCN) await loadScenarios();
+  const id=h.incident_id, {fid, miss}=rpMatch(h, await rpFaultList());
   // 통합장애 항목은 incident_id 뒤에 「#구성 목록」이 붙는다 — FOCUS 는 앞쪽 대표 ID 만 갖는다
   const b=document.getElementById('rpbtn'); if(!b||FOCUS!==String(id).split('#')[0]) return;
   if(fid==null){ b.disabled=true; b.title=T('이 장애에 이어지는 주입 기록이 없습니다'); return; }
   b.disabled=false;
   const on=RP&&RP.fid===fid;
-  b.textContent=on?T('■ 재생 닫기'):T('▶ 재생 · F-{id}',{id:fid});
-  b.title=T('주입 장애 F-{id} 를 1분씩 다시 봅니다',{id:fid});
+  // 원인 판정이 주입 종류와 다르면 ⚠ 를 달고 툴팁에 둘을 적는다 — 잇기는 하되 같은 종류라고 말하지 않는다
+  const mw=miss?'\n⚠ '+T('원인 판정이 주입 종류와 다릅니다 (판정 {c} · 주입 {k})',
+    {c:causeName(miss.code, h.root_label), k:rpFaultName(miss.f)}):'';
+  b.textContent=(on?T('■ 재생 닫기'):T('▶ 재생 · F-{id}',{id:fid}))+(miss?' ⚠':'');
+  b.title=T('주입 장애 F-{id} 를 1분씩 다시 봅니다',{id:fid})+mw;
   b.onclick=()=>{ if(RP&&RP.fid===fid) rpStop(); else rpStart(fid); };
+  const b3=document.getElementById('rp3dbtn');
+  if(b3){ b3.disabled=false; b3.title=T('주입 장애 F-{id} 를 3D 로 다시 봅니다',{id:fid})+mw; b3.onclick=()=>rp3dOpen(fid,h); }
+}
+//: 3D 재생 — **누를 때 처음** 모듈과 three.js 를 받는다(평소 지도 로딩에 들지 않게 · 사용자 2026-11-25).
+//: 기존 재생과 같은 자료(`/api/replay/{id}/…`)를 3D 로 보이기만 한다. 장애마다 따로 만들지 않는다 — 기존 재생이
+//: 되는 장애는 모두 연다(사용자 11-25 「미리 만든 시나리오에 데이터만 바꿔 쓰는 것」). 노선·열차는 노선 주입(`target`)일 때만
+async function rp3dOpen(fid,h){
+  if(RP) rpStop();
+  try{
+    const m=await import('/ui3d/replay3d.js?v=__R3D_V__');
+    const f=(await rpFaultList()).find(x=>+x.fault_id===+fid)||{kind:''};
+    // 자막용 — 시나리오 설명(`/api/scenarios` description)·원인 이름(고른 항목의 root_label, 일본어는 코드로)·옅은 점으로 깔 셀
+    const sc=Array.isArray(SCN)&&(SCN.find(x=>x.kind===f.kind&&x.rank!=null)||SCN.find(x=>x.kind===f.kind));
+    m.open({fid:+fid, host:wrap, title:rpFaultName(f), target:f.target||'', geo:GEO, rail:RAIL, water:WATER, stations:STBL, theme:document.body.dataset.theme,
+      what:sc&&sc.description?T(sc.description):'', cause:c=>causeName(c, h&&h.root_code===c?h.root_label:null), cells:D?D.cells:null,
+      // 지도에서 이어지게 — 지금 보이는 범위(지도 좌표)·바닥 그림·역·지명 글자·지표 이름(용어집)·창 숨기기
+      view:visRect(VB), snap:rp3dSnap, wide:rp3dWide, panels:rp3dPanels, lang:LANG,
+      labels:LABELS.filter(l=>/\blb-(s|s2|a)\b/.test(l.cls||'')).map(l=>({x:l.x, y:l.y, t:l.t, cls:l.cls, tier:l.tier, tl:l.tl})),
+      // 역 이름 거르기 — 2D 와 같은 축척 막대 값·기준(사용자 11-25 「2D 에서 정한 조건을 3D 에도」)
+      stScale:{nice:scaleNiceM, t2:ST_T2_M, t3:ST_T3_M},
+      kpi:k=>kpiName(k), kpiLong:k=>{ const t=KPI_GL[k], x=t&&(t[LANG]||t.ko); return x&&x.l||''; }});
+  }catch(e){ alert(T('3D 재생을 열 수 없습니다')+' — '+(e&&e.message||e)); }
+}
+//: 3D 바닥 그림 — 지도 배경 그룹(구역·녹지·도로·강·철로·야마노테·역 띠)을 **그린 모양 그대로** 그림으로 굽는다.
+//: 글자·셀·표식은 뺀다(3D 가 따로 띄운다). 스타일은 계산값을 요소마다 옮긴다 — 페이지 CSS(배색 변수)가 떨어져 나가도
+//: 지도와 같은 색이 되게. 선 굵기는 화면 픽셀(`non-scaling-stroke`)이라 그림 해상도 비율만큼 키운다
+const RP3D_GROUPS=['gAdm','gGreen','gChome','gRoad','gRiv','gRail','gYmt','gStn'];
+const RP3D_PROPS=['fill','fill-opacity','fill-rule','stroke','stroke-width','stroke-opacity','stroke-dasharray','stroke-linecap','stroke-linejoin','opacity','display','visibility'];
+async function rp3dSnap(box, px, kk){
+  const NS='http://www.w3.org/2000/svg', vis=visRect(VB), ww=wrap.clientWidth||1;
+  const W=Math.round(box.w>=box.h?px:px*box.w/box.h), H=Math.round(box.w>=box.h?px*box.h/box.w:px);
+  // 지도 화면 1px 이 그림에서 몇 px 인가 — 3D 가 그림을 확대해 볼 때는 3D 가 정한 배율(kk)로(그대로 두면 선이 몇 배 굵어진다)
+  const k=kk||W/(ww*box.w/vis.w);
+  const o=document.createElementNS(NS,'svg');
+  o.setAttribute('xmlns',NS); o.setAttribute('viewBox',`${box.x} ${box.y} ${box.w} ${box.h}`);
+  o.setAttribute('width',W); o.setAttribute('height',H);
+  const bg=getComputedStyle(wrap).backgroundColor, r=document.createElementNS(NS,'rect');
+  r.setAttribute('x',box.x); r.setAttribute('y',box.y); r.setAttribute('width',box.w); r.setAttribute('height',box.h); r.setAttribute('fill',bg);
+  o.appendChild(r);
+  const px2=v=>String(v).replace(/[\d.]+px/g,m=>(parseFloat(m)*k).toFixed(2)+'px');
+  for(const id of RP3D_GROUPS){
+    const g=document.getElementById(id); if(!g) continue;
+    const c=g.cloneNode(true), a=[g,...g.querySelectorAll('*')], b=[c,...c.querySelectorAll('*')];
+    for(let i=0;i<a.length;i++){
+      if(b[i].tagName==='text'){ b[i].remove(); continue; }
+      const cs=getComputedStyle(a[i]), ne=cs.vectorEffect==='non-scaling-stroke';
+      b[i].removeAttribute('class');
+      b[i].setAttribute('style', RP3D_PROPS.map(q=>{ let v=cs.getPropertyValue(q); if(!v) return '';
+        if(ne&&(q==='stroke-width'||q==='stroke-dasharray')) v=px2(v);
+        return `${q}:${v}`; }).filter(Boolean).join(';')+(ne?';vector-effect:non-scaling-stroke':''));
+    }
+    c.removeAttribute('id'); o.appendChild(c);
+  }
+  const url=URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(o)],{type:'image/svg+xml'}));
+  try{
+    const im=new Image(); im.src=url; await im.decode();
+    const cv=document.createElement('canvas'); cv.width=W; cv.height=H; cv.getContext('2d').drawImage(im,0,0,W,H);
+    return cv;
+  } finally { URL.revokeObjectURL(url); }
+}
+//: 넓은 바닥 — 3D 가 지도를 다 가린 동안에만 부른다. 지도 보기를 그 범위로 잠깐 옮겨 배경을 그리게 하고 굽은 뒤
+//: **열기 전 보기 그대로** 되돌린다(`free` — 단계 맞추기를 거치지 않게). 사용자 눈에는 지도가 움직이지 않는다
+async function rp3dWide(box, px, kk){
+  const v0={...VB}, f0=VB_FREE;
+  try{ setVB(box,{free:true}); return await rp3dSnap(box, px, kk); }
+  finally{ setVB(v0,{free:f0}); }
+}
+//: 지도 위 창 숨기기·되살리기 — 'on'(창 숨김) · 'lab'(지도 글자까지) · 'off'(되살림)
+function rp3dPanels(st){
+  const b=document.body.classList;
+  if(st==='off'){ b.remove('r3d-on','r3d-lab'); setTimeout(()=>{ if(!b.contains('r3d-on')) b.remove('r3d-tr'); }, 450); return; }
+  b.add('r3d-tr','r3d-on'); if(st==='lab') b.add('r3d-lab');
 }
 function rpStop(){
   if(!RP) return;
@@ -3443,7 +3589,7 @@ function draw(){
       // 색 — 야마노테선 역만 녹색(`lb-s`), 나머지는 회색(`lb-s2`)
       // 등급 — 1 야마노테(항상) · 2 환승역(`ST_T2_M` 이하) · 3 나머지(`ST_T3_M` 이하). 거르기는 `placeLabels` 가 축척으로 한다
       LABELS.push({x:mx(alo), y:-my(ala), t:stLabel(st), cls:stYmt(st)?'lb-s':'lb-s2',
-                   dx:11*k, tier:stYmt(st)?1:(st.tier||3)});
+                   dx:11*k, tier:stYmt(st)?1:(st.tier||3), tl:st.tl});
     }
   }
   if(GEO){
@@ -3816,7 +3962,7 @@ function drawIncidents(){
                : Number(i.affected_subscribers).toLocaleString();
     const hm=v=>String(v||'').slice(11,16);
     return `<div class="inc ${esc(i.severity)}">`
-      + `<h5>${sevTag(i.severity)} · ${esc(i.title)}</h5>`
+      + `<h5>${sevTag(i.severity)} · ${esc(titleName(i.title))}</h5>`
       + `<p>${kpiTag(i.trigger_kpi)}`+T(' · 셀 {n}',{n:i.cell_cnt==null?'—':i.cell_cnt})
       + T(' · 영향 {s} ({i})',{s:esc(subs), i:esc(imp)})
       + ` · ${esc(String(i.opened_ts||'').slice(5,10))} ${esc(hm(i.opened_ts))}`

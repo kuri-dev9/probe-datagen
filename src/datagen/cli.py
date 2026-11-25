@@ -1016,7 +1016,8 @@ def _daily_load(conn, ts: datetime, vo_sec: float, cells=None) -> int | None:
     (`SHIFT_RAMP`) → 정점 → 회복(`SHIFT_RECOVER`) 모양은 그대로이고 정점 길이만 부하 길이를 따른다.
 
     * 묶음 — `CM_DATAGEN_CONFIG.daily_load.<n>`(`control.parse_daily_line` · 켜기|시 목록|역들). 켜진 묶음의 시가
-      가상 시각의 정시이면 **역마다 하나씩** 건다(대상 `DAILY:<토큰>` · 역 셋이면 장애 셋).
+      가상 시각의 정시이면 **화면의 역 한 칸마다 하나씩** 건다(대상 `DAILY:<토큰>` · 표시 이름이 같은 역 ID 여럿은
+      `DAILY:SG:<첫 ID>` 하나 · 2026-11-25).
     * 길이는 `DAILY_HOUR_MIN` × 그 시부터 이어진 시간 수(`control.daily_run`) — 18·19시면 18시에 2시간 하나를
       건다. 정시마다 따로 걸면 경계에서 회복 → 몰림 골이 생기고, 앞 부하가 아직 진행 중이라 뒤 시간이 빠진다.
     * 같은 대상이 이미 걸려 있으면(대기·진행) 건너뛴다 — 이어진 시간의 다음 정시 · 같은 분의 다음 틱 · 재기동 ·
@@ -1058,19 +1059,28 @@ def _daily_load(conn, ts: datetime, vo_sec: float, cells=None) -> int | None:
         run = control.daily_run(d["hours"], h)
         ln = control.DAILY_HOUR_MIN * run
         end = (h + run) % 24
-        for tok in d["targets"]:
+        # **화면의 역 한 칸 = 장애 1건**(2026-11-25 사용자 「2시간짜리 2역인데 4개는 아니지」). 화면은 표시 이름이 같은
+        # 역 ID 를 한 칸으로 보이는데(渋谷 ID 3개) 여기서 ID 마다 걸어 장애가 4건이 됐다. 같은 이름(`faults.daily_groups`
+        # — 화면 `/api/stations` 와 같은 `station_label`)의 ID 를 대상 하나(`SG:<첫 ID>` · `faults.daily_token`)로 묶는다
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT TARGET FROM {control.T_FAULT} WHERE FAULT_KIND='capacity_shift' "
+                        "AND TARGET LIKE 'DAILY%' AND STATUS IN ('pending','active')")
+            busy = set().union(*(F.daily_parts(r[0]) for r in cur.fetchall()))
+        for group in F.daily_groups(d["targets"]):
+            tok = F.daily_token(group)
             target = f"{DAILY_PREFIX}:{tok}"
+            # 셀 0개 판단은 묶은 ID 전체로 — ID 하나가 생성 범위 밖이어도 다른 ID 에 셀이 있으면 건다
             if cells is not None and not F._daily_cells(tok, cells):
                 if tok not in _DAILY_NO_CELLS:
                     _DAILY_NO_CELLS.add(tok)
                     print(f"[{ts:%H:%M}] 매일 부하 — 묶음 {n} · {tok} 는 셀 0개(생성 범위 밖) · 등록하지 않는다", flush=True)
                 continue
-            with conn.cursor() as cur:
-                cur.execute(f"SELECT COUNT(*) FROM {control.T_FAULT} WHERE FAULT_KIND='capacity_shift' "
-                            "AND TARGET=%s AND STATUS IN ('pending','active')", [target])
-                if cur.fetchone()[0]:
-                    continue
-            where = (F.STATION_NAMES.get(F.station_key(tok[3:]), tok) if tok.upper().startswith("ST:") else tok)
+            # 대기·진행 중인 매일 부하와 **역 ID 가 하나라도 겹치면** 건너뛴다 — 옛 꼴(ID 하나씩) 장애가 아직 돌고 있을 때
+            # 묶은 장애를 또 걸지 않게. 같은 분의 다음 틱·이어진 시간의 다음 정시도 이것으로 막힌다
+            if F.daily_parts(target) & busy:
+                continue
+            busy |= F.daily_parts(target)
+            where = (F.STATION_NAMES.get(F.station_key(group[0][3:]), group[0]) if group[0].upper().startswith("ST:") else tok)
             fid = control.add_fault(conn, "capacity_shift", target, datetime.now(),
                                     duration_min=ln, mode="daily",
                                     note=f"매일 같은 시각 부하 · {where} (묶음 {n} · 가상 {virt:%m-%d} {h:02d}시~{end:02d}시)")

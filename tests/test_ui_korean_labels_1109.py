@@ -97,7 +97,8 @@ def test_no_hon_sha_or_chome_in_korean_screen_strings():
     for i, ln in _code_lines():
         if i >= ja_start and re.search(r'^\s*"[^"]*":\s*$|^\s*"[^"]*":\s*"|^\s+"', ln):
             continue  # 번역표(키·값)
-        if re.search(r"本社|丁目", ln):
+        code = re.sub(r"\s//[^'\"`]*$", "", ln)    # 줄 끝 주석(`const SHOW_CHOME=false;   // 丁目 …`)은 화면 글자가 아니다
+        if re.search(r"本社|丁目", code):
             if re.search(r'"""|丁目\)|丁目 코드|丁目 을', ln):  # docstring
                 continue
             bad.append((i, ln.strip()[:100]))

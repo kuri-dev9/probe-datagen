@@ -598,7 +598,7 @@ def api_stations():
 
     같은 이름에 역사 폴리곤이 여럿이면(阿佐ヶ谷 둘) 한 줄에 ID 를 모두 싣는다 — 이름은 사람이 쓴 문자열이라 키로
     쓰지 않는다(graphio 불변규칙 14). 대상 토큰은 `ST:<짧은 ID>` 다(`faults.station_key`)"""
-    from ..faults import station_key
+    from ..faults import station_key, station_label
     conn = _connect()
     try:
         with conn.cursor() as cur:
@@ -618,7 +618,8 @@ def api_stations():
     by: dict[str, dict] = {}
     for name, sid, enb, cellnum in rows:
         m = names.get(sid) or {}
-        ja = m.get("ja") or name or sid
+        # 묶는 이름은 매일 부하(`faults.daily_groups`)와 같은 함수 — 화면 한 칸이 장애 1건이 되게(2026-11-25)
+        ja = station_label(sid, name, names)
         g = by.setdefault(ja, {"name": ja, "name_ja": ja, "name_ko": m.get("ko") or ja, "ids": [], "ids_live": [],
                                "cells": 0, "cells_gen": 0})
         k = station_key(sid)
@@ -639,10 +640,8 @@ STATION_NAMES = Path(__file__).resolve().parents[3] / "config" / "station_names.
 
 def _station_names() -> dict:
     """`STATION_ID → {ja, ko, kind, src}`. 파일이 없거나 깨졌으면 빈 표 — 화면은 DB 이름으로 남는다(목록은 그대로 뜬다)"""
-    try:
-        return json.loads(STATION_NAMES.read_text(encoding="utf-8")).get("stations", {})
-    except (OSError, ValueError):
-        return {}
+    from ..faults import station_display_names
+    return station_display_names()
 
 
 @router.post("/api/settings")

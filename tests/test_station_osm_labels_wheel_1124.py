@@ -52,7 +52,7 @@ def labels():
 
 @needs_geo
 def test_osm_kinds_are_exactly_five(osm):
-    assert {x["kind"] for x in osm} == {"platform", "area", "hull", "bldg", "n02"}
+    assert {x["kind"] for x in osm} == {"platform", "area", "band", "bldg", "n02"}      # `hull` 은 11-24 저녁 노선 띠(`band`)로 바뀌었다
 
 
 @needs_geo
@@ -66,50 +66,51 @@ def test_osm_polygons_are_closed_rings_and_n02_fallbacks_have_segs(osm):
 
 
 @needs_geo
-def test_hull_outer_rings_are_counter_clockwise_and_named(osm):
-    for x in (x for x in osm if x["kind"] == "hull"):
-        r = x["ring"]
-        assert sum(a * d - c * b for (a, b), (c, d) in zip(r, r[1:])) > 0     # 바깥 고리(반시계) — 구멍이 아니다
-        assert x["name"]
+def test_bands_are_named_strips_and_the_old_hulls_are_gone(osm):
+    assert not [x for x in osm if x["kind"] == "hull"]                       # 덩어리는 노선을 따라가는 띠로 바뀌었다(사용자 11-24 저녁 「라인을 따라」)
+    bands = [x for x in osm if x["kind"] == "band"]
+    assert len(bands) > 500 and all(x["name"] for x in bands)
+    assert min(_area(x["ring"]) for x in bands) > 100                         # 점처럼 찌그러진 띠가 없다
 
 
 @needs_geo
-def test_hull_exists_for_all_30_yamanote_stations(osm):
-    hulls = {x["name"] for x in osm if x["kind"] == "hull"}
-    names = _ymt_names()
-    assert len(names) == 30
-    assert [n for n in names if n not in hulls] == []     # 有楽町도 N02 승강장 선을 넓혀 덩어리를 만든다(11-24 저녁 · 사용자 「건물을 하나로」)
-
-
-@needs_geo
-def test_every_n02_fallback_station_also_has_a_hull(osm):
-    hulls = {x["name"] for x in osm if x["kind"] == "hull"}
-    assert [x["name"] for x in osm if x["kind"] == "n02" and x["name"] not in hulls] == []
-
-
-@needs_geo
-def test_hull_corners_are_right_angles(osm):
-    """끝을 직각으로(사용자 11-24 「둥글게 되어 있어 실제 건물 같다는 느낌이 안 든다」) — 모서리 대부분이 90°±2°, 어떤 것도 ±3° 밖이 아니다."""
-    ok = tot = 0
-    worst = 0.0
-    for x in (x for x in osm if x["kind"] == "hull"):
+def test_band_ends_are_right_angles(osm):
+    """띠의 양 끝은 직각이다(사용자 「끝을 직각으로」 → 노선 띠에서도 같다) — 거의 모든 띠에 직각 모서리가 4개 이상(양 끝 × 2)."""
+    k = math.cos(math.radians(35.68))
+    good = tot = 0
+    for x in (x for x in osm if x["kind"] == "band"):
         r = x["ring"][:-1]
         n = len(r)
+        c = 0
         for i in range(n):
-            a, b, c = r[i - 1], r[i], r[(i + 1) % n]
-            k = math.cos(math.radians(35.68))
-            v1, v2 = ((a[0] - b[0]) * k, a[1] - b[1]), ((c[0] - b[0]) * k, c[1] - b[1])
-            ang = math.degrees(math.acos(max(-1, min(1, (v1[0] * v2[0] + v1[1] * v2[1]) / (math.hypot(*v1) * math.hypot(*v2))))))
-            tot += 1
-            ok += abs(ang - 90) <= 2
-            worst = max(worst, abs(ang - 90))
-    assert tot > 5000 and ok / tot >= 0.995 and worst <= 3.0, (tot, ok, worst)    # 지금 10,250곳 중 18곳이 2.0~2.3° — 맥스 보고 「모두 ±2」와 조금 다르다
+            a, b, d = r[i - 1], r[i], r[(i + 1) % n]
+            v1, v2 = ((a[0] - b[0]) * k, a[1] - b[1]), ((d[0] - b[0]) * k, d[1] - b[1])
+            ln = math.hypot(*v1) * math.hypot(*v2)
+            if ln:
+                c += abs(math.degrees(math.acos(max(-1, min(1, (v1[0] * v2[0] + v1[1] * v2[1]) / ln)))) - 90) <= 3
+        tot += 1
+        good += c >= 4
+    assert tot > 500 and good / tot >= 0.99, (good, tot)                      # 지금 99.8%
 
 
 @needs_geo
-def test_tokyo_and_shinjuku_hulls_are_big_enough_to_read_as_a_station(osm):
+def test_band_exists_for_all_30_yamanote_stations(osm):
+    bands = {x["name"] for x in osm if x["kind"] == "band"}
+    names = _ymt_names()
+    assert len(names) == 30
+    assert [n for n in names if n not in bands] == []                          # 有楽町도 N02 승강장 선을 따라 띠를 만든다
+
+
+@needs_geo
+def test_every_n02_fallback_station_also_has_a_band(osm):
+    bands = {x["name"] for x in osm if x["kind"] == "band"}
+    assert [x["name"] for x in osm if x["kind"] == "n02" and x["name"] not in bands] == []
+
+
+@needs_geo
+def test_tokyo_and_shinjuku_bands_add_up_to_a_station_sized_shape(osm):
     for n in ("東京", "新宿"):
-        assert max(_area(x["ring"]) for x in osm if x["kind"] == "hull" and x["name"] == n) > 80_000, n
+        assert sum(_area(x["ring"]) for x in osm if x["kind"] == "band" and x["name"] == n) > 80_000, n     # 지금 16만 · 15만 m²
 
 
 @needs_geo
@@ -187,15 +188,21 @@ def test_station_labels_missing_file_returns_the_list_unchanged(monkeypatch):
 
 # ── 화면: 그리는 순서·옅기·숨김 ────────────────────────────────────────────
 
-def test_stn_draws_only_the_hull_by_default_and_the_other_kinds_are_the_way_back():
+def test_stn_draws_only_the_band_by_default_and_the_other_kinds_are_the_way_back():
     m = re.search(r"const ORDER=\[([^\]]*)\]", HTML)
-    assert re.findall(r"'([^']+)'", m.group(1)) == ["stk stk-hull", "stb", "stn"]    # 승강장·건물·구내·N02 대체 선은 데이터에만 남는다
-    for gone in ("'stk stk-area'", "'stk stk-platform'", "'stk stk-bldg'", "'stn stn-fb'"):
+    assert re.findall(r"'([^']+)'", m.group(1)) == ["stk stk-band", "stb", "stn"]     # 노선을 따라가는 띠 하나만(사용자 11-24 저녁)
+    for gone in ("'stk stk-hull'", "'stk stk-area'", "'stk stk-platform'", "'stk stk-bldg'", "'stn stn-fb'"):
         assert gone not in m.group(1)
 
 
-def test_hull_is_the_only_layer_so_it_is_drawn_at_half_opacity():
-    assert re.search(r"\.stk-hull\{fill-opacity:\.5\}", HTML)
+def test_band_is_an_opaque_gray_that_is_brighter_than_land_on_dark_and_darker_on_light():
+    assert re.search(r"\.stk-band\{fill:var\(--stbd\);fill-opacity:1\}", HTML)             # 투명도 없는 회색(사용자 「셀 아래에 깐다」)
+    dark = re.search(r"--stbd:(#[0-9a-fA-F]{6})", HTML.split("body[data-theme=light]")[0]).group(1)
+    light = re.search(r"--stbd:(#[0-9a-fA-F]{6})", HTML.split("body[data-theme=light]")[1]).group(1)
+    lum = lambda h: sum(int(h[i:i + 2], 16) for i in (1, 3, 5)) / 3
+    land_dark = re.search(r"--land:(#[0-9a-fA-F]{6})", HTML).group(1)
+    land_light = re.search(r"body\[data-theme=light\]\{[^}]*--land:(#[0-9a-fA-F]{6})", HTML, re.S).group(1)
+    assert lum(dark) > lum(land_dark) and lum(light) < lum(land_light)
     # 되돌릴 때를 위해 나머지 종류의 CSS 는 남아 있다 — 옅기 순서는 그대로
     op = {k: float(re.search(rf"\.stk-{k}\{{fill-opacity:([\d.]+)\}}", HTML).group(1)) for k in ("area", "platform", "bldg")}
     assert op["area"] < op["platform"] < op["bldg"]
@@ -418,11 +425,15 @@ def test_label_only_is_no_longer_limited_to_the_yamanote_line(monkeypatch, label
 
 # ── 글자 자리 옮기기 (`placeLabels`) — node 로 코드를 그대로 돌린다 ───────────────────────────────────
 
-def _place(tmp_path, blockers, extra=""):
+def _place(tmp_path, blockers, extra="", sc=500, tier=None):
     a = HTML.index("function placeLabels(){")
     b = HTML.index("\n}\n", a) + 3
+    t = HTML.index("const ST_T2_M=2000, ST_T3_M=1000;")
+    tier_js = "" if tier is None else f", tier:{tier}"
     js = f"""
-const LABELS=[]; let GEST=false, RP=false;
+const LABELS=[]; let GEST=false, RP=false, VB={{}};
+const mppOf=()=>1, scaleNiceM=()=>{sc};
+{HTML[t:HTML.index(chr(10), t)]}
 const els=[]; const box={{replaceChildren:(...x)=>{{els.length=0; els.push(...x);}}}};
 const rect={{left:0,top:0,width:1000,height:800}}, far={{left:-900,top:-900,right:-800,bottom:-800}};
 const document={{getElementById:id=>id==='labels'?box:id==='wrap'?{{getBoundingClientRect:()=>rect}}:{{getBoundingClientRect:()=>far}},
@@ -432,7 +443,7 @@ const placeHq=()=>null, placeFx=()=>{{}};
 {HTML[a:b]}
 {extra}
 for(const bl of {json.dumps(blockers)}) LABELS.push({{x:bl[0],y:bl[1],t:'AAAA',cls:'lb-n'}});
-LABELS.push({{x:500,y:400,t:'東京',cls:'lb-s',dx:11}});
+LABELS.push({{x:500,y:400,t:'東京',cls:'lb-s',dx:11{tier_js}}});
 placeLabels();
 const st=els.find(e=>e.className==='lb lb-s');
 console.log(JSON.stringify(st?{{left:+parseFloat(st.style.left).toFixed(1),top:+parseFloat(st.style.top).toFixed(1)}}:null));
@@ -470,6 +481,32 @@ def test_equipment_label_placed_first_keeps_its_place_over_the_station_name(tmp_
     assert _place(tmp_path, [RIGHT]) != {"left": 516.0, "top": 400.0}
 
 
+@needs_node
+@pytest.mark.parametrize("tier,sc,shown", [
+    (1, 50000, True), (1, 5000, True),                          # 1등급(야마노테)은 늘 보인다
+    (2, 2500, False), (2, 2000, True), (2, 1500, True),         # 2등급(환승역)은 `ST_T2_M`=2000 이하
+    (3, 1500, False), (3, 1000, True), (3, 500, True),          # 3등급(나머지)은 `ST_T3_M`=1000 이하
+    (None, 5000, True),                                          # 등급이 없는 글자(장비·지명 등)는 거르지 않는다
+])
+def test_station_name_tiers_show_by_scale(tmp_path, tier, sc, shown):
+    got = _place(tmp_path, [], sc=sc, tier=tier)
+    assert (got is not None) is shown, (tier, sc, got)
+
+
+def test_tier_thresholds_are_initial_values_and_the_filter_is_in_place_labels_not_draw():
+    assert re.search(r"const ST_T2_M=2000, ST_T3_M=1000;", HTML)
+    assert "**초기값이다**" in HTML[HTML.index("const ST_T2_M") - 220:HTML.index("const ST_T2_M")]
+    a = HTML.index("function placeLabels(){")
+    body = HTML[a:HTML.index("\n}\n", a)]
+    assert "L.tier===2&&sc>ST_T2_M || L.tier===3&&sc>ST_T3_M" in body            # 단계가 안 바뀌어도 축척 경계에서 바로 거른다
+
+
+def test_station_tier_comes_from_the_api_and_the_screen_lifts_the_30_yamanote_stations_to_tier1():
+    assert "tier:stYmt(st)?1:(st.tier||3)" in HTML                               # 노선 자료 30역은 항상 1등급, 등급이 없으면 3등급
+    from datagen.ui import map_api
+    assert map_api._TIER2_LINES == 3                                             # 노선 3개 이상 환승역 — 초기값
+
+
 def test_place_labels_moves_only_station_names_not_equipment_or_area_labels():
     a = HTML.index("function placeLabels(){")
     body = HTML[a:HTML.index("\n}\n", a)]
@@ -480,14 +517,14 @@ def test_place_labels_moves_only_station_names_not_equipment_or_area_labels():
 # ── 화면: 그리기 안전 · 지명 투명 · 경계 점선 · 丁目 끔 ──────────────────────────────────────────────────
 
 @needs_node
-def test_stn_build_draws_only_hulls_and_survives_unknown_kinds(tmp_path):
+def test_stn_build_draws_only_bands_and_survives_unknown_kinds(tmp_path):
     a = HTML.index("function stnBuild(g){")
     b = HTML.index("//: 마우스 아래 승강장", a)
     js = f"""
 let STN_PTS=[], STN_MPP=0; const BASE_CELL=0.01; const mx=x=>x, my=y=>-y;
 const el=n=>({{cls:null,d:null,setAttribute(k,v){{this[k==='class'?'cls':k]=v;}}}});
 const ring=(x,y)=>[[x,y],[x+.001,y],[x+.001,y+.001],[x,y+.001],[x,y]];
-const STBL=[{{kind:'hull',name:'東京',ring:ring(139.76,35.68)}}, {{kind:'platform',name:'',ring:ring(139.7601,35.6801)}},
+const STBL=[{{kind:'band',name:'東京',ring:ring(139.76,35.68)}}, {{kind:'hull',name:'옛덩어리',ring:ring(139.78,35.70)}}, {{kind:'platform',name:'',ring:ring(139.7601,35.6801)}},
   {{kind:'bldg',name:'東京駅',ring:ring(139.7602,35.6802)}}, {{kind:'area',name:'x',ring:ring(139.7603,35.6803)}},
   {{kind:'zzz',name:'모르는',ring:ring(139.77,35.69)}}, {{kind:'n02',name:'有楽町',lines:['a'],segs:[[[139.76,35.67],[139.761,35.67]]]}}];
 const g={{kids:[],appendChild(x){{this.kids.push(x);}}}};
@@ -500,7 +537,7 @@ console.log(JSON.stringify({{cls:g.kids.map(k=>k.cls), pts:STN_PTS.map(p=>p[2])}
     r = subprocess.run([NODE, str(f)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr                      # 모르는 종류(`zzz`)가 와도 예외가 나지 않는다 — 11-24 지도 멈춤 사고
     out = json.loads(r.stdout.strip().splitlines()[-1])
-    assert out["cls"] == ["stk stk-hull"]                     # 승강장·건물·구내·N02 선·모르는 종류는 그리지 않는다
+    assert out["cls"] == ["stk stk-band"]                     # 승강장·건물·구내·N02 선·옛 덩어리(hull)·모르는 종류는 그리지 않는다
     assert set(out["pts"]) == {"東京"}                        # 마우스 표시에도 그리는 것만 들어간다(이름 없는·안 그리는 것은 빠진다)
 
 
@@ -509,8 +546,35 @@ def test_place_names_are_translucent_so_station_names_read_first():
     assert re.search(r"opacity:\s*\.6\b", css)
 
 
-def test_district_border_is_dashed_and_chome_border_is_off_with_a_way_back():
+def test_district_border_is_dashed_between_districts_and_solid_on_the_coast_and_chome_is_off():
     adm = re.search(r"\n \.adm\{[^}]*\}", HTML).group(0)
-    assert "stroke-dasharray:4 3" in adm
+    assert "stroke:none" in adm                                                  # 면은 칠만 한다(선은 따로 긋는다)
+    lines = re.search(r"\n \.adm-in,\.adm-out\{[^}]*\}", HTML).group(0)
+    assert "pointer-events:none" in lines and "vector-effect:non-scaling-stroke" in lines
+    assert re.search(r"\n \.adm-in\{stroke-dasharray:4 3\}", HTML)             # 두 구가 맞닿은 선 — 점선
+    assert not re.search(r"\.adm-out\{[^}]*dasharray", HTML)                    # 해안·강변(한쪽만 땅) — 실선
     assert re.search(r"const SHOW_CHOME=false;", HTML)
-    assert "if(SHOW_CHOME && CHOME && LOD>=2) tiled('gChome','ch'" in HTML     # 데이터·`.ch` 는 남고 한 줄로 되돌린다
+    assert "if(SHOW_CHOME && CHOME && LOD>=2) tiled('gChome','ch'" in HTML       # 데이터·`.ch` 는 남고 한 줄로 되돌린다
+
+
+@needs_node
+def test_adm_edges_split_shared_borders_from_coast_lines(tmp_path):
+    """`admEdges` — 이웃 구 경계가 30m 안에 붙어 있으면 「구 사이」(in), 아니면 「땅 끝」(out). 번호가 앞선 구만 긋는다."""
+    a = HTML.index("const ADM_SHARE_M=30;")
+    b = HTML.index("\n}\n", HTML.index("function admEdges(geo){", a)) + 3
+    js = f"""
+const mx=x=>x, my=y=>-y;
+{HTML[a:b]}
+const sq=(x,y)=>[[x,y],[x+.01,y],[x+.01,y+.01],[x,y+.01]];
+// 두 구가 x=.01 에서 맞닿는다(꼭짓점은 일부러 20m 어긋나게 — `N03_map` 이 구마다 따로 단순화한 모양)
+const geo={{features:[{{rings:[sq(139.70,35.60)]}}, {{rings:[[[139.71,35.60002],[139.72,35.60002],[139.72,35.61002],[139.71,35.61002]]]}}]}};
+const r=admEdges(geo);
+const R=(r&&r.runs)||ADM_EDGES&&ADM_EDGES.runs||[];
+console.log(JSON.stringify({{keys:Object.keys(r||{{}}), n:R.length, cls:[...new Set(R.map(x=>x.cls))]}}));
+"""
+    f = tmp_path / "e.js"
+    f.write_text(js, encoding="utf-8")
+    res = subprocess.run([NODE, str(f)], capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    out = json.loads(res.stdout.strip().splitlines()[-1])
+    assert out["n"] > 0 and set(out["cls"]) == {"in", "out"}, out                # 맞닿은 변은 in, 바깥 변은 out 이 함께 나온다

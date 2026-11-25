@@ -62,6 +62,11 @@ def patch(monkeypatch):
     monkeypatch.setattr(R, "_events", lambda fid: (st.events, None))
     # 이 장애 것 고르기(`_own_events`)가 부르는 graphio·정답 읽기 — 사건 행의 `_c`(셀)·`_a`(축)로 대신한다. 없으면 장애 셀 그대로(겹친다)
     monkeypatch.setattr(R, "_truth_of", lambda fid: st.truth if st.truth is not None else {"cells": list(st.cells)})
+    # 정답은 지금 정답 파일 → 주입별 원장(`_truth_any`) 순으로 찾는다 — 시험이 실제 data/truth 를 읽지 않게 같은 가짜로 막는다
+    monkeypatch.setattr(R, "_truth_any", lambda fid: st.truth if st.truth is not None else {"cells": list(st.cells)})
+    # 같이 잡은 주입 확인(`_claims`)이 graphio 사건 문서(`/api/events/{id}`)를 묻는다 — 실제 graphio 로 가지 않게 빈 응답으로 막는다.
+    # `_ev_doc` 자체는 바꾸지 않는다(`_members_in` 시험이 `_graphio` 를 자기 가짜로 다시 바꿔 쓴다)
+    monkeypatch.setattr(R, "_graphio", lambda path, timeout=8: (None, "시험 — graphio 없음"))
     monkeypatch.setattr(R, "_ev_cells", lambda e: set(e.get("_c", st.cells)))
     monkeypatch.setattr(R, "_ev_axis", lambda e: e.get("_a", {}))
     monkeypatch.setattr(R, "_fault_cells", lambda fid, evs: (list(st.cells), {k: ["truth"] for k in st.cells}))

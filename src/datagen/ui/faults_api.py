@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ..control import FAULT_SELECT, FLOOR_TAIL_KEY, KINDS, T_FAULT, add_fault, cancel_fault, ensure_tables, get_config, list_faults, list_scenarios
-from .common import HERE, _connect, _pem_cfg
+from .common import HERE, _connect, _pem_cfg, truth_codes
 
 
 router = APIRouter()
@@ -56,6 +56,9 @@ def api_scenarios():
     from ..scenarios import recommended_duration, recommended_hours
     from ..faults import TARGET_UNITS, UNIT_WARN
     for r in rows:
+        # 이 종류가 내야 할 원인 코드 — 지도 재생이 사건과 주입을 이을 때 종류를 맞춘다
+        # (2026-11-25 · 4G↔5G 사건에 DNS 주입이 붙었다). `replay_api._own_events` 와 같은 함수다
+        r["truth_codes"] = truth_codes(r.get("kind") or "")
         # 거는 단위(2026-11-22 단위 표 · `faults.TARGET_UNITS`) — 있으면 화면이 장비 칸 대신 이 단위만 보인다.
         # `unit_warn` 단위(셀·eNB 하나)를 고르면 「탐지 안 될 수 있음」을 띄운다 — 막지 않는다
         r["units"] = list(TARGET_UNITS.get(r.get("kind") or "", ()))

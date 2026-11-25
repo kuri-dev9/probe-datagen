@@ -28,6 +28,7 @@ def _stations(monkeypatch):
     monkeypatch.setattr(faults, "STATION_CELLS", {
         faults.station_key(ST1[3:]): {"1-0"}, faults.station_key(ST2[3:]): {"2-0"},
         faults.station_key(OUT1[3:]): {"900-0"}, faults.station_key(OUT2[3:]): {"901-0"}}, raising=False)
+    monkeypatch.setattr(faults, "STATION_NAMES", {}, raising=False)        # 이름을 모르면 ID 마다 한 칸 — 다른 시험의 표가 새지 않게
     monkeypatch.setattr(faults, "load_stations", lambda conn: None, raising=False)
     monkeypatch.setattr(faults, "ADM3_CELLS", {"x": {"1-0"}}, raising=False)
     monkeypatch.setattr(faults, "load_adm3", lambda conn: None, raising=False)
