@@ -183,6 +183,14 @@ class FaultCfg:
     #: 23번 자동 대상 — 역 하나 근처 eNB 수 `(최소, 최대)`(2026-11-22 사용자 결정 ①). 주입마다 이 범위에서 하나를
     #: 뽑는다. eNB 하나(셀 3개 · 활성 20명 안팎)는 정체 인원이 판정 하한에 닿지 못했다(F-499·F-508). 초기값
     venue_enbs: tuple[int, int] = (5, 6)
+    #: **2번 행사장 인파 — 더하는 사람 몫**(2026-11-26 사용자 답 11 「배수로 정하지 마 · 100명이 있다면 최소 30명」).
+    #: 대상·인근 셀마다 주입 직전 1분의 사람 수 × 이 몫 × 강도를 올림해 그만큼 다른 셀 사람을 데려온다(`pemdb1._crowd_now`).
+    #: 값은 사용자가 준 30% 다
+    crowd_add_share: float = 0.3
+    #: 행사장과 함께 늘리는 인근 셀 수 `(최소, 최대)` — 사용자 「인근 셀 1~3개」. 주입마다 이 범위에서 하나
+    crowd_near_cells: tuple[int, int] = (1, 3)
+    #: 가장 가까운 역에서 행사장까지 걷는 길의 셀에 더하는 몫 `(강도 0, 강도 1)` — 사용자 「5~10% 정도만이라도」
+    crowd_path_share: tuple[float, float] = (0.05, 0.10)
     #: 23번 혼잡 몫의 처리율 `(최소, 최대)` bps — 행사장은 100kbps 안팎이 정상이다(2026-11-06 사용자
     #: 결정). 셀 용량 ÷ 동시 가입자로 계산한 값이 아니다 — 셀 마스터에 용량이 없다. **초기값**
     crowd_up_bps: tuple[float, float] = (50_000.0, 150_000.0)
@@ -204,11 +212,17 @@ class FaultCfg:
                     raise RuntimeError(f"pemdb1.fault.congestion_rtt 는 0 < 최소 ≤ 최대: {v}")
                 f.congestion_rtt = (lo, hi)
                 continue
-            if k in ("crowd_enb_cells", "venue_enbs"):
+            if k in ("crowd_enb_cells", "venue_enbs", "crowd_near_cells"):
                 lo, hi = (int(x) for x in v)
                 if not 0 < lo <= hi:
                     raise RuntimeError(f"pemdb1.fault.{k} 는 0 < 최소 ≤ 최대: {v}")
                 setattr(f, k, (lo, hi))
+                continue
+            if k == "crowd_path_share":
+                lo, hi = (float(x) for x in v)
+                if not 0 <= lo <= hi:
+                    raise RuntimeError(f"pemdb1.fault.crowd_path_share 는 0 ≤ 최소 ≤ 최대: {v}")
+                f.crowd_path_share = (lo, hi)
                 continue
             if k in ("crowd_up_bps", "crowd_dn_bps"):
                 lo, hi = (float(x) for x in v)
@@ -471,6 +485,9 @@ class Target:
     #: 15번(`ho_interruption`)이 고른 **노선 구간** — `route_segment` 가 만든 사전(노선 id·역·SGW 가
     #: 바뀌는 칸 수·모양). 노선을 못 쓴 대상은 `None` 이다. 정답지에 그대로 실린다
     route_seg: dict | None = None
+    #: 2번 행사장(`event_crowd`)의 **사람들이 걸어오는 역** — 자동 대상(`faults._station_venue`)이 고른 역 ID. 생성기가
+    #: 이 역에서 행사장까지 길(`faults.walk_path`)을 따라 사람을 걷게 한다. 비면 가장 가까운 역이다
+    station: str | None = None
 
     def label(self) -> str:
         bits = []
@@ -2716,7 +2733,7 @@ def _ran_congestion_load(sc, intensity) -> float:
     """1번 퇴근길 역 앞 속도 저하 — **사람이 몰려 붐빈다**(2026-11-23 사용자 결정 3 · 11-05 「호는 늘지 않는다」를 뒤집음).
 
     퇴근길 혼잡은 원래 사람이 몰려서 생긴다. 배율은 기존 `congestion_load`(1.8 · 확정대장 §3.0 「17–20시 1.8배」)이고
-    23번 행사장(`_event_crowd_load`)과 같은 장치(셀 추첨 비중)다. 대상은 메시 그대로다(`faults._congestion_target`) —
+    옛 23번 행사장 배율(`_event_crowd_load` · 11-26 걷음)과 같은 장치(셀 추첨 비중)다. 대상은 메시 그대로다(`faults._congestion_target`) —
     역 근처 eNB 몇 곳으로 좁히면 Q-11 칸 비율이 묽어진다(F-129·F-155). 하한은 지금처럼 채우지 않는다(`pemdb1`).
     나빠지는 사람은 여전히 IMSI 로 고른 몫(`congestion_user_share`)이고, 늘어난 사람도 같은 규칙에 든다
     """
@@ -4094,26 +4111,27 @@ def _pay_session(plan, sc, intensity, rng, cell) -> bool:
 # --------------------------------------------------------------------------
 
 
-@booster("event_crowd")
-def _event_crowd_load(sc, intensity) -> float:
-    """활성 가입자 **3배**(확정대장 §11.1). 14번 러시(1.8배)와 같은 장치다.
+def crowd_factor(intensity: float) -> float:
+    """2번 행사장 셀의 사람이 평소의 몇 배인가 — 더하는 사람 몫(`crowd_add_share`)에서 나온다. 배율을 따로 정하지 않는다"""
+    return 1.0 + FAULT.crowd_add_share * max(0.0, intensity)
 
-    추첨 비중만 올린다 — 호 대부분은 `floor_moved_kinds` 의 하한이 평소 호에서 옮겨 온다.
-    """
-    return 1.0 + 2.0 * intensity
+
+# 사람은 셀 배율(`@booster`)로 늘리지 않는다(2026-11-26 사용자 답 11 「배수로 정하지 마 · 사람이 더 몰릴 뿐」). 배율은
+# 고정 경로(셀 추첨) 몫에만 먹어 낮 12시에 사람 ×1.05~1.15 였다(F-632). 지금은 다른 셀 사람을 데려와 그 셀에서 호를
+# 걸게 한다 — `pemdb1.PemdbGen._crowd_now`(대상·인근 셀 · 역에서 걸어오는 길)
 
 
 @app_booster("event_crowd")
 def _event_app_load(sc, intensity, app) -> float:
     """행사장에서는 **모두 같은 게임을 켠다**(2026-11-21 · 대상 게임 앱 `target.app_id`).
 
-    배율은 새 값이 아니다 — 늘어난 사람 몫(`_event_crowd_load` 의 `2×강도` / `1+2×강도`)이 그 게임을 쓰게 한다.
+    배율은 새 값이 아니다 — 데려온 사람 몫(`crowd_factor` 의 `몫×강도` / `1+몫×강도`)이 그 게임을 쓰게 한다.
     대상 셀에서 그 게임이 차지하는 몫이 늘어난 사람 몫과 같아지는 배율을 사전의 원래 몫(`_app_share` ·
     `generator._bind_scenario_targets`)으로 푼다. 원래 몫을 모르면 사람 배율 그대로(3배)다.
     """
     if app.idx != sc.target.app_id:
         return 1.0
-    crowd = 1.0 + 2.0 * intensity
+    crowd = crowd_factor(intensity)
     p = getattr(sc, "_app_share", None)
     want = (crowd - 1.0) / crowd
     if not p or not 0.0 < p < 1.0 or want <= p:
@@ -4209,6 +4227,13 @@ def _event_crowd(plan, sc, intensity, rng, cell) -> bool:
     # 사건이 둘로 갈렸다. 몫은 그대로 `0.5×강도` 이고 IMSI·장애 ID 로 정해(`congested_user` · 14번과 같은 함수)
     # 고른 사람이 여는 대상 게임 세션은 모두 끊긴다 — 강도가 오르내리면 같은 순위에서 사람이 더해지고 빠진다
     if not congested_user(plan.imsi, sc.id, intensity, share=0.5):
+        # **끊기지 않은 사람의 그 게임도 느리다**(2026-11-26 · 사용자 「결론을 모르고도 맞히게 다른 필드도 함께 나빠지게」).
+        # 같은 게임 서버로 사람이 몰렸으니 내려받는 데 걸리는 시간이 1+2×강도배로 늘어 속도가 그만큼 떨어진다(옛 사람
+        # 배율 3배를 그대로 쓴다 · 새 값 아님 — 셀 사람 수와 따로다: 게임 서버는 행사장 밖 사람도 받는다). 그 게임·그 셀에서만이다 — 셀 전체(1번 퇴근길 혼잡)나 지역 무관(16번
+        # 동영상 서버)과 다르다. 재전송·연결 실패는 넣지 않는다 — down 재전송은 graphio R-41 이 전송 구간(R-09)에
+        # 양보하게 하고(위), 연결 실패는 16번(서버 쪽)의 모양이다
+        # 돌려주는 값은 「끊었나」다(끊지 않았으니 False) — 느려짐은 끊김이 아니다
+        plan.scale("Traffic_Total_Dnlink_ThroughputTime", 1.0 + 2.0 * intensity)
         return False
     for f in ("Traffic_Total_Dnlink_PayloadSize", "Traffic_Total_Dnlink_PayloadPacketCount",
               "Traffic_Total_Dnlink_RetransPacketCount"):
@@ -4347,7 +4372,7 @@ def _transport_cut_relocate(sc, cell, intensity, pool):
 def _transport_cut_load(sc, intensity) -> float:
     """복구 국면(`OUTAGE_GATE` 아래)의 **재접속 몰림** — 대상 지역에 호를 더 배정한다.
 
-    배율은 23번 행사장(`_event_crowd_load`)과 같은 식 `1 + 2 × 강도`다 — 복구 계단 0.40 에서 1.8배로,
+    배율은 옛 23번 행사장 배율(`_event_crowd_load` · 11-26 걷음)과 같은 식 `1 + 2 × 강도`다 — 복구 계단 0.40 에서 1.8배로,
     14번 러시(1.8배)와 같은 크기다. **초기값**(재접속 실측 없음). 정지 국면에는 억제기가 호를 막으므로
     배율을 걸지 않는다
     """

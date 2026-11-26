@@ -89,11 +89,12 @@ def test_app_load_grows_only_the_target_game_and_matches_the_crowd_share():
     other = SimpleNamespace(idx="3001")
     game = SimpleNamespace(idx=GAME)
     assert S._event_app_load(sc, 1.0, other) == 1.0                    # SNS 3배는 걷었다
-    assert S._event_app_load(sc, 1.0, game) == 3.0                     # 원래 몫을 모르면 사람 배율 그대로
-    sc._app_share = 0.1                                                # 몫 10% → 늘어난 사람 2/3 가 그 게임
+    assert S._event_app_load(sc, 1.0, game) == S.crowd_factor(1.0)      # 원래 몫을 모르면 사람 배율 그대로(11-26 — 3배가 아니라 더하는 사람 몫 `crowd_add_share`에서 나온다)
+    sc._app_share = 0.1                                                # 몫 10% → 늘어난 사람 몫이 그 게임(11-26 · 더하는 사람 몫 기준)
     x = S._event_app_load(sc, 1.0, game)
     share = 0.1 * x / (0.1 * x + 0.9)
-    assert abs(share - 2 / 3) < 1e-9
+    crowd = S.crowd_factor(1.0)
+    assert abs(share - (crowd - 1.0) / crowd) < 1e-9                   # 게임 몫 = 늘어난 사람 몫(`몫×강도 / (1+몫×강도)`)
 
 
 def test_old_upload_devices_remain_but_are_not_called_by_the_mutator(monkeypatch):
@@ -124,5 +125,11 @@ def test_floor_drafts_skips_event_crowd_so_the_size_is_the_crowd_load_alone():
     assert block.rstrip().endswith("continue")            # 하한을 채우는 분기로 내려가지 않는다
 
 
-def test_event_crowd_load_is_three_times_at_full_intensity_and_scales_with_it():
-    assert S._event_crowd_load(None, 1.0) == 3.0 and S._event_crowd_load(None, 0.5) == 2.0 and S._event_crowd_load(None, 0.0) == 1.0
+def test_crowd_factor_comes_from_the_added_share_and_scales_with_intensity():
+    """11-26 사용자 답 11 「배수로 정하지 마 · 사람이 더 몰릴 뿐」 — 배율을 따로 정하지 않고 더하는 사람 몫에서 나온다.
+    (전에는 강도 1.0 에서 3배 고정이었다.)"""
+    add = S.FAULT.crowd_add_share
+    assert S.crowd_factor(0.0) == 1.0                                   # 강도 0 이면 늘지 않는다
+    assert abs(S.crowd_factor(1.0) - (1.0 + add)) < 1e-12 and abs(S.crowd_factor(0.5) - (1.0 + 0.5 * add)) < 1e-12
+    assert S.crowd_factor(0.5) < S.crowd_factor(1.0)
+    assert S.crowd_factor(-1.0) == 1.0                                  # 음수 강도는 줄이지 않는다

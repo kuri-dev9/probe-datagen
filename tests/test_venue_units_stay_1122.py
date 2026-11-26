@@ -67,10 +67,14 @@ def test_venue_enb_count_follows_the_config_value(stations, monkeypatch):
     assert len({c.enb_id for c in stations if c.cell_key in t.cell_keys}) == 3
 
 
-def test_venue_picks_the_enbs_nearest_to_the_station(stations):
+def test_venue_is_off_the_station_by_at_least_the_minimum_path_and_never_contains_the_station_enb(stations):
+    """11-26 사용자 지시 「역에서 행사장까지 길이 3셀 이상」 — 역 eNB 는 행사장에서 빠지고, 역에서 가까운 eNB 부터 잇되
+    걷는 길이 `VENUE_MIN_PATH` 이상인 첫 곳을 고른다(전에는 역 eNB 100 부터 바로 붙은 묶음이었다)."""
     t = faults._station_venue(stations, random.Random(1), only="A")        # 역A = eNB 100 (선 끝)
     enbs = sorted({int(c.enb_id) for c in stations if c.cell_key in t.cell_keys})
-    assert enbs[0] == 100 and enbs == list(range(100, 100 + len(enbs)))
+    assert 100 not in enbs                                                 # 역 eNB 제외
+    assert enbs == list(range(enbs[0], enbs[0] + len(enbs)))               # 이어진 eNB 묶음(역에 가까운 것부터)
+    assert enbs[0] - 100 >= faults.VENUE_MIN_PATH                           # 역에서 최소 길이 이상 떨어졌다
 
 
 def test_venue_avoids_the_daily_load_station_and_its_enb(stations, monkeypatch):
@@ -122,7 +126,7 @@ def test_cell_target_is_one_cell(stations):
 def test_station_target_is_the_venue_of_that_station(stations):
     t = faults._resolve_target("ST:A", "event_crowd", stations, random.Random(1))
     enbs = {c.enb_id for c in stations if c.cell_key in t.cell_keys}
-    assert "100" in enbs and 5 <= len(enbs) <= 6
+    assert "100" not in enbs and 5 <= len(enbs) <= 6                       # 11-26 — 역 eNB 는 행사장에서 뺀다(역에서 3셀 이상)
 
 
 def test_station_target_accepts_the_stn_prefix(stations):

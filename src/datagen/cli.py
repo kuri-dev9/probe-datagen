@@ -1176,6 +1176,7 @@ def cmd_run(args) -> int:
             capacity_shift=_capacity_shift(pem),
             # 추가 가입자(lte_call 만) 상한 — 미리 만들어 두고 UI 막대 값만큼 쓴다(`set_extra_subs`)
             extra_lte_max=int(pem.get("extra_lte_max", 100_000)),
+            extra_home_boost=float(pem.get("extra_home_boost", 1.0)),
         )
         # 실시간 주입도 정답을 남긴다 — `_live_truth` 가 활성 집합이 바뀔 때 쓴다
         gen.truth_path = _truth_path(pem, data_dir)

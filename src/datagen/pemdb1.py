@@ -817,6 +817,34 @@ def _vendor_share_path(data_dir: Path, locale: str | None) -> Path | None:
     return path
 
 
+def _load_home_resid(data_dir: Path, locale: str | None) -> dict[str, float]:
+    """셀 키 → 그 셀의 상주 인구 몫(`tools/bake_home_resid.py` 가 굽는다 · 2026-11-26 사용자 결정 11).
+
+    추가 가입자를 주택가 쪽으로 더 두는 데만 쓴다(`_make_extra_subs`). 파일이 없으면 경고하고 빈 표 — 지금처럼
+    eNB 균등이다. `data/pemdb1/` 이 아니라 `data/` 에 두는 이유: 그 아래는 이미지에서 빠진다(`.dockerignore`)."""
+    path = Path(data_dir) / f"home_resid_{locale or 'kr'}.json"
+    if not path.exists():
+        print(f"  ! 주거 표 {path} 이 없다 — 추가 가입자는 eNB 균등으로 둔다(tools/bake_home_resid.py)", flush=True)
+        return {}
+    return {str(k): float(v) for k, v in json.loads(path.read_text(encoding="utf-8"))["counts"].items()}
+
+
+def _route_cell_keys(path: str) -> set[str]:
+    """노선 파일(`mobility.routes_file` · 야마노테선)에 적힌 셀 키 전부. 파일이 없으면 경고하고 빈 집합.
+
+    추가 가입자 정원(`_extra_homes`)이 「야마노테선 셀」을 고르는 데만 쓴다 — 탑승자 배치(`_seat_mobility`)는 따로 읽는다.
+    여기서는 모르는 셀 키를 멈추지 않는다(생성 범위 밖 셀은 그냥 정원 대상이 아니다)"""
+    if not path:
+        return set()
+    p = Path(path)
+    if not p.is_absolute():
+        p = Path(__file__).resolve().parents[2] / p
+    if not p.exists():
+        print(f"  ! 노선 파일 {p} 이 없다 — 추가 가입자 정원에 야마노테선 몫을 주지 않는다", flush=True)
+        return set()
+    return {str(k) for r in json.loads(p.read_text(encoding="utf-8")) for k in r.get("cells", ())}
+
+
 class Distributions:
     """`_distributions.json` 의 실측 구성비 샘플러.
 
@@ -2198,7 +2226,9 @@ class PemdbGen:
                  geo_drift_check: str = "stop",
                  #: **추가 가입자** 상한 — lte_call 만 만드는 가입자를 미리 이만큼 만들어 둔다(`set_extra_subs`).
                  #: 0 이면 만들지 않는다(기본 · 시험·배치 경로는 지금과 같다)
-                 extra_lte_max: int = 0):
+                 extra_lte_max: int = 0,
+                 #: 추가 가입자 정원에서 주택가·야마노테선 셀이 받는 몫(보통 셀 1 · `_extra_homes`). 1 이면 셀 균등
+                 extra_home_boost: float = 1.0):
         self.plmn = plmn or Plmn()
         #: 시군구 코드 → (시도 이름, 시군구 이름) — 좌표로 준 27번 진앙의 지명(`scenarios.quake_place_name`).
         #: 셀 마스터의 이름 칸은 비어 있다(`load_cells` · 한글 깨짐) — 이름은 지역 벌 표에서 읽는다
@@ -2252,6 +2282,11 @@ class PemdbGen:
         #: 값은 `(마지막 분, 그때의 하한, fault_id)` — fault_id 는 화면에 꼬리가
         #: 끝나는 시각을 fault 별로 알리는 데 쓴다(`floor_tail_until`)
         self._floor_last: dict[str, tuple[int, float, int | None]] = {}
+        #: 2번 행사장 인파 계획 — 장애 ID → `_crowd_plan` 결과. **프로세스 상태다**(재시작하면 그 분의 사람 수로 다시 짠다)
+        self._crowd: dict[str, dict] = {}
+        #: 직전 1분에 셀마다 기록을 낸 서로 다른 **원래** 가입자 수(데려온 사람 뺌) — 행사장이 「지금 있는 사람의 30%」를
+        #: 세는 기준이다(`_crowd_now`)
+        self._people_prev: dict[str, int] = {}
         self.dist = Distributions(
             data_dir / "pemdb1" / "_distributions.json",
             random.Random(seed + 101), success_only=success_only,
@@ -2293,7 +2328,10 @@ class PemdbGen:
             sa_device_share=float((net_mode or {}).get("sa_device_share", 0.3)),
         )
         self._reseat_subscribers(random.Random(seed + 202))
-        self._make_extra_subs(int(extra_lte_max or 0), random.Random(seed + 303))
+        self._make_extra_subs(int(extra_lte_max or 0), random.Random(seed + 303),
+                              resid=_load_home_resid(data_dir, locale) if extra_lte_max else {},
+                              line_keys=_route_cell_keys(Mobility.from_cfg(mobility).routes_file) if extra_lte_max else set(),
+                              boost=float(extra_home_boost))
         # 평시 PathSwitch 는 `_coerce` 가 셀 마스터를 보고 심는다. 생성기 쪽에도
         # 걸어 두는 이유는 구 경로(`generate_minute`)가 `_coerce` 를 타지 않아
         # **평시 배경이 없다**는 것을 코드에서 읽히게 하려는 것이다.
@@ -2463,7 +2501,41 @@ class PemdbGen:
         # (`session` 의 `sub_i`).
         self.gen.sub_by_imsi = {s.imsi: i for i, s in enumerate(self.gen.subs)}
 
-    def _make_extra_subs(self, n: int, rng: random.Random) -> None:
+    def _extra_homes(self, n: int, resid: dict[str, float] | None, line_keys: set[str], boost: float) -> list[int]:
+        """추가 가입자 ``j`` 번째의 머무는 셀 인덱스 — **셀별 정원대로** 나눈다(2026-11-26 사용자 「0명 271곳은 명백한
+        버그 · 상위 셀에 몰리게 하지 마 · 대부분 비슷하게 · 야마노테선과 주택가 위주」).
+
+        셀 몫은 1, **주택가 셀**(상주 인구 몫 ``resid`` 가 생성 셀 평균보다 많은 셀)과 **야마노테선 셀**(``line_keys``)은
+        ``boost``(설정 `extra_home_boost`)다. 둘 다여도 ``boost`` 한 번이다.
+
+        **어느 앞 순번에서 잘라도 정원 비례다** — 막대(`extra_n`)가 앞에서부터 몇 명을 쓰는지 정하므로, 순번마다
+        「(지금 인원 + ½) ÷ 몫」이 가장 작은 셀에 차례로 준다(Webster 순차 배정). 그래서 앞 ``k`` 명의 셀별 인원은
+        ``k × 몫 / 몫 합`` 과 1명 넘게 차이 나지 않고 합은 정확히 ``k`` 다. 동률은 셀 키의 CRC 순이라 셀 목록 순서(eNB
+        순)대로 몰리지 않는다. 전에는 `CellRing` 가중 추첨이라 가상 노드 반올림으로 271셀이 0명, 한 셀이 808명이었다.
+
+        대가: 셀 목록이 바뀌면(마스터·생성 범위) 사람들의 셀이 많이 바뀐다 — 링은 빠진 셀의 사람만 옮겼다. 셀 목록은
+        기동 때 한 번 정해지므로 같은 설정이면 같다.
+        """
+        import heapq
+
+        cells = self.gen.cells
+        r = [float((resid or {}).get(c.cell_key, 0.0)) for c in cells]
+        mean_r = sum(r) / len(r) if r else 0.0
+        w = [boost if ((mean_r > 0 and x > mean_r) or c.cell_key in line_keys) else 1.0 for c, x in zip(cells, r)]
+        heap = [(0.5 / wi, zlib.crc32(c.cell_key.encode()), i) for i, (c, wi) in enumerate(zip(cells, w))]
+        heapq.heapify(heap)
+        got = [0] * len(cells)
+        out: list[int] = []
+        for _ in range(max(0, n)):
+            _, tie, i = heapq.heappop(heap)
+            out.append(i)
+            got[i] += 1
+            heapq.heappush(heap, ((got[i] + 0.5) / w[i], tie, i))
+        self._extra_home_w = w
+        return out
+
+    def _make_extra_subs(self, n: int, rng: random.Random, resid: dict[str, float] | None = None,
+                         line_keys: set[str] | None = None, boost: float = 1.0) -> None:
         """**추가 가입자** — lte_call 만 만드는 사람을 ``n`` 명 미리 만든다(2026-11-20 사용자 「추가 lte-call 만
         생산할 생산량」 · 최소 1만).
 
@@ -2477,15 +2549,17 @@ class PemdbGen:
         다른 값이 된다. 식별자 순번은 기존 풀·숨은 SA 단말 뒤(`2 × len(gen.subs) + j`)라 IMSI·IMEI·MDN 이 겹치지 않는다.
         나머지 칸(요금제·성별·나이·교환국)은 기존 가입자를 차례로 본뜬다 — 분포가 같다.
         이동 그룹에 넣지 않는다 — 고정 가입자다(노선·이동 시나리오 9·15 는 기존 가입자가 맡는다).
+
+        **머무는 셀은 셀별 정원대로 나눈다**(2026-11-26 · `_extra_homes`) — 모든 셀에 사람이 있고, 주택가·야마노테선
+        셀이 `extra_home_boost` 배를 받는다.
         """
         import dataclasses
-        from .generator import CellRing
 
         base = self.gen.subs
         out: list = []
-        # 머무는 셀 — 기존 가입자를 본뜨면 같은 순번 둘이 같은 셀에 살게 된다. 자기 링으로 정한다(난수를 쓰지 않는다 ·
-        # 기존 가입자 집과 같은 eNB 균등 가중). 머무는 셀(`home_locality`)을 껐으면 읽지 않는다
-        home = CellRing(self.gen.cells, self.gen.flat_weights, "home_extra")
+        # 머무는 셀 — 기존 가입자를 본뜨면 같은 순번 둘이 같은 셀에 살게 된다. 정원대로 정한다(난수를 쓰지 않는다 ·
+        # 위 docstring). 머무는 셀(`home_locality`)을 껐으면 읽지 않는다
+        homes = self._extra_homes(n if base else 0, resid, line_keys or set(), boost)
         share = self.gen.sa_device_share
         dist = self.dist
         for j in range(max(0, n) if base else 0):
@@ -2501,7 +2575,7 @@ class PemdbGen:
             s.mdn = synth_mdn(i, s.mcc_mnc)
             s.imei = synth_imei(s.vendor, s.model, i)
             s.dcnr = "1" if rng.random() < share else "0"
-            s.home_cell = home.pick(i)
+            s.home_cell = homes[j]
             out.append(s)
         #: 추가 가입자 — 앞에서부터 `extra_n` 명을 쓴다. 값을 바꿔도 같은 사람이 남는다
         self.extra_subs = out
@@ -2744,8 +2818,153 @@ class PemdbGen:
 
         return relocate
 
+    #: 2번 행사장(내부 23번)
+    CROWD_KINDS = frozenset(("event_crowd",))
+
+    def _crowd_now(self, minute: int, active: list[Scenario], suppress) -> list[tuple]:
+        """이 분 행사장으로 **데려온 사람**의 호 `(가입자, 셀)` — 사람마다 그 분에 한 건(2026-11-26 사용자 답 11).
+
+        「인파가 더 몰릴 뿐이야. 배수로 정하지 마 · 100명이 있다면 최소 30명」. 전에는 셀 추첨 배율(×1+2·강도)이었는데
+        셀 추첨을 지나는 고정 경로 몫에만 먹어 낮 12시에 사람이 ×1.05~1.15 였다(F-632). 이제 사람 수로 정한다 —
+
+        * **대상·인근 셀**(`_crowd_plan` 의 ``stay``): 직전 1분의 **원래 사람 수**(데려온 사람은 뺀다 · `_people_prev`) ×
+          `crowd_add_share` × 강도를 올림한 만큼 명단 앞에서부터 그 셀에 둔다. 매 분 다시 재므로 「지금 있는 사람의 30%」가
+          시간대를 따라간다(주입 직전 한 분으로 굳히면 그 분의 들쭉날쭉이 25분 내내 남았다 · 모의 101명 대 평소 118명).
+          같은 사람이 매 분 같은 셀에 있다(머문다). 강도가 오르면 명단 뒤 사람이 더해진다.
+        * **역에서 걸어오는 길**(``path``): 매 분 한 무리가 역 셀에서 출발해 분마다 길의 다음 셀로 옮긴다(같은 IMSI). 무리
+          크기는 출발하는 분의 길 셀 평균 사람 수 × `crowd_path_share`(강도로 5~10%)를 확률 반올림한 값이고 걷는 동안
+          그대로다(셀이 작으면 올림이 30% 를 넘겨 버린다). 걸음이 TA 경계를 넘으면 위치 갱신(TAU)을 한 건 낸다. 길 끝에
+          닿은 무리는 행사장 사람에 섞인 것으로 보고 더 내지 않는다 — 행사장 사람 수는 위 몫이 정한다.
+
+        **생성량은 그대로다** — 호출부가 이 수만큼 평소 호 추첨을 줄인다. 사람은 고정 가입자 풀에서 이 셀들에 살지 않는
+        사람을 데려온다. 억제된 셀(무호 장애)에는 두지 않는다. 난수는 장애 ID 로 정한 것만 쓴다(공용 난수를 쓰지 않는다).
+        """
+        out: list[tuple] = []
+        live: set[str] = set()
+        cfg = self.fault
+        prev = self._people_prev
+        for sc in active:
+            if sc.kind not in self.CROWD_KINDS or not sc.target.cell_keys:
+                continue
+            live.add(sc.id)
+            plan = self._crowd.get(sc.id)
+            if plan is None:
+                plan = self._crowd[sc.id] = self._crowd_plan(sc)
+            lvl = sc.intensity(minute)
+            if lvl <= 0.0:
+                continue
+            take = plan["take"]
+            for k in plan["stay"]:
+                cell = self.gen.cell_by_key.get(k)
+                if cell is None or (suppress is not None and suppress(cell)):
+                    continue
+                n = math.ceil(cfg.crowd_add_share * lvl * prev.get(k, 0))
+                mine = plan["roster"][k]
+                if len(mine) < n:
+                    mine.extend(take(n - len(mine)))
+                out.extend((sub, cell) for sub in mine[:n])
+            path = plan["path"]
+            if not path:
+                continue
+            rel = minute - sc.start_minute
+            if rel not in plan["cohorts"]:
+                lo, hi = cfg.crowd_path_share
+                base = sum(prev.get(c.cell_key, 0) for c in path) / len(path)
+                x = (lo + (hi - lo) * min(1.0, lvl)) * base
+                n = int(x + random.Random(f"crowd:{sc.id}:{rel}").random())
+                plan["cohorts"][rel] = take(n)
+            for q in range(max(0, rel - len(path) + 1), rel + 1):
+                cell = path[rel - q]
+                if suppress is not None and suppress(cell):
+                    continue
+                walkers = plan["cohorts"].get(q, ())
+                out.extend((sub, cell) for sub in walkers)
+                # **TA 경계를 넘으면 위치 갱신(TAU) 한 건**(2026-11-26 케이 결정) — 걷는 사람(`Generator._advance_walkers`)과
+                # 같은 규칙·같은 길(`tau_events` → 이 분 끝의 TAU 루프)이다. 새 기준값이 없다
+                was = path[rel - q - 1] if rel - q >= 1 else None
+                if was is not None and was.ta_list and cell.ta_list and was.ta_list != cell.ta_list:
+                    for sub in walkers:
+                        si = self.gen.sub_by_imsi.get(sub.imsi)
+                        if si is not None:
+                            self.gen.tau_events.append((si, was, cell))
+        for gone in set(self._crowd) - live:
+            del self._crowd[gone]
+        return out
+
+    def _crowd_plan(self, sc: Scenario) -> dict:
+        """행사장 계획 — 대상·인근 셀, 역에서 오는 길, 데려올 사람 줄. 장애 ID 로 정해 같은 주입이면 같다.
+
+        * 인근 셀 — 대상 셀 중심에서 가까운 순으로 대상 eNB 밖 셀 `crowd_near_cells` 개(주입마다 그 범위에서 하나).
+        * 길 — 자동 대상이 고른 역(`Target.station` · 역에서 3셀 이상 떨어진 행사장), 없으면 행사장 밖 셀이 있는 가장 가까운
+          역의 셀에서 행사장 쪽으로 잇는다(`faults.walk_path` — 대상 고르기와 같은 함수). 한 분에 한 걸음이다.
+        * 사람 줄 — 고정 가입자 중 이 셀들에 살지 않는 사람을 장애 ID 로 섞은 줄. 필요할 때 앞에서부터 꺼낸다(``take``) —
+          한 사람은 한 자리(한 셀 또는 한 무리)에만 쓴다. 줄이 다 떨어지면 더 데려오지 않는다.
+        """
+        from . import faults as _faults
+
+        gen = self.gen
+        by_key = gen.cell_by_key
+        venue = [by_key[k] for k in sorted(sc.target.cell_keys) if k in by_key and by_key[k].latitude is not None]
+        plan: dict = {"stay": [], "roster": {}, "path": [], "cohorts": {}, "take": lambda n: [],
+                      "venue": [], "near": [], "station": None}
+        if not venue:
+            return plan
+        rng = random.Random(f"crowd:{sc.id}")
+        vy = sum(c.latitude for c in venue) / len(venue)
+        vx = sum(c.longitude for c in venue) / len(venue)
+        kx = math.cos(math.radians(vy))
+
+        def to_v(c) -> float:
+            return math.hypot((c.latitude - vy) * 111_320.0, (c.longitude - vx) * 111_320.0 * kx)
+
+        venbs = {c.enb_id for c in venue}
+        mapped = [c for c in gen.cells if c.latitude is not None and c.longitude is not None]
+        # 길은 **행사장만** 도착·건너뜀으로 본다 — 대상 고르기(`faults._venue_off_station`)와 같은 인자라야 고를 때 3셀이던
+        # 길이 여기서도 3셀이다(인근 셀까지 도착으로 보면 2셀로 줄었다 · 11-26 모의). 인근 셀은 길을 정한 뒤 길 밖에서 고른다
+        skeys = {c.cell_key for c in venue}
+        # 길 — 자동 대상이 고른 역(`Target.station`), 없으면 행사장 밖 셀이 있는 가장 가까운 역에서 `faults.walk_path`
+        station = getattr(sc.target, "station", None)
+        if station is None or station not in _faults.STATION_CELLS:
+            station, best = None, None
+            for sid in sorted(_faults.STATION_CELLS):
+                mine = [by_key[k] for k in sorted(_faults.STATION_CELLS[sid]) if k in by_key and by_key[k].latitude is not None]
+                if not mine or _faults.station_start(mine, skeys) is None:
+                    continue
+                cy = sum(c.latitude for c in mine) / len(mine)
+                cx = sum(c.longitude for c in mine) / len(mine)
+                d = math.hypot((cy - vy) * 111_320.0, (cx - vx) * 111_320.0 * kx)
+                if best is None or d < best:
+                    station, best = sid, d
+        path: list = []
+        if station is not None:
+            mine = [by_key[k] for k in sorted(_faults.STATION_CELLS[station]) if k in by_key and by_key[k].latitude is not None]
+            start = _faults.station_start(mine, skeys)
+            if start is not None:
+                path = _faults.walk_path(gen.cells, start, (vy, vx), venue, skeys)
+        on_path = {c.cell_key for c in path}
+        lo, hi = self.fault.crowd_near_cells
+        near = sorted((c for c in mapped if c.enb_id not in venbs and c.cell_key not in on_path),
+                      key=lambda c: (to_v(c), c.cell_key))[:rng.randint(lo, hi)]
+        stay = venue + near
+        here = {gen.cell_index[c.cell_key] for c in stay + path}
+        pool = [i for i in (gen._fixed or range(len(gen.subs))) if gen.subs[i].home_cell not in here]
+        rng.shuffle(pool)
+        it = iter(pool)
+
+        def take(n: int) -> list:
+            return [gen.subs[i] for i, _ in zip(it, range(max(0, n)))]
+
+        prev = self._people_prev
+        print(f"  · 행사장 인파 {sc.id} — 대상 {len(venue)}셀(직전 사람 {sum(prev.get(c.cell_key, 0) for c in venue)}) · 인근 "
+              f"{len(near)}셀(직전 {sum(prev.get(c.cell_key, 0) for c in near)}) · 역 "
+              f"{_faults.STATION_NAMES.get(station, station)} 길 {len(path)}셀(직전 {sum(prev.get(c.cell_key, 0) for c in path)})",
+              flush=True)
+        plan.update(stay=[c.cell_key for c in stay], roster={c.cell_key: [] for c in stay}, path=path, take=take,
+                    venue=[c.cell_key for c in venue], near=[c.cell_key for c in near], station=station)
+        return plan
+
     def _floor_drafts(self, minute: int, active: list[Scenario], landed,
-                      suppress, ts, slot_start):
+                      suppress, ts, slot_start, force_ct: dict | None = None):
         """장애 대상 셀마다 **판정 하한까지 모자란 호**를 낸다.
 
         대상이 `floor_max_cells` 를 넘으면 걸지 않는다(장비 전체 대상).
@@ -2775,7 +2994,7 @@ class PemdbGen:
                 # 같아졌다(리오 실측 29.9% 대 29.8%). 셀당 호를 맞추는 장치와 구성비 신호는 함께 못 간다
                 continue
             if sc.kind == "event_crowd":
-                # **23번도 하한을 채우지 않는다**(2026-11-21 · F-490·F-491). 크기는 `_event_crowd_load`(사람 3배)
+                # **23번도 하한을 채우지 않는다**(2026-11-21 · F-490·F-491). 크기는 데려온 사람(`_crowd_now` · 11-26 전에는 `_event_crowd_load` 사람 3배)
                 # 하나가 정한다. 옛 하한 셀당 120호(업링크 혼잡 시절 서버 2곳 표본용)가 평소 셀당 약 7호를
                 # 대신해 행사장 셀 3개의 사람이 77배·세션이 85배가 됐고, 그 셀들이 구 세션의 3분의 1을 먹어
                 # 新宿区 전체 내려받기 속도(U-15 · 1,039셀)가 떨어져 보였다
@@ -2834,7 +3053,21 @@ class PemdbGen:
                 else:
                     self._floor_last[k] = (minute, want, _fault_no(sc.id))
                 need = int(want + gen.rng.random()) - landed[k]
+                nr_try = sc.kind in self.NR_TRY_FLOOR_KINDS
+                if nr_try and self._dcnr_pool is None:
+                    self._dcnr_pool = [i for i in pool if gen.subs[i].dcnr == "1"]
                 for _ in range(max(0, need)):
+                    if nr_try:
+                        # **5G 를 붙이려는 데이터 호**로 채운다(2026-11-26 · 23번 F-638). 아무 단말·아무 절차로 채우면
+                        # 5G 단말 호(분모)만 늘고 NR 을 붙일 호는 분당 0~5건이라 NR 레그 연결률(N-02)이 떨어진 것이
+                        # 보이지 않았다. 하한 크기는 그대로 — 사람만 5G 능력 단말, 절차만 NR 이 붙는 데이터 절차다
+                        dp = self._dcnr_pool or pool
+                        sub = gen.subs[dp[gen.rng.randrange(len(dp))]]
+                        rec, c2 = gen.base_lte_call(ts, slot_start, at=(sub, cell))
+                        if force_ct is not None:
+                            force_ct[id(rec)] = self.NR_TRY_CALL_TYPE
+                        yield rec, c2
+                        continue
                     sub = gen.subs[pool[gen.rng.randrange(len(pool))]]
                     yield gen.base_lte_call(ts, slot_start, at=(sub, cell))
         yield from self._floor_tail(minute, done, landed, suppress, ts, slot_start)
@@ -3256,8 +3489,10 @@ class PemdbGen:
         landed: collections.Counter = collections.Counter()
         # `floor_sa_kinds` 는 호를 **더하지 않고 평소 호에서 옮긴다** — 전국 호 수가 그대로다. `n_calls`
         # 는 폭주·폴백 상한의 기준이라 그대로 두고 평소 호 추첨 횟수만 줄인다
+        # 행사장으로 데려온 사람의 호(2번 · `_crowd_now`) — 평소 호에서 같은 수를 뺀다(생성량 그대로)
+        crowd_now = self._crowd_now(minute, active, suppress) if n_calls else []
         plain_calls = max(0, n_calls - self._sa_floor_calls(minute, active)
-                          - self._moved_floor_calls(minute, active, n_calls))
+                          - self._moved_floor_calls(minute, active, n_calls) - len(crowd_now))
 
         def drafts():
             for _ in range(plain_calls):
@@ -3290,7 +3525,9 @@ class PemdbGen:
                 # 않지만, 같은 셀에 다른 장애의 하한이 걸려도 배율 기준이 흔들리지 않게 남긴다
                 natural = collections.Counter(landed)
                 yield from self._floor_drafts(minute, active, landed, suppress,
-                                              ts, slot_start)
+                                              ts, slot_start, force_ct)
+                for sub, cell in crowd_now:
+                    yield gen.base_lte_call(ts, slot_start, at=(sub, cell))
                 # 자연재해 호 폭주 — 더한 호의 절차는 `force_ct` 가 정한다(음성·발신 쪽으로)
                 yield from self._surge_drafts(minute, active, landed, n_calls,
                                               ts, slot_start, force_ct, natural, emergency)
@@ -3345,6 +3582,10 @@ class PemdbGen:
         extra_ids: set[int] = set()
         #: 추가 호 동안 바꿔 끼운 공용 난수의 원래 상태 — 호 루프가 끝나면 되돌린다(`extra_drafts`)
         frozen: list = []
+        #: 이 분 셀마다 기록을 낸 **원래** 가입자 — 다음 분 행사장 사람 기준(`_people_prev`). 데려온 사람은 빼야 30% 가
+        #: 데려온 사람 위에 다시 붙지 않는다
+        people: dict[str, set] = collections.defaultdict(set)
+        crowd_imsi = {sub.imsi for sub, _ in crowd_now}
         for rec, cell in drafts():
             fct = force_ct.pop(id(rec), None)
             is_extra = id(rec) in extra_ids
@@ -3400,6 +3641,8 @@ class PemdbGen:
             _scenarios.fit_minute(rec, slot_start, lo_down)
             vals = rec.values
             out.append(vals)
+            if vals[i_imsi] not in crowd_imsi:
+                people[cell.cell_key].add(vals[i_imsi])
             if is_extra:
                 self.last_extra_n += 1
             # 다운 SGW·PGW 에서 다운 시각 뒤에 끝난 호는 세션을 열지 않는다 — 절단된 호도
@@ -3431,6 +3674,7 @@ class PemdbGen:
         # 추가 호 동안 바꿔 끼운 공용 난수를 되돌린다 — 뒤의 TAU·세션·U-Plane 은 추가 가입자가 없을 때와 같은 흐름이다
         for r, st in frozen:
             r.setstate(st)
+        self._people_prev = {k: len(v) for k, v in people.items()}
         # ── TAU — **TAC 가 바뀐 전환마다 한 건** ────────────────────────
         #
         # 핸드오버 레코드와 **별개 절차**다. 이것이 없으면 "TAC 가 바뀌었는데
@@ -4076,6 +4320,9 @@ class PemdbGen:
 
     #: NR 을 얹는 절차 — 현장 추출의 NR 호 145건이 전부 ct 3·4 다. 7(Ext Svc MO)은 같은 서비스 호다
     NR_CALL_TYPES = frozenset(("3", "4", "7"))
+    #: 하한 호를 「5G 를 붙이려는 데이터 호」로 채우는 kind 와 그 절차(`NR_CALL_TYPES` 의 서비스 요청) — `_floor_drafts`
+    NR_TRY_FLOOR_KINDS = frozenset(("nsa_nr_leg",))
+    NR_TRY_CALL_TYPE = "3"
     #: Modify Bearer 가 없는 절차 — 현장 ct 6 은 0. Detach 는 경로를 만들지 않는다
     NO_MB_CALL_TYPES = frozenset(("6", "9"))
     #: 호 길이(초 상한) → NR 가능 eNB 에서 NR 이 붙는 확률. **초기값.** 현장은 5G 단말 전체로 5초 미만

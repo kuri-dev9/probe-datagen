@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import random
 import re
 from datetime import datetime
@@ -1060,8 +1061,64 @@ def _outage_target(cells: list[Cell], rng: random.Random, rate,
 DAILY_TOKENS: list[str] = []
 
 
+def walk_path(cells: list[Cell], start: Cell, goal: tuple[float, float], arrive: list[Cell],
+              skip: set[str]) -> list[Cell]:
+    """``start`` 셀에서 ``goal``(위도, 경도) 쪽으로 셀을 한 걸음씩 잇는 길 — 2번 행사장 사람들이 역에서 걸어오는 길.
+
+    한 걸음은 ``goal`` 쪽으로 다가가는 셀 중 **가장 가까운 셀**이고, 그 걸음의 절반 이상은 ``goal`` 쪽으로 다가가야
+    한다(옆으로 새지 않게 · 절반은 초기값). ``arrive`` 셀(행사장)이 다음 걸음보다 가까우면 도착이다. 좌표가 같은
+    셀(섹터)은 한 번만 밟고, ``skip`` 셀은 밟지 않는다. 대상 고르기(`_station_venue` · 길이 조건)와 생성기
+    (`pemdb1._crowd_plan`)가 **같은 함수**를 쓴다 — 두 벌이면 고를 때 3셀이던 길이 생성할 때 다른 길이가 된다
+    """
+    from .generator import _dist_m
+
+    gy, gx = goal
+    kx = math.cos(math.radians(gy))
+
+    def to_g(c) -> float:
+        return math.hypot((c.latitude - gy) * 111_320.0, (c.longitude - gx) * 111_320.0 * kx)
+
+    mapped = [c for c in cells if c.latitude is not None and c.longitude is not None and c.cell_key not in skip]
+    cur = start
+    path = [cur]
+    seen = {(cur.latitude, cur.longitude)}
+    while True:
+        dv = to_g(cur)
+        reach = min((_dist_m(cur, c) for c in arrive), default=0.0)
+        best, bd = None, None
+        for c in mapped:
+            if (c.latitude, c.longitude) in seen:
+                continue
+            d = _dist_m(cur, c)
+            if to_g(c) < dv - d / 2.0 and (bd is None or (d, c.cell_key) < (bd, best.cell_key)):
+                best, bd = c, d
+        if best is None or bd >= reach:
+            return path
+        path.append(best)
+        seen.add((best.latitude, best.longitude))
+        cur = best
+
+
+def station_start(station_cells: list[Cell], skip: set[str]) -> Cell | None:
+    """역 셀 중 ``skip``(행사장) 밖이고 역 중심에 가장 가까운 셀 — 걷는 길의 출발 셀"""
+    mine = [c for c in station_cells if c.latitude is not None]
+    out = [c for c in mine if c.cell_key not in skip]
+    if not out:
+        return None
+    cy = sum(c.latitude for c in mine) / len(mine)
+    cx = sum(c.longitude for c in mine) / len(mine)
+    k = math.cos(math.radians(cy))
+    return min(out, key=lambda c: (math.hypot(c.latitude - cy, (c.longitude - cx) * k), c.cell_key))
+
+
+#: 2번 행사장 자동 대상 — 역에서 행사장까지 걷는 길의 최소 셀 수(2026-11-26 케이 결정 「3셀 이상」 · 사용자 「역에서 해당 셀까지
+#: 이동 동선」). 역 바로 옆 eNB 를 고르면 길이 2셀이라 걷는 모습이 보이지 않았다
+VENUE_MIN_PATH = 3
+
+
 def _station_venue(cells: list[Cell], rng: random.Random,
-                   used: dict[str, int] | None = None, only: str | None = None) -> Target | None:
+                   used: dict[str, int] | None = None, only: str | None = None,
+                   load=None, fault: dict | None = None) -> Target | None:
     """23번 자동 대상 — **역 하나 근처 eNB 5~6개**(2026-11-22 사용자 결정 ① · `venue_enbs`).
 
     행사장은 역 앞에 모이고, eNB 하나(셀 3개 · 활성 20명 안팎)는 정체 인원이 판정 하한에 닿지 못했다(F-499·F-508).
@@ -1072,6 +1129,10 @@ def _station_venue(cells: list[Cell], rng: random.Random,
     * 활성 장애 셀은 `build` 가 후보 셀(`cells`)에서 eNB 째 덜어 넘긴다 — 여기서 따로 보지 않는다.
     * 역 표를 못 읽었으면(빈 표) None — 호출부가 예전 eNB 하나 고르기로 돌아간다.
     * ``only`` — 그 역 하나(대상 `ST:<역>` · 운영자가 골랐다). 매일 부하 역도 피하지 않는다(사람이 고른 것이다)
+    * **사람이 아주 많은 곳은 되도록 피한다**(2026-11-26 사용자 답 11). 창고의 평소 메시 인원(``load`` · `_meshes`)을
+      후보 eNB 셀에 셀 수 비율로 나눠 더하고, 후보 평균보다 많은 후보를 뺀다(평균 이하가 하나도 없으면 빼지 않는다).
+      평소 1,000명인 곳에 30% 를 더해도 사람이 더 몰려 보이기는 하지만 같은 인원을 옮겨 오는 몫이 커진다.
+      창고를 못 읽으면 예전처럼 고른다
     """
     from .geo_lite import haversine_km
 
@@ -1101,19 +1162,58 @@ def _station_venue(cells: list[Cell], rng: random.Random,
         if not mine or STATION_NAMES.get(sid) in daily_names or {c.cell_key for c in mine} & daily:
             continue
         at = (sum(c.latitude for c in mine) / len(mine), sum(c.longitude for c in mine) / len(mine))
-        near = sorted(per, key=lambda e: (haversine_km(*at, *centre[e]), str(e)))[:n]
+        near = _venue_off_station(cells, per, centre, mine, at, n)
+        if near is None:
+            continue
         # 같은 eNB 묶음이 되는 역(한 역의 역사 여럿 · 붙은 두 역)은 한 후보다
         cand.setdefault(target_key(c.cell_key for e in near for c in per[e]), (sid, near))
     if not cand:
         print(f"  ! 역 {only} — 생성 범위에 셀이 없다" if only
               else "  ! 23번 후보 역이 없다 — eNB 하나 고르기로 돌아간다", flush=True)
         return None
+    meshes = _meshes(cells, fault, load) if (load is not None and fault is not None and not only) else []
+    if meshes and len(cand) > 1:
+        share: dict[str, float] = {}
+        for _, people, mine in meshes:
+            for c in mine:
+                share[c.cell_key] = share.get(c.cell_key, 0.0) + people / len(mine)
+        crowd = {k: sum(share.get(c.cell_key, 0.0) for e in near for c in per[e]) for k, (_, near) in cand.items()}
+        mean = sum(crowd.values()) / len(crowd)
+        calm = {k: v for k, v in cand.items() if crowd[k] <= mean}
+        if calm:
+            print(f"  · 23번 붐비는 역 피함 — 후보 {len(cand)}개 중 평소 인원 평균({mean:,.0f}명) 위 {len(cand) - len(calm)}개 뺌",
+                  flush=True)
+            cand = calm
     key = _rotating(sorted(cand), lambda k: k, used, rng)
     sid, near = cand[key]
     keys = {c.cell_key for e in near for c in per[e]}
     print(f"  · 역 근처 대상 {STATION_NAMES.get(sid, sid)} · eNB {len(near)}개 {sorted(map(str, near))}"
           f" · 셀 {len(keys)}개 (후보 역 {len(cand)}개)", flush=True)
-    return Target(cell_keys=keys, enb_id=near[0] if len(near) == 1 else None)
+    return Target(cell_keys=keys, enb_id=near[0] if len(near) == 1 else None, station=sid)
+
+
+def _venue_off_station(cells: list[Cell], per: dict, centre: dict, station_cells: list[Cell],
+                       at: tuple[float, float], n: int) -> list | None:
+    """역에서 **조금 떨어진** 행사장 eNB ``n`` 개 — 역에서 걷는 길(`walk_path`)이 `VENUE_MIN_PATH` 셀 이상인 곳 중 역에
+    가장 가까운 곳(2026-11-26 케이 결정). 역에서 가까운 eNB 부터 행사장 중심 후보로 보고, 그 eNB 에서 가까운 ``n`` 개를
+    행사장으로 묶는다. 역 셀이 든 eNB 는 행사장에 넣지 않는다. 길이 조건을 채우는 곳이 없으면 None(그 역은 후보 아님)"""
+    from .geo_lite import haversine_km
+
+    own = {c.enb_id for c in station_cells}
+    pool = [e for e in per if e not in own]
+    for seed in sorted(pool, key=lambda e: (haversine_km(*at, *centre[e]), str(e))):
+        c0 = centre[seed]
+        near = sorted(pool, key=lambda e: (haversine_km(*c0, *centre[e]), str(e)))[:n]
+        venue = [c for e in near for c in per[e]]
+        keys = {c.cell_key for c in venue}
+        start = station_start(station_cells, keys)
+        if start is None:
+            continue
+        gy = sum(c.latitude for c in venue) / len(venue)
+        gx = sum(c.longitude for c in venue) / len(venue)
+        if len(walk_path(cells, start, (gy, gx), venue, keys)) >= VENUE_MIN_PATH:
+            return near
+    return None
 
 
 def _venue_target(cells: list[Cell], rng: random.Random, fault: dict, load,
@@ -1364,7 +1464,7 @@ def build(fault: dict, cells: list[Cell], anchor: datetime,
                     target = _anchor_target(pick, rng, fault, mesh_load, used)
                 elif fault["kind"] in _VENUE_KINDS:
                     # 역 근처 eNB 5~6개(2026-11-22) — 역 표가 없으면 예전 eNB 하나(`_venue_target`)
-                    target = (_station_venue(pick, rng, used)
+                    target = (_station_venue(pick, rng, used, load=mesh_load, fault=fault)
                               or _venue_target(pick, rng, fault, mesh_load, used))
                 elif fault["kind"] == "enb_s1_outage":
                     target = _outage_target(pick, rng, _rate_at(enb_rate, fault), used)

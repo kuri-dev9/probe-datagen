@@ -73,6 +73,25 @@ pemdb1:
   # 의 반출 묶음에 실리고, compose 가 호스트 것을 이 경로로 마운트한다.
   geo_crosswalk: /app/data/geo/code_crosswalk.json
 
+  # ── 지도·3D 재생 배경 자료 — **컨테이너 안 경로다** (2026-11-26) ────────
+  #
+  # 베이스(`datagen.yaml`)는 `../graphio-probe-rca/data/geo/jp/...` 호스트 상대경로라
+  # 컨테이너에서는 없는 경로가 된다. 빠지면 **에러 없이** 3D 재생이 빈 화면이 된다
+  # (현장에서 겪었다). 자료는 graphio `data/geo/jp/` 에 있고 git 밖이다 — 복사해 둔다.
+  geo_roads: /app/data/geo/jp/roads.json        # 도로 OSM (배경)
+  geo_green: /app/data/geo/jp/green.json        # 공원·수역 OSM (배경)
+  geo_station_bldg: /app/data/geo/jp/station_bldg.json  # 역 건물 OSM (배경)
+  geo_station_n02: /app/data/geo/jp/station_n02.json    # 역 승강장 선 N02 (배경)
+  geo_station_osm: /app/data/geo/jp/station_osm.json    # 역 모양 OSM (배경)
+  geo_station_label: /app/data/geo/jp/station_label.json  # 역 이름 글자 자리 (화면용)
+  geo_building_tall: /app/data/geo/jp/building_tall.json  # 높은 건물 OSM (3D 재생 전용)
+  geo_bldg_dir: /app/data/geo/jp/bldg   # 낮은 건물까지 1km 칸 파일 OSM (3D 재생 전용)
+  geo_boundary_map: /app/data/geo/jp/N03_map.json   # 행정경계 상세 (지도 전용)
+  geo_water: /app/data/geo/jp/water.json            # 수역 relation OSM
+  geo_chome: /app/data/geo/jp/chome.json            # 丁目 경계 e-Stat
+  geo_dong_shapes: /app/data/geo/jp/dong_shapes.json  # 읍면동 모양 (graphio geo-chome)
+  geo_prefectures: /app/data/geo/jp/prefectures.json  # 미니 일본 전도 (27번 진앙)
+
   # ── 생성량 비율(%) ──────────────────────────────────────────────────────
   #
   # **운영은 100% 다.** 기본값(`datagen.yaml` 의 70)은 노트북에서 디스크를

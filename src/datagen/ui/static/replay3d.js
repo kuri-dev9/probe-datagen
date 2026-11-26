@@ -109,13 +109,10 @@ const MY = lat => (180 / Math.PI) * Math.log(Math.tan(Math.PI / 4 + lat * Math.P
 //: 재생 속도 고르기 · 누르기로 보는 움직임 한계(px) — 이보다 많이 움직이면 끌기다. **초기값이다**
 const SPEEDS = [.5, 1, 2, 4], CLICK_PX = 5;
 
-// 픽토그램(SVG · 24×24) — 이모지를 쓰지 않고 직접 그린다(11-26 사용자). 지진 = **집 아래 땅이 흔들리는 모양**(같은 날 사용자 「집 아래 땅이
-// 흔들리는 모양으로」 — 집은 위쪽 절반, 폭을 꽉 채운 지그재그 땅 선과 그 가운데 갈라짐, 양옆 흔들림 괄호). 전원 차단 = 전원 기호에 사선.
-// 3D 표식(`iconOf` quake·power)과 지도(`map.html` 통합 장애 바 「지진」 줄)도 같은 그림이다
-const PIC_QUAKE = '<svg class=pic viewBox="0 0 24 24" aria-hidden=true><path d="M7 13V7L12 3L17 7V13Z" fill="#ff4d4d"/><path d="M11 13V10H13V13Z" fill="#fff"/>'
-  + '<path d="M1 17L4 15L7 18L10 15L13 18L16 15L19 18L22 15" fill="none" stroke="#ff4d4d" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>'
-  + '<path d="M12 18L11 20.5L13 23" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>'
-  + '<path d="M3 6Q2 9 3 12M21 6Q22 9 21 12" fill="none" stroke="#ff4d4d" stroke-width="1.6" stroke-linecap="round"/></svg>';
+// 픽토그램(SVG · 24×24) — 이모지를 쓰지 않고 직접 그린다(11-26 사용자). 지진 = **시나리오 화면 4번 「① 원인」 그림**(같은 날 사용자 「문어 같다 ·
+// 집 아래 땅 움직이는 모습, 집이랑 땅, 땅 아래 번개」) — 땅선 위 건물 두 채(창은 흰 표시), 수평 땅선, 땅 아래 번개 갈라짐.
+// 전원 차단 = 전원 기호에 사선. 3D 표식(`iconOf` quake·power)과 지도(`map.html` 통합 장애 바 「지진」 줄)도 같은 그림이다
+const PIC_QUAKE = '<svg class=pic viewBox="0 0 24 24" aria-hidden=true><path d="M3 14V8H9V14Z" fill="#ff4d4d"/><path d="M10 14V3H17V14Z" fill="#ff4d4d"/><path d="M4.5 9.5H7.5V11H4.5ZM11.5 5H13.3V6.6H11.5ZM14.2 5H16V6.6H14.2ZM11.5 8.3H13.3V9.9H11.5ZM14.2 8.3H16V9.9H14.2Z" fill="#fff"/><path d="M1 15H23" stroke="#ff4d4d" stroke-width="2" stroke-linecap="round"/><path d="M12.2 16H16.2L13.9 18.8H16.4L10.6 23.8L12.4 20.6H9.8Z" fill="#ffb020"/></svg>';
 const PIC_POWER = '<svg class=pic viewBox="0 0 24 24" aria-hidden=true><path d="M7.4 6.6A8 8 0 1 0 16.6 6.6" fill="none" stroke="#b18cff" stroke-width="2.6" stroke-linecap="round"/>'
   + '<path d="M12 3V12" stroke="#b18cff" stroke-width="2.6" stroke-linecap="round"/><path d="M4 21L20 3" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>';
 // 3D 화면 전용 모양 — 지도 CSS(`.r3d*`)에 얹는다. 열 때 넣고 닫을 때 걷는다. 상자 색은 배색 변수로
@@ -390,10 +387,14 @@ export async function open(opt) {
   const dotPos = [];
   for (const c of opt.cells || ta.cells) {
     const [x, z] = P(c.lon, c.lat); if (Math.abs(x) > G || Math.abs(z) > G) continue;
-    dotPos.push(x, 4, z);
+    dotPos.push(x, 1, z);
   }
+  // 점은 땅 높이에, **기둥보다 먼저** 그린다(11-26 사용자 「빛 기둥 위로 셀 점이 보인다 · 아래로 내려」). 점과 기둥이 같은 순서(0)라
+  // 거리 정렬에 따라 점이 기둥 위에 덧그려졌다 — 점 물체의 기준 위치가 바닥 가운데라 정렬이 셀 자리와 맞지 않는다.
+  // 건물 깊이를 지운 뒤(-1.4) · 기둥(0) 앞에 둔다
   const dotGeo = keep(new THREE.BufferGeometry()); dotGeo.setAttribute('position', new THREE.Float32BufferAttribute(dotPos, 3));
-  scene.add(new THREE.Points(dotGeo, keep(new THREE.PointsMaterial({ color: light ? 0x6b7280 : 0x7d8ea6, size: 2.2, sizeAttenuation: false, transparent: true, opacity: light ? .55 : .5, depthWrite: false }))));
+  const dots = new THREE.Points(dotGeo, keep(new THREE.PointsMaterial({ color: light ? 0x6b7280 : 0x7d8ea6, size: 2.2, sizeAttenuation: false, transparent: true, opacity: light ? .55 : .5, depthWrite: false })));
+  dots.renderOrder = -1.3; scene.add(dots);
 
   // ── 이상 셀 — 기둥(심 + 후광) + 바닥 번짐 ─────────────────────────────────
   // 어두움: 아래가 밝고 위로 갈수록 투명한 빛(가산 혼합). 밝음: 가산 혼합은 흰 바탕에서 사라지므로 진한 색을 일반 혼합으로
@@ -870,12 +871,10 @@ export async function open(opt) {
   // 종류별 그림 — **시나리오 카드(`scenarios.html`)의 그림만** 쓴다. 바탕판 없이 그림 하나(body, 심각도 색) + 상태 표시 하나(mark, 흰색·밝은 배색이면 검정).
   // mk2 는 표시 뒤에 까는 body 색 테두리. 카드에 맞는 그림이 없는 종류는 카드의 ✕ 배지(`#nx`) 하나로
   const iconOf = t => {
-    // 지진 — 집 아래 땅이 흔들리는 모양(PIC_QUAKE 와 같은 그림): 집 · 지그재그 땅 선 · 양옆 흔들림(심각도 색), 문 · 땅 갈라짐은 흰 표시
+    // 지진 — 시나리오 카드 「① 원인」 그림(PIC_QUAKE 와 같은 그림): 건물 두 채 · 수평 땅선 · 땅 아래 번개(심각도 색), 창은 흰 표시
     if (t === 'quake') { const T2 = (x, y) => [(x - 12) / 9, -(y - 12) / 9], L = (a, b, c, d, w) => seg(...T2(a, b), ...T2(c, d), w / 9);
-      const zz = [[1, 17], [4, 15], [7, 18], [10, 15], [13, 18], [16, 15], [19, 18], [22, 15]];
-      return { body: [pathShape('M7 13V7L12 3L17 7V13Z', T2), ...zz.slice(1).map(([x, y], i) => L(...zz[i], x, y, 2.2)),
-          L(3, 6, 2.3, 9, 1.6), L(2.3, 9, 3, 12, 1.6), L(21, 6, 21.7, 9, 1.6), L(21.7, 9, 21, 12, 1.6)],
-        mark: [pathShape('M11 13V10H13V13Z', T2), L(12, 18, 11, 20.5, 1.4), L(11, 20.5, 13, 23, 1.4)] }; }
+      return { body: [...['M3 14V8H9V14Z', 'M10 14V3H17V14Z'].map(d => pathShape(d, T2)), L(1, 15, 23, 15, 2), pathShape('M12.2 16H16.2L13.9 18.8H16.4L10.6 23.8L12.4 20.6H9.8Z', T2)],
+        mark: ['M4.5 9.5H7.5V11H4.5Z', 'M11.5 5H13.3V6.6H11.5Z', 'M14.2 5H16V6.6H14.2Z', 'M11.5 8.3H13.3V9.9H11.5Z', 'M14.2 8.3H16V9.9H14.2Z'].map(d => pathShape(d, T2)) }; }
     // 전원 차단 — 전원 기호(위가 열린 고리 + 세로 막대) 위에 사선
     if (t === 'power') { const ar = new THREE.Shape(), a0 = Math.PI / 2 + .62, a1 = Math.PI * 2.5 - .62;
       ar.absarc(0, 0, .82, a0, a1, false); ar.absarc(0, 0, .56, a1, a0, true); ar.closePath();

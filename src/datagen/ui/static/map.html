@@ -1127,11 +1127,8 @@ async function pollQuake(){
 //: 통합 장애 바 「지진」 줄 (2026-11-16 사용자 "왼쪽 위 통합장애 표시에 지진 정보도 함께"). 생성기가 `CM_QUAKE_EVENT`
 //: 에 적은 진원 지명·규모·깊이·진앙 진도·발생 시각만 옮긴다 — 모르는 칸은 비운다(불변규칙 17). 꺼진 셀·eNB 수는
 //: **정답지라 넣지 않는다** — 정답은 「정답 표시」를 켰을 때만 보인다(같은 날 사용자)
-//: 지진 그림 — 집 아래 땅이 흔들리는 모양(11-26 사용자). 3D 재생(`replay3d.js` PIC_QUAKE)과 같은 그림이다
-const PIC_QUAKE_2D='<svg class=qpic viewBox="0 0 24 24" aria-hidden=true><path d="M7 13V7L12 3L17 7V13Z" fill="#ff4d4d"/><path d="M11 13V10H13V13Z" fill="#fff"/>'
-  +'<path d="M1 17L4 15L7 18L10 15L13 18L16 15L19 18L22 15" fill="none" stroke="#ff4d4d" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"/>'
-  +'<path d="M12 18L11 20.5L13 23" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>'
-  +'<path d="M3 6Q2 9 3 12M21 6Q22 9 21 12" fill="none" stroke="#ff4d4d" stroke-width="1.6" stroke-linecap="round"/></svg>';
+//: 지진 그림 — 시나리오 4번 「① 원인」 그림: 건물 · 땅선 · 땅 아래 번개(11-26 사용자). 3D 재생(`replay3d.js` PIC_QUAKE)과 같은 그림이다
+const PIC_QUAKE_2D='<svg class=qpic viewBox="0 0 24 24" aria-hidden=true><path d="M3 14V8H9V14Z" fill="#ff4d4d"/><path d="M10 14V3H17V14Z" fill="#ff4d4d"/><path d="M4.5 9.5H7.5V11H4.5ZM11.5 5H13.3V6.6H11.5ZM14.2 5H16V6.6H14.2ZM11.5 8.3H13.3V9.9H11.5ZM14.2 8.3H16V9.9H14.2Z" fill="#fff"/><path d="M1 15H23" stroke="#ff4d4d" stroke-width="2" stroke-linecap="round"/><path d="M12.2 16H16.2L13.9 18.8H16.4L10.6 23.8L12.4 20.6H9.8Z" fill="#ffb020"/></svg>';
 function quakeLine(){
   const q=MINI_Q;
   if(!q||QFOR!==FOCUS) return '';

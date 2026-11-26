@@ -35,6 +35,9 @@ class _Plan:
     def set(self, k, v):
         self.v[k] = v
 
+    def scale(self, name, factor):        # 11-26 — 시나리오 적용이 수치를 곱하는 길(`scenarios.Plan.scale`)을 가짜도 갖는다
+        self.v[name] = self.v.get(name, 0) * factor
+
 
 SC = N(id="F-501", target=S.Target(cell_keys={"x"}, app_id="3035"))
 IMSIS = [f"44010{i:010d}" for i in range(4000)]
