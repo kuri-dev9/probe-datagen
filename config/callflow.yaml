@@ -795,19 +795,43 @@ faults:
     message: 75                        # TAU_REJECT (12호 전부)
     release: {302: 1.0}
 
-  ctxsetup_overload:
-    title: "S1AP Initial Context Setup 실패 (MME 과부하 500)"
-    break_at: ctxsetup
-    # **정답지에 `500` 이 없다** — 평시 스냅숏이라 과부하가 없었다(R1 S1AP
-    # 5xx 0건). Cause 는 `codes.S1AP_CAUSE[500] Control Processing Overload`
-    # 이고, **그릇(Context Setup 실패의 시간·해제 모양)은 실측 `126`·`103`
-    # 에서 왔다.** `R-23` 은 해제 사유의 `500` 을 보므로 해제가 Cause 를
-    # 따라가야 한다(`release_from_cause`).
-    call_types: [1, 3, 4]
-    causes: {500: 1.0}
-    release_from_cause: true
-    release_request: true
-    release_request_call_types: [1]
+  # ── MME 과부하 — NAS 거절 EMM 22(Congestion) (2026-11-26 검수 · 사용자 승인) ─────────────────────
+  # 전에는 `ctxsetup_overload`(S1AP Initial Context Setup **실패** · Cause 500 · eNB 해제 요청)였다. ICS Failure 와
+  # 해제 요청은 **기지국이 보내는 메시지**라 그것은 기지국 과부하의 서명이다. MME 가 과부하면 MME 자신이
+  # NAS 로 거절한다 — EMM Cause 22 Congestion(TS 24.301 §5.5.1.2.5 · §5.6.1.5 · 백오프 T3346 과 함께). 거절한
+  # 뒤 MME 가 UE Context Release **Command** 로 닫고, Cause 500(Control Processing Overload)은 그 해제에만 싣는다
+  # (eNB 해제 요청 없음). 절차마다 거절 메시지가 다르다 — 정답지 하류 EMM 의 메시지 규칙(`set_downstream`)과 같다.
+  # 22 자체는 정답지에 없다(평시 스냅숏 · 과부하 없음) — **그릇(rrc 단계 NAS 거절의 시간·해제 모양)은
+  # `emm_reject_attach`·`emm_reject_tau` 와 같다.**
+  emm_congestion_attach:
+    title: "EMM Attach 거절 22 (MME 과부하)"
+    break_at: rrc
+    call_types: [1]
+    iface: 5
+    prefix: emm
+    causes: {22: 1.0}
+    message: 68                        # ATTACH_REJECT
+    release: {500: 1.0}
+
+  emm_congestion_service:
+    title: "EMM Service 거절 22 (MME 과부하)"
+    break_at: rrc
+    call_types: [3, 4]
+    iface: 5
+    prefix: emm
+    causes: {22: 1.0}
+    message: 78                        # SERVICE_REJECT
+    release: {500: 1.0}
+
+  emm_congestion_tau:
+    title: "EMM TAU 거절 22 (MME 과부하)"
+    break_at: rrc
+    call_types: [5]
+    iface: 5
+    prefix: emm
+    causes: {22: 1.0}
+    message: 75                        # TAU_REJECT
+    release: {500: 1.0}
 
   ctxsetup_reject_103:
     title: "S1AP Initial Context Setup 실패 (MME UE S1AP ID 불일치)"

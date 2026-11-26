@@ -126,7 +126,7 @@ def test_japanese_phrases_exist_for_every_new_screen_string():
                "기록된 값으로 자동으로 만든 문장입니다", "아직 기록이 없습니다", "일부만 맞혔습니다",
                "이상 찾기", "원인 판단", "여러 장애 묶기", "AI 설명",
                "주입하자마자 이상을 찾았습니다.", "주입하고 {n}분 뒤에 이상을 처음 찾았습니다.",
-               "원인은 정하지 못했습니다(판단 보류).", "시스템이 고른 원인은 「{c}」입니다."):
+               "원인을 정하지 못했습니다(신뢰도 낮음).", "시스템이 고른 원인은 「{c}」입니다."):
         assert ko in ui._JA_SCEN or ko in ui._JA_COMMON, ko
     for old in ("어떤 장애인가", "어떻게 만드나", "무엇이 나타나나"):                   # 쓰이지 않는 옛 제목은 번역 표에서 뺐다
         assert old not in ui._JA_SCEN and old not in ui._JA_COMMON, old

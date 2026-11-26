@@ -838,7 +838,10 @@ KIND_SPECS: dict[str, dict] = {
     "ue_model": dict(
         title="특정 기종만 문제",
         truth_code="UE_MODEL_ISSUE", truth_category="UE",
-        expect_rules=("R-10",), expect_geo="SCATTER",
+        # **기대 지리 WIDE**(2026-11-26 검수 · 사용자 승인) — 8·26번 자동 대상은 기종만 고르고 셀·장비가 없다(전국 ·
+        # `faults._MODEL_WIDE_SCENARIOS`). 정답지는 이미 `faults.build` 가 WIDE 로 적어 왔다(F-362) — 여기 고정값만 SCATTER 로
+        # 남아 카드(보고서 `expect.geo`)와 어긋났다. `SGW-n` 을 지정하면 그 셀의 실제 모양을 잰다(그대로)
+        expect_rules=("R-10",), expect_geo="WIDE",
         shape="STEP", scope_kind="UE", expect_kpi="C-02",
     ),
     "mobility": dict(
@@ -942,7 +945,7 @@ KIND_SPECS: dict[str, dict] = {
     ),
     # 일본 시연 `j-sc-14` — 도심 역 저녁 러시. **원인 코드와 룰은 graphio
     # 에 아직 없다**(확정대장 §4.2 A-4 · 룰 번호 미정). gen 은 XDR 과 정답만
-    # 적는다 — 그래서 `expect_rules` 가 비어 있다. 2단계(혼잡 룰) 전까지 graphio 는 판단 보류로 낸다.
+    # 적는다 — 그래서 `expect_rules` 가 비어 있다. 2단계(혼잡 룰) 전까지 graphio 는 원인 미확정으로 낸다.
     # 호는 늘리지 않고 기존 가입자의 일부가 나빠진다(2026-11-05 사용자 결정 · 스펙의 1.8배와 다르다).
     # 탐지 지표는 Q-11(RTT 초과 가입자 비율)이고 메시·정목 단위로 서서 인접 칸이 묶인다(`CLUSTER`)
     "ran_congestion": dict(
@@ -1012,10 +1015,11 @@ KIND_SPECS: dict[str, dict] = {
     # 일본 시연 `j-sc-21` — CDN 서버측 열화. **지역 문제가 아니다**가 메시지
     # 이고(투자 ❌), 그 판정에 필요한 앱 축·`Q-06` 이 graphio 에 없다(§12.6 X-3·4).
     "cdn_degradation": dict(
-        title="동영상 서버(CDN) 느림",
+        title="동영상 서버(CDN) 접속 불가",
         truth_code="EXTERNAL_SERVER", truth_category="EXTERNAL",
         expect_rules=(), rule_pending=True, expect_geo="WIDE",
-        shape="RAMP", series=("transport", "http"),
+        # http 계열 변형(응답 지연·504)은 2026-11-26 걷었다 — 접속 불가 하나다(`_cdn_plan`)
+        shape="RAMP", series=("transport",),
         # 기대 지표는 TCP 연결 성공률(U-01)이다(2026-11-20 사용자 「CDN 장애면 다운 열화가 있을 수 없다」 · `_cdn_plan`).
         # 전에는 코드가 U-12(다운 재전송) · 보고서가 Q-06 으로 서로 달랐다
         scope_kind="SERVICE", expect_kpi="U-01",
@@ -2138,13 +2142,17 @@ def _external_server(rec, sc, intensity, rng, cell) -> bool:
     "외부 서버"와 "백본 지연"이 구분되지 않는다. 경로 지연은 SC-06b 다.
 
     `HTTP_Total_Response_PayloadSize` 는 **건드리지 않는다** — Parquet 에 없다.
+
+    **504 는 쓰지 않는다**(2026-11-26 검수 · 사용자 승인). 15번은 「서버가 바로 오류로 답한다」이고, 504(Gateway
+    Timeout)는 중간 장치가 **기다리다 시간 초과로** 내는 코드라 응답 지연 없이 나오면 모양이 맞지 않는다. 남은
+    500·502·503 의 비중(3·2·3)은 그대로다.
     """
     if not _domain_hit(rec, sc):
         return False
     if rng.random() >= intensity * 0.85:
         return False
-    rec.set("StatusCode", rng.choices([500, 502, 503, 504],
-                                      weights=[3, 2, 3, 2], k=1)[0])
+    rec.set("StatusCode", rng.choices([500, 502, 503],
+                                      weights=[3, 2, 3], k=1)[0])
     return True
 
 
@@ -2388,16 +2396,27 @@ def _handover_failure(rec, sc, rng, pairs=None) -> bool:
 
 @mutator("mme_overload")
 def _mme_overload(rec, sc, intensity, rng, cell) -> bool:
-    """MME 처리 용량 초과 — 전반 지연 + 신규 접속 일부 실패 (R-23).
-
-    `s1ap_error_Message` 는 **`9 InitialContextSetup`(OUT)** 이다.
-    `34 OverloadStart` 는 **non-UE-associated 절차**로 MME→eNB 과부하
-    통보이고 특정 호에 매달리지 않는다 — 구 구현이 그것을 적고 있었다.
-    `R-23` 은 "Release Cause 500 편중 **또는** S1AP 34" 로 OR 조건이라
-    갈래 ② 의 `500` 으로 발동한다.
+    """MME 처리 용량 초과 — 전반 지연 + 신규 접속 일부를 **MME 가 NAS 로 거절** (R-23).
 
     지연은 **게이트를 통과하지 않은 호에도** 걸린다 — "실패하지 않은 호의
-    지연이 평시 2배"가 과부하의 관측 신호다(⑱-2).
+    지연이 평시 2배"가 과부하의 관측 신호다(⑱-2). MME 가 요청을 늦게 처리하니
+    접속 단계(`initial_access`)와 코어 단계(`initial_core`)가 함께 늘어난다.
+
+    ## 서명 — 2026-11-26 검수 · 사용자 승인
+
+    전에는 ① 접속 실패를 S1AP Initial Context Setup **실패**(Cause 500 · eNB 해제 요청)로, ② 절단을 eNB 의
+    해제 요청 500 으로 적었다. 둘 다 **기지국이 보내는 메시지**라 기지국 과부하의 서명이었다. 이제
+
+    - ① 접속 시도: MME 가 **EMM Cause 22(Congestion)** 로 거절한다 — Attach `68` · Service `78` · TAU `75`
+      (`callflow` `emm_congestion_*`). 거절 뒤 MME 가 UE Context Release Command 로 닫으며 Cause 500 을 싣는다
+    - ② 연결된 호: MME 가 **먼저** UE Context Release Command(Cause 500)로 끊는다 — eNB 해제 요청 없음
+      (`callflow.drop(by_mme=True)`). Cause 500 은 `RAN_LOST_CAUSES` 에 없으므로 `classify()` → `OUT_STALL`
+      → down 재전송 급증 + `AckTime=0` 이다 — 과부하가 U-Plane 품질로도 번진다
+    - `34 OverloadStart` 는 **non-UE-associated 절차**(MME→eNB 과부하 통보)라 호 레코드에 매달 수 없다 — 적지 않는다
+
+    graphio 는 ① 을 R-23 의 EMM 22 갈래로, ② 를 노드 절단 몫(EV-04c) + Release Cause 500 갈래로 본다.
+    갈래 비율(50%·I 게이트 · 반반)은 전과 같다. 22·500 자체는 정답지에 없다(평시 스냅숏 · 과부하 없음) —
+    **그릇만 실측이다**(rrc 단계 NAS 거절 · 절단의 시간·해제 모양).
     """
     if not _node_eq(rec.get("MME_ID"), sc.target.mme_id):
         return False
@@ -2407,25 +2426,20 @@ def _mme_overload(rec, sc, intensity, rng, cell) -> bool:
     rec.scale("initial_core_duration", 1.0 + 1.3 * intensity)
     if rng.random() >= intensity * 0.50:
         return False
-    # 두 갈래 모두 **`callflow` 명세가 적는다** (2026-10-28 · `j-sc-19`).
-    #
-    # 전 구현은 실측 모양에서 벗어나 있었다 —
-    #   ① 접속 실패가 해제 사유에 `500` 을 적지 않았다. `R-23` 은 **해제
-    #      사유의 `500`** 을 보므로 이 갈래는 룰에 보이지 않았다.
-    #   ② 절단이 First Error·S1AP 구간·eNB 요청을 비워 뒀다. 실측 절단 81호는
-    #      전부 First(msg 18 요청)·Last(msg 23 해제)·`rreq = rel` 이다.
-    #
-    # `500` 자체는 정답지에 없다(평시 스냅숏 — R1 S1AP 5xx 0건). **그릇만
-    # 실측이다** — Context Setup 실패(`126`·`103`)와 절단(`504`·`126`…)의 모양.
     from . import callflow
     if rng.random() < 0.50 or not _connected(rec):
-        # ① 접속 실패. **연결되지 않은 호는 반드시 이쪽이다** — 절단 갈래는
+        # ① 접속 거절. **연결되지 않은 호는 반드시 이쪽이다** — 절단 갈래는
         #    `success_flag` 를 세울 수 없다(규칙 C-4 · `_connected` 주석)
-        return callflow.inject(rec, "ctxsetup_overload", rng)
-    # ② 연결 후 절단. Cause 500 은 `RAN_LOST_CAUSES` 에 **없으므로**
-    #    `classify()` → `OUT_STALL` → down 재전송 급증 + `AckTime=0`.
-    #    과부하가 U-Plane 품질로도 번진다 — 의도한 것이다
-    return callflow.drop(rec, 500, rng)
+        ct = str(rec.get("call_type"))
+        name = _MME_CONGESTION_SPEC.get(ct)
+        return bool(name) and callflow.inject(rec, name, rng)
+    # ② 연결 후 MME 가 끊는다
+    return callflow.drop(rec, 500, rng, by_mme=True)
+
+
+#: call_type → MME 과부하 NAS 거절 명세(`config/callflow.yaml`). 없는 절차(Detach·Paging 등)는 거절하지 않는다
+_MME_CONGESTION_SPEC = {"1": "emm_congestion_attach", "3": "emm_congestion_service",
+                        "4": "emm_congestion_service", "5": "emm_congestion_tau"}
 
 
 # --------------------------------------------------------------------------
@@ -2735,7 +2749,7 @@ def _ran_congestion_load(sc, intensity) -> float:
     퇴근길 혼잡은 원래 사람이 몰려서 생긴다. 배율은 기존 `congestion_load`(1.8 · 확정대장 §3.0 「17–20시 1.8배」)이고
     옛 23번 행사장 배율(`_event_crowd_load` · 11-26 걷음)과 같은 장치(셀 추첨 비중)다. 대상은 메시 그대로다(`faults._congestion_target`) —
     역 근처 eNB 몇 곳으로 좁히면 Q-11 칸 비율이 묽어진다(F-129·F-155). 하한은 지금처럼 채우지 않는다(`pemdb1`).
-    나빠지는 사람은 여전히 IMSI 로 고른 몫(`congestion_user_share`)이고, 늘어난 사람도 같은 규칙에 든다
+    나빠지는 쪽은 사람이 아니라 셀이다 — 붐비는 셀의 세션은 전부 나빠진다(`_ran_congestion_users` · 11-23)
     """
     return 1.0 + (FAULT.congestion_load - 1.0) * max(0.0, min(1.0, intensity))
 
@@ -3525,6 +3539,29 @@ SA_FALLBACK_TAU_SHARE = 0.7
 SA_FALLBACK_CAP = 0.5
 
 
+@mutator("sa_fallback")
+def _sa_fallback_nr_down(rec, sc, intensity, rng, cell) -> bool:
+    """13번(내부 17) — **원인은 5G 기지국(gNB) 정지다**(2026-11-26 검수 · 사용자 승인). 그 지역에 원래 있던 5G 단말도 5G 를 잃는다.
+
+    전에는 SA 상주 단말만 LTE 로 넘어오고, 그 지역에서 LTE 에 붙어 5G(NSA · EN-DC)를 쓰던 단말은 그대로 5G 였다 — gNB 가
+    멈췄다면 같은 사이트 NR 을 나눠 쓰는 EN-DC 의 SgNB 도 없다(`pemdb1._sa_fallback_drafts` 머리말이 이미 그렇게 적는다). 그래서
+    대상 셀의 5G 능력 단말 호는 강도만큼 NR 레그가 없다(`nr_clear` · 23번 `_nsa_nr_leg` 과 같은 필드). 넘어온 숨은 단말은 원래
+    NR 레그가 없으니 그대로다.
+
+    **23번 5G 접속 불량과의 차이** — 23번은 기지국이 살아 있고 5G 연결만 실패한다(단말이 옮겨 오지 않는다 · N-01 그대로). 13번은
+    gNB 가 꺼져 SA 단말이 LTE 로 몰리고(N-01 상승) 기존 5G 단말도 5G 를 잃는다. graphio R-33 은 N-01 이 함께 서면 R-48 에
+    양보한다(F-161) — 새 값 없음(게이트는 강도 그대로).
+    """
+    if rec.get("ue_dcnr") != "1":
+        return False
+    if cell.cell_key not in sc.active_cells_cache:
+        return False
+    if rng.random() >= intensity:
+        return False
+    nr_clear(rec)
+    return True
+
+
 def _sa_fallback_truth(sc) -> dict:
     """17번 정답지 덧붙임 — 원인 코드는 결정 대기라 맥락만 싣는다(graphio 채점은 모르는 키를 무시한다)."""
     if sc.kind != "sa_fallback":
@@ -3955,64 +3992,30 @@ def _app_session_broken(plan, rng, intensity: float, sc=None) -> None:
 
 
 def _cdn_plan(plan, rng, intensity: float, sc=None) -> None:
-    """21번 CDN 장애 세션 — **서버에 붙지 못한다.** 다운 방향은 건드리지 않는다(2026-11-20 사용자).
+    """16번(내부 21) CDN 장애 세션 — **서버에 붙지 못한다.** 다운 방향은 건드리지 않는다(2026-11-20 사용자).
 
     사용자: 「CDN 에서 장애가 났는데 어떻게 다운링크가 발생하겠어. 없는 게 정상이거나 UP 쪽이 문제」. 전에는
     22번과 같은 `_app_session_broken` 을 불러 down RTT·down 재전송·내려받기 양 축소를 넣었다 — 그것은 무선·전송
     구간의 모양이라 CDN 서버 장애와 맞지 않는다.
 
-    - 연결: 50%·I 의 세션이 **SYN 을 몇 번 보내고 ACK 를 못 받는다**(`syn_fail` · `SynCount` 2~4) — `U-01`↓ · `U-03`↑.
-      주 신호다. 그 세션은 흐른 양이 없다(`session._plan`)
-    - 붙은 세션: up RTT 만 오른다(`_congested_rtt` Uplink) — 요청이 서버 앞에서 줄을 선다. up 재전송도 22번과 같은
-      값(`_app_session_broken` 의 down 몫 상수)으로 오른다
-    - 다운 RTT·다운 재전송·처리율·내려받기 양: **그대로**
-    - 재시도: 22번과 같다 — 붙지 못한 사용자가 다시 누른다(세션 수가 는다)
-    - HTTP 응답 지연·504 는 `_cdn_degradation`(http 계열) 그대로다 — 붙은 세션의 요청 쪽이다
-
-    `plan.fade` 는 `_app_session_broken` 과 같게 등록한다 — 장애 창이 끝나면 이월 세션의 up 열화도 걷힌다.
-
     **고른 세션은 모두 붙지 못하고, 붙지 못한 세션은 모두 다시 시도한다**(2026-11-23 사용자 「down 이 엄청 적거나 0
-    이고 연결 요청만 계속 증가 · 단말이 껐다 켰다 하며 요청만 쌓이는 모습」). 전에는 50%·I 만 `syn_fail` 이었고
-    대상 앱(3001 STREAMING)이 **UDP(QUIC)** 라 `syn_fail` 이 TCP 갈래에서만 효과가 있어 신호가 아예 없었다(F-547).
-    이제 UDP 세션의 `syn_fail` 은 `session` 의 「응답 없음」 갈래다 — up 은 연결 요청 1~3개(Initial ~1,200B ·
-    재전송 = 개수 − 1), down 은 전부 0. 재시도 개수 범위는 그대로(1~(1+3I))이고 재시도의 재시도는 없다(`_open`)
-    — 그래서 그 앱의 세션 수(연결 요청)가 쌓이고 down 은 거의 0 이 된다. 새 값 없음
+    이고 연결 요청만 계속 증가 · 단말이 껐다 켰다 하며 요청만 쌓이는 모습」).
+
+    - 연결: `syn_fail` — TCP 는 SYN 을 몇 번 보내고 ACK 를 못 받는다(`SynCount` 2~4 · `U-01`↓ · `U-03`↑). 대상 앱
+      (3001 STREAMING)이 **UDP(QUIC)** 라 `session` 의 「응답 없음」 갈래가 받는다 — up 은 연결 요청 1~3개(Initial
+      ~1,200B · 재전송 = 개수 − 1), down 은 전부 0. 전에는 50%·I 만 `syn_fail` 이라 UDP 앱에서 신호가 없었다(F-547)
+    - 재시도: 1~(1+3I)개 — 붙지 못한 사용자가 다시 누른다. 재시도의 재시도는 없다(`_open`). 그래서 그 앱의 세션
+      수(연결 요청)가 쌓이고 down 은 거의 0 이 된다
+    - **붙은 세션 갈래·HTTP 응답 지연·504 는 없다**(2026-11-26 검수 · 사용자 승인). 「느림(HTTP 지연·504)」 설계와
+      「접속 불가(SYN 무응답)」 설계가 섞여 있었다 — 이름·카드·기대 지표(`U-01`)가 모두 접속 불가다. http 계열
+      변형기(`_cdn_degradation`)를 걷었다
+
+    `plan.fade` 는 `_app_session_broken` 과 같게 등록한다 — 장애 창이 끝나면 이월 세션도 걷힌다.
     """
     if sc is not None and intensity > 0 and plan.fade is None:
         plan.fade = (sc, intensity, dict(plan.totals))
     plan.syn_fail = True
     plan.retries = rng.randint(1, 1 + int(3 * intensity))
-
-
-@mutator("cdn_degradation")
-def _cdn_degradation(rec, sc, intensity, rng, cell) -> bool:
-    """CDN 서버가 **느리게 답한다** — HTTP 응답시간 상승 + 일부 5xx.
-
-    `external_server`(6번)는 5xx 하나로 신호를 낸다. 이쪽은 **서버 처리
-    지연**이 주 신호이고 5xx 는 곁가지다(타임아웃 끝에 504). 대상은 도메인
-    하나가 아니라 **호스트 사이트**(`kakaocdn`)다 — 같은 사업자의 여러 엣지
-    호스트가 함께 느려진다(§12.2 "IP 대역 대신 `HOST_SITE`").
-
-    transport 쪽(RTT·처리율·끊김·재시도)은 `_cdn_degradation_plan` 이 본다.
-    처음에는 RTT 를 두지 않았다(경로 지연 `R-09b` 와 가르려고) — 사람이
-    "RTT 도 크게, 끊기고, 세션도 많이" 로 정했다(2026-10-28).
-    """
-    if rec.series != "http":
-        return False
-    if sc.target.app_id:
-        if rec.get("App_ID") != sc.target.app_id:
-            return False
-    elif not _domain_hit(rec, sc):
-        return False
-    if rng.random() >= intensity * 0.85:
-        return False
-    req = rec.num("RequestTime")
-    if req > 0:
-        rec.set("ResponseTime",
-                f"{req + rng.uniform(0.5, 0.5 + 3.0 * intensity):.6f}")
-    if rng.random() < 0.10 * intensity:
-        rec.set("StatusCode", 504)
-    return True
 
 
 @plan_mutator("cdn_degradation")
@@ -4203,7 +4206,8 @@ def _crowd_choke(plan, rng, intensity: float) -> None:
 
 @plan_mutator("event_crowd")
 def _event_crowd(plan, sc, intensity, rng, cell) -> bool:
-    """**그 게임만 내려받기가 끊긴다** — 행사장 관객이 같은 게임을 켜서 게임 서버가 보내지 못한다(2026-11-21).
+    """**그 게임만 내려받기가 끊긴다** — 행사장 관객이 같은 게임을 켜서 행사장 셀에 그 게임 트래픽이 몰린다(2026-11-21 ·
+    11-26 검수: 서버 탓이면 행사장 밖 사람도 멈춰야 하므로 「셀에 몰린 앱 트래픽」으로 설명한다).
 
     사용자 11-21 오후: 「다운로드가 끊기는 거 · 앱 자체가 먹통 · 게임 또는 웹 한 가지」. 옛 모양(사진 업로드로
     업링크가 무너짐 · `_crowd_uplink`·`_crowd_choke`)은 부르지 않는다 — 함수는 남긴다.
@@ -4229,7 +4233,7 @@ def _event_crowd(plan, sc, intensity, rng, cell) -> bool:
     if not congested_user(plan.imsi, sc.id, intensity, share=0.5):
         # **끊기지 않은 사람의 그 게임도 느리다**(2026-11-26 · 사용자 「결론을 모르고도 맞히게 다른 필드도 함께 나빠지게」).
         # 같은 게임 서버로 사람이 몰렸으니 내려받는 데 걸리는 시간이 1+2×강도배로 늘어 속도가 그만큼 떨어진다(옛 사람
-        # 배율 3배를 그대로 쓴다 · 새 값 아님 — 셀 사람 수와 따로다: 게임 서버는 행사장 밖 사람도 받는다). 그 게임·그 셀에서만이다 — 셀 전체(1번 퇴근길 혼잡)나 지역 무관(16번
+        # 배율 3배를 그대로 쓴다 · 새 값 아님 — 셀 사람 수와 따로다). 그 게임·그 셀에서만이다 — 셀 전체(1번 퇴근길 혼잡)나 지역 무관(16번
         # 동영상 서버)과 다르다. 재전송·연결 실패는 넣지 않는다 — down 재전송은 graphio R-41 이 전송 구간(R-09)에
         # 양보하게 하고(위), 연결 실패는 16번(서버 쪽)의 모양이다
         # 돌려주는 값은 「끊었나」다(끊지 않았으니 False) — 느려짐은 끊김이 아니다
@@ -4447,14 +4451,17 @@ def _service_tls_fail(plan, sc, intensity, rng, cell) -> bool:
     return True
 
 
-#: 34번 — v6 세션이 끝나는 모양의 몫. SYN 이 답을 못 받는 쪽(경로 끊김)이 다수이고 일부는 서버 쪽
-#: RST 로 끊긴다. **초기값**(실측 없음)
-IPV6_SYN_FAIL_SHARE = 0.70
+#: 34번 — v6 세션이 끝나는 모양의 몫. SYN 이 답을 못 받는 쪽(경로 끊김)이 다수이고 일부는 RST 로 끊긴다.
+#: **0.70 → 0.90**(2026-11-26 검수 · 사용자 승인). PGW 뒤 IPv6 경로가 끊기면 패킷이 사라질 뿐(블랙홀) 누가 RST 를
+#: 돌려주지 않는다 — RST 는 경로 위 장치가 **능동적으로 거부**할 때만 온다(방화벽 reject 등 · ICMPv6 unreachable 은
+#: RST 가 아니다). 그래서 RST 는 소수여야 하고 30% 는 많았다. 0.90 은 「대부분 무응답, 일부만 거부」를 옮긴
+#: **초기값**이다(실측 없음 · 현장 확인 전)
+IPV6_SYN_FAIL_SHARE = 0.90
 
 
 @plan_mutator("ipv6_path_fail")
 def _ipv6_path_fail(plan, sc, intensity, rng, cell) -> bool:
-    """대상 PGW 셀의 **IPv6 세션만** 서지 않고, 단말이 몇 초 뒤 **IPv4 로 다시 붙는다**(재시도 1회).
+    """대상 PGW 셀의 **IPv6 세션만** 서지 않고, 단말이 0.25~2초 뒤 **IPv4 로 다시 붙는다**(재시도 1회 · `session._open`).
 
     경로가 끊겼으므로 v6 세션은 강도만큼 모두 실패한다. 재시도는 같은 앱·같은 호로 v4 세션을 연다
     (`session._open` 의 `ipv="1"`) — 그래서 사용자에게는 「끊김」이 아니라 「접속이 늦다」로 보인다.
@@ -4623,30 +4630,45 @@ def _compound_causal_failure(rec, sc, intensity, rng, cell) -> bool:
 
     1차(transport)는 `PLAN_MUTATORS` 가, 2차(dns)는 여기가 한다. 시간차는
     `series_offset={"dns": 2}` 가 만든다.
+
+    **2차는 1차 손실에서 나온다**(2026-11-26 검수 · 사용자 승인). 전에는 DNS 질의의 70%×I 를 따로 고정해 떨어뜨렸고
+    그중 40% 를 SERVFAIL(`ReplyCode` 2)로 적었다 — SERVFAIL 은 **DNS 서버가 보낸 응답**이라 「DNS 장치는 멀쩡하고 길이
+    나쁘다」와 맞지 않고, 손실 3~15% 에 실패 70% 도 비례가 안 맞았다. 이제
+    - 영향 몫: 1차와 같은 `COMPOUND_SHARE`×I(1차가 세션을 고르는 몫)
+    - 한 번 묻기가 사라질 확률 q = 1 − (1 − p)² — 질의 패킷이나 응답 패킷 하나라도 잃으면 답을 못 받는다. p 는 1차의
+      down 손실률(`COMPOUND_LOSS` · `_down_loss` 와 같은 식)
+    - 실패 = 다시 묻기까지(`QueryRetryCount` 1~3, 비중 그대로) **모두** 사라진 경우 — qⁿ
+    - 표현은 무응답(`ReplyCode` 900 · `_dns_fail` 의 B 갈래와 같은 모양) 하나
+    그래서 강도 1.0 정점에서 실패는 DNS 질의의 약 19% 다(전 70%). 새 값은 없다 — 손실 상수는 1차 것을 같이 쓴다.
+
+    **한계 — 2분 시차.** 같은 백홀(전송 구간)을 지나면 손실과 DNS 실패는 **동시에** 시작하는 것이 물리적으로 맞다.
+    2분은 「1차 원인을 먼저 보이고 2차 증상이 뒤따르는」 순서를 판정(R-16·L2 사건 모양)이 가릴 수 있는지 보려는 시험
+    장치다 — 실제 현장에서 2분 늦게 오는 근거가 있는 것은 아니다(캐시가 살아 있는 동안 DNS 증상이 늦게 보일 수는 있다).
     """
     if rec.series != "dns":
         return False                        # transport 는 `PLAN_MUTATORS` 가 본다
     if cell.cell_key not in sc.active_cells_cache:
         return False
-    if rng.random() >= intensity * 0.70:
+    if rng.random() >= intensity * COMPOUND_SHARE:
         return False
-    # SC-05 와 같은 갈래이되 무응답이 우세하다 — 지역 전송 구간이 먼저
-    # 나빠졌으므로 서버 오류보다 경로 쪽 증상이 많은 것이 인과에 맞다.
-    # **비율만 다르고 표현은 `_dns_fail` 과 같아야 한다** — 무응답은
-    # `ReplyCode = 900`(2026-10-22 운영 실측 교정, 그 함수 머리말 참조).
-    if rng.random() < 0.60:
-        rec.set("ReplyCode", 900)
-        rec.set("ResponseTime", "0.0")
-        rec.set("AnswerCount", 0)
-        retry = rng.choices((1, 2, 3), weights=(79, 20, 1))[0]
-    else:
-        rec.set("ReplyCode", 2)
-        rec.set("AnswerCount", 0)
-        retry = 1 if rng.random() < 0.98 else 2
+    lo, hi, k = COMPOUND_LOSS
+    p = clip(rng.uniform(lo, hi) + k * intensity, 0.0, 0.30)
+    q = 1.0 - (1.0 - p) ** 2
+    retry = rng.choices((1, 2, 3), weights=(79, 20, 1))[0]
+    if rng.random() >= q ** retry:
+        return False                        # 다시 묻는 사이 한 번은 답을 받았다
+    rec.set("ReplyCode", 900)
+    rec.set("ResponseTime", "0.0")
+    rec.set("AnswerCount", 0)
     rec.set("QueryRetryCount", retry)
     rec.set("dns_retry_sequence", retry)
     rec.set("dns_retry_interval", round(rng.uniform(1.0, 5.0), 3))
     return True
+
+
+#: 22번(내부 30) 1차 전송 손실 — 세션을 고르는 몫과 down 손실률 `(lo, hi, k)`(`_down_loss`). 2차 DNS 실패가 같은 값을 쓴다
+COMPOUND_SHARE = 0.80
+COMPOUND_LOSS = (0.03, 0.03, 0.12)
 
 
 @plan_mutator("compound_causal_failure")
@@ -4656,10 +4678,10 @@ def _compound_causal_failure_plan(plan, sc, intensity, rng, cell) -> bool:
         return False
     if plan.outcome == "stall":
         return False
-    if rng.random() >= intensity * 0.80:
+    if rng.random() >= intensity * COMPOUND_SHARE:
         return False
     _fade_on(plan, sc)
-    _down_loss(plan, rng, intensity, 0.03, 0.03, 0.12)
+    _down_loss(plan, rng, intensity, *COMPOUND_LOSS)
     _congested_rtt(plan, rng, intensity)
     plan.scale("Traffic_Total_Dnlink_ThroughputTime", 1.0 + 1.9 * intensity)
     return True

@@ -57,7 +57,9 @@ def test_50_does_not_leak_15_judgements_and_15_does_not_get_50():
     runs50 = {s["latest"]["run"] for s in p50.values() if s.get("latest")}
     assert runs50 and not (runs15 & runs50), "15% 회차와 50% 회차가 섞였다"
     for no in (1, 2, 5):
-        for k in ("name", "kind", "what", "setup", "expect"):
+        # `what`·`setup` 은 뺀다 — 11-26 검수로 50% 카드(v50)의 설명·대상 문구만 현재 코드에 맞게 고쳤다(SGW→PGW 등).
+        # 15% 기록(`scenario_report.json`)은 지난 회차 그대로라 문구가 갈라졌다. 이름·kind·기대 판정은 계속 같아야 한다
+        for k in ("name", "kind", "expect"):
             assert p15[no][k] == p50[no][k], "설정·기준은 15% 와 같다"
 
 

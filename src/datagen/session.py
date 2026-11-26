@@ -880,8 +880,12 @@ class SessionEngine:
         # 않기 때문이다(`cli.cmd_run` 의 "같은 분 좌표" 주석).
         t0 = min(max(call.t, slot), slot + 58.0)
         if retry_of is not None:
-            # 재시도는 **조금 뒤**다 — 실패를 보고 다시 누르기까지
-            t0 = min(t0 + rng.uniform(1.0, 8.0), slot + 59.0)
+            # 재시도는 **조금 뒤**다 — 실패를 보고 다시 누르기까지.
+            # **34번 IPv4 되붙기는 사람이 아니라 단말이 한다**(2026-11-26 검수 · 사용자 승인) — Happy Eyeballs
+            # (RFC 8305 §5)는 v6 시도 뒤 Connection Attempt Delay(기본 250ms · 권장 상한 2초)만 기다리고 v4 를 연다.
+            # 전에는 사람의 재시도와 같은 1~8초라 「몇 초 기다림」으로 보였다. 값은 그 RFC 의 기본·상한이다
+            gap = rng.uniform(0.25, 2.0) if ipv == "1" else rng.uniform(1.0, 8.0)
+            t0 = min(t0 + gap, slot + 59.0)
         # **다운 SGW·PGW 로는 다운 시각 뒤에 세션을 열지 않는다**(2026-11-04 · 두 번째 겹).
         # 첫 겹은 `pemdb1.records` 의 `down_opens_session` 이다 — 거기서 빠진 경로(재시도 세션 등)를
         # 여기서 막는다. 다운 시각을 모르면(분 단위) 그 분부터 막는다

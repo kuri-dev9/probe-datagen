@@ -349,7 +349,8 @@ def test_34_every_v6_tcp_session_on_the_target_pgw_fails():
     ok = t.filter((pl.col("ACK_TIME") > 0) & (pl.col("RST_COUNT") == 0))
     assert ok.height == 0, f"IPv6 TCP 세션이 {ok.height}건 정상으로 끝났다"
     syn = t.filter(pl.col("ACK_TIME") <= 0).height / t.height
-    assert 0.65 < syn < 0.95, syn          # SYN 무응답 70% + 평소에도 ACK 없는 종료 레코드가 절반쯤 있다
+    # 11-26 검수: 연결 거부(RST)를 30%→10% 로 줄여 SYN 무응답이 90% 다(+ 평소에도 ACK 없는 종료 레코드가 절반쯤 있다)
+    assert 0.80 < syn < 0.99, syn
     rst = t.filter((pl.col("ACK_TIME") > 0) & (pl.col("RST_COUNT") > 0))
     assert rst.height > 0 and (rst["RST_DIRECTION"] == 2).all(), "서버·망 쪽 RST 는 방향 2 여야 한다"
 
@@ -373,7 +374,7 @@ def test_34_v4_sessions_increase_because_of_retries():
     assert win > pre * 1.3, (pre, win)
 
 
-def test_34_each_failed_v6_session_gets_one_v4_retry_1_to_8_seconds_later_with_an_a_query():
+def test_34_each_failed_v6_session_gets_one_v4_retry_025_to_2_seconds_later_with_an_a_query():
     """재시도는 실패한 세션 바로 다음 세션 번호(`sid` 카운터 + 1)로 열린다 — 같은 가입자·같은 앱·IPv4."""
     sc, F, _ = _run("ipv6_path_fail")
     tp, dn = F["transport"], F["dns"]
@@ -393,7 +394,8 @@ def test_34_each_failed_v6_session_gets_one_v4_retry_1_to_8_seconds_later_with_a
     assert bad.height > 200
     assert j.height / bad.height > 0.9, (j.height, bad.height)        # 한 번씩 — 번호가 이어지고 가입자·앱이 같다
     gap = (j["t_retry"] - j["t_bad"])
-    assert gap.min() >= 1.0 - 1e-6 and gap.max() <= 8.0 + 1e-6, (gap.min(), gap.max())
+    # 11-26 검수: 1~8초 → 0.25~2초 (RFC 8305 Happy Eyeballs 기본 250ms · 권장 상한 2초)
+    assert gap.min() >= 0.25 - 1e-6 and gap.max() <= 2.0 + 1e-6, (gap.min(), gap.max())
     q = dn.filter(pl.col("SESSION_ID").is_in(j["SESSION_ID"].implode()))
     assert q.height > 100
     assert (q["IP_VERSION"] == 1).all()

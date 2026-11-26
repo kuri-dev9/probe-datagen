@@ -290,11 +290,11 @@
   "UNDETERMINED": {
    "kind": "cause",
    "ko": {
-    "s": "원인 판단 보류",
+    "s": "원인 미확정(신뢰도 낮음)",
     "l": "분류 UNKNOWN"
    },
    "ja": {
-    "s": "原因判断保留",
+    "s": "原因未確定（信頼度低）",
     "l": "分類 UNKNOWN"
    }
   },
@@ -368,11 +368,11 @@
    "kind": "rule",
    "ko": {
     "s": "MME 과부하 신호",
-    "l": "UEContextRelease_Cause=500 편중 또는 S1AP 34(OverloadStart) 관측 → MME_OVERLOAD"
+    "l": "UEContextRelease_Cause=500 편중 또는 S1AP 34(OverloadStart)·NAS EMM 22(Congestion) 관측 → MME_OVERLOAD"
    },
    "ja": {
     "s": "MME 過負荷の信号",
-    "l": "UEContextRelease_Cause=500 への偏り、または S1AP 34(OverloadStart)の観測 → MME_OVERLOAD"
+    "l": "UEContextRelease_Cause=500 への偏り、または S1AP 34(OverloadStart)・NAS EMM 22(Congestion)の観測 → MME_OVERLOAD"
    }
   },
   "R-06": {
@@ -1369,11 +1369,11 @@
    "kind": "field",
    "ko": {
     "s": "판단 확신. 0~1, 0.5 이상이어야 인정",
-    "l": "0.5 미만이면 원인이 맞아도 화면에는 판단 보류로 보입니다. 원인마다 상한이 있습니다."
+    "l": "0.5 미만이면 원인이 맞아도 화면에는 원인 미확정(신뢰도 낮음)으로 보입니다. 원인마다 상한이 있습니다."
    },
    "ja": {
     "s": "判断の確信度。0~1、0.5 以上で認定",
-    "l": "0.5 未満なら原因が合っていても画面には判断保留と表示されます。原因ごとに上限があります。"
+    "l": "0.5 未満なら原因が合っていても画面には原因未確定（信頼度低）と表示されます。原因ごとに上限があります。"
    }
   },
   "field:detect_min": {

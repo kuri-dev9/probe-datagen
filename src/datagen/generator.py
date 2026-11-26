@@ -162,6 +162,16 @@ USER_FIELDS = (
 )
 
 
+#: 스마트폰 기본 인터넷 APN 의 NI(망 식별 부분) — docomo spモード(`region.py` APN 변환표 · 5G/4G 기본)
+DEFAULT_INTERNET_APN_NI = ("spmode.ne.jp",)
+
+
+def _is_default_internet_apn(apn: str) -> bool:
+    """기본 인터넷 APN 인가 — NI 앞부분으로 본다(`spmode.ne.jp.mnc010.mcc440.gprs`)."""
+    a = (apn or "").lower()
+    return any(a == ni or a.startswith(ni + ".") for ni in DEFAULT_INTERNET_APN_NI)
+
+
 @dataclass
 class Subscriber:
     imsi: str
@@ -1460,6 +1470,10 @@ class Generator:
                 if sc.kind == "apn_pdn_failure":
                     # **29번은 데이터 APN 만**(2026-11-19 사용자 결정) — IMS(음성) APN 은 20번의 자리다
                     pool = [a for a in pool if "ims" not in a.lower()]
+                    # **스마트폰 기본 인터넷 APN(spモード)도 뺀다**(2026-11-26 검수 · 사용자 승인). 17번은 「특정 서비스망만
+                    # 안 되고 인터넷은 정상」인데, 기본 APN 이 뽑히면 대부분의 사용자가 인터넷이 끊긴다(F-592 영향 3.4만 명).
+                    # 남는 후보가 없으면 전처럼 둔다 — 주입이 성립하지 않는 것보다 낫다
+                    pool = [a for a in pool if not _is_default_internet_apn(a)] or pool
                 sc.target.apn = (self._rotate_pick(sc, "apn", pool, lambda a: f"APN:{a}")
                                  if pool else None) or (pool[0] if pool and sc.kind == "apn_pdn_failure"
                                                         else self._top_apn())

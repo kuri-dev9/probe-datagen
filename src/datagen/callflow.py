@@ -1400,12 +1400,16 @@ def request_gap(cause: int, rng) -> float:
 DROP_ZERO_LENGTH = True
 
 
-def drop(rec, cause: int, rng: random.Random, fill_zero: bool | None = None) -> bool:
+def drop(rec, cause: int, rng: random.Random, fill_zero: bool | None = None,
+         by_mme: bool = False) -> bool:
     """**연결된 호를 비정상 해제로 끊는다** — `spec.drop` 의 실측 모양.
 
     call flow 는 성공했으므로 단계를 다시 밟지 않는다. 바꾸는 것은 호의 끝 —
     eNB 가 `cause` 로 해제를 요청하고(First, msg 18) MME 가 해제한다(Last,
     msg 23). 호 길이를 줄이고 그 끝에 둘을 놓는다.
+
+    ``by_mme`` 면 **MME 가 먼저 끊는다**(2026-11-26 · MME 과부하) — eNB 해제 요청이 없고 First·Last 가 모두
+    UE Context Release Command(msg 23)다. `UEContextReleaseRequest_*` 는 비운다.
 
     연결되지 않은 호(`success_flag != 1`)는 손대지 않는다(`False`) — 절단은
     접속된 호에만 있다(규칙 C-2·C-4).
@@ -1426,8 +1430,10 @@ def drop(rec, cause: int, rng: random.Random, fill_zero: bool | None = None) -> 
         return False
     lo, hi = (float(v) for v in d.get("duration_scale", (0.15, 0.6)))
     t_req = t0 + max(floor + 0.01, dur * rng.uniform(lo, hi))
-    t_rel = t_req + request_gap(cause, rng)
+    t_rel = t_req if by_mme else t_req + request_gap(cause, rng)
     m_req, m_rel = int(d.get("first_message", 18)), int(d.get("last_message", 23))
+    if by_mme:
+        m_req = m_rel
     rec.set("drop_flag", 1)
     rec.set("first_error_interface_protocol", 2)
     rec.set("first_error_cause", cause)
@@ -1439,8 +1445,8 @@ def drop(rec, cause: int, rng: random.Random, fill_zero: bool | None = None) -> 
     rec.set("s1ap_error_Cause", cause)
     rec.set("s1ap_error_Message", m_rel)
     rec.set("s1ap_error_Time", f"{t_rel:.6f}")
-    rec.set("UEContextReleaseRequest_Cause", cause)
-    rec.set("UEContextReleaseRequest_Time", f"{t_req:.6f}")
+    rec.set("UEContextReleaseRequest_Cause", 0 if by_mme else cause)
+    rec.set("UEContextReleaseRequest_Time", "0.0" if by_mme else f"{t_req:.6f}")   # 「없음」 표기는 `_close_call` 과 같다
     rec.set("UEContextRelease_Cause", cause)
     rec.set("UEContextRelease_Time", f"{t_rel:.6f}")
     # 직전 호 오류는 없다 — 실측 0/81. 절단은 재시도의 결과가 아니다.

@@ -153,9 +153,10 @@ def test_every_kind_has_a_hook():
     "등록됐는데 아무 일도 안 하는" 상태와 구분되지 않는다.
     """
     hooks = set(SC.MUTATORS) | set(SC.PLAN_MUTATORS) | set(SC.SUPPRESSORS)
-    # `sa_fallback`(17번 · 11-05)은 훅이 없다 — 레코드를 바꾸지 않고 **새 레코드를 더하는** 종류라
-    # `pemdb1._sa_fallback_drafts` 가 한다. 동작은 `test_sa_fallback.py` 가 지킨다(여기서는 일부러 뺀다)
-    assert set(SC.KIND_SPECS) - {"sa_fallback"} == hooks, set(SC.KIND_SPECS) ^ hooks
+    # `sa_fallback`(13번)은 11-26 검수로 훅(`_sa_fallback_nr_down`)이 생겼다 — 새 레코드는 `pemdb1._sa_fallback_drafts` 가
+    # 더하고, 그 지역 기존 5G 단말의 NR 레그는 이 훅이 지운다. 이제 예외 없이 전부 훅이 있다
+    assert "sa_fallback" in SC.MUTATORS
+    assert set(SC.KIND_SPECS) == hooks, set(SC.KIND_SPECS) ^ hooks
 
 
 def test_kind_specs_declare_scoring_meta():

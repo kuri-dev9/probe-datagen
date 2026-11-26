@@ -189,6 +189,7 @@ def test_names_table_has_14_rows():
 def test_control_scenarios_use_the_table_names():
     want = _md_names()
     want[24] = "같은 지역 같은 시간 혼잡 발생"     # 11-22 24번 카드 부활 · 이름 바뀜
+    want[21] = "동영상 서버(CDN) 접속 불가"     # 11-26 검수 — 「느림」이 아니라 SYN 무응답(접속 불가)로 정리
     want[23] = "행사장 특정 앱 먹통"     # 11-21 오후 재정의 — 문서 표(1114 기록)는 옛 이름 그대로 둔다
     got = {r[0]: r[1] for r in control.SCENARIOS if r[0] in want}
     assert got == want
